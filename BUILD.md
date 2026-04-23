@@ -10,7 +10,7 @@ Primary design reference: [`docs/2026-04-22-nexus-registration-spec.md`](docs/20
 
 ## Status
 
-**Current step:** §6.1 scaffold complete. Directory structure + stubs in place. No runtime code yet.
+**Current step:** §6.2 broker core + registration endpoints complete. `nexus` binary builds cross-platform; smoke test covers register/heartbeat/list/deregister + session-mismatch 409. Stale-reap loop running in background. No TLS yet (plain HTTP for local dev).
 
 **Running in parallel:** `C:\src\agent-network` (current production) continues to run. Nexus is built alongside; cutover happens at §6.8.
 
@@ -51,7 +51,7 @@ tests/                    # end-to-end test harness (wren verify-canon = first)
 Per spec §9 and §6:
 
 - [x] **§6.1 Scaffold** — directory structure, stubs, BUILD.md, spec copied in.
-- [ ] **§6.2 Nexus core + registration endpoints** — broker skeleton, HTTPS, in-memory roster, `/aspects/register|heartbeat|deregister|list`. Smoke test with synthetic client.
+- [x] **§6.2 Nexus core + registration endpoints** — broker (`nexus/broker`), in-memory roster (`nexus/roster`), entry point (`nexus/cmd/nexus`), smoke test (`scripts/smoke-register`). Endpoints: `/health`, `/aspects/register`, `/aspects/heartbeat`, `/aspects/deregister`, `/aspects`. Bearer-token auth. Stale-reap sweeper in `main.go`. **TLS deferred** — v1 runs plain HTTP on loopback; TLS lands when we wire the first real aspect.
 - [ ] **§6.3 Single agent runtime + Claude API provider** — `agent.exe` reads aspect home, registers, heartbeats, handles comms dispatch. `claude-api` provider implements invoke/tokenCount/compact. Context persistence for all three modes.
 - [ ] **§6.4 Hands end-to-end** — `kind:"hand"` dispatch. wren `verify-canon` as first cross-aspect test.
 - [ ] **§6.5 keel embedded** — keel folds into Nexus process as global-context harness. No PTY. `@keel` preserved.
