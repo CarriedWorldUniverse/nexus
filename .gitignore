@@ -1,0 +1,7 @@
+# Go build artifacts
+bin/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
