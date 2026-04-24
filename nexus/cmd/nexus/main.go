@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nexus-cw/nexus/nexus/broker"
+	"github.com/nexus-cw/nexus/nexus/handqueue"
 	"github.com/nexus-cw/nexus/nexus/roster"
 	"github.com/nexus-cw/nexus/nexus/sessions"
 	"github.com/nexus-cw/nexus/nexus/storage"
@@ -48,12 +49,41 @@ func main() {
 
 	r := roster.New()
 	proj := sessions.New(db)
+
+	// Hand dispatch queue. Executor spawns harness subprocesses in
+	// hand mode. Resolves aspect home paths from the roster — v1
+	// only dispatches to aspects whose home is on this Nexus host;
+	// cross-host hand dispatch lands when Outposts gain their own
+	// queues.
+	queue, err := handqueue.New(handqueue.Config{
+		MaxConcurrent: 5,
+		Executor: &handqueue.SpawnExecutor{
+			HomeResolver: handqueue.AspectHomeResolverFunc(func(aspect string) (string, bool) {
+				for _, a := range r.List() {
+					if a.Name == aspect {
+						return a.Home, true
+					}
+				}
+				return "", false
+			}),
+			ExtraEnv: []string{
+				"NEXUS_TOKEN=" + token,
+			},
+		},
+		Logger: logger,
+	})
+	if err != nil {
+		logger.Error("handqueue.New", "err", err)
+		os.Exit(1)
+	}
+
 	b := broker.New(broker.Config{
 		Addr:       *addr,
 		AuthToken:  token,
 		StaleAfter: *staleAfter,
 		Logger:     logger,
 		Projection: proj,
+		HandQueue:  queue,
 	}, r)
 
 	// Stale-reap sweep. Runs until ctx cancels.
