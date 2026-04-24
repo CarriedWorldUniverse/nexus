@@ -141,30 +141,36 @@ func (a *Agent) Tree() *tree.Tree { return a.tree }
 // Start brings the agent up: drives the wsclient Run loop (which
 // dials upstream and reconnects on drop), registers on each new
 // connection. Blocks until ctx is cancelled or FailFirstConnect
-// trips. Deregisters on clean shutdown.
+// trips. Deregisters on clean shutdown (while the connection is
+// still live — we watch ctx separately so deregister lands before
+// Run tears the socket down).
 func (a *Agent) Start(ctx context.Context) error {
 	// Register-on-connect: watch for the wsclient becoming ready and
 	// send the register frame. On reconnect, we register again with
-	// the same session id — the roster's displacement logic will
-	// either accept the re-register (same session) or reject it
-	// (different session, live entry — but we keep the same id, so
-	// it's the same-session path).
+	// the same session id — the roster's displacement logic accepts
+	// the re-register as the same session path.
 	registerDone := make(chan struct{})
 	go a.registerLoop(ctx, registerDone)
 
-	err := a.ws.Run(ctx)
+	// Graceful-shutdown watcher: when the caller cancels ctx, attempt
+	// a deregister frame BEFORE wsclient's Run tears down the
+	// connection. Uses a derived context that lives slightly past
+	// ctx so the frame has time to flush.
+	runCtx, runCancel := context.WithCancel(context.Background())
+	go func() {
+		<-ctx.Done()
+		a.mu.Lock()
+		wasRegistered := a.registered
+		a.mu.Unlock()
+		if wasRegistered {
+			bg, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = a.sendDeregister(bg)
+			cancel()
+		}
+		runCancel()
+	}()
 
-	// Graceful shutdown: attempt a deregister frame if we were
-	// registered. Do it on a fresh context so parent-cancel doesn't
-	// immediately kill it.
-	a.mu.Lock()
-	wasRegistered := a.registered
-	a.mu.Unlock()
-	if wasRegistered {
-		bg, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = a.sendDeregister(bg)
-	}
+	err := a.ws.Run(runCtx)
 
 	// Signal the register loop to exit (Run has already returned).
 	select {
@@ -172,6 +178,10 @@ func (a *Agent) Start(ctx context.Context) error {
 	default:
 	}
 
+	// Preserve the original caller's error intent.
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	return err
 }
 
