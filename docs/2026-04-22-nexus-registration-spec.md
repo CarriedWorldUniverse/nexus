@@ -10,6 +10,7 @@
 - **Embedding provider is Ollama via the provider-adapter spec's new `Embed()` method.** Locked model: **`nomic-embed-text`** (768-dim) — technical-tuned, matches this KB's actual content (operational notes, architecture decisions, incident postmortems). Ollama runs as a separate Docker container at the standard `http://host.docker.internal:11434` endpoint, currently stopped — adapter handles unreachable-upstream gracefully.
 - **Scope: technical knowledge only.** Narrative canon (verity's domain) is explicitly out of scope for this KB. If canon ever becomes vector-searchable, it's a separate system, separate build (per operator #7676).
 - **Active retrieval (RAG-pattern) formalised** — on thread start, runtime runs `SearchKnowledge(topic)` and injects hits as a `system.prompt` entry, subject to relevance threshold and corpus scoping. Removes the "remember to search" burden that today's numbers (107 entries, ~1.5:1 write:read) show aspects are failing at.
+- **Storage bootstrap pattern** — schema as committed source (`nexus/storage/schema.sql` + `//go:embed`), database as runtime-created under `NEXUS_DATA_DIR` (default `./data/`, gitignored). `Bootstrap(db)` runs idempotent DDL every startup. Per operator #7682/#7685: commits carry source only, runtime creates its own DB. Details in §10.
 - **Companion:** provider-adapter spec v0.2 adds the `Embed` contract and the `ollama-local` adapter. See [`2026-04-24-provider-adapter-spec.md`](2026-04-24-provider-adapter-spec.md).
 
 **v0.4 changes (2026-04-24, informed by harrow's Pi research in #7601):**
@@ -713,4 +714,10 @@ Context for picking this back up:
 - keel is currently running as PTY-proxy on Claude Opus 4.7 [1m] under `C:\src\agent-network`. It will run in parallel with the new Nexus during migration and only migrate in at §6 step 5 once the rest of the architecture is proven.
 - wren pre-committed to implementing `verify-canon` as the first cross-aspect Hand end-to-end test.
 - Open naming question (`global`/`thread`/`stateless` vs alternatives) not yet resolved; proceeding with these names as placeholders.
-- **Ollama Docker container is currently stopped** — needs to be brought up before first embedding call. Nexus startup is tolerant of this (see provider-adapter spec §9.4). Endpoint URL and embedding model name still need operator confirmation before §6.3 wire-up.
+- **Ollama ready (2026-04-24).** Docker container up at `http://localhost:11434` (also reachable as `host.docker.internal:11434` from other containers). `nomic-embed-text` pulled and smoke-tested (768-dim as expected). Also present for future chat use: `qwen2.5:7b`, `qwen2.5:3b`.
+- **Storage bootstrap (added 2026-04-24 from #7685):** commits carry schema source, never the database itself. Pattern:
+  - `nexus/storage/schema.sql` — canonical DDL, committed, idempotent (`CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, `CREATE TRIGGER IF NOT EXISTS`). Defines `knowledge`, `knowledge_fts` + triggers, `threads`, `chat_messages`, `tickets`, `activity`, etc.
+  - `nexus/storage/schema.go` — `//go:embed schema.sql` + `func Bootstrap(db *sql.DB) error` that runs the DDL against an empty or existing database. Safe every startup. Loads `sqlite-vec` extension before running DDL so the `embedding BLOB` column is usable.
+  - Runtime: Nexus reads `NEXUS_DATA_DIR` env var (default `./data/`), opens `nexus.db` within it. If file missing, SQLite creates empty; `Bootstrap` populates schema. Existing DBs get idempotent DDL which no-ops.
+  - Single DB pattern (same as agent-network's `comms.db`) — chat, tickets, knowledge, threads all share one file. Session JSONL stays separate under each aspect's `<home>/session/`, also runtime-created, also gitignored.
+  - **Migrations deferred:** idempotent DDL is enough for v1 (schema only grows). First backwards-incompatible change introduces `schema_version` table and real migrations. Not pre-emptively.
