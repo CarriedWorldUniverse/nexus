@@ -127,6 +127,30 @@ CREATE INDEX IF NOT EXISTS idx_activity_type       ON activity(type);
 CREATE INDEX IF NOT EXISTS idx_activity_created_at ON activity(created_at);
 
 -- -------------------------------------------------------------------
+-- Session projection — read-only mirror of aspect session trees.
+-- Source of truth is the aspect's local JSONL (per transport spec
+-- §8); this table exists so the dashboard can render live session
+-- history without querying individual aspects. Populated by
+-- session.entry.appended frames forwarded from the aspect to Nexus.
+-- -------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS session_projection (
+  id           INTEGER PRIMARY KEY,
+  aspect       TEXT NOT NULL,
+  session_id   TEXT NOT NULL,
+  entry_id     TEXT NOT NULL,
+  parent_id    TEXT,
+  entry_kind   TEXT NOT NULL,
+  entry_ts     TEXT NOT NULL,
+  payload      TEXT,                         -- JSON blob, best-effort
+  received_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(aspect, session_id, entry_id)       -- idempotent on replay
+);
+
+CREATE INDEX IF NOT EXISTS idx_sp_aspect     ON session_projection(aspect);
+CREATE INDEX IF NOT EXISTS idx_sp_session    ON session_projection(aspect, session_id);
+CREATE INDEX IF NOT EXISTS idx_sp_received   ON session_projection(received_at);
+
+-- -------------------------------------------------------------------
 -- Schema metadata — marker only. Real migrations defer until first
 -- backwards-incompatible change (per §10 of registration spec).
 -- -------------------------------------------------------------------

@@ -56,11 +56,31 @@ type headSidecar struct {
 // concurrent use within a single process — all mutating operations
 // take the tree mutex. Cross-process concurrency is NOT supported
 // (session files are owned by a single agent runtime).
+// AppendHook is invoked (synchronously, after the tree mutex is
+// released) for each successful Append. Used by the agent runtime to
+// forward entries upward as session.entry.appended frames for Nexus-
+// side observability. Implementations must not call back into the
+// tree; they should hand the entry off to a channel / queue.
+type AppendHook func(Entry)
+
 type Tree struct {
 	jsonlPath   string
 	sidecarPath string
 	mu          sync.Mutex
 	entropy     io.Reader // ULID entropy — package-level var would leak between tests
+
+	// onAppend is optional. Set via SetAppendHook.
+	onAppend AppendHook
+}
+
+// SetAppendHook installs a callback that fires after each successful
+// Append. The hook runs on the Append caller's goroutine, after the
+// tree mutex has been released, so it must not reach back into the
+// tree or do anything slow. Pass nil to clear.
+func (t *Tree) SetAppendHook(h AppendHook) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.onAppend = h
 }
 
 // Open opens (or creates) the session files at dir/<name>.jsonl and
@@ -92,12 +112,31 @@ func (t *Tree) SidecarPath() string { return t.sidecarPath }
 // active head, and returns it with ID and TS populated. ParentID
 // defaults to the current head if the caller leaves it empty; pass
 // a specific ParentID to branch off an earlier entry.
+//
+// If an AppendHook is installed, it fires after the mutex is
+// released with the written entry — the hook gets the fully
+// populated Entry (id + ts + parent) and can forward it.
 func (t *Tree) Append(ctx context.Context, e Entry) (Entry, error) {
+	written, hook, err := t.appendLocked(ctx, e)
+	if err != nil {
+		return Entry{}, err
+	}
+	if hook != nil {
+		hook(written)
+	}
+	return written, nil
+}
+
+// appendLocked does the file-I/O work under the mutex and returns
+// both the written entry and the currently-installed hook (captured
+// under the lock so concurrent SetAppendHook doesn't produce a stale
+// pointer dereference).
+func (t *Tree) appendLocked(ctx context.Context, e Entry) (Entry, AppendHook, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	if e.Kind == "" {
-		return Entry{}, errors.New("tree.Append: Kind required")
+		return Entry{}, nil, errors.New("tree.Append: Kind required")
 	}
 	if e.TS.IsZero() {
 		e.TS = time.Now().UTC()
@@ -105,42 +144,44 @@ func (t *Tree) Append(ctx context.Context, e Entry) (Entry, error) {
 	if e.ID == "" {
 		id, err := ulid.New(ulid.Timestamp(e.TS), t.entropy)
 		if err != nil {
-			return Entry{}, fmt.Errorf("tree.Append: ulid: %w", err)
+			return Entry{}, nil, fmt.Errorf("tree.Append: ulid: %w", err)
 		}
 		e.ID = id.String()
 	}
 	if e.ParentID == "" {
 		head, err := t.readHead()
 		if err != nil {
-			return Entry{}, fmt.Errorf("tree.Append: read head: %w", err)
+			return Entry{}, nil, fmt.Errorf("tree.Append: read head: %w", err)
 		}
 		e.ParentID = head // empty string for root entry
 	}
 
 	raw, err := json.Marshal(e)
 	if err != nil {
-		return Entry{}, fmt.Errorf("tree.Append: marshal: %w", err)
+		return Entry{}, nil, fmt.Errorf("tree.Append: marshal: %w", err)
 	}
 
 	f, err := os.OpenFile(t.jsonlPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return Entry{}, fmt.Errorf("tree.Append: open jsonl: %w", err)
+		return Entry{}, nil, fmt.Errorf("tree.Append: open jsonl: %w", err)
 	}
 	defer f.Close()
 
 	if _, err := f.Write(append(raw, '\n')); err != nil {
-		return Entry{}, fmt.Errorf("tree.Append: write: %w", err)
+		return Entry{}, nil, fmt.Errorf("tree.Append: write: %w", err)
 	}
 	// fsync the JSONL before updating the head pointer so a crash
 	// between the two can't leave the sidecar pointing at an entry
 	// that wasn't durably written.
 	if err := f.Sync(); err != nil {
-		return Entry{}, fmt.Errorf("tree.Append: sync: %w", err)
+		return Entry{}, nil, fmt.Errorf("tree.Append: sync: %w", err)
 	}
 	if err := t.writeHead(e.ID); err != nil {
-		return Entry{}, fmt.Errorf("tree.Append: write head: %w", err)
+		return Entry{}, nil, fmt.Errorf("tree.Append: write head: %w", err)
 	}
-	return e, nil
+	// Capture the currently-installed hook under the lock — caller
+	// invokes it after the mutex is released.
+	return e, t.onAppend, nil
 }
 
 // Head returns the current active-head entry ID. Empty string on a

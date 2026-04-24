@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/nexus-cw/nexus/nexus/roster"
+	"github.com/nexus-cw/nexus/nexus/sessions"
 	"github.com/nexus-cw/nexus/shared/schemas"
 )
 
@@ -28,6 +29,12 @@ type Config struct {
 	HeartbeatIntervalS int           // value returned to aspects on register
 	StaleAfter         time.Duration // aspect becomes "stale" after this gap
 	Logger             *slog.Logger
+
+	// Projection receives session.entry.appended frames from aspects.
+	// Optional — if nil, the broker logs and drops session-projection
+	// frames instead of persisting (useful for tests that don't need
+	// a DB).
+	Projection *sessions.Projection
 }
 
 // Broker owns the HTTP server and its roster.

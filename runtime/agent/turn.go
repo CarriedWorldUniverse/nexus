@@ -155,6 +155,40 @@ func (a *Agent) dispatchTurn(ctx context.Context, req frames.TurnPayload) (frame
 	}, nil
 }
 
+// projectEntryUpward is the tree.AppendHook that forwards each local
+// entry as a session.entry.appended frame. Runs on the caller's
+// goroutine (after the tree mutex is released) so it MUST be quick —
+// we fire the Send on a fresh goroutine with a bounded ctx. Transport
+// spec §5.2/§8 positions this as read-only observability: if the
+// frame never reaches Nexus (disconnected, slow upstream, etc.) the
+// aspect keeps working because the authoritative state is the local
+// JSONL.
+func (a *Agent) projectEntryUpward(entry tree.Entry) {
+	env, err := frames.New(frames.KindSessionEntryAppended, frames.SessionEntryAppendedPayload{
+		Aspect:    a.cfg.Aspect.Name,
+		SessionID: a.sessionID,
+		EntryID:   entry.ID,
+		ParentID:  entry.ParentID,
+		EntryKind: string(entry.Kind),
+		TS:        entry.TS,
+		Payload:   entry.Payload,
+	})
+	if err != nil {
+		a.log.Warn("build session.entry.appended frame failed", "err", err)
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := a.ws.Send(ctx, env); err != nil {
+			// Best-effort only — don't retry, don't log at warn level
+			// for expected disconnect cases.
+			a.log.Debug("session.entry.appended send failed (will not retry)",
+				"entry", entry.ID, "err", err)
+		}
+	}()
+}
+
 // convertToProviderEntries converts tree entries to the provider's
 // normalised entry type. They share shape but live in different
 // packages; this is the seam.

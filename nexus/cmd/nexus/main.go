@@ -15,6 +15,7 @@ import (
 
 	"github.com/nexus-cw/nexus/nexus/broker"
 	"github.com/nexus-cw/nexus/nexus/roster"
+	"github.com/nexus-cw/nexus/nexus/sessions"
 	"github.com/nexus-cw/nexus/nexus/storage"
 )
 
@@ -46,11 +47,13 @@ func main() {
 	defer db.Close()
 
 	r := roster.New()
+	proj := sessions.New(db)
 	b := broker.New(broker.Config{
 		Addr:       *addr,
 		AuthToken:  token,
 		StaleAfter: *staleAfter,
 		Logger:     logger,
+		Projection: proj,
 	}, r)
 
 	// Stale-reap sweep. Runs until ctx cancels.
