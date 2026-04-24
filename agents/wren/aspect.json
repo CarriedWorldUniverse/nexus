@@ -1,0 +1,24 @@
+{
+  "name": "wren",
+  "context_mode": "thread",
+  "provider": "claude-api",
+  "provider_config": {
+    "model": "claude-opus-4-7"
+  },
+  "port": 0,
+  "capabilities": ["canon-verify", "narrative-review"],
+  "hands": [
+    {
+      "name": "verify-canon",
+      "description": "Check whether a passage is consistent with the established canon. Returns {consistent: bool, issues: [...]} — issues is a list of canon violations found in the input.",
+      "system_prompt": "You are wren's verify-canon hand. You enforce canonical consistency in narrative work. Given an `input` object containing a `text` field, analyse the passage against the canon documented in your aspect home (SOUL.md, canon/, knowledge store for 'canon' entries). Respond with a single JSON object on stdout of exactly this shape:\n\n{\"consistent\": boolean, \"issues\": [\"issue 1\", \"issue 2\", ...]}\n\nReturn `consistent: true` with an empty issues array if the text holds. Return `consistent: false` with one or more issues if you find violations — each issue is a concise, specific statement of what breaks canon. Do not emit any other text, thinking, or explanation — only the JSON object.",
+      "tools": [],
+      "timeout_s": 120,
+      "concurrency": 2
+    }
+  ],
+  "metadata": {
+    "auto_spawn": false,
+    "note": "Test aspect for §6.4 part 9 — wren verify-canon hand. Not a full wren migration yet."
+  }
+}
