@@ -6,7 +6,7 @@
 **Repo:** `C:\src\nexus` (fresh git repo, separate from `C:\src\agent-network`)
 
 **v0.5 changes (2026-04-24, from #7636 → #7676 discussion with operator and harrow):**
-- **New §2.8 — Knowledge storage & retrieval.** SQLite + FTS5 primary; `sqlite-vec` extension loaded-but-dormant from day one with an `embedding BLOB` column reserved; hybrid (keyword + vector) retrieval behind a single `SearchKnowledge` interface so callers don't change when the vector layer is turned on.
+- **New §2.8 — Knowledge storage & retrieval.** SQLite + FTS5 primary; `embedding BLOB` column reserved day-one for future vector retrieval; hybrid (keyword + vector) retrieval behind a single `SearchKnowledge` interface so callers don't change when the vector layer is turned on. Note: `sqlite-vec` *extension loading* is DEFERRED in v1 — upstream pure-Go binding pairing is out of sync; CGO alternative would break cross-platform single binary. Columns remain reserved (#7695).
 - **Embedding provider is Ollama via the provider-adapter spec's new `Embed()` method.** Locked model: **`nomic-embed-text`** (768-dim) — technical-tuned, matches this KB's actual content (operational notes, architecture decisions, incident postmortems). Ollama runs as a separate Docker container at the standard `http://host.docker.internal:11434` endpoint, currently stopped — adapter handles unreachable-upstream gracefully.
 - **Scope: technical knowledge only.** Narrative canon (verity's domain) is explicitly out of scope for this KB. If canon ever becomes vector-searchable, it's a separate system, separate build (per operator #7676).
 - **Active retrieval (RAG-pattern) formalised** — on thread start, runtime runs `SearchKnowledge(topic)` and injects hits as a `system.prompt` entry, subject to relevance threshold and corpus scoping. Removes the "remember to search" burden that today's numbers (107 entries, ~1.5:1 write:read) show aspects are failing at.
@@ -255,7 +255,7 @@ CREATE VIRTUAL TABLE knowledge_fts USING fts5(
 -- FTS triggers on INSERT/UPDATE/DELETE as in today's broker.
 ```
 
-The `sqlite-vec` extension is loaded at Nexus startup (`SELECT load_extension('sqlite-vec')`). If the embedding column is unused, the extension is zero-cost; if we turn vector retrieval on, the column is already there and we run a one-time backfill through the current embedding provider.
+**sqlite-vec extension: DEFERRED in v1** (decision #7695). The pure-Go path needs a compatible pairing of `sqlite-vec-go-bindings` + `ncruces/go-sqlite3`; upstream is currently out of sync (the binding references APIs removed in recent go-sqlite3 releases) and the alternative is CGO, which would break our single cross-platform binary story. Columns `embedding` / `embed_model` / `embed_dim` are still reserved day-one — activation is just "load the extension, backfill embeddings, flip `retrieval_backend` config" with no schema migration. The FTS5 path is fully functional and that's what v1 ships on per §2.8 anyway.
 
 **Retrieval — pluggable interface, hybrid-ready.**
 
@@ -709,7 +709,7 @@ Context for picking this back up:
 - §6.2 (broker core + registration endpoints) complete and smoke-tested; Go locked in.
 - v0.3 incorporated t3code research: JSONL-owns-state retained, enrichment-fiber adopted, thread TTL resolved, tool-authority modes + plan/execute mode logged as future work.
 - v0.4 incorporated Pi research: tree-structured JSONL (`id`/`parentId`), proactive compaction formula, rewind/fork/branch-summary as first-class ops, thinking-level logged as future work.
-- v0.5: SQLite + FTS5 primary for knowledge; `sqlite-vec` extension loaded day-one with `embedding BLOB` column reserved; ollama-local embedding adapter (`nomic-embed-text`, 768-dim) wrapping existing Ollama Docker container; active-retrieval injection at thread start as `system.prompt` entry; operator-curated canon scoping.
+- v0.5: SQLite + FTS5 primary for knowledge; `embedding BLOB` column reserved but `sqlite-vec` extension loading DEFERRED (#7695 — upstream binding out of sync with current go-sqlite3; reviewable when pairing catches up or when we flip to vector retrieval); ollama-local embedding adapter (`nomic-embed-text`, 768-dim) wrapping existing Ollama Docker container; active-retrieval injection at thread start as `system.prompt` entry; operator-curated `Shared` scope flag.
 - **Cross-platform mandatory:** Windows + Linux minimum, Mac preferred (#7602).
 - keel is currently running as PTY-proxy on Claude Opus 4.7 [1m] under `C:\src\agent-network`. It will run in parallel with the new Nexus during migration and only migrate in at §6 step 5 once the rest of the architecture is proven.
 - wren pre-committed to implementing `verify-canon` as the first cross-aspect Hand end-to-end test.

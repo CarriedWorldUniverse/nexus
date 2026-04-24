@@ -15,6 +15,7 @@ import (
 
 	"github.com/nexus-cw/nexus/nexus/broker"
 	"github.com/nexus-cw/nexus/nexus/roster"
+	"github.com/nexus-cw/nexus/nexus/storage"
 )
 
 func main() {
@@ -22,6 +23,7 @@ func main() {
 	tokenEnv := flag.String("token-env", "NEXUS_TOKEN", "env var holding the shared bearer token")
 	staleAfter := flag.Duration("stale-after", 30*time.Second, "aspect becomes stale after this gap without heartbeat")
 	reapEvery := flag.Duration("reap-every", 10*time.Second, "how often to sweep for stale aspects")
+	dataDir := flag.String("data-dir", "", "data directory holding nexus.db (falls back to NEXUS_DATA_DIR env, then ./data)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -33,6 +35,16 @@ func main() {
 		os.Exit(2)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	db, err := storage.Open(ctx, *dataDir, logger)
+	if err != nil {
+		logger.Error("storage open failed", "err", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
 	r := roster.New()
 	b := broker.New(broker.Config{
 		Addr:       *addr,
@@ -40,9 +52,6 @@ func main() {
 		StaleAfter: *staleAfter,
 		Logger:     logger,
 	}, r)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// Stale-reap sweep. Runs until ctx cancels.
 	go reaper(ctx, r, *staleAfter, *reapEvery, logger)
