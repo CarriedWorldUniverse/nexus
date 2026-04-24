@@ -29,7 +29,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -120,13 +119,19 @@ func run() error {
 		return fmt.Errorf("nexus not ready: %w", err)
 	}
 
-	// Start the agent.
+	// Start the agent. Now connects via WS — NEXUS_UPSTREAM env,
+	// no local listener.
+	// NOTE: Under the §6.4 WS transport the agent no longer exposes
+	// HTTP /healthz or /turn. A full WS-based e2e driver lands in
+	// part 10; this script is kept compiling for now.
+	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/connect", *nexusPort)
 	agentCmd := exec.Command(agentBin,
 		"-home", home,
-		"-nexus", nexusURL,
-		"-listen", fmt.Sprintf(":%d", *agentPort),
 	)
-	agentCmd.Env = append(os.Environ(), "NEXUS_TOKEN="+*token)
+	agentCmd.Env = append(os.Environ(),
+		"NEXUS_TOKEN="+*token,
+		"NEXUS_UPSTREAM="+wsURL,
+	)
 	agentCmd.Stdout = tagged("[agent] ", os.Stdout)
 	agentCmd.Stderr = tagged("[agent] ", os.Stderr)
 	if err := agentCmd.Start(); err != nil {
@@ -134,57 +139,11 @@ func run() error {
 	}
 	defer terminate(agentCmd, "agent")
 
-	// Wait for the agent's /healthz.
-	agentURL := fmt.Sprintf("http://127.0.0.1:%d", *agentPort)
-	if err := waitHTTP(agentURL+"/healthz", 15*time.Second); err != nil {
-		return fmt.Errorf("agent not ready: %w", err)
-	}
-
-	// Post a turn.
-	fmt.Println("posting /turn ...")
-	reqBody, _ := json.Marshal(map[string]any{
-		"prompt": "Reply with exactly the phrase: SMOKE TEST OK — and nothing else.",
-	})
-	resp, err := http.Post(agentURL+"/turn", "application/json", bytes.NewReader(reqBody))
-	if err != nil {
-		return fmt.Errorf("POST /turn: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("/turn returned %d: %s", resp.StatusCode, body)
-	}
-	fmt.Println("turn response:", string(body))
-
-	var turnResp struct {
-		Output     string   `json:"output"`
-		StopReason string   `json:"stop_reason"`
-		EntryIDs   []string `json:"entry_ids"`
-	}
-	if err := json.Unmarshal(body, &turnResp); err != nil {
-		return fmt.Errorf("parse response: %w", err)
-	}
-	if turnResp.Output == "" {
-		return fmt.Errorf("empty output")
-	}
-	if len(turnResp.EntryIDs) != 2 {
-		return fmt.Errorf("expected 2 entry ids, got %d", len(turnResp.EntryIDs))
-	}
-	if !strings.Contains(strings.ToUpper(turnResp.Output), "SMOKE TEST OK") {
-		fmt.Printf("WARNING: model response didn't include the requested phrase — check canon drift. output: %q\n", turnResp.Output)
-	}
-
-	// Verify the agent's session JSONL has 2 entries.
-	sessionFile := filepath.Join(home, "session", "global.jsonl")
-	raw, err := os.ReadFile(sessionFile)
-	if err != nil {
-		return fmt.Errorf("read session file: %w", err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(lines) != 2 {
-		return fmt.Errorf("expected 2 entries in %s, got %d", sessionFile, len(lines))
-	}
-
+	// Wait briefly for the agent to connect. Part 10 replaces this
+	// with a proper WS client that drives a turn and asserts the
+	// round-trip.
+	time.Sleep(2 * time.Second)
+	fmt.Println("agent should have connected; turn driver deferred to part 10")
 	return nil
 }
 

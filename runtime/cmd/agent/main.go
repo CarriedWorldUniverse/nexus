@@ -1,12 +1,16 @@
-// Command agent is the single-aspect runtime binary.
+// Command agent is the single-aspect runtime binary. Soon to be
+// renamed to harness per the transport spec; keeping the directory
+// name for now to preserve git history. The hand-mode flag arrives
+// in a later part.
 //
 // Usage:
 //
-//	agent -home <aspect-home-folder> [-nexus <url>] [-token-env <var>]
+//	agent -home <aspect-home-folder>
 //
 // Reads <home>/aspect.json, loads the configured provider (currently
-// only claude-api), opens the session tree, registers with Nexus,
-// runs the heartbeat loop, serves POST /turn.
+// only claude-api), opens the session tree, dials upstream (Nexus
+// directly or a local Outpost per NEXUS_OUTPOST/NEXUS_UPSTREAM env),
+// registers, handles turn frames.
 package main
 
 import (
@@ -29,9 +33,7 @@ import (
 
 func main() {
 	home := flag.String("home", "", "aspect home folder (must contain aspect.json)")
-	nexusURL := flag.String("nexus", "http://localhost:7888", "Nexus base URL")
 	tokenEnv := flag.String("token-env", "NEXUS_TOKEN", "env var holding the shared bearer token")
-	listen := flag.String("listen", ":0", "agent turn-endpoint bind address (\":0\" picks an ephemeral port)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -59,6 +61,12 @@ func main() {
 		os.Exit(2)
 	}
 
+	upstreamURL, isExplicitOutpost, err := resolveUpstream()
+	if err != nil {
+		log.Error("resolve upstream", "err", err)
+		os.Exit(2)
+	}
+
 	provider, err := buildProvider(cfg, absHome)
 	if err != nil {
 		log.Error("build provider", "err", err)
@@ -66,13 +74,13 @@ func main() {
 	}
 
 	a, err := agent.New(agent.Config{
-		Home:       absHome,
-		Aspect:     cfg,
-		Provider:   provider,
-		NexusURL:   *nexusURL,
-		AuthToken:  token,
-		Logger:     log,
-		ListenAddr: *listen,
+		Home:                      absHome,
+		Aspect:                    cfg,
+		Provider:                  provider,
+		UpstreamURL:               upstreamURL,
+		UpstreamIsExplicitOutpost: isExplicitOutpost,
+		AuthToken:                 token,
+		Logger:                    log,
 	})
 	if err != nil {
 		log.Error("agent new", "err", err)
@@ -87,6 +95,21 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("agent stopped")
+}
+
+// resolveUpstream applies the transport spec §3.1 precedence:
+// NEXUS_OUTPOST if set → connect via local Outpost (fail-loudly).
+// Else NEXUS_UPSTREAM → direct to Nexus.
+// Else error.
+// Returns (url, isExplicitOutpost, err).
+func resolveUpstream() (string, bool, error) {
+	if v := os.Getenv("NEXUS_OUTPOST"); v != "" {
+		return v, true, nil
+	}
+	if v := os.Getenv("NEXUS_UPSTREAM"); v != "" {
+		return v, false, nil
+	}
+	return "", false, errors.New("neither NEXUS_OUTPOST nor NEXUS_UPSTREAM is set")
 }
 
 // loadAspectConfig parses aspect.json in the home folder.
@@ -107,8 +130,6 @@ func loadAspectConfig(home string) (schemas.AspectConfig, error) {
 }
 
 // buildProvider constructs the provider adapter named in aspect.json.
-// Only claude-api wired in v1; openai-api / gemini-api / ollama-local
-// (for chat if ever added) can slot in here.
 func buildProvider(cfg schemas.AspectConfig, home string) (providers.Provider, error) {
 	switch cfg.Provider {
 	case claudeapi.ProviderName, "":
