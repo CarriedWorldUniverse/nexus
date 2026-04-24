@@ -10,7 +10,7 @@ Primary design reference: [`docs/2026-04-22-nexus-registration-spec.md`](docs/20
 
 ## Status
 
-**Current step:** §6.2 broker core + registration endpoints complete. `nexus` binary builds cross-platform; smoke test covers register/heartbeat/list/deregister + session-mismatch 409. Stale-reap loop running in background. No TLS yet (plain HTTP for local dev).
+**Current step:** §6.3 single-agent runtime complete. Nexus broker + agent runtime + Claude provider + Ollama embedding + knowledge store + tree JSONL + compaction all landed in 8 PRs over a single session. Live smoke script at `scripts/smoke-e2e` drives a real Nexus + agent + Claude round-trip. No TLS yet (plain HTTP for local dev).
 
 **Running in parallel:** `C:\src\agent-network` (current production) continues to run. Nexus is built alongside; cutover happens at §6.8.
 
@@ -52,7 +52,25 @@ Per spec §9 and §6:
 
 - [x] **§6.1 Scaffold** — directory structure, stubs, BUILD.md, spec copied in.
 - [x] **§6.2 Nexus core + registration endpoints** — broker (`nexus/broker`), in-memory roster (`nexus/roster`), entry point (`nexus/cmd/nexus`), smoke test (`scripts/smoke-register`). Endpoints: `/health`, `/aspects/register`, `/aspects/heartbeat`, `/aspects/deregister`, `/aspects`. Bearer-token auth. Stale-reap sweeper in `main.go`. **TLS deferred** — v1 runs plain HTTP on loopback; TLS lands when we wire the first real aspect.
-- [ ] **§6.3 Single agent runtime + Claude API provider** — `agent.exe` reads aspect home, registers, heartbeats, handles comms dispatch. `claude-api` provider implements invoke/tokenCount/compact. Context persistence for all three modes.
+- [x] **§6.3 Single agent runtime + Claude API provider** — delivered in 8 sub-parts, each branch → code → review → test → merge:
+  - 1. Storage bootstrap (`nexus/storage`) — SQLite + FTS5, `sqlite-vec` deferred.
+  - 2. Provider interface + `claude-api` adapter (invoke, token count, capabilities).
+  - 3. `ollama-local` embeddings adapter (`nomic-embed-text`, 768-dim).
+  - 4. Knowledge store (`nexus/knowledge`) — FTS5 retrieval with scope flags.
+  - 5. Tree-structured session JSONL (`runtime/context/tree`) — head sidecar, fsync, fork.
+  - 6. Compaction (`runtime/compactor`) — active-system-prompt preservation; real `claude-api` Compact via Haiku.
+  - 7. Agent runtime (`runtime/agent` + `runtime/cmd/agent`) — register/heartbeat/deregister + POST /turn dispatch.
+  - 8. E2E smoke (`scripts/smoke-e2e`) — `-live` mode builds both binaries, spawns them, hits Claude for a real turn.
+
+  Deferred to follow-ups (flagged with TODO in code):
+  - Thread + stateless context modes (warn-only at startup; global-mode served).
+  - Tool-call execution end-to-end (runtime rejects tool-result entries in `buildMessages` with ErrUnsupported).
+  - Compaction trigger wired into dispatch loop (compactor.Run exists; not yet called automatically).
+  - Per-write / per-search telemetry counters (§2.8).
+  - SOUL.md / CLAUDE.md / PRIMER composition into SystemPrompt.
+  - §2.8 active-retrieval injection at thread start.
+  - Cost accounting attribution.
+  - sqlite-vec activation (columns reserved; extension load deferred pending upstream binding fix).
 - [ ] **§6.4 Hands end-to-end** — `kind:"hand"` dispatch. wren `verify-canon` as first cross-aspect test.
 - [ ] **§6.5 keel embedded** — keel folds into Nexus process as global-context harness. No PTY. `@keel` preserved.
 - [ ] **§6.6 Migrate remaining aspects** — home folders populated; old proxies stood down one-by-one.
