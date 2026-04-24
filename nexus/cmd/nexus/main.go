@@ -10,9 +10,11 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/nexus-cw/nexus/nexus/autospawn"
 	"github.com/nexus-cw/nexus/nexus/broker"
 	"github.com/nexus-cw/nexus/nexus/handqueue"
 	"github.com/nexus-cw/nexus/nexus/roster"
@@ -26,6 +28,8 @@ func main() {
 	staleAfter := flag.Duration("stale-after", 30*time.Second, "aspect becomes stale after this gap without heartbeat")
 	reapEvery := flag.Duration("reap-every", 10*time.Second, "how often to sweep for stale aspects")
 	dataDir := flag.String("data-dir", "", "data directory holding nexus.db (falls back to NEXUS_DATA_DIR env, then ./data)")
+	aspectDir := flag.String("aspect-dir", "", "directory to scan for aspect homes to auto-spawn (falls back to NEXUS_ASPECT_DIR env; disabled if neither set)")
+	harnessPath := flag.String("harness-path", "", "path to the harness binary used for auto-spawn (falls back to NEXUS_HARNESS env)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -89,11 +93,78 @@ func main() {
 	// Stale-reap sweep. Runs until ctx cancels.
 	go reaper(ctx, r, *staleAfter, *reapEvery, logger)
 
+	// Auto-spawn: after the broker has bound its listener (brief
+	// delay), scan the aspect dir and fire off harness children.
+	// Non-blocking; failures are logged per-aspect.
+	go runAutoSpawn(ctx, logger, *aspectDir, *harnessPath, *addr, token)
+
 	if err := b.ListenAndServe(ctx); err != nil {
 		logger.Error("broker exited with error", "err", err)
 		os.Exit(1)
 	}
 	logger.Info("nexus stopped")
+}
+
+// runAutoSpawn discovers aspect homes under aspectDir (or
+// NEXUS_ASPECT_DIR env) and spawns a harness for each. Skipped if
+// no dir is configured. Runs after a short delay so the broker's
+// listener has bound before children try to dial in.
+func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessPathFlag, brokerAddr, token string) {
+	dir := aspectDirFlag
+	if dir == "" {
+		dir = os.Getenv("NEXUS_ASPECT_DIR")
+	}
+	if dir == "" {
+		return // auto-spawn disabled
+	}
+	harnessPath := harnessPathFlag
+	if harnessPath == "" {
+		harnessPath = os.Getenv("NEXUS_HARNESS")
+	}
+	if harnessPath == "" {
+		log.Warn("auto-spawn dir set but no harness path; skipping", "dir", dir)
+		return
+	}
+	absHarness, err := filepath.Abs(harnessPath)
+	if err == nil {
+		harnessPath = absHarness
+	}
+
+	// Give the broker a moment to bind before children dial in.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	upstream := brokerAddr
+	if upstream[0] == ':' {
+		upstream = "127.0.0.1" + upstream
+	}
+	wsURL := "ws://" + upstream + "/connect"
+
+	cfg := autospawn.Config{
+		ScanDir:     dir,
+		HarnessPath: harnessPath,
+		BaseEnv: []string{
+			"NEXUS_UPSTREAM=" + wsURL,
+			"NEXUS_TOKEN=" + token,
+		},
+		Logger: log,
+	}
+
+	candidates, err := autospawn.Discover(cfg)
+	if err != nil {
+		log.Error("auto-spawn discovery failed", "err", err)
+		return
+	}
+	if len(candidates) == 0 {
+		log.Info("auto-spawn: no aspect homes found", "dir", dir)
+		return
+	}
+	if err := autospawn.Spawn(cfg, candidates); err != nil {
+		log.Error("auto-spawn failed", "err", err)
+	}
 }
 
 func reaper(ctx context.Context, r *roster.Roster, staleAfter, every time.Duration, log *slog.Logger) {
