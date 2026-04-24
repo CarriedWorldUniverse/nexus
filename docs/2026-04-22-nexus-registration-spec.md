@@ -1,9 +1,16 @@
-# Nexus Registration Architecture — Spec v0.4
+# Nexus Registration Architecture — Spec v0.5
 
-**Date:** 2026-04-22 (v0.1) → 2026-04-24 (v0.2 → v0.3 → v0.4)
-**Status:** Draft — scaffold complete at v0.3; v0.4 updates session/compaction model before first commit.
+**Date:** 2026-04-22 (v0.1) → 2026-04-24 (v0.2 → v0.3 → v0.4 → v0.5)
+**Status:** Draft — scaffold complete at v0.3; v0.5 adds knowledge storage + retrieval.
 **Owner:** keel
 **Repo:** `C:\src\nexus` (fresh git repo, separate from `C:\src\agent-network`)
+
+**v0.5 changes (2026-04-24, from #7636 → #7676 discussion with operator and harrow):**
+- **New §2.8 — Knowledge storage & retrieval.** SQLite + FTS5 primary; `sqlite-vec` extension loaded-but-dormant from day one with an `embedding BLOB` column reserved; hybrid (keyword + vector) retrieval behind a single `SearchKnowledge` interface so callers don't change when the vector layer is turned on.
+- **Embedding provider is Ollama via the provider-adapter spec's new `Embed()` method.** Locked model: **`nomic-embed-text`** (768-dim) — technical-tuned, matches this KB's actual content (operational notes, architecture decisions, incident postmortems). Ollama runs as a separate Docker container at the standard `http://host.docker.internal:11434` endpoint, currently stopped — adapter handles unreachable-upstream gracefully.
+- **Scope: technical knowledge only.** Narrative canon (verity's domain) is explicitly out of scope for this KB. If canon ever becomes vector-searchable, it's a separate system, separate build (per operator #7676).
+- **Active retrieval (RAG-pattern) formalised** — on thread start, runtime runs `SearchKnowledge(topic)` and injects hits as a `system.prompt` entry, subject to relevance threshold and corpus scoping. Removes the "remember to search" burden that today's numbers (107 entries, ~1.5:1 write:read) show aspects are failing at.
+- **Companion:** provider-adapter spec v0.2 adds the `Embed` contract and the `ollama-local` adapter. See [`2026-04-24-provider-adapter-spec.md`](2026-04-24-provider-adapter-spec.md).
 
 **v0.4 changes (2026-04-24, informed by harrow's Pi research in #7601):**
 - **Session JSONL upgraded to tree-structured** — every entry carries `id` and `parentId`. Branching, fork, clone, and rewind are tree operations on a single file rather than destructive truncation or multi-file management. New §2.6 defines the entry schema. Applies to `global` and `thread` modes; `stateless` unchanged.
@@ -83,7 +90,7 @@ The home folder is the aspect. Everything the runtime needs is inside.
 
 ### 2.3 Provider layer
 
-The runtime executable is provider-agnostic. A provider module is a plug-in that knows how to call a specific AI backend with credentials and configuration.
+The runtime executable is provider-agnostic. A provider module is a plug-in that knows how to call a specific AI backend with credentials and configuration. **Detailed interface, tool translation, triage, dispatch-time provider overrides, and per-provider appendices live in [`2026-04-24-provider-adapter-spec.md`](2026-04-24-provider-adapter-spec.md).** This section is the architectural summary.
 
 ```
 C:\src\nexus\runtime\providers\
@@ -217,6 +224,114 @@ Runtime polls token count on every turn-end. When `shouldCompact` is true and no
 **Manual compact:** admin endpoint `POST /nexus/aspects/<name>/compact` triggers the same flow out-of-band.
 
 Matches the feedback pattern in keel memory `feedback_compact_before_drift.md`: proactive beats reactive because reactive happens after model degradation.
+
+### 2.8 Knowledge storage & retrieval
+
+The knowledge base (`knowledge` table in the Nexus SQLite) is the cross-session memory shared across aspects. Measured usage on the current agent-network network (107 entries, ~1.5:1 write:read over 30 days, most aspects never search) shows the failure mode isn't storage — it's retrieval habit. The spec addresses both the storage shape (ready for scale) and the retrieval pattern (surface knowledge without relying on aspect discipline).
+
+**Storage — SQLite, FTS5 today, vectors when needed.**
+
+Single table, single database file. Same `comms.db` that holds chat, tickets, threads, session metadata.
+
+```sql
+CREATE TABLE knowledge (
+  id           INTEGER PRIMARY KEY,
+  from_agent   TEXT NOT NULL,
+  topic        TEXT NOT NULL,
+  content      TEXT NOT NULL,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  embedding    BLOB,                    -- reserved day-one; populated when vector retrieval enabled
+  embed_model  TEXT,                    -- which model produced the embedding (see provider-adapter spec §3.3)
+  embed_dim    INTEGER,                 -- vector length; non-NULL only when embedding is present
+  UNIQUE(from_agent, topic)
+);
+
+CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+  topic, content, content=knowledge, content_rowid=id,
+  tokenize='porter unicode61'
+);
+-- FTS triggers on INSERT/UPDATE/DELETE as in today's broker.
+```
+
+The `sqlite-vec` extension is loaded at Nexus startup (`SELECT load_extension('sqlite-vec')`). If the embedding column is unused, the extension is zero-cost; if we turn vector retrieval on, the column is already there and we run a one-time backfill through the current embedding provider.
+
+**Retrieval — pluggable interface, hybrid-ready.**
+
+One method on the runtime, one shape regardless of backend:
+
+```
+SearchKnowledge(query SearchQuery) -> []SearchHit
+
+SearchQuery {
+  Text         string           // free-form query text
+  Scope        KnowledgeScope   // see below
+  TopK         int              // default 5
+  MinRelevance float              // FTS5 BM25 rank threshold or cosine-distance cutoff
+}
+
+SearchHit {
+  ID           int
+  FromAgent    string
+  Topic        string
+  Content      string
+  UpdatedAt    time.Time
+  Score        float            // FTS5 rank, cosine similarity, or hybrid-fused — backend-dependent
+  Matched      string           // "fts" | "vector" | "hybrid"
+}
+```
+
+Backends (runtime-side, not caller-visible):
+
+- **FTS5-only** (v1 default): BM25 rank, `knowledge_fts MATCH ?`. Returns top-K above threshold.
+- **Vector-only** (v2, optional): embed query via provider, nearest-neighbour search in `sqlite-vec`.
+- **Hybrid** (v3): FTS5 + vector, reciprocal-rank-fusion or weighted sum. Industry default for production RAG.
+
+Backend choice is Nexus config (`knowledge.retrieval_backend`), not a caller parameter. Callers always use `SearchKnowledge`; turning on vectors or hybrid is an operator change, not a code change.
+
+**Scoping — who can see whose entries.**
+
+```
+KnowledgeScope {
+  OwnAgent   bool      // include caller's own entries (default true)
+  Shared     bool      // include operator-curated shared entries (default true for Frame aspects, false for sim characters)
+  Peers      []string  // explicit list of peer aspects to include
+}
+```
+
+Default scope for a Frame thread aspect: `OwnAgent: true, Shared: true, Peers: nil`. Simulation-world characters get `Shared: false` — their knowledge entries are sim-scoped only and they never see Frame operational notes, preventing cross-contamination.
+
+**Not in scope here:** narrative canon (verity's domain, the lore and world-building documents). This spec covers the operational/technical knowledge store used by Frame aspects for cross-session memory. If canon ever becomes vector-searchable, it's a separate system with its own storage, embedding choice, and retrieval semantics — per operator's call in #7676.
+
+**Active retrieval on thread start.**
+
+When a thread-context or stateless aspect receives an invocation, the runtime runs active retrieval *before* the aspect's first turn:
+
+1. Extract query text from the incoming message. Two options, toggleable per-aspect:
+   - *Literal*: use the thread subject line (if present) or the first 500 chars of message content.
+   - *Triage-extracted*: call the provider's triage model (§3.3 provider-adapter spec; Haiku/Flash/GPT-5-mini) with a prompt like "extract 3-5 search keywords from this message." ~200 tokens, adds ~1s latency, much better signal on long/ambiguous messages.
+2. `SearchKnowledge(query, scope, topK=3, minRelevance=<threshold>)`.
+3. If any hits pass threshold, emit a `system.prompt` entry in the thread's session tree with content like:
+
+   ```
+   Prior knowledge relevant to this thread:
+   - [harrow 2026-03-29] Tailscale MagicDNS cert rotation — we've seen this break every 60d. Procedure: ...
+   - [keel 2026-04-02] Broker restart sequence — stop aspects first, broker last, reverse on start.
+   ```
+
+4. If zero hits pass threshold: no injection. Don't emit a "no prior knowledge found" stub — that's noise.
+
+The `system.prompt` entry is part of the permanent session tree (§2.6), so the retrieval is auditable and survives rewind/fork. Compaction preserves the latest `system.prompt`.
+
+**Budget.** One retrieval call per thread-start. Triage-extracted keywords are the only LLM cost. Vector embedding of the query (if vector retrieval is on) is a local Ollama call, effectively free.
+
+**Write-path telemetry.** Knowledge writes are currently un-telemetered beyond the activity log. Nexus emits per-write counters (agent, topic length, content length, embed-success) and per-search counters (agent, hit count, top score). These feed the dashboard's knowledge view and tell us when retrieval is actually working — the question we can't answer today.
+
+**Open questions (v0.5-level):**
+
+- Should `system.prompt` RAG injections appear in compaction's kept entries automatically, or should compaction be free to drop them when they're no longer load-bearing? Lean: keep the most recent, drop older RAG injections in favour of actual turn history.
+- Operator-curated canon: how does an entry get flagged `canon: true`? Either a write-time parameter (`store_knowledge(..., canon: true)` — restricted to operator role) or a separate table. Probably the latter, so aspect entries can't accidentally escape their scope.
+- Vector retrieval activation threshold. At what corpus size do we flip `retrieval_backend: hybrid` on? Candidate: > 1K entries or > 10 misses/week where an operator expected a hit that FTS5 didn't return. Requires the telemetry above to be live first.
 
 ## 3. aspect.json schema
 
@@ -584,16 +699,18 @@ Each step is revertible while both Nexuses are running. No hard cutover until af
 6. **keel embedded** (§6 step 5).
 7. **Aspect migration** (§6 step 6).
 
-## 10. Session state at v0.4 (2026-04-24)
+## 10. Session state at v0.5 (2026-04-24)
 
 Context for picking this back up:
 
-- Operator green-lit build-out on 2026-04-24. Scaffold (§6.1) complete at v0.3. v0.4 updates session/compaction/rewind model before the first commit — scaffold may need minor re-shape under `runtime/context/` to reflect tree-structured JSONL.
+- Operator green-lit build-out on 2026-04-24. Scaffold (§6.1) complete at v0.3. v0.4 updated session/compaction/rewind; v0.5 adds knowledge storage + retrieval (§2.8) and the ollama-local embeddings adapter. Companion spec: `2026-04-24-provider-adapter-spec.md` v0.2.
 - Scaffold strategy: **Option A** (full directory scaffold first, stubs, then working code in order) — chosen over thin-vertical-slice.
+- §6.2 (broker core + registration endpoints) complete and smoke-tested; Go locked in.
 - v0.3 incorporated t3code research: JSONL-owns-state retained, enrichment-fiber adopted, thread TTL resolved, tool-authority modes + plan/execute mode logged as future work.
 - v0.4 incorporated Pi research: tree-structured JSONL (`id`/`parentId`), proactive compaction formula, rewind/fork/branch-summary as first-class ops, thinking-level logged as future work.
+- v0.5: SQLite + FTS5 primary for knowledge; `sqlite-vec` extension loaded day-one with `embedding BLOB` column reserved; ollama-local embedding adapter (`nomic-embed-text`, 768-dim) wrapping existing Ollama Docker container; active-retrieval injection at thread start as `system.prompt` entry; operator-curated canon scoping.
 - **Cross-platform mandatory:** Windows + Linux minimum, Mac preferred (#7602).
 - keel is currently running as PTY-proxy on Claude Opus 4.7 [1m] under `C:\src\agent-network`. It will run in parallel with the new Nexus during migration and only migrate in at §6 step 5 once the rest of the architecture is proven.
 - wren pre-committed to implementing `verify-canon` as the first cross-aspect Hand end-to-end test.
 - Open naming question (`global`/`thread`/`stateless` vs alternatives) not yet resolved; proceeding with these names as placeholders.
-- **Outstanding tech choice before §6.2:** Node or Go for the Nexus process and `agent.exe` runtime. Keel recommends Go; awaiting operator lock-in.
+- **Ollama Docker container is currently stopped** — needs to be brought up before first embedding call. Nexus startup is tolerant of this (see provider-adapter spec §9.4). Endpoint URL and embedding model name still need operator confirmation before §6.3 wire-up.
