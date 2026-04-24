@@ -133,6 +133,24 @@ func (c *wsConn) serve(parentCtx context.Context) {
 			continue
 		}
 
+		// Route correlated responses FIRST — even if the Kind is
+		// unknown to us. A response to a request we sent out (e.g.
+		// a turn.error with a kind the current build doesn't list in
+		// IsKnown) must still reach the waiting caller. Forward-compat
+		// cuts both ways: server-generated kinds like "turn.error"
+		// are response-shape, not canonical, and pending routing is
+		// the right hook. We unblock the caller, who then decides
+		// what to do with the unexpected kind.
+		if env.InReplyTo != "" {
+			if c.broker.dispatcher.routeResponse(env) {
+				continue
+			}
+			// Fell through — no pending waiter. Log and drop.
+			c.log.Info("uncorrelated response frame dropped",
+				"kind", env.Kind, "in_reply_to", env.InReplyTo)
+			continue
+		}
+
 		if !frames.IsKnown(env.Kind) {
 			c.log.Warn("unknown frame kind, dropping", "kind", env.Kind)
 			continue // forward-compat per spec §5.3
@@ -142,9 +160,9 @@ func (c *wsConn) serve(parentCtx context.Context) {
 	}
 }
 
-// dispatch routes a decoded frame to the appropriate handler by kind.
-// Parts 3-10 wire up more kinds; for now register/deregister is all
-// the broker needs to know.
+// dispatch routes a decoded non-response frame to the appropriate
+// handler by kind. Response frames are routed to the dispatcher in
+// the read loop before we ever get here.
 func (c *wsConn) dispatch(env frames.Envelope) {
 	switch env.Kind {
 	case frames.KindRegister:
@@ -184,6 +202,7 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 
 	c.registeredAs = state.Name
 	c.sessionID = state.SessionID
+	c.broker.dispatcher.bind(state.Name, c)
 
 	if displacedSession != "" {
 		c.log.Warn("aspect re-registered, displacing prior session",
@@ -224,7 +243,9 @@ func (c *wsConn) handleDeregisterFrame(env frames.Envelope) {
 	}
 
 	c.log.Info("aspect deregistered via ws", "name", payload.Name, "reason", payload.Reason)
-	// Clear the binding so cleanup() doesn't try to deregister again.
+	// Unbind from dispatcher + clear the binding so cleanup() doesn't
+	// try to deregister again.
+	c.broker.dispatcher.unbind(payload.Name, c)
 	c.registeredAs = ""
 	c.sessionID = ""
 
@@ -267,9 +288,10 @@ func (c *wsConn) send(env frames.Envelope) {
 
 // cleanup runs when the connection goroutine exits. If an aspect was
 // registered on this socket, deregister it so the roster reflects the
-// disconnect.
+// disconnect, and unbind from the dispatcher.
 func (c *wsConn) cleanup() {
 	if c.registeredAs != "" && c.sessionID != "" {
+		c.broker.dispatcher.unbind(c.registeredAs, c)
 		if err := c.broker.roster.Deregister(c.registeredAs, c.sessionID); err != nil && !errors.Is(err, roster.ErrNotRegistered) {
 			c.log.Warn("deregister on disconnect failed",
 				"name", c.registeredAs, "err", err)

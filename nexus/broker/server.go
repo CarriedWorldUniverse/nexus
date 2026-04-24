@@ -43,6 +43,11 @@ type Broker struct {
 	// shutdown (not just when the OS drops the TCP connection).
 	ctx       context.Context
 	ctxCancel context.CancelFunc
+
+	// dispatcher is the server-side request/response API: tracks
+	// which wsConn holds each aspect name, and delivers correlated
+	// response frames. Used by SendTurn (and later SendHand etc).
+	dispatcher *Dispatcher
 }
 
 func New(cfg Config, r *roster.Roster) *Broker {
@@ -55,7 +60,7 @@ func New(cfg Config, r *roster.Roster) *Broker {
 	if cfg.StaleAfter == 0 {
 		cfg.StaleAfter = 30 * time.Second
 	}
-	return &Broker{cfg: cfg, roster: r, log: cfg.Logger}
+	return &Broker{cfg: cfg, roster: r, log: cfg.Logger, dispatcher: newDispatcher()}
 }
 
 // ListenAndServe blocks serving the broker until the context is cancelled.
