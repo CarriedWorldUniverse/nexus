@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/nexus-cw/nexus/nexus/handqueue"
 	"github.com/nexus-cw/nexus/nexus/roster"
 	"github.com/nexus-cw/nexus/nexus/sessions"
 	"github.com/nexus-cw/nexus/shared/schemas"
@@ -35,6 +36,11 @@ type Config struct {
 	// frames instead of persisting (useful for tests that don't need
 	// a DB).
 	Projection *sessions.Projection
+
+	// HandQueue dispatches hand.dispatch frames. Optional — if nil,
+	// the broker responds with a hand.error indicating no dispatcher
+	// configured.
+	HandQueue *handqueue.Queue
 }
 
 // Broker owns the HTTP server and its roster.

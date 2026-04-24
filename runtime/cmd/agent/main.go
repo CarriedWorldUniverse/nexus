@@ -26,6 +26,7 @@ import (
 	"syscall"
 
 	"github.com/nexus-cw/nexus/runtime/agent"
+	"github.com/nexus-cw/nexus/runtime/handexec"
 	"github.com/nexus-cw/nexus/runtime/providers"
 	claudeapi "github.com/nexus-cw/nexus/runtime/providers/claude-api"
 	"github.com/nexus-cw/nexus/shared/schemas"
@@ -34,6 +35,7 @@ import (
 func main() {
 	home := flag.String("home", "", "aspect home folder (must contain aspect.json)")
 	tokenEnv := flag.String("token-env", "NEXUS_TOKEN", "env var holding the shared bearer token")
+	handMode := flag.Bool("hand", false, "run in hand mode: read a dispatch request from stdin, execute once, exit")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -55,6 +57,25 @@ func main() {
 		os.Exit(2)
 	}
 
+	provider, err := buildProvider(cfg, absHome)
+	if err != nil {
+		log.Error("build provider", "err", err)
+		os.Exit(1)
+	}
+
+	// Hand mode: single-turn execution, read from stdin, write to
+	// stdout, exit. No WS connect, no registration — the spawning
+	// dispatcher already holds the audit trail.
+	if *handMode {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := handexec.Run(ctx, absHome, cfg, provider); err != nil {
+			log.Error("handexec.Run", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	token := os.Getenv(*tokenEnv)
 	if token == "" {
 		log.Error("missing auth token", "env_var", *tokenEnv)
@@ -65,12 +86,6 @@ func main() {
 	if err != nil {
 		log.Error("resolve upstream", "err", err)
 		os.Exit(2)
-	}
-
-	provider, err := buildProvider(cfg, absHome)
-	if err != nil {
-		log.Error("build provider", "err", err)
-		os.Exit(1)
 	}
 
 	a, err := agent.New(agent.Config{
