@@ -170,11 +170,47 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleRegisterFrame(env)
 	case frames.KindDeregister:
 		c.handleDeregisterFrame(env)
+	case frames.KindOutpostRegister:
+		c.handleOutpostRegisterFrame(env)
+	case frames.KindOutpostDeregister:
+		c.handleOutpostDeregisterFrame(env)
 	case frames.KindSessionEntryAppended:
 		c.handleSessionEntryAppended(env)
 	default:
 		c.log.Info("frame kind not yet handled", "kind", env.Kind)
 	}
+}
+
+// handleOutpostRegisterFrame accepts a connecting Outpost. v1 just
+// acks; per-Outpost state (roster integration, routing tables) is
+// bundled into the broker's dispatcher in part 7.
+func (c *wsConn) handleOutpostRegisterFrame(env frames.Envelope) {
+	var payload frames.OutpostRegisterPayload
+	if err := frames.PayloadAs(env, &payload); err != nil {
+		c.respondError(env, "outpost.register payload missing: "+err.Error())
+		return
+	}
+	if payload.OutpostID == "" {
+		c.respondError(env, "outpost_id required")
+		return
+	}
+	c.log.Info("outpost registered", "outpost_id", payload.OutpostID)
+	ack, _ := frames.NewResponse(frames.KindOutpostRegisterAck, env.ID, frames.OutpostRegisterAckPayload{
+		HeartbeatIntervalS: c.broker.cfg.HeartbeatIntervalS,
+	})
+	c.send(ack)
+}
+
+// handleOutpostDeregisterFrame logs graceful shutdown from an
+// Outpost. The aspect-deregister cascade happens as each local
+// aspect's WS (tunnelled through the Outpost) closes.
+func (c *wsConn) handleOutpostDeregisterFrame(env frames.Envelope) {
+	var payload frames.OutpostDeregisterPayload
+	if err := frames.PayloadAs(env, &payload); err != nil {
+		c.respondError(env, "outpost.deregister payload missing: "+err.Error())
+		return
+	}
+	c.log.Info("outpost deregistered", "outpost_id", payload.OutpostID, "reason", payload.Reason)
 }
 
 // handleSessionEntryAppended persists the forwarded entry into the
@@ -208,9 +244,13 @@ func (c *wsConn) handleSessionEntryAppended(env frames.Envelope) {
 }
 
 // handleRegisterFrame processes the first-frame-after-connect register
-// frame from an aspect.
+// frame from an aspect. Also handles the Outpost-forwarded register
+// (same frame shape, just with a via_outpost field).
 func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
-	var payload frames.RegisterPayload
+	// Decode as the extended ForwardedRegisterPayload which embeds
+	// the base RegisterRequest. Plain aspect registers simply leave
+	// via_outpost empty; Outpost-forwarded ones carry the stamp.
+	var payload frames.ForwardedRegisterPayload
 	if err := frames.PayloadAs(env, &payload); err != nil {
 		c.respondError(env, "register payload missing or malformed: "+err.Error())
 		return
@@ -218,6 +258,10 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 	if err := validateRegister(&payload.RegisterRequest); err != nil {
 		c.respondError(env, err.Error())
 		return
+	}
+	if payload.ViaOutpost != "" {
+		c.log.Info("aspect registering via outpost",
+			"name", payload.Name, "via", payload.ViaOutpost)
 	}
 
 	state, displacedSession, err := c.broker.roster.Register(&payload.RegisterRequest)
