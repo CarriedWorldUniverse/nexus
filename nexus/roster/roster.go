@@ -47,10 +47,16 @@ func (r *Roster) Register(req *schemas.RegisterRequest) (state *schemas.AspectSt
 		}
 	}
 
-	// Port conflict check — only against *other* aspects.
-	for name, a := range r.aspects {
-		if name != req.Name && a.Port == req.Port && a.Status == "live" {
-			return nil, "", ErrPortConflict
+	// Port conflict check — only against *other* aspects, and only
+	// for real port numbers. Port 0 is the WS-era convention for
+	// "no inbound listener," so multiple aspects registering with
+	// port=0 must coexist. Treating 0 as a real port would false-
+	// positive as soon as the second WS-era aspect registered.
+	if req.Port != 0 {
+		for name, a := range r.aspects {
+			if name != req.Name && a.Port == req.Port && a.Status == "live" {
+				return nil, "", ErrPortConflict
+			}
 		}
 	}
 

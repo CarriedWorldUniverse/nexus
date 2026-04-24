@@ -1,10 +1,11 @@
-// Package broker serves the Nexus HTTP API: registration endpoints
-// (spec §4.1) and the live-roster query. TLS and bearer-token auth are
-// middleware applied in the server constructor.
+// Package broker serves the Nexus WS and HTTP surface. Per transport
+// spec v0.1 §10, the bulk of inter-component traffic runs over the
+// WS endpoint at /connect (see ws.go). This file keeps the HTTP bits
+// that remain legitimately HTTP: /health (external monitoring) and
+// /api/aspects (dashboard convenience — authoritative roster state
+// is the WS-driven in-memory map).
 //
-// This package is transport-only — it translates HTTP requests into
-// roster operations and returns JSON responses. Business logic lives
-// in nexus/roster.
+// Business logic lives in nexus/roster; this package is transport.
 package broker
 
 import (
@@ -35,6 +36,13 @@ type Broker struct {
 	roster *roster.Roster
 	srv    *http.Server
 	log    *slog.Logger
+
+	// ctx drives the lifetime of WS goroutines. Set in ListenAndServe
+	// from the caller's context; cancelled when ListenAndServe returns
+	// so detached WS serve-goroutines tear down during graceful
+	// shutdown (not just when the OS drops the TCP connection).
+	ctx       context.Context
+	ctxCancel context.CancelFunc
 }
 
 func New(cfg Config, r *roster.Roster) *Broker {
@@ -54,11 +62,16 @@ func New(cfg Config, r *roster.Roster) *Broker {
 // v1 uses plain HTTP for local dev; TLS wiring lands alongside the first
 // real aspect invocation.
 func (b *Broker) ListenAndServe(ctx context.Context) error {
+	b.ctx, b.ctxCancel = context.WithCancel(ctx)
+	defer b.ctxCancel()
+
 	mux := http.NewServeMux()
-	mux.Handle("POST /aspects/register", b.auth(http.HandlerFunc(b.handleRegister)))
-	mux.Handle("POST /aspects/heartbeat", b.auth(http.HandlerFunc(b.handleHeartbeat)))
-	mux.Handle("POST /aspects/deregister", b.auth(http.HandlerFunc(b.handleDeregister)))
-	mux.Handle("GET /aspects", b.auth(http.HandlerFunc(b.handleList)))
+	// WS surface per transport spec v0.1 — see ws.go. Auth is checked
+	// inside handleConnect before upgrade so bad tokens get clean 401s.
+	mux.HandleFunc("GET /connect", b.handleConnect)
+	// HTTP surface that stays per spec §10: dashboard convenience +
+	// external monitoring.
+	mux.Handle("GET /api/aspects", b.auth(http.HandlerFunc(b.handleList)))
 	mux.HandleFunc("GET /health", b.handleHealth)
 
 	b.srv = &http.Server{
@@ -105,102 +118,6 @@ func (b *Broker) auth(next http.Handler) http.Handler {
 	})
 }
 
-func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
-	var req schemas.RegisterRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := validateRegister(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	state, displacedSession, err := b.roster.Register(&req)
-	if err != nil {
-		switch {
-		case errors.Is(err, roster.ErrAlreadyRegistered):
-			writeError(w, http.StatusConflict, "aspect already registered with a different session")
-		case errors.Is(err, roster.ErrPortConflict):
-			writeError(w, http.StatusConflict, "port in use by another live aspect")
-		default:
-			writeError(w, http.StatusInternalServerError, err.Error())
-		}
-		return
-	}
-
-	if displacedSession != "" {
-		b.log.Warn("aspect re-registered, displacing prior session",
-			"name", state.Name,
-			"prior_session", displacedSession,
-			"new_session", state.SessionID,
-		)
-	}
-
-	b.log.Info("aspect registered",
-		"name", state.Name,
-		"port", state.Port,
-		"context_mode", state.ContextMode,
-		"provider", state.Provider,
-	)
-
-	writeJSON(w, http.StatusCreated, schemas.RegisterResponse{
-		Status:             "registered",
-		HeartbeatIntervalS: b.cfg.HeartbeatIntervalS,
-		StaleAfterS:        int(b.cfg.StaleAfter.Seconds()),
-	})
-}
-
-func (b *Broker) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
-	var req schemas.HeartbeatRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if req.Name == "" || req.SessionID == "" {
-		writeError(w, http.StatusBadRequest, "name and session_id required")
-		return
-	}
-	// Always server-stamp liveness — an aspect (or a compromised aspect) could
-	// post a future timestamp and trick the reaper into never marking it stale.
-	at := time.Now().UTC()
-
-	if err := b.roster.Heartbeat(req.Name, req.SessionID, at); err != nil {
-		switch {
-		case errors.Is(err, roster.ErrNotRegistered):
-			writeError(w, http.StatusNotFound, "aspect not registered; call /aspects/register")
-		case errors.Is(err, roster.ErrSessionMismatch):
-			writeError(w, http.StatusConflict, "session id does not match current registration")
-		default:
-			writeError(w, http.StatusInternalServerError, err.Error())
-		}
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (b *Broker) handleDeregister(w http.ResponseWriter, r *http.Request) {
-	var req schemas.DeregisterRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if req.Name == "" || req.SessionID == "" {
-		writeError(w, http.StatusBadRequest, "name and session_id required")
-		return
-	}
-	if err := b.roster.Deregister(req.Name, req.SessionID); err != nil {
-		if errors.Is(err, roster.ErrSessionMismatch) {
-			writeError(w, http.StatusConflict, "session id does not match current registration")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	b.log.Info("aspect deregistered", "name", req.Name, "reason", req.Reason)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
 func (b *Broker) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"aspects": b.roster.List(),
@@ -226,17 +143,14 @@ func validateRegister(req *schemas.RegisterRequest) error {
 	if req.Provider == "" {
 		return errors.New("provider required")
 	}
-	if req.Port <= 0 || req.Port > 65535 {
-		return errors.New("port must be 1–65535")
+	// Port used to be required (HTTP-era: broker needed it to route
+	// back to the aspect). Under the WS transport, aspects dial out
+	// and have no inbound listener, so port is advisory metadata
+	// only. Validated for range if provided.
+	if req.Port < 0 || req.Port > 65535 {
+		return errors.New("port must be 0–65535 (0 means no inbound listener)")
 	}
 	return nil
-}
-
-// decodeJSON is deliberately tolerant of unknown fields. The wire protocol
-// is expected to evolve (enrichment fields on heartbeat, new metadata on
-// register) and rejecting unknown fields makes rolling upgrades impossible.
-func decodeJSON(r *http.Request, v any) error {
-	return json.NewDecoder(r.Body).Decode(v)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
