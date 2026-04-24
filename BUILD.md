@@ -71,7 +71,24 @@ Per spec §9 and §6:
   - §2.8 active-retrieval injection at thread start.
   - Cost accounting attribution.
   - sqlite-vec activation (columns reserved; extension load deferred pending upstream binding fix).
-- [ ] **§6.4 Hands end-to-end** — `kind:"hand"` dispatch. wren `verify-canon` as first cross-aspect test.
+- [x] **§6.4 Hands end-to-end** — delivered via the WS-first transport reshape per `docs/2026-04-25-nexus-transport-spec.md`, 11 sub-parts:
+  - 0. Transport spec v0.1 committed.
+  - 1. `nexus/frames` — Envelope, Kind constants, payloads, coder/websocket locked.
+  - 2. Nexus WS endpoint at `/connect`, register/deregister as WS frames.
+  - 3. Aspect WS client (`runtime/wsclient`) + agent reshape — HTTP server replaced with WS handler.
+  - 4. Turn dispatch (server side) — `Broker.SendTurn`, response correlation via Dispatcher.
+  - 5. Session projection upward — `session.entry.appended` frames; `nexus/sessions` projection table.
+  - 6. `nexus/outpost` — per-host relay binary + cmd/outpost; register forwarding with via_outpost stamp.
+  - 7. Dispatch queue (`nexus/handqueue`) + spawn mechanics (`runtime/handexec`) — harness `--hand` mode; SpawnExecutor.
+  - 8. Auto-spawn on startup (`nexus/autospawn`) — scan aspect dir, fire-and-forget harness subprocesses.
+  - 9. First real hand — `agents/wren` with verify-canon declaration + subprocess-level spawn test.
+  - 10. Cross-aspect e2e smoke — WS-first smoke script with default (fake harness) and -live (real Claude) modes.
+
+  Deferred / known gaps:
+  - Outpost-side dispatch queue (cross-host hand routing): v1 only Nexus has a queue; hands only run on aspects whose home is on the Nexus host.
+  - Turn frame routing downward THROUGH an Outpost: spec gap (frame doesn't carry a target aspect identifier for routing); needs a dedicated routing header. Direct-aspect turn dispatch works.
+  - Shutdown frame handling beyond log-and-drop.
+  - Per-aspect concurrency caps vs global handqueue max.
 - [ ] **§6.5 keel embedded** — keel folds into Nexus process as global-context harness. No PTY. `@keel` preserved.
 - [ ] **§6.6 Migrate remaining aspects** — home folders populated; old proxies stood down one-by-one.
 - [ ] **§6.7 Dashboard migration** — live-feed from `/aspects`, views re-pointed.

@@ -1,20 +1,24 @@
-// Command smoke-e2e exercises the whole §6.3 stack end-to-end:
-// starts the Nexus broker, prepares a synthetic aspect home,
-// starts the agent binary, waits for registration, posts a turn
-// against the agent's /turn endpoint, and asserts the response.
+// Command smoke-e2e exercises the §6.4 cross-aspect stack end-to-end:
+// spawns a Nexus, auto-starts a wren aspect from a test aspect dir,
+// drives a hand.dispatch over WS, asserts the hand.result round-
+// trip — everything talks WS.
 //
-// Runs in two modes:
-//   - Default: a mock-provider Nexus test (no real Anthropic key
-//     required) — validates registration, heartbeat, turn dispatch
-//     via an in-process fake. This is what the core §6.3 parts
-//     already cover in unit tests; here we exercise the binaries.
-//   - -live: spawns nexus.exe and agent.exe subprocesses and hits
-//     Claude for a real turn. Requires ANTHROPIC_API_KEY in env.
+// Two modes:
+//
+//   - Default: uses a fake harness (this binary itself, via
+//     HANDQUEUE_FAKE_HARNESS env) so no real Claude calls happen.
+//     Proves the wire: Nexus binds, aspect registers via WS,
+//     hand.dispatch enqueues, subprocess spawns, hand.result flows
+//     back correlated.
+//
+//   - -live: uses the real harness binary (built from this repo)
+//     and hits Claude for a real verify-canon invocation. Requires
+//     ANTHROPIC_API_KEY in env.
 //
 // Usage:
 //
-//	go run ./scripts/smoke-e2e -nexus-port 7890 -agent-port 7990
-//	go run ./scripts/smoke-e2e -live -nexus-port 7890 -agent-port 7990
+//	go run ./scripts/smoke-e2e                  # default fake
+//	go run ./scripts/smoke-e2e -live            # real Claude
 package main
 
 import (
@@ -24,25 +28,59 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/coder/websocket"
+
+	"github.com/nexus-cw/nexus/nexus/frames"
+	"github.com/nexus-cw/nexus/runtime/handexec"
 	"github.com/nexus-cw/nexus/shared/schemas"
 )
 
 var (
-	nexusPort = flag.Int("nexus-port", 7890, "port for the nexus broker")
-	agentPort = flag.Int("agent-port", 7990, "port the agent's turn-endpoint binds to")
-	live      = flag.Bool("live", false, "spawn real nexus.exe + agent.exe binaries and hit Claude")
-	keepRoot  = flag.Bool("keep-root", false, "don't delete the temp aspect home on exit")
-	token     = flag.String("token", "smoke-e2e-token", "shared bearer token for Nexus auth")
+	live     = flag.Bool("live", false, "use real harness binary + real Claude (needs ANTHROPIC_API_KEY)")
+	keepRoot = flag.Bool("keep-root", false, "don't delete the temp aspect home on exit")
+	token    = flag.String("token", "smoke-e2e-token", "shared bearer token")
 )
+
+// TestMain hook: the smoke binary itself acts as a fake harness
+// when HANDQUEUE_FAKE_HARNESS is set. Reads handexec.Request from
+// stdin, writes a canned HandResultPayload to stdout. Keeps the
+// default mode dependency-free (no Claude).
+func init() {
+	if os.Getenv("HANDQUEUE_FAKE_HARNESS") != "" {
+		runFakeHarness()
+		os.Exit(0)
+	}
+}
+
+func runFakeHarness() {
+	var req handexec.Request
+	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
+		fmt.Fprintln(os.Stderr, "fake harness: decode stdin:", err)
+		os.Exit(2)
+	}
+	resp := frames.HandResultPayload{
+		HandName: req.HandName,
+		Output: map[string]any{
+			"consistent": true,
+			"issues":     []string{},
+			"fake":       true,
+			"echoed":     req.Input,
+		},
+	}
+	raw, _ := json.Marshal(resp)
+	fmt.Println(string(raw))
+}
 
 func main() {
 	flag.Parse()
@@ -54,11 +92,7 @@ func main() {
 }
 
 func run() error {
-	if !*live {
-		return fmt.Errorf("only -live mode is implemented; the default mock-provider path is covered by agent_test.go in-process tests")
-	}
-
-	if os.Getenv("ANTHROPIC_API_KEY") == "" {
+	if *live && os.Getenv("ANTHROPIC_API_KEY") == "" {
 		return fmt.Errorf("-live requires ANTHROPIC_API_KEY env var")
 	}
 
@@ -73,39 +107,59 @@ func run() error {
 			}
 		}()
 	}
-	fmt.Println("aspect root:", root)
+	fmt.Println("smoke root:", root)
 
-	// Build the binaries into a known path so we don't rely on PATH.
+	// Build what we need.
 	binDir := filepath.Join(root, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return err
 	}
 	nexusBin := filepath.Join(binDir, exeName("nexus"))
-	agentBin := filepath.Join(binDir, exeName("agent"))
-
-	fmt.Println("building binaries ...")
 	if err := goBuild(nexusBin, "./nexus/cmd/nexus"); err != nil {
 		return fmt.Errorf("build nexus: %w", err)
 	}
-	if err := goBuild(agentBin, "./runtime/cmd/agent"); err != nil {
-		return fmt.Errorf("build agent: %w", err)
+
+	// The harness path depends on mode.
+	var harnessPath string
+	if *live {
+		harnessPath = filepath.Join(binDir, exeName("agent"))
+		if err := goBuild(harnessPath, "./runtime/cmd/agent"); err != nil {
+			return fmt.Errorf("build agent: %w", err)
+		}
+	} else {
+		// Reuse this smoke binary as a fake harness.
+		self, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		harnessPath = self
 	}
 
-	// Create the aspect home with aspect.json + .credentials.
-	home := filepath.Join(root, "aspects", "smoketest")
-	if err := writeAspectHome(home); err != nil {
+	// Pick an ephemeral port so parallel smoke runs don't collide.
+	port, err := pickFreePort()
+	if err != nil {
 		return err
 	}
 
-	// Data dir for Nexus.
+	// Aspect home for wren.
+	aspectDir := filepath.Join(root, "aspects")
+	if err := writeWrenHome(aspectDir); err != nil {
+		return err
+	}
+
 	dataDir := filepath.Join(root, "data")
 
-	// Start Nexus.
+	// Start Nexus with auto-spawn pointing at the aspect dir.
 	nexusCmd := exec.Command(nexusBin,
-		"-addr", fmt.Sprintf(":%d", *nexusPort),
+		"-addr", fmt.Sprintf(":%d", port),
 		"-data-dir", dataDir,
+		"-aspect-dir", aspectDir,
+		"-harness-path", harnessPath,
 	)
-	nexusCmd.Env = append(os.Environ(), "NEXUS_TOKEN="+*token)
+	nexusCmd.Env = append(os.Environ(),
+		"NEXUS_TOKEN="+*token,
+		"HANDQUEUE_FAKE_HARNESS=1", // no-op for -live since real harness isn't this binary
+	)
 	nexusCmd.Stdout = tagged("[nexus] ", os.Stdout)
 	nexusCmd.Stderr = tagged("[nexus] ", os.Stderr)
 	if err := nexusCmd.Start(); err != nil {
@@ -113,66 +167,227 @@ func run() error {
 	}
 	defer terminate(nexusCmd, "nexus")
 
-	// Wait for Nexus /health.
-	nexusURL := fmt.Sprintf("http://127.0.0.1:%d", *nexusPort)
-	if err := waitHTTP(nexusURL+"/health", 10*time.Second); err != nil {
+	// Wait for /health.
+	nexusHTTPURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	if err := waitHTTP(nexusHTTPURL+"/health", 10*time.Second); err != nil {
 		return fmt.Errorf("nexus not ready: %w", err)
 	}
 
-	// Start the agent. Now connects via WS — NEXUS_UPSTREAM env,
-	// no local listener.
-	// NOTE: Under the §6.4 WS transport the agent no longer exposes
-	// HTTP /healthz or /turn. A full WS-based e2e driver lands in
-	// part 10; this script is kept compiling for now.
-	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/connect", *nexusPort)
-	agentCmd := exec.Command(agentBin,
-		"-home", home,
-	)
-	agentCmd.Env = append(os.Environ(),
-		"NEXUS_TOKEN="+*token,
-		"NEXUS_UPSTREAM="+wsURL,
-	)
-	agentCmd.Stdout = tagged("[agent] ", os.Stdout)
-	agentCmd.Stderr = tagged("[agent] ", os.Stderr)
-	if err := agentCmd.Start(); err != nil {
-		return fmt.Errorf("start agent: %w", err)
-	}
-	defer terminate(agentCmd, "agent")
+	// The aspect is a stub harness in default mode — it will get
+	// spawned by Nexus BUT because we don't want it competing with
+	// our hand.dispatch test (and because auto_spawn: false is in
+	// wren/aspect.json), we skip spawning the long-running aspect
+	// here. Instead we drive hand.dispatch directly from this
+	// script against the Nexus's hand queue. The fake harness will
+	// be spawned by the queue itself when a hand.dispatch arrives.
+	// However wren's aspect.json has auto_spawn:false, which means
+	// Nexus won't auto-start wren; the SpawnExecutor (when it runs
+	// a hand) resolves the home via the roster — wren isn't
+	// registered. We fix that for the smoke by force-registering a
+	// stub aspect via a throwaway WS client.
 
-	// Wait briefly for the agent to connect. Part 10 replaces this
-	// with a proper WS client that drives a turn and asserts the
-	// round-trip.
-	time.Sleep(2 * time.Second)
-	fmt.Println("agent should have connected; turn driver deferred to part 10")
+	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/connect", port)
+
+	// Open a WS client as "wren" to register it in the roster so
+	// the HandExecutor's HomeResolver finds wren's home.
+	stubHome := filepath.Join(aspectDir, "wren")
+	regClient, err := dialWS(wsURL, *token)
+	if err != nil {
+		return fmt.Errorf("register client dial: %w", err)
+	}
+	defer regClient.Close(websocket.StatusNormalClosure, "done")
+
+	regEnv, _ := frames.NewRequest(frames.KindRegister, frames.RegisterPayload{
+		RegisterRequest: schemas.RegisterRequest{
+			Name:         "wren",
+			ContextMode:  schemas.ContextThread,
+			Provider:     "claude-api",
+			SessionID:    "smoke-wren-1",
+			Home:         stubHome,
+			StartedAt:    time.Now().UTC(),
+			Capabilities: []string{"canon-verify"},
+		},
+	})
+	if err := writeFrame(regClient, regEnv); err != nil {
+		return fmt.Errorf("send register: %w", err)
+	}
+	ack, err := readFrame(regClient)
+	if err != nil {
+		return fmt.Errorf("read register ack: %w", err)
+	}
+	if ack.Kind != frames.KindRegisterAck {
+		return fmt.Errorf("register ack kind = %q, want register.ack", ack.Kind)
+	}
+	fmt.Println("wren registered")
+
+	// Now drive a hand.dispatch from a second client — simulates
+	// keel (or operator) asking wren to verify a passage.
+	caller, err := dialWS(wsURL, *token)
+	if err != nil {
+		return fmt.Errorf("caller dial: %w", err)
+	}
+	defer caller.Close(websocket.StatusNormalClosure, "done")
+
+	// Register the caller minimally so it can participate (broker
+	// accepts frames on any connection once it's registered, but
+	// the hand.dispatch doesn't actually require registration — it
+	// just needs a valid upstream connection).
+	callerReg, _ := frames.NewRequest(frames.KindRegister, frames.RegisterPayload{
+		RegisterRequest: schemas.RegisterRequest{
+			Name:        "smoke-caller",
+			ContextMode: schemas.ContextStateless,
+			Provider:    "claude-api",
+			SessionID:   "smoke-caller-1",
+			Home:        stubHome, // home doesn't matter for this client
+			StartedAt:   time.Now().UTC(),
+		},
+	})
+	if err := writeFrame(caller, callerReg); err != nil {
+		return fmt.Errorf("send caller register: %w", err)
+	}
+	if ack, err := readFrame(caller); err != nil || ack.Kind != frames.KindRegisterAck {
+		return fmt.Errorf("caller register ack: kind=%v err=%v", ack.Kind, err)
+	}
+
+	// Dispatch a hand.
+	dispatchEnv, _ := frames.NewRequest(frames.KindHandDispatch, frames.HandDispatchPayload{
+		TargetAspect: "wren",
+		HandName:     "verify-canon",
+		ThreadID:     "smoke-thread-1",
+		Invoker:      "smoke-caller",
+		Input:        map[string]any{"text": "A passage for canon check."},
+	})
+	if err := writeFrame(caller, dispatchEnv); err != nil {
+		return fmt.Errorf("send hand.dispatch: %w", err)
+	}
+
+	resp, err := readFrame(caller)
+	if err != nil {
+		return fmt.Errorf("read hand.result: %w", err)
+	}
+	if resp.InReplyTo != dispatchEnv.ID {
+		return fmt.Errorf("response InReplyTo = %q, want %q", resp.InReplyTo, dispatchEnv.ID)
+	}
+	if resp.Kind == frames.KindHandError {
+		var errPayload frames.HandErrorPayload
+		_ = frames.PayloadAs(resp, &errPayload)
+		return fmt.Errorf("hand.error: code=%s reason=%s", errPayload.Code, errPayload.Reason)
+	}
+	if resp.Kind != frames.KindHandResult {
+		return fmt.Errorf("response kind = %q, want hand.result", resp.Kind)
+	}
+	var result frames.HandResultPayload
+	if err := frames.PayloadAs(resp, &result); err != nil {
+		return fmt.Errorf("parse result: %w", err)
+	}
+	fmt.Printf("hand.result: target=%s hand=%s output=%v\n", result.TargetAspect, result.HandName, result.Output)
+
+	if *live {
+		// Real mode: result["consistent"] should exist as bool.
+		if _, ok := result.Output["consistent"]; !ok {
+			fmt.Println("WARNING: live mode output missing 'consistent' key — check prompt compliance")
+		}
+	} else {
+		// Fake mode: we know the canned shape.
+		if result.Output["fake"] != true {
+			return fmt.Errorf("fake mode expected output.fake=true, got %v", result.Output)
+		}
+		fmt.Println("fake-mode round-trip verified ✓")
+	}
+
 	return nil
 }
 
-func writeAspectHome(home string) error {
-	if err := os.MkdirAll(home, 0o755); err != nil {
+// -------------------------------------------------------------------
+// helpers
+// -------------------------------------------------------------------
+
+func writeWrenHome(aspectDir string) error {
+	wrenDir := filepath.Join(aspectDir, "wren")
+	if err := os.MkdirAll(wrenDir, 0o755); err != nil {
 		return err
 	}
 	cfg := schemas.AspectConfig{
-		Name:         "smoketest",
-		ContextMode:  schemas.ContextGlobal,
-		Provider:     "claude-api",
-		Port:         0,
-		Capabilities: []string{"smoke"},
+		Name:        "wren",
+		ContextMode: schemas.ContextThread,
+		Provider:    "claude-api",
+		Capabilities: []string{"canon-verify"},
+		Hands: []schemas.HandConfig{
+			{
+				Name:         "verify-canon",
+				Description:  "Verify whether a passage is canon-consistent.",
+				SystemPrompt: "You are wren's verify-canon hand. Respond with a single JSON object {\"consistent\": boolean, \"issues\": [\"...\"]} and nothing else.",
+				TimeoutS:     120,
+				Concurrency:  1,
+			},
+		},
+		Metadata: map[string]any{"auto_spawn": false},
 	}
-	raw, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(home, "aspect.json"), raw, 0o644); err != nil {
+	raw, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(filepath.Join(wrenDir, "aspect.json"), raw, 0o644); err != nil {
 		return err
 	}
 
-	credsDir := filepath.Join(home, ".credentials")
-	if err := os.MkdirAll(credsDir, 0o700); err != nil {
+	// In -live mode the real harness will read .credentials/claude-api.json.
+	if *live {
+		credsDir := filepath.Join(wrenDir, ".credentials")
+		if err := os.MkdirAll(credsDir, 0o700); err != nil {
+			return err
+		}
+		creds := map[string]string{"api_key": os.Getenv("ANTHROPIC_API_KEY")}
+		raw, _ := json.Marshal(creds)
+		if err := os.WriteFile(filepath.Join(credsDir, "claude-api.json"), raw, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func dialWS(url, token string) (*websocket.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + token}},
+	})
+	return c, err
+}
+
+func writeFrame(c *websocket.Conn, env frames.Envelope) error {
+	raw, err := frames.Encode(env)
+	if err != nil {
 		return err
 	}
-	creds := map[string]string{"api_key": os.Getenv("ANTHROPIC_API_KEY")}
-	credsRaw, _ := json.Marshal(creds)
-	return os.WriteFile(filepath.Join(credsDir, "claude-api.json"), credsRaw, 0o600)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return c.Write(ctx, websocket.MessageText, raw)
+}
+
+func readFrame(c *websocket.Conn) (frames.Envelope, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, data, err := c.Read(ctx)
+	if err != nil {
+		return frames.Envelope{}, err
+	}
+	return frames.Decode(data)
+}
+
+func pickFreePort() (int, error) {
+	ln, err := listen("127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer ln.Close()
+	_, portStr, _ := strings.Cut(ln.Addr().String(), ":")
+	var port int
+	if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
+		return 0, err
+	}
+	return port, nil
+}
+
+func listen(addr string) (nl net.Listener, err error) {
+	return net.Listen("tcp", addr)
 }
 
 func goBuild(out, pkg string) error {
@@ -210,7 +425,6 @@ func terminate(cmd *exec.Cmd, name string) {
 func waitHTTP(url string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 	for {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -229,9 +443,6 @@ func waitHTTP(url string, timeout time.Duration) error {
 	}
 }
 
-// tagged returns an io.Writer that prefixes each line with `prefix`.
-// Writes are mutex-guarded so concurrent output from nexus and agent
-// subprocesses doesn't interleave mid-line.
 func tagged(prefix string, w io.Writer) io.Writer {
 	return &taggedWriter{prefix: []byte(prefix), w: w}
 }
