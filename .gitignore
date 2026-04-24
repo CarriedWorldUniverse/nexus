@@ -1,7 +1,41 @@
 # Go build artifacts
 bin/
+*.exe
+*.test
 
 # IDE / OS
 .vscode/
 .idea/
 *.swp
+.DS_Store
+Thumbs.db
+
+# Credentials — never commit
+.credentials/
+**/.credentials/
+*.pem
+*.key
+*.env
+.env.*
+credentials.json
+*-credentials.json
+
+# Runtime / operational data — never commit
+# (note: `runtime/` the directory IS source code; we're excluding runtime *artifacts*)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+logs/
+**/logs/
+**/session/
+agents/*/session/
+agents/*/logs/
+agents/*/tmp/
+agents/*/.credentials/
+tmp/
+
+# Vector index files (if ever dumped separately)
+*.vec
+*.index
