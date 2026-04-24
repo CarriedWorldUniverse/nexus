@@ -2,10 +2,13 @@ module github.com/nexus-cw/nexus
 
 go 1.25.0
 
-require github.com/ncruces/go-sqlite3 v0.34.0
+require (
+	github.com/anthropics/anthropic-sdk-go v1.38.0
+	github.com/ncruces/go-sqlite3 v0.34.0
+	github.com/oklog/ulid/v2 v2.1.1
+)
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.38.0 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/invopop/jsonschema v0.13.0 // indirect
