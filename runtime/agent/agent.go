@@ -1,62 +1,78 @@
-// Package agent implements the single per-aspect runtime (agent.exe).
-// Reads an aspect's home folder, registers with Nexus, heartbeats,
-// serves an inbound turn endpoint that the Nexus (or tests) can POST
-// to, dispatches through the provider, writes entries to the session
-// tree. Ties together parts 1–6 into a working aspect.
+// Package agent implements the per-aspect runtime. Long-running
+// process that connects to its upstream (Nexus directly OR a local
+// Outpost) via a persistent WebSocket. Handles register/turn frames
+// over that WS, writes session entries to a local tree, invokes the
+// configured provider for each turn.
 //
-// Scope note: comms-broker-style routing is NOT implemented here.
-// The agent exposes a simple HTTP turn endpoint at `/turn` as the
-// dispatch surface for v1; the broader comms layer (kind:"hand"
-// on a shared chat bus) lands in a later part.
+// v1 scope: register + deregister + turn dispatch over WS. Hand
+// dispatch, knowledge frames, session projection land in subsequent
+// parts.
 package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/nexus-cw/nexus/nexus/frames"
 	"github.com/nexus-cw/nexus/runtime/context/tree"
 	"github.com/nexus-cw/nexus/runtime/providers"
+	"github.com/nexus-cw/nexus/runtime/wsclient"
 	"github.com/nexus-cw/nexus/shared/schemas"
 )
 
-// Config bundles the runtime dependencies. All fields are required
-// unless noted.
+// Config bundles the runtime dependencies. All fields except Logger
+// are required.
 type Config struct {
-	Home       string            // absolute path to the aspect home folder
-	Aspect     schemas.AspectConfig
-	Provider   providers.Provider // chat provider (e.g. claude-api)
-	NexusURL   string            // base URL, e.g. http://localhost:7888
-	AuthToken  string            // bearer token for Nexus auth
-	Logger     *slog.Logger      // nil falls back to slog default
-	HTTPClient *http.Client      // nil means http.DefaultClient
-	ListenAddr string            // e.g. ":7904"; zero-port (":0") works for tests
+	// Home is the absolute path to the aspect home folder.
+	Home string
+
+	// Aspect is the parsed aspect.json.
+	Aspect schemas.AspectConfig
+
+	// Provider is the chat provider adapter (e.g. claude-api).
+	Provider providers.Provider
+
+	// UpstreamURL is the WS URL to dial. For aspects running on a
+	// direct-to-Nexus host this is the Nexus's /connect endpoint;
+	// on hosts with a local Outpost, it's the Outpost's listener.
+	// Resolution rule: NEXUS_OUTPOST overrides NEXUS_UPSTREAM per
+	// transport spec §3.1. The caller (main.go) resolves it and
+	// passes the resulting URL here.
+	UpstreamURL string
+
+	// UpstreamIsExplicitOutpost is true when the URL was resolved
+	// from NEXUS_OUTPOST (not NEXUS_UPSTREAM). Triggers fail-loudly
+	// on initial connect failure per transport spec §3.5.
+	UpstreamIsExplicitOutpost bool
+
+	// AuthToken is the bearer token sent on the WS upgrade.
+	AuthToken string
+
+	// Logger is optional; nil falls back to slog.Default().
+	Logger *slog.Logger
 }
 
 // Agent is the running runtime instance.
 type Agent struct {
 	cfg       Config
 	log       *slog.Logger
-	client    *http.Client
 	sessionID string
 	tree      *tree.Tree
 
+	ws *wsclient.Client
+
 	mu         sync.Mutex
 	registered bool
-	srv        *http.Server
-	listenURL  string
-	serveErrCh chan error
 }
 
-// New constructs an Agent. Does no I/O — call Start() to kick off
-// registration and the heartbeat loop.
+// New constructs an Agent. Does no I/O — call Start() to dial and
+// register.
 func New(cfg Config) (*Agent, error) {
 	if cfg.Home == "" {
 		return nil, errors.New("agent: Home required")
@@ -67,227 +83,183 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.Provider == nil {
 		return nil, errors.New("agent: Provider required")
 	}
-	if cfg.NexusURL == "" {
-		return nil, errors.New("agent: NexusURL required")
+	if cfg.UpstreamURL == "" {
+		return nil, errors.New("agent: UpstreamURL required")
 	}
 
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
 	}
-	client := cfg.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
-	}
 
-	// One session id per agent-process lifetime. Stays stable across
-	// heartbeat retries so the Nexus roster ties this process to its
+	// One session id per agent-process lifetime. Stable across
+	// reconnects so the Nexus roster ties this process to its
 	// registration entry.
 	sessionID := fmt.Sprintf("%s-%d-%d", cfg.Aspect.Name, os.Getpid(), time.Now().UnixNano())
 
-	// Session tree lives under <home>/session/ per context-mode
-	// conventions. Global mode: single session. Thread/stateless:
-	// runtime creates per-thread files as they're needed; for now
-	// we only serve the global-mode path — thread sessions arrive
-	// when dispatch gets richer.
+	// Session tree lives under <home>/session/. Global mode: single
+	// session file. Thread/stateless modes arrive in a later part.
 	sessionDir := filepath.Join(cfg.Home, "session")
 	tr, err := tree.Open(sessionDir, "global")
 	if err != nil {
 		return nil, fmt.Errorf("agent: open session tree: %w", err)
 	}
 
-	// Warn-only on non-global context modes: the runtime doesn't
-	// fully serve thread/stateless yet. Onboarding aspects with those
-	// modes declared should work for their "global-shaped" usage and
-	// we pick up the extras later.
 	if cfg.Aspect.ContextMode != "" && cfg.Aspect.ContextMode != schemas.ContextGlobal {
 		log.Warn("agent: context mode not fully served in v1",
 			"mode", cfg.Aspect.ContextMode,
 			"note", "treating as global-scoped session")
 	}
 
-	return &Agent{
-		cfg:        cfg,
-		log:        log,
-		client:     client,
-		sessionID:  sessionID,
-		tree:       tr,
-		serveErrCh: make(chan error, 1),
-	}, nil
+	a := &Agent{
+		cfg:       cfg,
+		log:       log,
+		sessionID: sessionID,
+		tree:      tr,
+	}
+
+	ws, err := wsclient.New(wsclient.Config{
+		URL:              cfg.UpstreamURL,
+		AuthToken:        cfg.AuthToken,
+		Handler:          wsclient.HandlerFunc(a.handleFrame),
+		Logger:           log,
+		FailFirstConnect: cfg.UpstreamIsExplicitOutpost,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("agent: ws client: %w", err)
+	}
+	a.ws = ws
+	return a, nil
 }
 
 // SessionID returns the unique id for this agent-process lifetime.
 func (a *Agent) SessionID() string { return a.sessionID }
 
-// Tree returns the session tree — useful for tests + dashboard.
+// Tree returns the session tree — useful for tests.
 func (a *Agent) Tree() *tree.Tree { return a.tree }
 
-// ListenURL returns the address the turn endpoint is listening on.
-// Only valid after Start returns.
-func (a *Agent) ListenURL() string {
+// Start brings the agent up: drives the wsclient Run loop (which
+// dials upstream and reconnects on drop), registers on each new
+// connection. Blocks until ctx is cancelled or FailFirstConnect
+// trips. Deregisters on clean shutdown.
+func (a *Agent) Start(ctx context.Context) error {
+	// Register-on-connect: watch for the wsclient becoming ready and
+	// send the register frame. On reconnect, we register again with
+	// the same session id — the roster's displacement logic will
+	// either accept the re-register (same session) or reject it
+	// (different session, live entry — but we keep the same id, so
+	// it's the same-session path).
+	registerDone := make(chan struct{})
+	go a.registerLoop(ctx, registerDone)
+
+	err := a.ws.Run(ctx)
+
+	// Graceful shutdown: attempt a deregister frame if we were
+	// registered. Do it on a fresh context so parent-cancel doesn't
+	// immediately kill it.
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.listenURL
+	wasRegistered := a.registered
+	a.mu.Unlock()
+	if wasRegistered {
+		bg, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = a.sendDeregister(bg)
+	}
+
+	// Signal the register loop to exit (Run has already returned).
+	select {
+	case <-registerDone:
+	default:
+	}
+
+	return err
 }
 
-// -------------------------------------------------------------------
-// Lifecycle
-// -------------------------------------------------------------------
-
-// Start brings the agent up: starts the turn server, registers with
-// Nexus, launches the heartbeat loop. Blocks until ctx is cancelled
-// or a fatal error occurs. Deregisters on exit.
-func (a *Agent) Start(ctx context.Context) error {
-	if err := a.startTurnServer(); err != nil {
-		return fmt.Errorf("agent.Start: turn server: %w", err)
-	}
-
-	heartbeatInterval, err := a.register(ctx)
-	if err != nil {
-		// Tear down the server we just started — registration failed.
-		_ = a.shutdownTurnServer(context.Background())
-		return fmt.Errorf("agent.Start: register: %w", err)
-	}
-	a.log.Info("agent registered",
-		"name", a.cfg.Aspect.Name,
-		"session", a.sessionID,
-		"nexus", a.cfg.NexusURL,
-		"listen", a.listenURL,
-		"heartbeat_s", heartbeatInterval)
-
-	// Heartbeat loop. Runs until ctx done; any failure is logged but
-	// not fatal (transient broker restarts shouldn't kill the agent).
-	// The serveErrCh path catches the async turn-server crash case:
-	// if the listener dies, registration is stale and we must exit.
-	ticker := time.NewTicker(time.Duration(heartbeatInterval) * time.Second)
-	defer ticker.Stop()
-
+// registerLoop sends a register frame each time the wsclient becomes
+// ready. Runs until ctx done.
+func (a *Agent) registerLoop(ctx context.Context, done chan struct{}) {
+	defer close(done)
+	lastConnected := false
 	for {
 		select {
 		case <-ctx.Done():
-			a.log.Info("agent stopping", "reason", ctx.Err())
-			return a.shutdown()
-		case err := <-a.serveErrCh:
-			a.log.Error("turn server crashed — shutting down agent", "err", err)
-			// Best-effort deregister so Nexus doesn't keep routing
-			// to a dead endpoint.
-			_ = a.shutdown()
-			return fmt.Errorf("agent: turn server crashed: %w", err)
-		case <-ticker.C:
-			if err := a.heartbeat(ctx); err != nil {
-				a.log.Warn("heartbeat failed", "err", err)
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+		connected := a.ws.Connected()
+		if connected && !lastConnected {
+			// New connection just came up — register.
+			if err := a.sendRegister(ctx); err != nil {
+				a.log.Warn("register after connect failed", "err", err)
 			}
 		}
+		lastConnected = connected
 	}
 }
 
-func (a *Agent) shutdown() error {
-	// Best-effort deregister + server shutdown. Use a fresh bounded
-	// context so the parent cancellation doesn't immediately kill
-	// this.
-	bg, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// sendRegister sends a register frame and waits for the ack. Marks
+// the agent as registered on success.
+func (a *Agent) sendRegister(ctx context.Context) error {
+	req, err := frames.NewRequest(frames.KindRegister, frames.RegisterPayload{
+		RegisterRequest: schemas.RegisterRequest{
+			Name:         a.cfg.Aspect.Name,
+			ContextMode:  a.cfg.Aspect.ContextMode,
+			Provider:     a.cfg.Aspect.Provider,
+			Port:         a.cfg.Aspect.Port,
+			PID:          os.Getpid(),
+			StartedAt:    time.Now().UTC(),
+			Capabilities: a.cfg.Aspect.Capabilities,
+			Home:         a.cfg.Home,
+			SessionID:    a.sessionID,
+			Metadata:     a.cfg.Aspect.Metadata,
+			Hands:        a.cfg.Aspect.Hands,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("build register frame: %w", err)
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-
-	var errs []error
-	if err := a.deregister(bg); err != nil {
-		a.log.Warn("deregister failed", "err", err)
-		errs = append(errs, err)
+	resp, err := a.ws.Request(reqCtx, req)
+	if err != nil {
+		return fmt.Errorf("register request: %w", err)
 	}
-	if err := a.shutdownTurnServer(bg); err != nil {
-		a.log.Warn("turn server shutdown failed", "err", err)
-		errs = append(errs, err)
-	}
-	return errors.Join(errs...)
-}
-
-// -------------------------------------------------------------------
-// Registration protocol
-// -------------------------------------------------------------------
-
-func (a *Agent) register(ctx context.Context) (int, error) {
-	req := schemas.RegisterRequest{
-		Name:         a.cfg.Aspect.Name,
-		ContextMode:  a.cfg.Aspect.ContextMode,
-		Provider:     a.cfg.Aspect.Provider,
-		Port:         a.cfg.Aspect.Port,
-		PID:          os.Getpid(),
-		StartedAt:    time.Now().UTC(),
-		Capabilities: a.cfg.Aspect.Capabilities,
-		Home:         a.cfg.Home,
-		SessionID:    a.sessionID,
-		Metadata:     a.cfg.Aspect.Metadata,
-		Hands:        a.cfg.Aspect.Hands,
+	if resp.Kind != frames.KindRegisterAck {
+		return fmt.Errorf("register: got kind %q, want register.ack", resp.Kind)
 	}
 
-	var resp schemas.RegisterResponse
-	if err := a.postJSON(ctx, "/aspects/register", req, &resp); err != nil {
-		return 0, err
-	}
-	if resp.Status != "registered" {
-		return 0, fmt.Errorf("register: unexpected status %q", resp.Status)
+	var ack frames.RegisterAckPayload
+	if err := frames.PayloadAs(resp, &ack); err != nil {
+		// Register succeeded (ack kind) but payload malformed; treat
+		// as transient.
+		a.log.Warn("register.ack payload malformed", "err", err)
 	}
 
 	a.mu.Lock()
 	a.registered = true
 	a.mu.Unlock()
 
-	interval := resp.HeartbeatIntervalS
-	if interval <= 0 {
-		interval = 15
-	}
-	return interval, nil
-}
-
-func (a *Agent) heartbeat(ctx context.Context) error {
-	req := schemas.HeartbeatRequest{
-		Name:      a.cfg.Aspect.Name,
-		SessionID: a.sessionID,
-		At:        time.Now().UTC(),
-	}
-	return a.postJSON(ctx, "/aspects/heartbeat", req, nil)
-}
-
-func (a *Agent) deregister(ctx context.Context) error {
-	a.mu.Lock()
-	registered := a.registered
-	a.mu.Unlock()
-	if !registered {
-		return nil
-	}
-	req := schemas.DeregisterRequest{
-		Name:      a.cfg.Aspect.Name,
-		SessionID: a.sessionID,
-		Reason:    "graceful shutdown",
-	}
-	return a.postJSON(ctx, "/aspects/deregister", req, nil)
-}
-
-// postJSON is a tiny JSON-over-HTTP helper with bearer auth.
-func (a *Agent) postJSON(ctx context.Context, path string, body any, out any) error {
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.cfg.NexusURL+path, newByteReader(raw))
-	if err != nil {
-		return fmt.Errorf("new request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if a.cfg.AuthToken != "" {
-		req.Header.Set("Authorization", "Bearer "+a.cfg.AuthToken)
-	}
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s: HTTP %d", path, resp.StatusCode)
-	}
-	if out != nil {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			return fmt.Errorf("%s: decode response: %w", path, err)
-		}
-	}
+	a.log.Info("agent registered",
+		"name", a.cfg.Aspect.Name,
+		"session", a.sessionID,
+		"heartbeat_s", ack.HeartbeatIntervalS)
 	return nil
+}
+
+// sendDeregister sends a graceful deregister frame. Best-effort.
+func (a *Agent) sendDeregister(ctx context.Context) error {
+	env, err := frames.NewRequest(frames.KindDeregister, frames.DeregisterPayload{
+		DeregisterRequest: schemas.DeregisterRequest{
+			Name:      a.cfg.Aspect.Name,
+			SessionID: a.sessionID,
+			Reason:    "graceful shutdown",
+		},
+	})
+	if err != nil {
+		return err
+	}
+	// Fire-and-forget: the connection is probably being torn down;
+	// don't bother waiting for the ack.
+	return a.ws.Send(ctx, env)
 }

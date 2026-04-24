@@ -1,130 +1,100 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"time"
 
+	"github.com/nexus-cw/nexus/nexus/frames"
 	"github.com/nexus-cw/nexus/runtime/context/tree"
 	"github.com/nexus-cw/nexus/runtime/providers"
 )
 
-// TurnRequest is the inbound shape for POST /turn. Matches what the
-// Nexus (or a test) sends to drive a conversation step.
-type TurnRequest struct {
-	Prompt       string `json:"prompt"`
-	SystemPrompt string `json:"system_prompt,omitempty"`
-	Model        string `json:"model,omitempty"`
+// handleFrame is the wsclient Handler for uncorrelated inbound frames.
+// Correlated frames (register.ack, etc.) are consumed by Request calls
+// and never reach here. This is where upstream-initiated frames land:
+// turn, hand.invoke, shutdown, etc.
+//
+// Crucially, long-running handlers MUST NOT block this function — it
+// runs inside the wsclient read goroutine, and blocking stalls all
+// subsequent frame reads (ping/pong, shutdown, further turns) for
+// the duration. Dispatch to a fresh goroutine instead.
+func (a *Agent) handleFrame(env frames.Envelope) {
+	switch env.Kind {
+	case frames.KindTurn:
+		// Provider.Invoke can run for minutes. Dispatching in a
+		// goroutine keeps the read loop responsive. Side effect:
+		// concurrent turns are now possible, which is fine — the
+		// session tree's mutex serialises tree mutations.
+		go a.handleTurnFrame(env)
+	case frames.KindShutdown:
+		a.log.Info("shutdown frame received", "in_reply_to", env.InReplyTo)
+		// Shutdown behaviour (graceful wind-down, partial commits) is
+		// part 7 scope. For now: log and let Run's ctx-cancel drive
+		// exit.
+	default:
+		a.log.Info("frame kind not yet handled by agent", "kind", env.Kind)
+	}
 }
 
-// TurnResponse carries the adapter's reply back.
-type TurnResponse struct {
-	Output     string                   `json:"output"`
-	StopReason string                   `json:"stop_reason"`
-	Tokens     providers.TokenCounts    `json:"tokens"`
-	EntryIDs   []string                 `json:"entry_ids"`
-}
-
-// startTurnServer binds the configured listen address and starts a
-// goroutine serving POST /turn. Writes the resolved listen URL back
-// to the agent so tests and ops can find it.
-func (a *Agent) startTurnServer() error {
-	addr := a.cfg.ListenAddr
-	if addr == "" {
-		addr = ":0" // tests expect a ephemeral port
-	}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("listen %q: %w", addr, err)
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/turn", a.handleTurn)
-	mux.HandleFunc("/healthz", a.handleHealthz)
-
-	srv := &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	a.mu.Lock()
-	a.srv = srv
-	a.listenURL = "http://" + ln.Addr().String()
-	a.mu.Unlock()
-
-	go func() {
-		err := srv.Serve(ln)
-		if err != nil && err != http.ErrServerClosed {
-			// Push to the serve-error channel so Start can react —
-			// without this, a crashed listener leaves registration
-			// stale and Nexus keeps routing to a dead endpoint.
-			a.log.Error("turn server exited abnormally", "err", err)
-			select {
-			case a.serveErrCh <- err:
-			default:
-				// Channel full or no reader — don't block the goroutine.
-			}
-		}
-	}()
-	return nil
-}
-
-func (a *Agent) shutdownTurnServer(ctx context.Context) error {
-	a.mu.Lock()
-	srv := a.srv
-	a.srv = nil
-	a.mu.Unlock()
-	if srv == nil {
-		return nil
-	}
-	return srv.Shutdown(ctx)
-}
-
-func (a *Agent) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
-}
-
-func (a *Agent) handleTurn(w http.ResponseWriter, r *http.Request) {
-	// Drain on all exit paths so HTTP/1.1 keep-alive can reuse the
-	// connection even after decode failures.
-	defer func() { _, _ = io.Copy(io.Discard, r.Body) }()
-
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST required", http.StatusMethodNotAllowed)
-		return
-	}
-	var req TurnRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+// handleTurnFrame processes a turn request from upstream. Dispatches
+// through the provider, appends user + assistant entries to the local
+// session tree, sends a turn.result frame correlating to the request.
+func (a *Agent) handleTurnFrame(env frames.Envelope) {
+	var req frames.TurnPayload
+	if err := frames.PayloadAs(env, &req); err != nil {
+		a.respondTurnError(env, fmt.Sprintf("turn payload invalid: %v", err))
 		return
 	}
 	if req.Prompt == "" {
-		http.Error(w, "empty prompt", http.StatusBadRequest)
+		a.respondTurnError(env, "empty prompt")
 		return
 	}
 
-	resp, err := a.dispatchTurn(r.Context(), req)
+	// Bound the whole turn with a generous timeout — model calls can
+	// run for a minute or two, but an unbounded tree-write + provider
+	// invoke is a liability.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	result, err := a.dispatchTurn(ctx, req)
 	if err != nil {
-		a.log.Error("turn dispatch failed", "err", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		a.respondTurnError(env, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	resp, err := frames.NewResponse(frames.KindTurnResult, env.ID, result)
+	if err != nil {
+		a.log.Error("build turn.result frame failed", "err", err)
+		return
+	}
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer sendCancel()
+	if err := a.ws.Send(sendCtx, resp); err != nil {
+		a.log.Error("send turn.result failed", "err", err)
+	}
+}
+
+// respondTurnError sends a turn.error-shaped response so the upstream
+// can correlate and surface the failure.
+func (a *Agent) respondTurnError(req frames.Envelope, msg string) {
+	errEnv, err := frames.NewResponse(frames.Kind("turn.error"), req.ID, map[string]string{"error": msg})
+	if err != nil {
+		a.log.Error("build turn.error frame failed", "err", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := a.ws.Send(ctx, errEnv); err != nil {
+		a.log.Error("send turn.error failed", "err", err)
+	}
 }
 
 // dispatchTurn runs a single user-turn through the provider and
 // records both the user and assistant entries in the session tree.
-// Returns the entry ids so callers can trace exactly which tree
-// nodes the turn produced.
-func (a *Agent) dispatchTurn(ctx context.Context, req TurnRequest) (TurnResponse, error) {
-	// 1. Append user turn to tree (advances head).
+// Returns the wire-shaped TurnResultPayload.
+func (a *Agent) dispatchTurn(ctx context.Context, req frames.TurnPayload) (frames.TurnResultPayload, error) {
+	// 1. Append user turn to tree.
 	userEntry, err := a.tree.Append(ctx, tree.Entry{
 		Kind: tree.KindTurnUser,
 		Payload: map[string]any{
@@ -132,17 +102,15 @@ func (a *Agent) dispatchTurn(ctx context.Context, req TurnRequest) (TurnResponse
 		},
 	})
 	if err != nil {
-		return TurnResponse{}, fmt.Errorf("append user turn: %w", err)
+		return frames.TurnResultPayload{}, fmt.Errorf("append user turn: %w", err)
 	}
 
-	// 2. Replay active branch for provider context (excludes the user
-	//    turn itself — we pass that as InvokeRequest.Prompt).
+	// 2. Replay active branch. Drop the trailing user entry we just
+	//    appended — provider gets it separately via Prompt.
 	branch, err := a.tree.Replay(ctx)
 	if err != nil {
-		return TurnResponse{}, fmt.Errorf("replay: %w", err)
+		return frames.TurnResultPayload{}, fmt.Errorf("replay: %w", err)
 	}
-	// Drop the trailing user entry we just appended — provider gets
-	// it separately via Prompt.
 	if n := len(branch); n > 0 && branch[n-1].ID == userEntry.ID {
 		branch = branch[:n-1]
 	}
@@ -151,13 +119,15 @@ func (a *Agent) dispatchTurn(ctx context.Context, req TurnRequest) (TurnResponse
 
 	// 3. Invoke provider.
 	result, err := a.cfg.Provider.Invoke(ctx, providers.InvokeRequest{
-		Context:      providerContext,
-		Prompt:       req.Prompt,
-		SystemPrompt: req.SystemPrompt,
-		Model:        req.Model,
+		Context:       providerContext,
+		Prompt:        req.Prompt,
+		SystemPrompt:  req.SystemPrompt,
+		Model:         req.Model,
+		ThinkingLevel: req.ThinkingLevel,
+		MaxTokens:     req.MaxTokens,
 	})
 	if err != nil {
-		return TurnResponse{}, fmt.Errorf("provider invoke: %w", err)
+		return frames.TurnResultPayload{}, fmt.Errorf("provider invoke: %w", err)
 	}
 
 	// 4. Append assistant turn.
@@ -170,14 +140,18 @@ func (a *Agent) dispatchTurn(ctx context.Context, req TurnRequest) (TurnResponse
 		},
 	})
 	if err != nil {
-		return TurnResponse{}, fmt.Errorf("append assistant turn: %w", err)
+		return frames.TurnResultPayload{}, fmt.Errorf("append assistant turn: %w", err)
 	}
 
-	return TurnResponse{
+	return frames.TurnResultPayload{
 		Output:     result.Output,
 		StopReason: string(result.StopReason),
-		Tokens:     result.Tokens,
-		EntryIDs:   []string{userEntry.ID, assistantEntry.ID},
+		Tokens: frames.TokenUsage{
+			Input:  result.Tokens.Input,
+			Output: result.Tokens.Output,
+			Total:  result.Tokens.Total,
+		},
+		EntryIDs: []string{userEntry.ID, assistantEntry.ID},
 	}, nil
 }
 
@@ -197,8 +171,3 @@ func convertToProviderEntries(entries []tree.Entry) []providers.Entry {
 	}
 	return out
 }
-
-// newByteReader wraps a byte slice as an io.Reader. Used by the
-// Nexus-bound postJSON helper; extracted here so both files can
-// reference it.
-func newByteReader(b []byte) io.Reader { return bytes.NewReader(b) }

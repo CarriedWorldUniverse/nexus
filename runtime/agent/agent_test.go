@@ -1,30 +1,31 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
+	"github.com/nexus-cw/nexus/nexus/frames"
 	"github.com/nexus-cw/nexus/runtime/providers"
 	"github.com/nexus-cw/nexus/shared/schemas"
 )
 
-// mockProvider — reused pattern from compactor tests, tailored to agent.
+// mockProvider is a minimal Provider for agent turn tests.
 type mockProvider struct {
 	reply       string
-	invokeCalls int32
+	invokeCalls atomic.Int32
 }
 
 func (m *mockProvider) Invoke(_ context.Context, _ providers.InvokeRequest) (providers.InvokeResult, error) {
-	atomic.AddInt32(&m.invokeCalls, 1)
+	m.invokeCalls.Add(1)
 	return providers.InvokeResult{
 		Output:     m.reply,
 		StopReason: providers.StopEndTurn,
@@ -34,7 +35,7 @@ func (m *mockProvider) Invoke(_ context.Context, _ providers.InvokeRequest) (pro
 func (m *mockProvider) Stream(context.Context, providers.InvokeRequest) (providers.StreamIterator, error) {
 	return nil, providers.ErrUnsupported
 }
-func (m *mockProvider) TokenCount(context.Context, string, string) (int, error)             { return 0, nil }
+func (m *mockProvider) TokenCount(context.Context, string, string) (int, error) { return 0, nil }
 func (m *mockProvider) Compact(context.Context, []providers.Entry, string) (providers.CompactionResult, error) {
 	return providers.CompactionResult{}, providers.ErrUnsupported
 }
@@ -47,62 +48,140 @@ func (m *mockProvider) Capabilities() providers.Capabilities {
 func (m *mockProvider) Models(context.Context) ([]providers.Model, error) { return nil, nil }
 func (m *mockProvider) TriageModel() string                               { return "mock-triage" }
 
-// fakeNexus spins up an httptest.Server simulating the Nexus broker.
-// Records which endpoints were hit for assertions.
+// fakeNexus spins up an httptest WS server that accepts /connect,
+// handles register/deregister frames, and routes all other inbound
+// frames (turn.result, etc.) to a shared channel that tests can
+// consume. Having a single reader goroutine per connection avoids
+// concurrent Read calls on the same *websocket.Conn, which
+// coder/websocket does not permit.
 type fakeNexus struct {
-	registers   int32
-	heartbeats  int32
-	deregisters int32
-	token       string
-	srv         *httptest.Server
+	srv   *httptest.Server
+	token string
+
+	mu           sync.Mutex
+	conns        []*websocket.Conn
+	inboundCh    chan frames.Envelope // non-register/deregister frames land here
+	registers    atomic.Int32
+	deregisters  atomic.Int32
 }
 
-func newFakeNexus(token string) *fakeNexus {
-	f := &fakeNexus{token: token}
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/aspects/register", func(w http.ResponseWriter, r *http.Request) {
-		if !f.checkAuth(w, r) {
+func newFakeNexus(t *testing.T, token string) *fakeNexus {
+	t.Helper()
+	f := &fakeNexus{
+		token:     token,
+		inboundCh: make(chan frames.Envelope, 32),
+	}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/connect" {
+			http.NotFound(w, r)
 			return
 		}
-		atomic.AddInt32(&f.registers, 1)
-		_ = json.NewEncoder(w).Encode(schemas.RegisterResponse{
-			Status: "registered", HeartbeatIntervalS: 1, StaleAfterS: 30,
-		})
-	})
-	mux.HandleFunc("/aspects/heartbeat", func(w http.ResponseWriter, r *http.Request) {
-		if !f.checkAuth(w, r) {
+		if r.Header.Get("Authorization") != "Bearer "+f.token {
+			http.Error(w, "unauthorized", 401)
 			return
 		}
-		atomic.AddInt32(&f.heartbeats, 1)
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("/aspects/deregister", func(w http.ResponseWriter, r *http.Request) {
-		if !f.checkAuth(w, r) {
+		wsc, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
 			return
 		}
-		atomic.AddInt32(&f.deregisters, 1)
-		w.WriteHeader(http.StatusOK)
+		wsc.SetReadLimit(1 << 20)
+		f.mu.Lock()
+		f.conns = append(f.conns, wsc)
+		f.mu.Unlock()
+		f.serveLoop(wsc)
+	}))
+	t.Cleanup(func() {
+		f.srv.Close()
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, c := range f.conns {
+			_ = c.Close(websocket.StatusNormalClosure, "test done")
+		}
 	})
-
-	f.srv = httptest.NewServer(mux)
 	return f
 }
 
-func (f *fakeNexus) checkAuth(w http.ResponseWriter, r *http.Request) bool {
-	got := r.Header.Get("Authorization")
-	if got != "Bearer "+f.token {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return false
+func (f *fakeNexus) URL() string { return "ws" + strings.TrimPrefix(f.srv.URL, "http") + "/connect" }
+
+// serveLoop is the SOLE reader on its connection. Handles
+// register/deregister inline; everything else is forwarded to
+// inboundCh for test assertions.
+func (f *fakeNexus) serveLoop(wsc *websocket.Conn) {
+	ctx := context.Background()
+	for {
+		_, data, err := wsc.Read(ctx)
+		if err != nil {
+			return
+		}
+		env, err := frames.Decode(data)
+		if err != nil {
+			continue
+		}
+		switch env.Kind {
+		case frames.KindRegister:
+			f.registers.Add(1)
+			ack, _ := frames.NewResponse(frames.KindRegisterAck, env.ID, frames.RegisterAckPayload{
+				HeartbeatIntervalS: 15,
+				StaleAfterS:        30,
+			})
+			raw, _ := frames.Encode(ack)
+			_ = wsc.Write(ctx, websocket.MessageText, raw)
+		case frames.KindDeregister:
+			f.deregisters.Add(1)
+			ack, _ := frames.NewResponse(frames.KindDeregister, env.ID, nil)
+			raw, _ := frames.Encode(ack)
+			_ = wsc.Write(ctx, websocket.MessageText, raw)
+		default:
+			// Non-blocking fan-out — a full channel means the test
+			// isn't consuming fast enough; drop and log for debug.
+			select {
+			case f.inboundCh <- env:
+			default:
+			}
+		}
 	}
-	return true
 }
 
-func (f *fakeNexus) Registers() int32   { return atomic.LoadInt32(&f.registers) }
-func (f *fakeNexus) Heartbeats() int32  { return atomic.LoadInt32(&f.heartbeats) }
-func (f *fakeNexus) Deregisters() int32 { return atomic.LoadInt32(&f.deregisters) }
-func (f *fakeNexus) URL() string        { return f.srv.URL }
-func (f *fakeNexus) Close()             { f.srv.Close() }
+// PushTurn sends a turn frame to the first connected client and
+// waits (up to 5s) for a correlated turn.result via inboundCh.
+// Writes happen from the test goroutine — safe because
+// coder/websocket permits concurrent Write calls but not concurrent
+// Read calls. The read is already owned by serveLoop.
+func (f *fakeNexus) PushTurn(t *testing.T, prompt string) (string, frames.Envelope) {
+	t.Helper()
+	f.mu.Lock()
+	var wsc *websocket.Conn
+	if len(f.conns) > 0 {
+		wsc = f.conns[0]
+	}
+	f.mu.Unlock()
+	if wsc == nil {
+		t.Fatal("PushTurn: no connected clients")
+	}
+
+	req, _ := frames.NewRequest(frames.KindTurn, frames.TurnPayload{Prompt: prompt})
+	raw, _ := frames.Encode(req)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := wsc.Write(ctx, websocket.MessageText, raw); err != nil {
+		t.Fatalf("PushTurn write: %v", err)
+	}
+
+	// Wait for the correlated turn.result to arrive via inboundCh.
+	// Drain any unrelated frames that might be ahead of it.
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case env := <-f.inboundCh:
+			if env.InReplyTo == req.ID {
+				return req.ID, env
+			}
+			// Unrelated frame; keep draining.
+		case <-deadline:
+			t.Fatalf("PushTurn: timed out waiting for turn.result with in_reply_to=%s", req.ID)
+		}
+	}
+}
 
 func newAgent(t *testing.T, nexusURL, token string, provider providers.Provider) *Agent {
 	t.Helper()
@@ -114,9 +193,9 @@ func newAgent(t *testing.T, nexusURL, token string, provider providers.Provider)
 			Provider:    "claude-api",
 			Port:        0,
 		},
-		Provider:  provider,
-		NexusURL:  nexusURL,
-		AuthToken: token,
+		Provider:    provider,
+		UpstreamURL: nexusURL,
+		AuthToken:   token,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -126,10 +205,10 @@ func newAgent(t *testing.T, nexusURL, token string, provider providers.Provider)
 
 func TestNewRequiresFields(t *testing.T) {
 	cases := map[string]Config{
-		"empty home":    {Aspect: schemas.AspectConfig{Name: "x"}, Provider: &mockProvider{}, NexusURL: "http://x"},
-		"empty name":    {Home: "/tmp", Provider: &mockProvider{}, NexusURL: "http://x"},
-		"nil provider":  {Home: "/tmp", Aspect: schemas.AspectConfig{Name: "x"}, NexusURL: "http://x"},
-		"empty nexus":   {Home: "/tmp", Aspect: schemas.AspectConfig{Name: "x"}, Provider: &mockProvider{}},
+		"empty home":     {Aspect: schemas.AspectConfig{Name: "x"}, Provider: &mockProvider{}, UpstreamURL: "ws://x"},
+		"empty name":     {Home: "/tmp", Provider: &mockProvider{}, UpstreamURL: "ws://x"},
+		"nil provider":   {Home: "/tmp", Aspect: schemas.AspectConfig{Name: "x"}, UpstreamURL: "ws://x"},
+		"empty upstream": {Home: "/tmp", Aspect: schemas.AspectConfig{Name: "x"}, Provider: &mockProvider{}},
 	}
 	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -142,46 +221,38 @@ func TestNewRequiresFields(t *testing.T) {
 }
 
 func TestStartRegistersAndDeregisters(t *testing.T) {
-	nx := newFakeNexus("tok")
-	defer nx.Close()
+	nx := newFakeNexus(t, "tok")
 	a := newAgent(t, nx.URL(), "tok", &mockProvider{reply: "ok"})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- a.Start(ctx) }()
 
-	// Wait for registration.
-	waitFor(t, 2*time.Second, func() bool { return nx.Registers() >= 1 })
-
-	cancel()
-	if err := <-done; err != nil {
-		t.Errorf("Start returned err: %v", err)
+	// Wait for register.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && nx.registers.Load() == 0 {
+		time.Sleep(10 * time.Millisecond)
 	}
-	if nx.Deregisters() != 1 {
-		t.Errorf("Deregisters = %d, want 1", nx.Deregisters())
+	if nx.registers.Load() == 0 {
+		t.Fatal("agent never registered")
 	}
-}
-
-func TestStartHeartbeatsWhileRunning(t *testing.T) {
-	nx := newFakeNexus("tok")
-	defer nx.Close()
-	a := newAgent(t, nx.URL(), "tok", &mockProvider{})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- a.Start(ctx) }()
-
-	// Fake Nexus returned HeartbeatIntervalS=1; wait for ≥2 beats.
-	waitFor(t, 5*time.Second, func() bool { return nx.Heartbeats() >= 2 })
 
 	cancel()
 	<-done
+
+	// Deregister should have fired during graceful shutdown.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && nx.deregisters.Load() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if nx.deregisters.Load() != 1 {
+		t.Errorf("deregisters = %d, want 1", nx.deregisters.Load())
+	}
 }
 
-func TestTurnDispatchHitsProviderAndTree(t *testing.T) {
-	nx := newFakeNexus("tok")
-	defer nx.Close()
-	mp := &mockProvider{reply: "hello from the model"}
+func TestTurnDispatchViaWS(t *testing.T) {
+	nx := newFakeNexus(t, "tok")
+	mp := &mockProvider{reply: "hello from model"}
 	a := newAgent(t, nx.URL(), "tok", mp)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -189,148 +260,71 @@ func TestTurnDispatchHitsProviderAndTree(t *testing.T) {
 	go func() { done <- a.Start(ctx) }()
 	defer func() { cancel(); <-done }()
 
-	waitFor(t, 2*time.Second, func() bool { return a.ListenURL() != "" && nx.Registers() >= 1 })
-
-	// Post a turn to the agent's /turn.
-	body, _ := json.Marshal(TurnRequest{Prompt: "ping?"})
-	resp, err := http.Post(a.ListenURL()+"/turn", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
+	// Wait for register + our serveLoop to enter read mode.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && nx.registers.Load() == 0 {
+		time.Sleep(10 * time.Millisecond)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("turn status = %d: %s", resp.StatusCode, b)
-	}
-	var out TurnResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
-	if out.Output != "hello from the model" {
-		t.Errorf("Output = %q", out.Output)
-	}
-	if len(out.EntryIDs) != 2 {
-		t.Errorf("EntryIDs len = %d, want 2 (user + assistant)", len(out.EntryIDs))
-	}
-	if atomic.LoadInt32(&mp.invokeCalls) != 1 {
-		t.Errorf("Invoke calls = %d, want 1", atomic.LoadInt32(&mp.invokeCalls))
+	if nx.registers.Load() == 0 {
+		t.Fatal("agent never registered")
 	}
 
-	// Second turn — provider should see the prior turn in context.
-	body, _ = json.Marshal(TurnRequest{Prompt: "follow-up"})
-	resp2, err := http.Post(a.ListenURL()+"/turn", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != 200 {
-		t.Fatalf("second turn status = %d", resp2.StatusCode)
+	// Drive a turn from the Nexus side.
+	_, resp := nx.PushTurn(t, "ping?")
+	if resp.Kind != frames.KindTurnResult {
+		t.Errorf("resp kind = %q, want turn.result", resp.Kind)
 	}
 
-	// Session tree should contain 4 entries (user1, asst1, user2, asst2).
+	var result frames.TurnResultPayload
+	if err := frames.PayloadAs(resp, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Output != "hello from model" {
+		t.Errorf("output = %q", result.Output)
+	}
+	if len(result.EntryIDs) != 2 {
+		t.Errorf("entry_ids len = %d, want 2", len(result.EntryIDs))
+	}
+	if mp.invokeCalls.Load() != 1 {
+		t.Errorf("invokeCalls = %d, want 1", mp.invokeCalls.Load())
+	}
+
+	// Session tree should now have 2 entries (user + assistant).
 	branch, err := a.Tree().Replay(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(branch) != 4 {
-		t.Errorf("branch len after 2 turns = %d, want 4", len(branch))
+	if len(branch) != 2 {
+		t.Errorf("branch len = %d, want 2", len(branch))
 	}
 }
 
-func TestTurnRejectsBadRequests(t *testing.T) {
-	nx := newFakeNexus("tok")
-	defer nx.Close()
-	a := newAgent(t, nx.URL(), "tok", &mockProvider{reply: "ok"})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- a.Start(ctx) }()
-	defer func() { cancel(); <-done }()
-
-	waitFor(t, 2*time.Second, func() bool { return a.ListenURL() != "" && nx.Registers() >= 1 })
-
-	// Empty prompt.
-	body, _ := json.Marshal(TurnRequest{Prompt: ""})
-	resp, _ := http.Post(a.ListenURL()+"/turn", "application/json", bytes.NewReader(body))
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("empty prompt status = %d, want 400", resp.StatusCode)
-	}
-
-	// Wrong method.
-	req, _ := http.NewRequest(http.MethodGet, a.ListenURL()+"/turn", nil)
-	resp2, _ := http.DefaultClient.Do(req)
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusMethodNotAllowed {
-		t.Errorf("GET /turn status = %d, want 405", resp2.StatusCode)
-	}
-
-	// Bad JSON.
-	resp3, _ := http.Post(a.ListenURL()+"/turn", "application/json", strings.NewReader("not json"))
-	defer resp3.Body.Close()
-	if resp3.StatusCode != http.StatusBadRequest {
-		t.Errorf("bad JSON status = %d, want 400", resp3.StatusCode)
-	}
-}
-
-func TestAuthFailureOnRegister(t *testing.T) {
-	nx := newFakeNexus("correct-token")
-	defer nx.Close()
-	a := newAgent(t, nx.URL(), "wrong-token", &mockProvider{})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	err := a.Start(ctx)
-	if err == nil {
-		t.Error("expected error for bad token")
-	}
-	if nx.Registers() != 0 {
-		t.Error("registration should not have succeeded")
-	}
-}
-
-func TestHealthz(t *testing.T) {
-	nx := newFakeNexus("tok")
-	defer nx.Close()
-	a := newAgent(t, nx.URL(), "tok", &mockProvider{})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- a.Start(ctx) }()
-	defer func() { cancel(); <-done }()
-
-	waitFor(t, 2*time.Second, func() bool { return a.ListenURL() != "" })
-
-	resp, err := http.Get(a.ListenURL() + "/healthz")
+func TestFailLoudOnExplicitOutpostUnreachable(t *testing.T) {
+	// An aspect with NEXUS_OUTPOST set should refuse to start if the
+	// outpost is unreachable at initial connect (transport spec §3.5).
+	a, err := New(Config{
+		Home: t.TempDir(),
+		Aspect: schemas.AspectConfig{
+			Name:        "testaspect",
+			ContextMode: schemas.ContextGlobal,
+			Provider:    "claude-api",
+		},
+		Provider:                  &mockProvider{},
+		UpstreamURL:               "ws://127.0.0.1:1/connect", // nothing listens here
+		UpstreamIsExplicitOutpost: true,
+		AuthToken:                 "tok",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Errorf("healthz status = %d", resp.StatusCode)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err = a.Start(ctx)
+	if err == nil {
+		t.Fatal("expected error when explicit outpost unreachable")
+	}
+	if !strings.Contains(err.Error(), "initial connect failed") && !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want initial-connect failure", err)
 	}
 }
-
-// waitFor polls `cond` every 10ms until it returns true or timeout elapses.
-func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	// One last check to give a clearer failure than "deadline elapsed"
-	if !cond() {
-		t.Fatalf("waitFor: condition never met within %s", timeout)
-	}
-}
-
-// Compile-time assertion that mockProvider actually implements Provider —
-// catches interface drift early.
-var _ providers.Provider = (*mockProvider)(nil)
-
-// silence unused-import warning when errors isn't referenced in a slim build
-var _ = errors.New
