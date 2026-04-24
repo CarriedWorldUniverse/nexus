@@ -180,11 +180,36 @@ func TestStreamReturnsUnsupported(t *testing.T) {
 	}
 }
 
-func TestCompactReturnsUnsupported(t *testing.T) {
+func TestCompactRejectsEmptyEntries(t *testing.T) {
 	p := &Provider{}
 	_, err := p.Compact(context.Background(), nil, "")
-	if !errors.Is(err, providers.ErrUnsupported) {
-		t.Errorf("Compact err = %v, want ErrUnsupported", err)
+	if err == nil {
+		t.Error("expected error for empty entries")
+	}
+}
+
+func TestCompactionRoleFor(t *testing.T) {
+	cases := map[providers.EntryKind]string{
+		providers.EntryTurnUser:       "user",
+		providers.EntryTurnAssistant:  "assistant",
+		providers.EntryTurnToolResult: "tool_result",
+		providers.EntrySystemPrompt:   "system",
+		providers.EntryCompaction:     "prior_summary",
+		providers.EntryBranchSummary:  "branch_summary",
+	}
+	for kind, want := range cases {
+		if got := compactionRoleFor(kind); got != want {
+			t.Errorf("compactionRoleFor(%q) = %q, want %q", kind, got, want)
+		}
+	}
+}
+
+func TestEstimateTokensRoughlyProportional(t *testing.T) {
+	if got := estimateTokens("abcd"); got != 1 {
+		t.Errorf("estimateTokens(4 chars) = %d, want 1", got)
+	}
+	if got := estimateTokens(""); got != 0 {
+		t.Errorf("estimateTokens(\"\") = %d, want 0", got)
 	}
 }
 

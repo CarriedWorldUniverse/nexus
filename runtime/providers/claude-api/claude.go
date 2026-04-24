@@ -147,10 +147,110 @@ func (p *Provider) TokenCount(ctx context.Context, model string, payload string)
 	return int(resp.InputTokens), nil
 }
 
-// Compact — stub for part 2. Part 6 implements the summarisation path.
+// Compact summarises prior-context entries using the triage model
+// (Haiku) for speed and cost — the summary doesn't need Opus-grade
+// reasoning. Emits a CompactionResult carrying the summary text and
+// token usage. Per §2.7 the runtime decides when to compact; this
+// method only executes the summarisation.
 func (p *Provider) Compact(ctx context.Context, entries []providers.Entry, hint string) (providers.CompactionResult, error) {
-	return providers.CompactionResult{}, providers.ErrUnsupported
+	if len(entries) == 0 {
+		return providers.CompactionResult{}, errors.New("claude-api.Compact: no entries to summarise")
+	}
+
+	// Serialise the entries into a transcript the summariser can read.
+	var transcript strings.Builder
+	inputTokensBefore := 0
+	for _, e := range entries {
+		role := compactionRoleFor(e.Kind)
+		text := entryText(e)
+		if text == "" {
+			continue
+		}
+		transcript.WriteString(role)
+		transcript.WriteString(": ")
+		transcript.WriteString(text)
+		transcript.WriteString("\n\n")
+	}
+
+	// Crude pre-count — reasonable approximation; real count comes
+	// from the provider response.
+	inputTokensBefore = estimateTokens(transcript.String())
+
+	prompt := buildCompactionPrompt(hint, transcript.String())
+
+	resp, err := p.client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.Model(TriageModelID),
+		MaxTokens: 2048,
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
+		},
+	})
+	if err != nil {
+		return providers.CompactionResult{}, normaliseError(err)
+	}
+
+	var summary strings.Builder
+	for _, block := range resp.Content {
+		if text, ok := block.AsAny().(anthropic.TextBlock); ok {
+			summary.WriteString(text.Text)
+		}
+	}
+
+	return providers.CompactionResult{
+		Summary:      strings.TrimSpace(summary.String()),
+		Model:        TriageModelID,
+		TokensBefore: inputTokensBefore,
+		TokensAfter:  int(resp.Usage.OutputTokens),
+	}, nil
 }
+
+// compactionRoleFor maps an entry kind to a role label for the
+// summarisation transcript.
+func compactionRoleFor(k providers.EntryKind) string {
+	switch k {
+	case providers.EntryTurnUser:
+		return "user"
+	case providers.EntryTurnAssistant:
+		return "assistant"
+	case providers.EntryTurnToolResult:
+		return "tool_result"
+	case providers.EntrySystemPrompt:
+		return "system"
+	case providers.EntryCompaction:
+		return "prior_summary"
+	case providers.EntryBranchSummary:
+		return "branch_summary"
+	default:
+		return string(k)
+	}
+}
+
+// buildCompactionPrompt wraps the transcript in a summarisation
+// instruction. Kept deliberately simple — provider-specific prompt
+// tuning is forge territory.
+func buildCompactionPrompt(hint, transcript string) string {
+	var b strings.Builder
+	b.WriteString("Summarise the following conversation transcript into a concise briefing that preserves:\n")
+	b.WriteString("- the goals and constraints discussed\n")
+	b.WriteString("- decisions made and their justifications\n")
+	b.WriteString("- any outstanding questions or action items\n")
+	b.WriteString("- concrete facts (names, dates, paths, error messages) that would be hard to reconstruct\n\n")
+	if hint != "" {
+		b.WriteString("Additional instruction: ")
+		b.WriteString(hint)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("TRANSCRIPT:\n")
+	b.WriteString(transcript)
+	b.WriteString("\nSUMMARY:\n")
+	return b.String()
+}
+
+// estimateTokens is a rough char-count ÷ 4 heuristic for the input
+// side of the summarisation call. Exact counts can come from
+// TokenCount; this is only used for the Result's TokensBefore field
+// which is informational.
+func estimateTokens(s string) int { return len(s) / 4 }
 
 // Embed — Anthropic has no embeddings endpoint. Fixed per spec §9.1.
 func (p *Provider) Embed(ctx context.Context, req providers.EmbedRequest) (providers.EmbedResult, error) {
