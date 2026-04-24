@@ -129,6 +129,13 @@ func New(cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("agent: ws client: %w", err)
 	}
 	a.ws = ws
+
+	// Install the session-projection hook: every local Append fires
+	// a session.entry.appended frame upward so Nexus can mirror the
+	// session for dashboard rendering. Fire-and-forget Send; if we're
+	// disconnected the frame is lost — Nexus's projection is
+	// best-effort observability, not source of truth.
+	tr.SetAppendHook(a.projectEntryUpward)
 	return a, nil
 }
 

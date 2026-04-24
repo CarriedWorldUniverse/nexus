@@ -16,6 +16,7 @@ import (
 
 	"github.com/nexus-cw/nexus/nexus/frames"
 	"github.com/nexus-cw/nexus/nexus/roster"
+	"github.com/nexus-cw/nexus/nexus/sessions"
 )
 
 // wsConn tracks per-connection state on the broker side: who's
@@ -169,8 +170,40 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleRegisterFrame(env)
 	case frames.KindDeregister:
 		c.handleDeregisterFrame(env)
+	case frames.KindSessionEntryAppended:
+		c.handleSessionEntryAppended(env)
 	default:
 		c.log.Info("frame kind not yet handled", "kind", env.Kind)
+	}
+}
+
+// handleSessionEntryAppended persists the forwarded entry into the
+// Nexus-side projection table. Aspects fire these as a best-effort
+// observability signal (transport spec §8); dropped frames don't
+// break the aspect, so we also don't respond. If the broker was
+// constructed without a Projection (tests), log-and-drop.
+func (c *wsConn) handleSessionEntryAppended(env frames.Envelope) {
+	if c.broker.cfg.Projection == nil {
+		return
+	}
+	var payload frames.SessionEntryAppendedPayload
+	if err := frames.PayloadAs(env, &payload); err != nil {
+		c.log.Warn("session.entry.appended payload malformed", "err", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := c.broker.cfg.Projection.WriteEntry(ctx, sessions.Entry{
+		Aspect:    payload.Aspect,
+		SessionID: payload.SessionID,
+		EntryID:   payload.EntryID,
+		ParentID:  payload.ParentID,
+		EntryKind: payload.EntryKind,
+		EntryTS:   payload.TS.Format(time.RFC3339Nano),
+		Payload:   payload.Payload,
+	}); err != nil {
+		c.log.Warn("session projection write failed",
+			"aspect", payload.Aspect, "entry", payload.EntryID, "err", err)
 	}
 }
 
