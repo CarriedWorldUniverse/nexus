@@ -3,7 +3,7 @@
 **Date:** 2026-04-22 (v0.1) → 2026-04-24 (v0.2 → v0.3 → v0.4 → v0.5)
 **Status:** Draft — scaffold complete at v0.3; v0.5 adds knowledge storage + retrieval.
 **Owner:** keel
-**Repo:** `C:\src\nexus` (fresh git repo, separate from `C:\src\agent-network`)
+**Repo:** `C:\src\nexus-cw\nexus` (fresh git repo, separate from `C:\src\agent-network`). The `C:\src\nexus` path is reserved for the deployed runtime artifact.
 
 **v0.5 changes (2026-04-24, from #7636 → #7676 discussion with operator and harrow):**
 - **New §2.8 — Knowledge storage & retrieval.** SQLite + FTS5 primary; `embedding BLOB` column reserved day-one for future vector retrieval; hybrid (keyword + vector) retrieval behind a single `SearchKnowledge` interface so callers don't change when the vector layer is turned on. Note: `sqlite-vec` *extension loading* is DEFERRED in v1 — upstream pure-Go binding pairing is out of sync; CGO alternative would break cross-platform single binary. Columns remain reserved (#7695).
@@ -82,9 +82,9 @@ The context-hygiene call — *"does the parent need the full trajectory, or just
 
 **Invocation:**
 ```
-agent.exe C:\src\nexus\agents\verity
-agent.exe C:\src\nexus\agents\wren
-agent.exe C:\src\nexus\agents\harrow
+agent.exe C:\src\nexus-cw\nexus\agents\verity
+agent.exe C:\src\nexus-cw\nexus\agents\wren
+agent.exe C:\src\nexus-cw\nexus\agents\harrow
 ```
 
 The home folder is the aspect. Everything the runtime needs is inside.
@@ -94,7 +94,7 @@ The home folder is the aspect. Everything the runtime needs is inside.
 The runtime executable is provider-agnostic. A provider module is a plug-in that knows how to call a specific AI backend with credentials and configuration. **Detailed interface, tool translation, triage, dispatch-time provider overrides, and per-provider appendices live in [`2026-04-24-provider-adapter-spec.md`](2026-04-24-provider-adapter-spec.md).** This section is the architectural summary.
 
 ```
-C:\src\nexus\runtime\providers\
+C:\src\nexus-cw\nexus\runtime\providers\
   claude-api\        # v1 — direct Anthropic API (no CLI dependency)
   claude-code\       # optional: wraps claude CLI for environments where that's easier
   openai-api\        # stub for v2
@@ -119,7 +119,7 @@ This is meaningful new work compared to the current model — today Claude Code 
 ### 2.4 Aspect home folder layout
 
 ```
-C:\src\nexus\agents\<name>\
+C:\src\nexus-cw\nexus\agents\<name>\
   aspect.json          # config (see §3)
   CLAUDE.md            # identity (consider renaming to AGENT.md for provider-neutrality)
   SOUL.md              # voice/values
@@ -364,7 +364,7 @@ The `system.prompt` entry is part of the permanent session tree (§2.6), so the 
 - No `runtime` field — there is only one runtime executable.
 - `context_mode` ∈ `global | thread | stateless`. Declares how the runtime persists and replays state.
 - `provider` names a provider module under `runtime/providers/<name>/`. `provider_config` is provider-specific.
-- `credentials_path` relative to aspect home; resolves to e.g. `C:\src\nexus\agents\verity\.credentials\claude-api.json`.
+- `credentials_path` relative to aspect home; resolves to e.g. `C:\src\nexus-cw\nexus\agents\verity\.credentials\claude-api.json`.
 - `nexus_url` via env var, not in file — so the same folder can target dev/prod/federated Nexuses without edits.
 - Port declared by aspect (self-allocated), not assigned by Nexus. Simpler, aspect owns its lifecycle. Nexus rejects registration if port conflicts with an existing live aspect of the same name.
 - `context_mode`, `provider`, `capabilities`, `metadata` are reported to Nexus on register; dashboard reads them from the live roster.
@@ -644,16 +644,16 @@ Nothing breaks if this file is absent — Nexus just observes what's connected.
 
 ## 6. Migration path
 
-This is a **greenfield** build at `C:\src\nexus`, not an in-place refactor of `C:\src\agent-network`. Old and new run side-by-side during transition; agent-network is retired once Nexus reaches parity and all aspects have migrated.
+This is a **greenfield** build at `C:\src\nexus-cw\nexus`, not an in-place refactor of `C:\src\agent-network`. Old and new run side-by-side during transition; agent-network is retired once Nexus reaches parity and all aspects have migrated.
 
 Discrete, shippable chunks:
 
-1. **Scaffold `C:\src\nexus`.** Full directory structure per §2 (Option A chosen by operator over thin-vertical-slice). README, license, skeleton for `nexus/`, `runtime/`, `runtime/providers/`, `agents/`, `shared/`, `docs/`, `scripts/`. BUILD.md captures next steps.
+1. **Scaffold `C:\src\nexus-cw\nexus`.** Full directory structure per §2 (Option A chosen by operator over thin-vertical-slice). README, license, skeleton for `nexus/`, `runtime/`, `runtime/providers/`, `agents/`, `shared/`, `docs/`, `scripts/`. BUILD.md captures next steps.
 2. **Nexus core + registration endpoints.** Broker skeleton serving HTTPS on (new) port, in-memory roster, `/aspects/register|heartbeat|deregister|list`. Smoke test with a synthetic registration client.
 3. **Single agent runtime + Claude API provider.** `agent.exe` reads aspect home folder, registers, heartbeats, handles comms dispatch. `claude-api` provider implements the invoke/tokenCount/compact contract. Context persistence wired for all three modes (global / thread / stateless).
 4. **Hands end-to-end.** `kind: "hand"` dispatch in the runtime. One concrete Hand from each of two aspects (wren's verify-canon is the pre-committed test case) — proves cross-aspect invocation works.
 5. **keel embedded in Nexus.** keel's aspect config moves into the Nexus process as a global-context harness. No PTY. Chat identity `@keel` preserved.
-6. **Migrate remaining aspects.** Home folders populated under `C:\src\nexus\agents\<name>\`. Aspects point at new Nexus via `NEXUS_URL`. Old agent-network proxies stood down one at a time.
+6. **Migrate remaining aspects.** Home folders populated under `C:\src\nexus-cw\nexus\agents\<name>\`. Aspects point at new Nexus via `NEXUS_URL`. Old agent-network proxies stood down one at a time.
 7. **Dashboard migration.** Agent list becomes live-feed from `/aspects`. Files/Tickets/Knowledge views re-point at new broker. Chat history either migrated or starts fresh.
 8. **Retire `C:\src\agent-network`.** Archive the repo; remove from startup.
 
@@ -692,8 +692,8 @@ Each step is revertible while both Nexuses are running. No hard cutover until af
 
 ## 9. Next steps (post-compact pickup)
 
-1. **Scaffold `C:\src\nexus`** per §2 Option A — full directory structure with BUILD.md, skeleton files.
-2. **Copy this spec into** `C:\src\nexus\docs\` as the primary design reference.
+1. **Scaffold `C:\src\nexus-cw\nexus`** per §2 Option A — full directory structure with BUILD.md, skeleton files.
+2. **Copy this spec into** `C:\src\nexus-cw\nexus\docs\` as the primary design reference.
 3. **Nexus core + registration endpoints** (§6 step 2).
 4. **Single agent runtime + Claude API provider** (§6 step 3).
 5. **Hands end-to-end** (§6 step 4).
