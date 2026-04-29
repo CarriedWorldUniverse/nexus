@@ -58,12 +58,26 @@ func main() {
 		err = runToken(ctx, args)
 	case "pair":
 		err = runPair(ctx, args)
+	case "pair-with-token":
+		err = runPairWithToken(ctx, args)
 	case "pending":
 		err = runPending(ctx, args)
 	case "approve":
 		err = runApprove(ctx, args)
 	case "deny":
 		err = runDeny(ctx, args)
+	case "discover":
+		err = runDiscover(ctx, args)
+	case "health":
+		err = runHealth(ctx, args)
+	case "status":
+		err = runStatus(ctx, args)
+	case "send":
+		err = runSend(ctx, args)
+	case "recv":
+		err = runRecv(ctx, args)
+	case "ack":
+		err = runAck(ctx, args)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -81,12 +95,32 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `relay-cli — operator CLI for the Nexus interchange
 
+Bootstrap & discovery:
+  discover -relay URL                          fetch /.well-known doc
+  health   -relay URL                          GET /health
+
+Identity:
   init <nexus-id> [-store DIR] [-dh P-256|X25519]
-  token -endpoint URL [-store DIR] [-as ID]
-  pair -target ID -relay URL [-endpoint URL] [-store DIR] [-as ID]
+  token -endpoint URL [-store DIR] [-as ID]    print our PairingToken JSON
+
+Pair flow (requester side):
+  pair    -target ID -relay URL [-endpoint URL] [-store DIR] [-as ID]
+  status  <request-id> -relay URL              one-shot status check
+
+Pair flow (owner side, tailnet):
   pending -tailnet URL
   approve <request-id> -tailnet URL [-store DIR] [-as ID]
-  deny <request-id> -tailnet URL
+  deny    <request-id> -tailnet URL
+
+Activate the pair locally (consume peer's PairingToken OOB):
+  pair-with-token <token-json> [-store DIR] [-as ID] [-max-age SECS]
+  pair-with-token -file PATH    [-store DIR] [-as ID]   (use - for stdin)
+
+Mailbox:
+  send <peer-id> <body...>      -relay URL [-kind K] [-content-type MIME] [-in-reply-to MSGID] [-store DIR] [-as ID]
+  send <peer-id> -file PATH     -relay URL ...                              (use - for stdin)
+  recv <peer-id>                -relay URL [-since MSGID] [-no-ack] [-json] [-store DIR] [-as ID]
+  ack  <peer-id> <msg-id> [...] -relay URL [-store DIR] [-as ID]
 
 Default store dir: ./relay-state
 `)
