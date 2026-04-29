@@ -373,42 +373,14 @@ func loadChannel(ctx context.Context, store, id string) (*casket.Channel, error)
 	return casket.Load(ctx, id, st, "")
 }
 
-// autoPairFromHalf converts a v2 PairHalfPayload (returned by the relay
-// in approve/poll responses on success) into a casket PairingToken and
-// instantiates the local PairedChannel. This is the v2 replacement for
-// the manual pair-with-token step: the relay delivers the peer's full
-// public material under signature coverage, so no out-of-band exchange
-// is required.
+// autoPairFromHalf delegates to relay.PairFromHalf with a 1-hour skew
+// window. CLI-side wrapper so the call sites in runPair / runApprove
+// stay short and the warn-on-failure UX is consistent.
 //
-// Returns an error if the half is missing required v2 fields (i.e. the
-// peer is still on v1) — caller should fall back to OOB token exchange.
+// 3600s is generous: the half was signed at submit time and is
+// signature-bound to that ts; the relay already validated freshness
+// at submit. SDK consumers wanting tighter bounds call relay.PairFromHalf
+// directly.
 func autoPairFromHalf(ctx context.Context, ch *casket.Channel, h relay.PairHalfPayload) (*casket.PairedChannel, error) {
-	if h.DhAlg == "" || h.DhPubkey == "" {
-		return nil, fmt.Errorf("peer half lacks v2 ECDH fields (peer may be on v1)")
-	}
-	t, err := time.Parse(time.RFC3339, h.Ts)
-	if err != nil {
-		t2, err2 := time.Parse("2006-01-02T15:04:05Z", h.Ts)
-		if err2 != nil {
-			return nil, fmt.Errorf("parse ts %q: %w", h.Ts, err)
-		}
-		t = t2
-	}
-	tok := casket.PairingToken{
-		V:        1,
-		NexusID:  h.NexusID,
-		SigAlg:   h.SigAlg,
-		DhAlg:    casket.DhAlgorithm(h.DhAlg),
-		Pubkey:   h.Pubkey,
-		DhPubkey: h.DhPubkey,
-		Endpoint: h.Endpoint,
-		Nonce:    h.Nonce,
-		Ts:       t.Unix(),
-	}
-	// Allow up to 1 hour of clock skew for the relay-mediated path —
-	// the relay already validated tsInWindow on submit, but the
-	// approve/poll response may land minutes later. 3600 is generous
-	// without being a security risk (the half was signed at submit
-	// time and is signature-bound to that ts).
-	return ch.Pair(ctx, tok, 3600)
+	return relay.PairFromHalf(ctx, ch, h, 3600)
 }
