@@ -1,6 +1,6 @@
 # BUILD.md — Nexus v0.4
 
-Build log and next-steps for the greenfield Nexus at `C:\src\nexus`.
+Build log and next-steps for the greenfield Nexus at `C:\src\nexus-cw\nexus`. The `C:\src\nexus` path is reserved for the deployed runtime artifact; this build repo lives alongside the rest of `nexus-cw` (interchange, casket-go, casket-ts, casket-dotnet).
 
 Primary design reference: [`docs/2026-04-22-nexus-registration-spec.md`](docs/2026-04-22-nexus-registration-spec.md) (v0.4).
 
