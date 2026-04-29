@@ -228,14 +228,17 @@ func runSend(ctx context.Context, args []string) error {
 		return err
 	}
 
-	ct, err := paired.EncryptBody(innerJSON, nil)
-	if err != nil {
-		return fmt.Errorf("send: encrypt: %w", err)
-	}
-
+	// Generate msg_id BEFORE encrypting — AAD = path_id || msg_id, so the
+	// msg_id must be fixed at AEAD time. Reordering this is the only
+	// sensitive part of the v1→AAD-binding migration.
 	msgID, err := uuidv7()
 	if err != nil {
 		return fmt.Errorf("send: msg_id: %w", err)
+	}
+	aad := relay.MakeAAD(paired.PathID(), msgID)
+	ct, err := paired.EncryptBody(innerJSON, aad)
+	if err != nil {
+		return fmt.Errorf("send: encrypt: %w", err)
 	}
 	env := relay.BuildOuter(paired.PathID(), msgID, relay.IsoTs(time.Now().UTC()), ct)
 
@@ -315,7 +318,12 @@ func runRecv(ctx context.Context, args []string) error {
 			fmt.Fprintf(os.Stderr, "recv: skip %s: ciphertext decode: %v\n", env.MsgID, err)
 			continue
 		}
-		plaintext, err := paired.DecryptBody(ctBytes, nil)
+		// AAD = path_id || msg_id (UTF-8 bytes, no separator) per spec.
+		// The path_id is fixed per pair; msg_id is per-envelope. Both are
+		// in the outer envelope so we can compute AAD independently of
+		// whether dedupe/seen-cache says we've processed before.
+		aad := relay.MakeAAD(env.PathID, env.MsgID)
+		plaintext, err := paired.DecryptBody(ctBytes, aad)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "recv: skip %s: decrypt: %v\n", env.MsgID, err)
 			continue
