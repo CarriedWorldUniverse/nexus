@@ -42,10 +42,12 @@ func BuildSignedPairHalf(ch *casket.Channel, nexusID, endpoint string) (PairHalf
 		return PairHalfPayload{}, fmt.Errorf("relay: nonce: %w", err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(ch.PublicKeyBytes())
+	dhPubB64 := base64.RawURLEncoding.EncodeToString(ch.DHPublicKeyBytes())
+	dhAlg := string(ch.DHAlg())
 	nonce := base64.RawURLEncoding.EncodeToString(nonceBytes)
 	ts := IsoTs(time.Now().UTC())
 
-	canonical := CanonicalHalfBytes(nexusID, "ed25519", pubB64, endpoint, nonce, ts)
+	canonical := CanonicalHalfBytes(nexusID, "ed25519", pubB64, dhAlg, dhPubB64, endpoint, nonce, ts)
 	sig, err := ch.Sign(canonical)
 	if err != nil {
 		return PairHalfPayload{}, fmt.Errorf("relay: sign half: %w", err)
@@ -54,7 +56,9 @@ func BuildSignedPairHalf(ch *casket.Channel, nexusID, endpoint string) (PairHalf
 	return PairHalfPayload{
 		NexusID:  nexusID,
 		SigAlg:   "ed25519",
+		DhAlg:    dhAlg,
 		Pubkey:   pubB64,
+		DhPubkey: dhPubB64,
 		Endpoint: endpoint,
 		Nonce:    nonce,
 		Ts:       ts,

@@ -89,10 +89,12 @@ type fakeEnvelope struct {
 }
 
 type fakePairRequest struct {
-	RequestID string
-	Status    string
-	Half      json.RawMessage
-	PathID    string
+	RequestID     string
+	Status        string
+	Half          json.RawMessage // requester's raw submitted body
+	RequesterHalf *PairHalfPayload
+	OwnerHalf     *PairHalfPayload
+	PathID        string
 }
 
 // fakeInterchange is the test-side HTTP handler implementing the wire
@@ -256,11 +258,18 @@ func (f *fakeInterchange) handler() http.Handler {
 				http.Error(w, `{"error":"request_not_found"}`, http.StatusNotFound)
 				return
 			}
-			resp := map[string]string{"request_id": req.RequestID, "status": req.Status}
-			if req.PathID != "" {
-				resp["path_id"] = req.PathID
+			out := struct {
+				RequestID string           `json:"request_id"`
+				Status    string           `json:"status"`
+				PathID    string           `json:"path_id,omitempty"`
+				OwnerHalf *PairHalfPayload `json:"owner_half,omitempty"`
+			}{
+				RequestID: req.RequestID,
+				Status:    req.Status,
+				PathID:    req.PathID,
+				OwnerHalf: req.OwnerHalf,
 			}
-			writeJSON(w, http.StatusOK, resp)
+			writeJSON(w, http.StatusOK, out)
 			return
 		}
 		http.NotFound(w, r)
@@ -374,11 +383,10 @@ func (f *fakeInterchange) handleAck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int{"evicted": evicted})
 }
 
-// verifyHalfSelfSig rebuilds the canonical bytes from the payload's
-// own fields and checks self_sig against the payload's pubkey. If a
-// client bug swapped a field or changed the canonical format, this
-// rejection fires rather than the fake silently accepting a broken
-// half.
+// verifyHalfSelfSig rebuilds the canonical bytes from the payload's own fields
+// and checks self_sig against the payload's pubkey. Accepts both v2 (preferred)
+// and v1 (transition) preimage formats. v2 is detected by presence of DhAlg +
+// DhPubkey fields; falls back to v1 if those are absent (legacy half).
 func verifyHalfSelfSig(h PairHalfPayload) error {
 	if h.SigAlg != "ed25519" {
 		return fmt.Errorf("sig_alg %q not supported at v1", h.SigAlg)
@@ -391,30 +399,46 @@ func verifyHalfSelfSig(h PairHalfPayload) error {
 	if err != nil || len(sig) != ed25519.SignatureSize {
 		return fmt.Errorf("invalid self_sig")
 	}
-	canonical := CanonicalHalfBytes(h.NexusID, h.SigAlg, h.Pubkey,
+
+	// Try v2 first (dh_alg + dh_pubkey in preimage). If those fields are
+	// present, the half MUST verify against the v2 preimage; falling back
+	// to v1 on a v2 half would defeat the purpose of signature coverage.
+	if h.DhAlg != "" && h.DhPubkey != "" {
+		canonical := CanonicalHalfBytes(h.NexusID, h.SigAlg, h.Pubkey,
+			h.DhAlg, h.DhPubkey, h.Endpoint, h.Nonce, h.Ts)
+		if !ed25519.Verify(pubBytes, canonical, sig) {
+			return fmt.Errorf("self_sig did not verify (v2 preimage)")
+		}
+		return nil
+	}
+
+	// v1 fallback: dh fields absent, use legacy preimage.
+	canonical := canonicalHalfBytesV1(h.NexusID, h.SigAlg, h.Pubkey,
 		h.Endpoint, h.Nonce, h.Ts)
 	if !ed25519.Verify(pubBytes, canonical, sig) {
-		return fmt.Errorf("self_sig did not verify")
+		return fmt.Errorf("self_sig did not verify (v1 preimage)")
 	}
 	return nil
 }
 
-// approveAllPending flips every currently-pending request to approved,
-// minting a pathId from the requester's pubkey (parsed from the stored
-// half) and the ownerPub param. Used by Part 3.3 tests to simulate an
-// operator clicking Approve in the dashboard.
-func (f *fakeInterchange) approveAllPending(ownerPub []byte) {
+// approveAllPending flips every currently-pending request to approved.
+// ownerHalf is the fully-signed PairHalfPayload representing the owner's
+// side — in tests this is built via BuildSignedPairHalf on the owner channel.
+// The requester's half is parsed from the stored request body so it can be
+// returned in poll responses, completing the no-sneakernet token exchange.
+func (f *fakeInterchange) approveAllPending(ownerHalf PairHalfPayload) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	ownerPub, err := base64.RawURLEncoding.DecodeString(ownerHalf.Pubkey)
+	if err != nil {
+		return
+	}
 	for id, req := range f.pendingRequests {
 		if req.Status != "pending" {
 			continue
 		}
-		// Parse the half to get the requester pubkey.
 		var payload struct {
-			Requester struct {
-				Pubkey string `json:"pubkey"`
-			} `json:"requester"`
+			Requester PairHalfPayload `json:"requester"`
 		}
 		if err := json.Unmarshal(req.Half, &payload); err != nil {
 			continue
@@ -426,6 +450,9 @@ func (f *fakeInterchange) approveAllPending(ownerPub []byte) {
 		pathID := pathIDFromPubkeys(reqPub, ownerPub)
 		req.Status = "approved"
 		req.PathID = pathID
+		req.RequesterHalf = &payload.Requester
+		oh := ownerHalf
+		req.OwnerHalf = &oh
 		f.pendingRequests[id] = req
 	}
 }

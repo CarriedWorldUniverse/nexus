@@ -206,6 +206,18 @@ func runPair(ctx context.Context, args []string) error {
 	}
 	out, _ := json.MarshalIndent(res, "", "  ")
 	fmt.Println(string(out))
+
+	// v2: if approved and the relay returned the owner's half, auto-
+	// instantiate the local PairedChannel. Eliminates the manual
+	// pair-with-token step that the v1 flow required.
+	if res.Status == "approved" && res.OwnerHalf != nil {
+		paired, err := autoPairFromHalf(ctx, ch, *res.OwnerHalf)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: auto-pair from owner_half failed (%v); peer's PairingToken can still be exchanged out-of-band as a fallback\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "auto-paired with %s (path_id=%s)\n", paired.PeerID(), paired.PathID())
+		}
+	}
 	return nil
 }
 
@@ -279,6 +291,22 @@ func runApprove(ctx context.Context, args []string) error {
 		return fmt.Errorf("approve: HTTP %d: %s", resp.StatusCode, respBody)
 	}
 	fmt.Println(string(respBody))
+
+	// v2: parse the requester_half from the response and auto-instantiate
+	// the local PairedChannel. Eliminates the manual pair-with-token
+	// step that the v1 flow required.
+	var parsed struct {
+		Status        string                 `json:"status"`
+		RequesterHalf *relay.PairHalfPayload `json:"requester_half"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err == nil && parsed.Status == "approved" && parsed.RequesterHalf != nil {
+		paired, err := autoPairFromHalf(ctx, ch, *parsed.RequesterHalf)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: auto-pair from requester_half failed (%v); peer's PairingToken can still be exchanged out-of-band as a fallback\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "auto-paired with %s (path_id=%s)\n", paired.PeerID(), paired.PathID())
+		}
+	}
 	return nil
 }
 
@@ -343,4 +371,44 @@ func loadChannel(ctx context.Context, store, id string) (*casket.Channel, error)
 	}
 	// Pass empty DhAlg to honor whatever was persisted at init.
 	return casket.Load(ctx, id, st, "")
+}
+
+// autoPairFromHalf converts a v2 PairHalfPayload (returned by the relay
+// in approve/poll responses on success) into a casket PairingToken and
+// instantiates the local PairedChannel. This is the v2 replacement for
+// the manual pair-with-token step: the relay delivers the peer's full
+// public material under signature coverage, so no out-of-band exchange
+// is required.
+//
+// Returns an error if the half is missing required v2 fields (i.e. the
+// peer is still on v1) — caller should fall back to OOB token exchange.
+func autoPairFromHalf(ctx context.Context, ch *casket.Channel, h relay.PairHalfPayload) (*casket.PairedChannel, error) {
+	if h.DhAlg == "" || h.DhPubkey == "" {
+		return nil, fmt.Errorf("peer half lacks v2 ECDH fields (peer may be on v1)")
+	}
+	t, err := time.Parse(time.RFC3339, h.Ts)
+	if err != nil {
+		t2, err2 := time.Parse("2006-01-02T15:04:05Z", h.Ts)
+		if err2 != nil {
+			return nil, fmt.Errorf("parse ts %q: %w", h.Ts, err)
+		}
+		t = t2
+	}
+	tok := casket.PairingToken{
+		V:        1,
+		NexusID:  h.NexusID,
+		SigAlg:   h.SigAlg,
+		DhAlg:    casket.DhAlgorithm(h.DhAlg),
+		Pubkey:   h.Pubkey,
+		DhPubkey: h.DhPubkey,
+		Endpoint: h.Endpoint,
+		Nonce:    h.Nonce,
+		Ts:       t.Unix(),
+	}
+	// Allow up to 1 hour of clock skew for the relay-mediated path —
+	// the relay already validated tsInWindow on submit, but the
+	// approve/poll response may land minutes later. 3600 is generous
+	// without being a security risk (the half was signed at submit
+	// time and is signature-bound to that ts).
+	return ch.Pair(ctx, tok, 3600)
 }
