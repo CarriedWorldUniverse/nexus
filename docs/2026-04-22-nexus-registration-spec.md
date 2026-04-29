@@ -5,21 +5,21 @@
 **Owner:** keel
 **Repo:** `C:\src\nexus-cw\nexus` (fresh git repo, separate from `C:\src\agent-network`). The `C:\src\nexus` path is reserved for the deployed runtime artifact.
 
-**v0.5 changes (2026-04-24, from #7636 → #7676 discussion with operator and harrow):**
-- **New §2.8 — Knowledge storage & retrieval.** SQLite + FTS5 primary; `embedding BLOB` column reserved day-one for future vector retrieval; hybrid (keyword + vector) retrieval behind a single `SearchKnowledge` interface so callers don't change when the vector layer is turned on. Note: `sqlite-vec` *extension loading* is DEFERRED in v1 — upstream pure-Go binding pairing is out of sync; CGO alternative would break cross-platform single binary. Columns remain reserved (#7695).
+**v0.5 changes (2026-04-24):**
+- **New §2.8 — Knowledge storage & retrieval.** SQLite + FTS5 primary; `embedding BLOB` column reserved day-one for future vector retrieval; hybrid (keyword + vector) retrieval behind a single `SearchKnowledge` interface so callers don't change when the vector layer is turned on. Note: `sqlite-vec` *extension loading* is DEFERRED in v1 — upstream pure-Go binding pairing is out of sync; CGO alternative would break cross-platform single binary. Columns remain reserved.
 - **Embedding provider is Ollama via the provider-adapter spec's new `Embed()` method.** Locked model: **`nomic-embed-text`** (768-dim) — technical-tuned, matches this KB's actual content (operational notes, architecture decisions, incident postmortems). Ollama runs as a separate Docker container at the standard `http://host.docker.internal:11434` endpoint, currently stopped — adapter handles unreachable-upstream gracefully.
-- **Scope: technical knowledge only.** Narrative canon (verity's domain) is explicitly out of scope for this KB. If canon ever becomes vector-searchable, it's a separate system, separate build (per operator #7676).
+- **Scope: technical knowledge only.** Narrative canon is explicitly out of scope for this KB. If canon ever becomes vector-searchable, it's a separate system, separate build.
 - **Active retrieval (RAG-pattern) formalised** — on thread start, runtime runs `SearchKnowledge(topic)` and injects hits as a `system.prompt` entry, subject to relevance threshold and corpus scoping. Removes the "remember to search" burden that today's numbers (107 entries, ~1.5:1 write:read) show aspects are failing at.
-- **Storage bootstrap pattern** — schema as committed source (`nexus/storage/schema.sql` + `//go:embed`), database as runtime-created under `NEXUS_DATA_DIR` (default `./data/`, gitignored). `Bootstrap(db)` runs idempotent DDL every startup. Per operator #7682/#7685: commits carry source only, runtime creates its own DB. Details in §10.
+- **Storage bootstrap pattern** — schema as committed source (`nexus/storage/schema.sql` + `//go:embed`), database as runtime-created under `NEXUS_DATA_DIR` (default `./data/`, gitignored). `Bootstrap(db)` runs idempotent DDL every startup. Commits carry source only; runtime creates its own DB. Details in §10.
 - **Companion:** provider-adapter spec v0.2 adds the `Embed` contract and the `ollama-local` adapter. See [`2026-04-24-provider-adapter-spec.md`](2026-04-24-provider-adapter-spec.md).
 
-**v0.4 changes (2026-04-24, informed by harrow's Pi research in #7601):**
+**v0.4 changes (2026-04-24, informed by Pi research):**
 - **Session JSONL upgraded to tree-structured** — every entry carries `id` and `parentId`. Branching, fork, clone, and rewind are tree operations on a single file rather than destructive truncation or multi-file management. New §2.6 defines the entry schema. Applies to `global` and `thread` modes; `stateless` unchanged.
 - **Compaction formalised — proactive, threshold-based.** `shouldCompact(tokens, window, reserve) := tokens > window - reserve`. Fires in the runtime, not the provider. `CompactionEntry` carries `firstKeptEntryId` so the pre-compact history is preserved in-tree with a pointer, not lost. New §2.7.
 - **Rewind / fork / branch-summary as first-class operations.** Rewind is an active-branch cursor move; fork creates a new branch at a historical entry; branch-switch generates a summary via LLM to carry departing-branch context into the resumed path. Details in §4.4 and admin endpoints in §4.5. Resolves spec §7's rewind and proactive-compaction open items.
 - **Thinking level** logged as future work (§7) — not v1. Orthogonal to everything we're building; drops in as an aspect/turn property later.
 
-**v0.3 changes (2026-04-24, informed by harrow's t3code research in #7595):**
+**v0.3 changes (2026-04-24, informed by t3code research):**
 - **JSONL-owns-state retained** — evaluated t3code's opaque-resume-cursor pattern; we keep the Nexus-owns-state model for provider-neutrality, auditability, and federation readiness. Tradeoff noted.
 - **Enrichment fiber pattern adopted** — registration is fast + static; capability/health enrichment streams in async. Folded into §2.5 + §4.
 - **Thread-session TTL resolved** — 30 min idle reap, 5 min sweep, active-turn skip. Session records reaped, thread records persist. Was an open question in §7.
@@ -34,7 +34,7 @@
 - Session state becomes the runtime's responsibility (Nexus owns conversation persistence, not Claude Code).
 - Scaffold plan: Option A — full directory scaffold first, then working code. Operator chose A over the thin-vertical-slice option.
 - Naming placeholder: using `global` / `thread` / `stateless` for context modes.
-- **Cross-platform requirement (added 2026-04-24, #7602):** runtime and Nexus process must run on Windows and Linux at minimum; Mac support preferred. Rules out Windows-native-only tech. Node and Go both qualify; pure-Rust also qualifies. Any provider-specific CLI dependencies must themselves be cross-platform.
+- **Cross-platform requirement (added 2026-04-24):** runtime and Nexus process must run on Windows and Linux at minimum; Mac support preferred. Rules out Windows-native-only tech. Node and Go both qualify; pure-Rust also qualifies. Any provider-specific CLI dependencies must themselves be cross-platform.
 
 ## 1. Motivation
 
@@ -146,7 +146,7 @@ Note: `.credentials\` replaces the current `.claude\` directory. Provider-neutra
 
 No aspect is ever required to be up for Nexus to be healthy. Nexus can run with zero aspects registered — that's just an empty galaxy.
 
-**Enrichment rationale** (adopted from t3code pattern, see harrow's research #7595): registration should be fast and deterministic — aspect-is-up/aspect-is-down is binary. But useful operational data (auth health, model list under the current subscription, real-time token counts) is expensive to gather and changes independently. Splitting static-register from async-enrich keeps the registration path tight while still surfacing rich state to the dashboard.
+**Enrichment rationale** (adopted from t3code pattern): registration should be fast and deterministic — aspect-is-up/aspect-is-down is binary. But useful operational data (auth health, model list under the current subscription, real-time token counts) is expensive to gather and changes independently. Splitting static-register from async-enrich keeps the registration path tight while still surfacing rich state to the dashboard.
 
 ### 2.6 Session JSONL format — tree-structured
 
@@ -255,7 +255,7 @@ CREATE VIRTUAL TABLE knowledge_fts USING fts5(
 -- FTS triggers on INSERT/UPDATE/DELETE as in today's broker.
 ```
 
-**sqlite-vec extension: DEFERRED in v1** (decision #7695). The pure-Go path needs a compatible pairing of `sqlite-vec-go-bindings` + `ncruces/go-sqlite3`; upstream is currently out of sync (the binding references APIs removed in recent go-sqlite3 releases) and the alternative is CGO, which would break our single cross-platform binary story. Columns `embedding` / `embed_model` / `embed_dim` are still reserved day-one — activation is just "load the extension, backfill embeddings, flip `retrieval_backend` config" with no schema migration. The FTS5 path is fully functional and that's what v1 ships on per §2.8 anyway.
+**sqlite-vec extension: DEFERRED in v1.** The pure-Go path needs a compatible pairing of `sqlite-vec-go-bindings` + `ncruces/go-sqlite3`; upstream is currently out of sync (the binding references APIs removed in recent go-sqlite3 releases) and the alternative is CGO, which would break our single cross-platform binary story. Columns `embedding` / `embed_model` / `embed_dim` are still reserved day-one — activation is just "load the extension, backfill embeddings, flip `retrieval_backend` config" with no schema migration. The FTS5 path is fully functional and that's what v1 ships on per §2.8 anyway.
 
 **Retrieval — pluggable interface, hybrid-ready.**
 
@@ -302,7 +302,7 @@ KnowledgeScope {
 
 Default scope for a Frame thread aspect: `OwnAgent: true, Shared: true, Peers: nil`. Simulation-world characters get `Shared: false` — their knowledge entries are sim-scoped only and they never see Frame operational notes, preventing cross-contamination.
 
-**Not in scope here:** narrative canon (verity's domain, the lore and world-building documents). This spec covers the operational/technical knowledge store used by Frame aspects for cross-session memory. If canon ever becomes vector-searchable, it's a separate system with its own storage, embedding choice, and retrieval semantics — per operator's call in #7676.
+**Not in scope here:** narrative canon (lore and world-building documents). This spec covers the operational/technical knowledge store used by Frame aspects for cross-session memory. If canon ever becomes vector-searchable, it's a separate system with its own storage, embedding choice, and retrieval semantics.
 
 **Active retrieval on thread start.**
 
@@ -444,7 +444,7 @@ Structured field on the comms message rather than content prefix — survives fo
 ```
 send_chat({
   from: "forge",
-  to: "@wren",
+  to: "<aspect>",
   kind: "hand",
   hand: "verify-canon",
   content: "<full task prompt>",
@@ -652,7 +652,7 @@ Discrete, shippable chunks:
 2. **Nexus core + registration endpoints.** Broker skeleton serving HTTPS on (new) port, in-memory roster, `/aspects/register|heartbeat|deregister|list`. Smoke test with a synthetic registration client.
 3. **Single agent runtime + Claude API provider.** `agent.exe` reads aspect home folder, registers, heartbeats, handles comms dispatch. `claude-api` provider implements the invoke/tokenCount/compact contract. Context persistence wired for all three modes (global / thread / stateless).
 4. **Hands end-to-end.** `kind: "hand"` dispatch in the runtime. One concrete Hand from each of two aspects (wren's verify-canon is the pre-committed test case) — proves cross-aspect invocation works.
-5. **keel embedded in Nexus.** keel's aspect config moves into the Nexus process as a global-context harness. No PTY. Chat identity `@keel` preserved.
+5. **Frame embedded in Nexus.** The Frame personality moves into the Nexus process as a global-context harness. No PTY. Frame chat identity preserved.
 6. **Migrate remaining aspects.** Home folders populated under `C:\src\nexus-cw\nexus\agents\<name>\`. Aspects point at new Nexus via `NEXUS_URL`. Old agent-network proxies stood down one at a time.
 7. **Dashboard migration.** Agent list becomes live-feed from `/aspects`. Files/Tickets/Knowledge views re-point at new broker. Chat history either migrated or starts fresh.
 8. **Retire `C:\src\agent-network`.** Archive the repo; remove from startup.
@@ -709,13 +709,13 @@ Context for picking this back up:
 - §6.2 (broker core + registration endpoints) complete and smoke-tested; Go locked in.
 - v0.3 incorporated t3code research: JSONL-owns-state retained, enrichment-fiber adopted, thread TTL resolved, tool-authority modes + plan/execute mode logged as future work.
 - v0.4 incorporated Pi research: tree-structured JSONL (`id`/`parentId`), proactive compaction formula, rewind/fork/branch-summary as first-class ops, thinking-level logged as future work.
-- v0.5: SQLite + FTS5 primary for knowledge; `embedding BLOB` column reserved but `sqlite-vec` extension loading DEFERRED (#7695 — upstream binding out of sync with current go-sqlite3; reviewable when pairing catches up or when we flip to vector retrieval); ollama-local embedding adapter (`nomic-embed-text`, 768-dim) wrapping existing Ollama Docker container; active-retrieval injection at thread start as `system.prompt` entry; operator-curated `Shared` scope flag.
-- **Cross-platform mandatory:** Windows + Linux minimum, Mac preferred (#7602).
+- v0.5: SQLite + FTS5 primary for knowledge; `embedding BLOB` column reserved but `sqlite-vec` extension loading DEFERRED (upstream binding out of sync with current go-sqlite3; reviewable when pairing catches up or when we flip to vector retrieval); ollama-local embedding adapter (`nomic-embed-text`, 768-dim) wrapping existing Ollama Docker container; active-retrieval injection at thread start as `system.prompt` entry; operator-curated `Shared` scope flag.
+- **Cross-platform mandatory:** Windows + Linux minimum, Mac preferred.
 - keel is currently running as PTY-proxy on Claude Opus 4.7 [1m] under `C:\src\agent-network`. It will run in parallel with the new Nexus during migration and only migrate in at §6 step 5 once the rest of the architecture is proven.
 - wren pre-committed to implementing `verify-canon` as the first cross-aspect Hand end-to-end test.
 - Open naming question (`global`/`thread`/`stateless` vs alternatives) not yet resolved; proceeding with these names as placeholders.
 - **Ollama ready (2026-04-24).** Docker container up at `http://localhost:11434` (also reachable as `host.docker.internal:11434` from other containers). `nomic-embed-text` pulled and smoke-tested (768-dim as expected). Also present for future chat use: `qwen2.5:7b`, `qwen2.5:3b`.
-- **Storage bootstrap (added 2026-04-24 from #7685):** commits carry schema source, never the database itself. Pattern:
+- **Storage bootstrap (added 2026-04-24):** commits carry schema source, never the database itself. Pattern:
   - `nexus/storage/schema.sql` — canonical DDL, committed, idempotent (`CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, `CREATE TRIGGER IF NOT EXISTS`). Defines `knowledge`, `knowledge_fts` + triggers, `threads`, `chat_messages`, `tickets`, `activity`, etc.
   - `nexus/storage/schema.go` — `//go:embed schema.sql` + `func Bootstrap(db *sql.DB) error` that runs the DDL against an empty or existing database. Safe every startup. Loads `sqlite-vec` extension before running DDL so the `embedding BLOB` column is usable.
   - Runtime: Nexus reads `NEXUS_DATA_DIR` env var (default `./data/`), opens `nexus.db` within it. If file missing, SQLite creates empty; `Bootstrap` populates schema. Existing DBs get idempotent DDL which no-ops.
