@@ -273,7 +273,7 @@ These are Nexus concerns; adapters never see them:
 - **Streaming:** supported, different chunk shape from SSE.
 - **Triage:** Gemini 3.1 Flash.
 - **Embeddings:** supported via `text-embedding-004` (768-dim) or `gemini-embedding-001` — implement when the chat adapter lands; until then, ollama-local carries embedding traffic.
-- **Notes:** multimodal dispatch is the motivating use case — image understanding Hands route here. Harrow's callout (#7624) on no-CLI-equivalent to `claude -p` is fine under the new runtime because we're API-only anyway (no PTY in the v0.2+ architecture).
+- **Notes:** multimodal dispatch is the motivating use case — image understanding Hands route here. The lack of a CLI-equivalent to `claude -p` is fine under the new runtime because we're API-only anyway (no PTY in the v0.2+ architecture).
 
 ### 9.3 openai-api (stub — v3+)
 
@@ -291,7 +291,7 @@ Pure-embeddings adapter wrapping a locally-hosted Ollama instance. This is the e
 
 - **Transport:** HTTP POST to `<OLLAMA_URL>/api/embeddings` with `{ model, prompt }`; response `{ embedding: [...] }`.
 - **Endpoint configuration:** `OLLAMA_URL` env var, default `http://host.docker.internal:11434` (the standard Docker-to-host address used by operator's existing container; `http://localhost:11434` if Nexus runs on the same host without Docker networking in the way). Container being stopped is tolerated — the adapter health-checks on first embed call and surfaces `ErrProvider` with a clear "Ollama unreachable at <url>" message rather than panicking.
-- **Locked embedding model:** `nomic-embed-text` (768-dim, ~150MB). Tuned for technical text — operational notes, architecture decisions, incident postmortems. Per operator #7673/#7676, KB scope is technical; narrative canon is out of scope. Swapping the model later requires re-embedding the whole corpus (see one-way-door note below).
+- **Locked embedding model:** `nomic-embed-text` (768-dim, ~150MB). Tuned for technical text — operational notes, architecture decisions, incident postmortems. KB scope is technical; narrative canon is out of scope. Swapping the model later requires re-embedding the whole corpus (see one-way-door note below).
 - **Capabilities:** `Chat: false`, `ToolUse: false`, `Streaming: false`, `Embeddings: true`, `EmbeddingModel: "nomic-embed-text"`, `EmbeddingDim: 768`. Selecting this adapter for a chat invocation fails at dispatch time.
 - **Auth:** none (local endpoint). If Ollama ever runs remote with auth enabled, `OLLAMA_AUTH_TOKEN` env var.
 - **Swappable upstream:** the adapter abstracts Ollama's HTTP shape, not the model. Moving to OpenAI embeddings later means registering `openai-api` with embeddings enabled and changing the `knowledge.embedding_provider` config (registration spec §5.6) — no caller changes. But see the one-way-door note below.
@@ -359,7 +359,7 @@ Runtime decides retry policy. Default: one retry on `ErrRateLimit` with backoff,
 - **keel** — this spec, the adapter interface, the provider-selection precedence, error taxonomy, configuration surface, capability declaration.
 - **forge** — per-adapter implementation tuning, JSON-schema translation, streaming shape details, triage-model selection per adapter, retry policy tuning.
 - **wren** — canon-compatibility review. Running maren on Gemini changes the voice the model produces; wren checks whether a non-Claude aspect can hold character, and flags adjustments needed to SOUL.md / CLAUDE.md to travel across providers.
-- **harrow** — research support (API surface differences, SDK discovery, model-capability mapping). Already did the initial discovery in #7624/#7626.
+- **Research support** — for new provider adapter work: API surface differences, SDK discovery, model-capability mapping.
 
 ## 14. Status
 
