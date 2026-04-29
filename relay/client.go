@@ -282,9 +282,11 @@ func (c *Client) Ack(ctx context.Context, paired *casket.PairedChannel, pathID s
 
 // PairResult is the outcome of a completed pair flow.
 type PairResult struct {
-	RequestID string
-	Status    string // "approved" | "denied" | "expired"
-	PathID    string // populated when Status == "approved"
+	RequestID    string
+	Status       string           // "approved" | "denied" | "expired"
+	PathID       string           // populated when Status == "approved"
+	OwnerHalf    *PairHalfPayload // populated when Status == "approved" (requester-side poll)
+	RequesterHalf *PairHalfPayload // populated when Status == "approved" (owner-side approve response)
 }
 
 // Discover fetches the interchange's /.well-known/nexus-interchange
@@ -311,15 +313,25 @@ func (c *Client) Discover(ctx context.Context) (json.RawMessage, error) {
 	return json.RawMessage(body), nil
 }
 
-// CanonicalHalfBytes builds the self-sig preimage for a pair-flow half.
-// Mirrors v3 spec §Components.2 Pairing.self_sig_canonical and the
-// interchange's pairflow.canonicalBytes — all three MUST agree byte-
-// for-byte or signatures don't verify across runtimes.
+// CanonicalHalfBytes builds the v2 self-sig preimage for a pair-flow half.
+// v2 adds dh_alg and dh_pubkey to the signed payload so an attacker who can
+// mutate stored halves cannot swap the ECDH key without breaking the
+// signature. The first line "v2" distinguishes this from the v1 preimage.
 //
-// Exposed so Part 3.3 (pairing UX) can call it once casket-go exposes
-// Channel.Sign. Caller format: line-oriented UTF-8, 7 fields joined by
-// "\n" (LF), no trailing newline.
-func CanonicalHalfBytes(nexusID, sigAlg, pubkey, endpoint, nonce, ts string) []byte {
+// Line-oriented UTF-8, 9 fields joined by "\n" (LF), no trailing newline:
+//
+//	v2 \n nexus_id \n sig_alg \n pubkey \n dh_alg \n dh_pubkey \n endpoint \n nonce \n ts
+func CanonicalHalfBytes(nexusID, sigAlg, pubkey, dhAlg, dhPubkey, endpoint, nonce, ts string) []byte {
+	return []byte(strings.Join([]string{
+		"v2", nexusID, sigAlg, pubkey, dhAlg, dhPubkey, endpoint, nonce, ts,
+	}, "\n"))
+}
+
+// canonicalHalfBytesV1 builds the legacy v1 preimage (no ECDH fields).
+// Used by the verifier to accept v1 halves during the transition period.
+// New halves MUST use CanonicalHalfBytes (v2). v1 leaves dh_pubkey
+// unsigned and is vulnerable to substitution at storage.
+func canonicalHalfBytesV1(nexusID, sigAlg, pubkey, endpoint, nonce, ts string) []byte {
 	return []byte(strings.Join([]string{
 		"v1", nexusID, sigAlg, pubkey, endpoint, nonce, ts,
 	}, "\n"))
@@ -345,7 +357,9 @@ type SubmitPairRequestBody struct {
 type PairHalfPayload struct {
 	NexusID  string `json:"nexus_id"`
 	SigAlg   string `json:"sig_alg"`   // "ed25519" at v1
+	DhAlg    string `json:"dh_alg"`    // "P-256" or "X25519"; covered by v2 self-sig
 	Pubkey   string `json:"pubkey"`    // base64url Ed25519 32 bytes
+	DhPubkey string `json:"dh_pubkey"` // base64url ECDH public key; covered by v2 self-sig
 	Endpoint string `json:"endpoint"`  // optional
 	Nonce    string `json:"nonce"`     // base64url 16 bytes
 	Ts       string `json:"ts"`        // ISO 8601
@@ -414,6 +428,8 @@ func (c *Client) PollRequest(ctx context.Context, requestID string) (PairResult,
 }
 
 // getRequestStatus fetches /pair/requests/:id (unauthenticated poll).
+// When status is "approved", the response includes owner_half so the requester
+// can immediately call channel.Pair without any out-of-band token exchange.
 func (c *Client) getRequestStatus(ctx context.Context, requestID string) (PairResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		c.BaseURL+"/pair/requests/"+requestID, nil)
@@ -429,14 +445,20 @@ func (c *Client) getRequestStatus(ctx context.Context, requestID string) (PairRe
 	switch resp.StatusCode {
 	case http.StatusOK:
 		var out struct {
-			RequestID string `json:"request_id"`
-			Status    string `json:"status"`
-			PathID    string `json:"path_id"`
+			RequestID string           `json:"request_id"`
+			Status    string           `json:"status"`
+			PathID    string           `json:"path_id"`
+			OwnerHalf *PairHalfPayload `json:"owner_half"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 			return PairResult{}, err
 		}
-		return PairResult{RequestID: out.RequestID, Status: out.Status, PathID: out.PathID}, nil
+		return PairResult{
+			RequestID: out.RequestID,
+			Status:    out.Status,
+			PathID:    out.PathID,
+			OwnerHalf: out.OwnerHalf,
+		}, nil
 	case http.StatusNotFound:
 		return PairResult{}, wrapErr(ErrRequestNotFound, resp.Body)
 	case http.StatusBadRequest:

@@ -15,6 +15,8 @@ import (
 // TestBuildSignedPairHalf verifies the assembled half's self-sig
 // verifies against the channel's own pubkey — if this passes, the
 // interchange will accept the half at /pair/request.
+// Also asserts v2 fields (dh_alg, dh_pubkey) are populated and covered
+// by the v2 preimage signature.
 func TestBuildSignedPairHalf(t *testing.T) {
 	ch, err := casket.Load(context.Background(), "keel", newInMemStorage(), casket.P256)
 	if err != nil {
@@ -30,21 +32,37 @@ func TestBuildSignedPairHalf(t *testing.T) {
 		t.Errorf("wrong identity fields: %+v", half)
 	}
 	if half.Pubkey == "" || half.Nonce == "" || half.Ts == "" || half.SelfSig == "" {
-		t.Errorf("missing fields: %+v", half)
+		t.Errorf("missing base fields: %+v", half)
+	}
+	// v2: dh fields must be populated
+	if half.DhAlg == "" || half.DhPubkey == "" {
+		t.Errorf("v2 dh fields missing: dh_alg=%q dh_pubkey=%q", half.DhAlg, half.DhPubkey)
 	}
 	expectedPub := base64.RawURLEncoding.EncodeToString(ch.PublicKeyBytes())
 	if half.Pubkey != expectedPub {
 		t.Errorf("pubkey mismatch: got %q", half.Pubkey)
 	}
+	expectedDhPub := base64.RawURLEncoding.EncodeToString(ch.DHPublicKeyBytes())
+	if half.DhPubkey != expectedDhPub {
+		t.Errorf("dh_pubkey mismatch: got %q", half.DhPubkey)
+	}
 
+	// Verify against v2 preimage
 	canonical := CanonicalHalfBytes(half.NexusID, half.SigAlg, half.Pubkey,
-		half.Endpoint, half.Nonce, half.Ts)
+		half.DhAlg, half.DhPubkey, half.Endpoint, half.Nonce, half.Ts)
 	sig, err := base64.RawURLEncoding.DecodeString(half.SelfSig)
 	if err != nil {
 		t.Fatalf("decode self_sig: %v", err)
 	}
 	if !ed25519.Verify(ch.PublicKeyBytes(), canonical, sig) {
-		t.Errorf("self-sig did not verify against channel pubkey")
+		t.Errorf("self-sig did not verify against channel pubkey (v2 preimage)")
+	}
+
+	// Must NOT verify against v1 preimage (proves dh fields are load-bearing)
+	canonicalV1 := canonicalHalfBytesV1(half.NexusID, half.SigAlg, half.Pubkey,
+		half.Endpoint, half.Nonce, half.Ts)
+	if ed25519.Verify(ch.PublicKeyBytes(), canonicalV1, sig) {
+		t.Errorf("self-sig verified against v1 preimage — dh fields not covered by signature")
 	}
 }
 
@@ -61,12 +79,12 @@ func TestBuildSignedPairHalfFreshNonce(t *testing.T) {
 
 // TestPairFullFlow drives Client.Pair end-to-end against a fake that
 // auto-approves after a short delay — simulating an operator click.
-// Verifies the happy path returns an approved PairResult with pathId.
+// Verifies the happy path returns an approved PairResult with pathId and
+// owner_half (v2 protocol — no sneakernet token exchange required).
 func TestPairFullFlow(t *testing.T) {
-	// Need a fake with an approver; setupFixture's fake has none.
-	// Build a dedicated fake here.
-	reqCh, _ := casket.Load(context.Background(), "keel", newInMemStorage(), casket.P256)
-	ownCh, _ := casket.Load(context.Background(), "keel-nexus", newInMemStorage(), casket.P256)
+	ctx := context.Background()
+	reqCh, _ := casket.Load(ctx, "keel", newInMemStorage(), casket.P256)
+	ownCh, _ := casket.Load(ctx, "keel-nexus", newInMemStorage(), casket.P256)
 	fake := newFakeInterchange(reqCh.PublicKeyBytes(), ownCh.PublicKeyBytes())
 	srv := httptest.NewServer(fake.handler())
 	defer srv.Close()
@@ -77,7 +95,13 @@ func TestPairFullFlow(t *testing.T) {
 		PollInterval: 5 * time.Millisecond,
 	}
 
-	// Approver: every 10ms, flip any pending requests to approved.
+	// Pre-build the owner half so the approver goroutine can pass it to
+	// approveAllPending (v2: full signed half, not just pubkey bytes).
+	ownerHalf, err := BuildSignedPairHalf(ownCh, "keel-nexus", "https://keel-nexus.local")
+	if err != nil {
+		t.Fatalf("BuildSignedPairHalf (owner): %v", err)
+	}
+
 	stopApprover := make(chan struct{})
 	go func() {
 		tick := time.NewTicker(10 * time.Millisecond)
@@ -87,16 +111,16 @@ func TestPairFullFlow(t *testing.T) {
 			case <-stopApprover:
 				return
 			case <-tick.C:
-				fake.approveAllPending(ownCh.PublicKeyBytes())
+				fake.approveAllPending(ownerHalf)
 			}
 		}
 	}()
 	defer close(stopApprover)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	result, err := client.Pair(ctx, reqCh, "keel", "keel-nexus", "https://keel.local")
+	result, err := client.Pair(timeoutCtx, reqCh, "keel", "keel-nexus", "https://keel.local")
 	if err != nil {
 		t.Fatalf("Pair: %v", err)
 	}
@@ -108,6 +132,17 @@ func TestPairFullFlow(t *testing.T) {
 	}
 	if result.PathID != fake.pathID {
 		t.Errorf("result path_id = %q, fake.pathID = %q", result.PathID, fake.pathID)
+	}
+	// v2 protocol: poll response includes owner_half so requester can pair locally.
+	if result.OwnerHalf == nil {
+		t.Errorf("owner_half missing from poll response — v2 protocol requires it on approval")
+	} else {
+		if result.OwnerHalf.DhAlg == "" || result.OwnerHalf.DhPubkey == "" {
+			t.Errorf("owner_half missing dh fields: %+v", result.OwnerHalf)
+		}
+		if result.OwnerHalf.NexusID != "keel-nexus" {
+			t.Errorf("owner_half nexus_id = %q, want keel-nexus", result.OwnerHalf.NexusID)
+		}
 	}
 }
 

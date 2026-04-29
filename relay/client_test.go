@@ -2,7 +2,6 @@ package relay
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -186,24 +185,19 @@ func TestDiscover(t *testing.T) {
 }
 
 // TestSubmitPairRequest exercises POST /pair/request with a hand-built
-// self-signature. Once casket-go exposes Channel.Sign, Part 3.3 wraps
-// this behind a Pair() convenience.
+// v2 self-signature (dh_alg + dh_pubkey covered by preimage).
 func TestSubmitPairRequest(t *testing.T) {
 	client, _, _, teardown := setupFixture(t)
 	defer teardown()
-	pub, priv, _ := ed25519.GenerateKey(nil)
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	nonce := base64.RawURLEncoding.EncodeToString(make([]byte, 16))
-	ts := IsoTs(time.Now().UTC())
-	selfSig := ed25519.Sign(priv, CanonicalHalfBytes("bob", "ed25519", pubB64, "https://bob", nonce, ts))
+	ch, _ := casket.Load(context.Background(), "bob", newInMemStorage(), casket.P256)
+	half, err := BuildSignedPairHalf(ch, "bob", "https://bob")
+	if err != nil {
+		t.Fatalf("BuildSignedPairHalf: %v", err)
+	}
 
 	res, err := client.SubmitPairRequest(context.Background(), SubmitPairRequestBody{
 		TargetNexusID: "alice",
-		Requester: PairHalfPayload{
-			NexusID: "bob", SigAlg: "ed25519", Pubkey: pubB64,
-			Endpoint: "https://bob", Nonce: nonce, Ts: ts,
-			SelfSig: base64.RawURLEncoding.EncodeToString(selfSig),
-		},
+		Requester:     half,
 	})
 	if err != nil {
 		t.Fatalf("SubmitPairRequest: %v", err)
@@ -216,18 +210,11 @@ func TestSubmitPairRequest(t *testing.T) {
 func TestPollRequestContextCancel(t *testing.T) {
 	client, _, _, teardown := setupFixture(t)
 	defer teardown()
-	pub, priv, _ := ed25519.GenerateKey(nil)
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	nonce := base64.RawURLEncoding.EncodeToString(make([]byte, 16))
-	ts := IsoTs(time.Now().UTC())
-	selfSig := ed25519.Sign(priv, CanonicalHalfBytes("bob", "ed25519", pubB64, "", nonce, ts))
+	ch, _ := casket.Load(context.Background(), "bob", newInMemStorage(), casket.P256)
+	half, _ := BuildSignedPairHalf(ch, "bob", "")
 	res, _ := client.SubmitPairRequest(context.Background(), SubmitPairRequestBody{
 		TargetNexusID: "alice",
-		Requester: PairHalfPayload{
-			NexusID: "bob", SigAlg: "ed25519", Pubkey: pubB64,
-			Nonce: nonce, Ts: ts,
-			SelfSig: base64.RawURLEncoding.EncodeToString(selfSig),
-		},
+		Requester:     half,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
@@ -241,10 +228,17 @@ func TestPollRequestContextCancel(t *testing.T) {
 // --- canonical helper format tests ---
 
 func TestCanonicalHalfBytesFormat(t *testing.T) {
-	got := string(CanonicalHalfBytes("bob", "ed25519", "pub", "ep", "nonce", "2026-04-25T12:00:00Z"))
-	want := "v1\nbob\ned25519\npub\nep\nnonce\n2026-04-25T12:00:00Z"
+	// v2 preimage: 9 fields, first field is "v2", dh_alg and dh_pubkey after pubkey.
+	got := string(CanonicalHalfBytes("bob", "ed25519", "pub", "P-256", "dhpub", "ep", "nonce", "2026-04-25T12:00:00Z"))
+	want := "v2\nbob\ned25519\npub\nP-256\ndhpub\nep\nnonce\n2026-04-25T12:00:00Z"
 	if got != want {
 		t.Errorf("\ngot  %q\nwant %q", got, want)
+	}
+	// v1 preimage: 7 fields, first field is "v1", no dh fields — accepted during transition.
+	gotV1 := string(canonicalHalfBytesV1("bob", "ed25519", "pub", "ep", "nonce", "2026-04-25T12:00:00Z"))
+	wantV1 := "v1\nbob\ned25519\npub\nep\nnonce\n2026-04-25T12:00:00Z"
+	if gotV1 != wantV1 {
+		t.Errorf("v1:\ngot  %q\nwant %q", gotV1, wantV1)
 	}
 }
 
