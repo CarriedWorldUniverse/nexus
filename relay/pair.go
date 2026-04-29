@@ -66,25 +66,18 @@ func BuildSignedPairHalf(ch *casket.Channel, nexusID, endpoint string) (PairHalf
 	}, nil
 }
 
-// Pair is the requester-side convenience that runs the full
-// staged-approval flow:
+// Pair is the requester-side convenience that runs the full staged-approval
+// flow:
 //
 //  1. Build + sign our half (BuildSignedPairHalf).
 //  2. POST /pair/request (Client.SubmitPairRequest).
-//  3. Poll GET /pair/requests/:id until the owner decides or ctx
-//     cancels (Client.PollRequest).
+//  3. Poll GET /pair/requests/:id until the owner decides or ctx cancels.
 //
-// Returns the final PairResult. On approval, the owner's half is NOT
-// returned by the interchange — the requester must still obtain the
-// owner's PairingToken out-of-band to call channel.Pair locally and
-// instantiate a PairedChannel. This is intentional per v3 spec: the
-// interchange stores pubkeys for signature verification but doesn't
-// redistribute pairing tokens.
-//
-// For the PoC (keel ↔ keel-nexus, one operator both sides), the
-// operator's dashboard on the owner side can render the owner's
-// PairingToken alongside the approved request so the requester side
-// can fetch it — that's dashboard work in Part 4.3.
+// Returns the final PairResult. Under v2 protocol the poll response includes
+// the owner's full half (PairResult.OwnerHalf), so callers can immediately
+// call PairFromHalf to activate a local PairedChannel without any OOB token
+// exchange. v1 peers return OwnerHalf == nil; callers must fall back to
+// Channel.Pair with a manually exchanged PairingToken.
 func (c *Client) Pair(ctx context.Context, ch *casket.Channel, nexusID, targetNexusID, endpoint string) (PairResult, error) {
 	if ch == nil {
 		return PairResult{}, errors.New("relay: Pair: casket.Channel is nil")
@@ -112,4 +105,50 @@ func (c *Client) Pair(ctx context.Context, ch *casket.Channel, nexusID, targetNe
 		return PairResult{}, fmt.Errorf("relay: poll: %w", err)
 	}
 	return final, nil
+}
+
+// PairFromHalf converts a relay-delivered PairHalfPayload into a PairingToken
+// and calls Channel.Pair, returning an active PairedChannel. This is the
+// canonical way to activate a local channel after receiving the peer's half
+// from the interchange (v2 protocol: approve response carries requester_half,
+// poll response carries owner_half).
+//
+// maxAgeSec is passed through to Channel.Pair. For relay-mediated pairs the
+// half was signed at request-submit time and the response may arrive minutes
+// later; 3600 (one hour) is a reasonable default. SDK consumers that know
+// the expected flow latency can tune tighter.
+//
+// Returns ErrBadRequest if the half is missing required fields.
+func PairFromHalf(ctx context.Context, ch *casket.Channel, h PairHalfPayload, maxAgeSec int64) (*casket.PairedChannel, error) {
+	if h.Pubkey == "" || h.DhPubkey == "" || h.DhAlg == "" || h.NexusID == "" {
+		return nil, fmt.Errorf("%w: peer half missing required fields (pubkey/dh_pubkey/dh_alg/nexus_id)", ErrBadRequest)
+	}
+
+	tsUnix, err := parseIsoTs(h.Ts)
+	if err != nil {
+		return nil, fmt.Errorf("%w: peer half ts: %v", ErrBadRequest, err)
+	}
+
+	token := casket.PairingToken{
+		V:        1,
+		NexusID:  h.NexusID,
+		SigAlg:   h.SigAlg,
+		DhAlg:    casket.DhAlgorithm(h.DhAlg),
+		Pubkey:   h.Pubkey,
+		DhPubkey: h.DhPubkey,
+		Endpoint: h.Endpoint,
+		Nonce:    h.Nonce,
+		Ts:       tsUnix,
+	}
+	return ch.Pair(ctx, token, maxAgeSec)
+}
+
+// parseIsoTs parses the protocol's ISO 8601 UTC timestamp (e.g.
+// "2026-04-30T12:00:00Z") into a Unix second value for Channel.Pair.
+func parseIsoTs(s string) (int64, error) {
+	t, err := time.Parse("2006-01-02T15:04:05Z", s)
+	if err != nil {
+		return 0, err
+	}
+	return t.Unix(), nil
 }
