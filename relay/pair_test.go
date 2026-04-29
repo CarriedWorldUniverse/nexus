@@ -197,3 +197,74 @@ func TestPairBlocksUntilDecision(t *testing.T) {
 		t.Errorf("expected ctx deadline error, got nil")
 	}
 }
+
+// TestPairFromHalf — happy path: a half built by BuildSignedPairHalf round-trips
+// through PairFromHalf and produces a PairedChannel with the correct pathID.
+func TestPairFromHalf(t *testing.T) {
+	ctx := context.Background()
+	aCh, _ := casket.Load(ctx, "alice", newInMemStorage(), casket.P256)
+	bCh, _ := casket.Load(ctx, "bob", newInMemStorage(), casket.P256)
+
+	// Build halves for both sides (simulating what the relay delivers).
+	aHalf, err := BuildSignedPairHalf(aCh, "alice", "https://alice.local")
+	if err != nil {
+		t.Fatalf("BuildSignedPairHalf alice: %v", err)
+	}
+	bHalf, err := BuildSignedPairHalf(bCh, "bob", "https://bob.local")
+	if err != nil {
+		t.Fatalf("BuildSignedPairHalf bob: %v", err)
+	}
+
+	// Each side pairs using the other's half — no OOB PairingToken exchange.
+	aPaired, err := PairFromHalf(ctx, aCh, bHalf, 3600)
+	if err != nil {
+		t.Fatalf("PairFromHalf (alice consumes bob's half): %v", err)
+	}
+	bPaired, err := PairFromHalf(ctx, bCh, aHalf, 3600)
+	if err != nil {
+		t.Fatalf("PairFromHalf (bob consumes alice's half): %v", err)
+	}
+
+	// Both sides must derive the same path_id.
+	if aPaired.PathID() != bPaired.PathID() {
+		t.Errorf("path_id mismatch: alice=%q bob=%q", aPaired.PathID(), bPaired.PathID())
+	}
+	if !strings.HasPrefix(aPaired.PathID(), "nxc_") {
+		t.Errorf("path_id = %q, want nxc_ prefix", aPaired.PathID())
+	}
+}
+
+// TestPairFromHalfMissingFields — rejects a half with blank required fields.
+func TestPairFromHalfMissingFields(t *testing.T) {
+	ctx := context.Background()
+	ch, _ := casket.Load(ctx, "alice", newInMemStorage(), casket.P256)
+
+	cases := []struct {
+		name string
+		h    PairHalfPayload
+	}{
+		{"missing pubkey", PairHalfPayload{NexusID: "bob", DhAlg: "P-256", DhPubkey: "x", Ts: "2026-04-30T00:00:00Z"}},
+		{"missing dh_pubkey", PairHalfPayload{NexusID: "bob", DhAlg: "P-256", Pubkey: "x", Ts: "2026-04-30T00:00:00Z"}},
+		{"missing dh_alg", PairHalfPayload{NexusID: "bob", Pubkey: "x", DhPubkey: "x", Ts: "2026-04-30T00:00:00Z"}},
+		{"missing nexus_id", PairHalfPayload{DhAlg: "P-256", Pubkey: "x", DhPubkey: "x", Ts: "2026-04-30T00:00:00Z"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := PairFromHalf(ctx, ch, tc.h, 3600)
+			if err == nil {
+				t.Errorf("expected error, got nil")
+			}
+		})
+	}
+}
+
+// TestPairFromHalfBadTs — rejects a half with an unparseable timestamp.
+func TestPairFromHalfBadTs(t *testing.T) {
+	ctx := context.Background()
+	ch, _ := casket.Load(ctx, "alice", newInMemStorage(), casket.P256)
+	h := PairHalfPayload{NexusID: "bob", DhAlg: "P-256", Pubkey: "x", DhPubkey: "x", Ts: "not-a-timestamp"}
+	_, err := PairFromHalf(ctx, ch, h, 3600)
+	if err == nil {
+		t.Errorf("expected error for bad ts, got nil")
+	}
+}
