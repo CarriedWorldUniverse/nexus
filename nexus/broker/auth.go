@@ -119,16 +119,45 @@ func (s *TokenStore) ReconcileAgentTokens(ctx context.Context, db *sql.DB, ids [
 	return nil
 }
 
-// ReconcileFrameToken loads or mints the special Frame identity token
-// and persists with admin=true. Returns the token string so the caller
-// can wire it into the orchestrator / Frame harness.
+// ReconcileFrameToken loads or mints the default Frame identity token
+// (FrameAgentID) and persists with admin=true. Used by callers that
+// don't yet know the operator-chosen Frame name (legacy startup paths
+// that pre-date §6.5's data-driven Frame identity). New callers should
+// prefer ReconcileFrameTokenFor with the actual name from frame.Detect.
 func (s *TokenStore) ReconcileFrameToken(ctx context.Context, db *sql.DB) (string, error) {
-	if err := s.reconcileOne(ctx, db, FrameAgentID, true); err != nil {
+	return s.ReconcileFrameTokenFor(ctx, db, FrameAgentID)
+}
+
+// ReconcileFrameTokenFor loads or mints an admin-flagged token for the
+// supplied identity. Returns the token string so the caller can wire it
+// into the embedded Frame's auth context.
+//
+// Per §6.5, the Frame's name is operator-chosen at first-boot and lives
+// in aspect.json, not as a hardcoded constant. Callers in P5+ pass that
+// name here so the persisted token row matches the Frame's actual id.
+//
+// Failure mode: reconcileOne enforces "stored value wins" — if a row
+// already exists with admin=0 (e.g., the operator promoted a previously
+// non-admin aspect to be the Frame), the loaded token resolves with
+// admin=false, which silently breaks every Frame admin call downstream.
+// Surface this loudly here rather than letting the failure surface at
+// the first /api/admin gate. Operator must clear the offending row by
+// hand.
+func (s *TokenStore) ReconcileFrameTokenFor(ctx context.Context, db *sql.DB, name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("auth: frame name required")
+	}
+	if err := s.reconcileOne(ctx, db, name, true); err != nil {
 		return "", err
 	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.byAgent[FrameAgentID], nil
+	tok := s.byAgent[name]
+	info := s.byToken[tok]
+	s.mu.RUnlock()
+	if !info.Admin {
+		return "", fmt.Errorf("auth: frame token for %q resolved admin=false; agent_tokens row predates Frame promotion — clear the row and re-run", name)
+	}
+	return tok, nil
 }
 
 // reconcileOne is the shared mint-or-load core. If a row exists in

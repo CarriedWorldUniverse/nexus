@@ -52,6 +52,7 @@ func main() {
 	// restarts the process and Nexus boots in normal mode with the new
 	// Frame attached. See docs/2026-04-28-frame-role-spec.md §5.
 	resolvedAspectDir := resolveAspectDir(*aspectDir)
+	var detectedFrame *frame.FrameAspect
 	if resolvedAspectDir != "" {
 		detected, derr := frame.Detect(resolvedAspectDir)
 		if derr != nil {
@@ -76,7 +77,8 @@ func main() {
 			logger.Error("frame: bootstrap failed", "err", berr)
 			os.Exit(1)
 		}
-		logger.Info("frame: detected", "name", detected.Frame.Name, "path", detected.Frame.Path)
+		detectedFrame = detected.Frame
+		logger.Info("frame: detected", "name", detectedFrame.Name, "path", detectedFrame.Path)
 	}
 
 	// Normal mode from here on.
@@ -104,6 +106,11 @@ func main() {
 	// the legacy master token until reconciled (deliberate graceful
 	// degrade; cleanup tracked separately).
 	tokenStore := broker.NewTokenStore()
+	// Frame-role aspects are excluded by autospawn.Discover (which
+	// discoverAspectIDs delegates to), so the Frame name will not appear
+	// in aspectIDs. The Frame's admin token is reconciled separately via
+	// frame.Embed below; if the filter is ever relaxed, this would
+	// silently double-reconcile the Frame as a non-admin first.
 	aspectIDs := discoverAspectIDs(*aspectDir, logger)
 	if len(aspectIDs) > 0 {
 		if err := tokenStore.ReconcileAgentTokens(ctx, db, aspectIDs); err != nil {
@@ -112,10 +119,40 @@ func main() {
 		}
 		logger.Info("token reconcile (aspects)", "count", len(aspectIDs))
 	}
-	if _, err := tokenStore.ReconcileFrameToken(ctx, db); err != nil {
-		logger.Error("token reconcile (frame)", "err", err)
-		os.Exit(1)
+	// Frame embedding (P5). When Detect found a Frame, instantiate it
+	// as an in-process aspect — registers in roster with admin=true,
+	// reconciles its admin token. Used by P6 (deliberation loop) and
+	// P7 (admin REST endpoints) downstream. When Detect found no Frame
+	// (resolvedAspectDir was unset), fall back to the legacy default
+	// "frame" identity so legacy callers using NEXUS_TOKEN continue
+	// resolving to an admin identity.
+	var embeddedFrame *frame.EmbeddedFrame
+	if detectedFrame != nil {
+		ef, err := frame.Embed(ctx, frame.EmbedConfig{
+			Detected:   detectedFrame,
+			Roster:     r,
+			TokenStore: tokenStore,
+			DB:         db,
+			Logger:     logger,
+		})
+		if err != nil {
+			logger.Error("frame embed failed", "err", err)
+			os.Exit(1)
+		}
+		embeddedFrame = ef
+	} else {
+		// Pre-§6.5 fallback: no aspect dir configured, so no Frame to
+		// embed. Reconcile the legacy "frame" identity so existing
+		// callers using NEXUS_TOKEN keep resolving to an admin identity.
+		// Operators should set --aspect-dir / NEXUS_ASPECT_DIR to get a
+		// real Frame embedded.
+		logger.Warn("frame: no aspect dir configured; using legacy frame token — set --aspect-dir for §6.5 Frame embedding")
+		if _, err := tokenStore.ReconcileFrameToken(ctx, db); err != nil {
+			logger.Error("token reconcile (frame, legacy)", "err", err)
+			os.Exit(1)
+		}
 	}
+	_ = embeddedFrame // P6/P7/P8 will consume this; for now suppress unused warning.
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
