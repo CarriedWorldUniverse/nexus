@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexus — first boot</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="wizard">
+    <header>
+      <h1>Nexus first boot</h1>
+      <p class="lede">No Frame personality found. Tell Nexus who its Frame should be — name, voice, the LLM that will think for it. After you submit, Nexus shuts down its bootstrap server and restarts with the new Frame attached.</p>
+    </header>
+
+    <form id="setup-form" class="card">
+      <fieldset>
+        <legend>Identity</legend>
+        <label for="name">Name <span class="required">required</span></label>
+        <input id="name" name="name" type="text" autocomplete="off" required pattern="[A-Za-z0-9_]{1,32}" maxlength="32" placeholder="frame">
+        <p class="hint">Alphanumeric + underscore. This becomes the Frame's chat handle (<code>@&lt;name&gt;</code>). Reserved: operator, system, orchestrator, nexus, all.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Voice (optional)</legend>
+        <label for="voice">How should the Frame speak?</label>
+        <textarea id="voice" name="voice" rows="3" placeholder="Default: direct, low-affect, plain. Reports what's happening, asks for clarification when needed, doesn't perform."></textarea>
+      </fieldset>
+
+      <fieldset>
+        <legend>Values (optional)</legend>
+        <label for="values">What does the Frame care about?</label>
+        <textarea id="values" name="values" rows="3" placeholder="Default: the network running well, the operator's time, honest reporting, the aspects' work landing cleanly."></textarea>
+      </fieldset>
+
+      <fieldset>
+        <legend>LLM</legend>
+        <label for="provider">Provider</label>
+        <select id="provider" name="provider" required></select>
+        <label for="model">Model</label>
+        <input id="model" name="model" type="text" autocomplete="off" placeholder="(default for selected provider)">
+        <p class="hint">Leave model blank to use the provider's default.</p>
+      </fieldset>
+
+      <button type="submit" id="submit-btn">Create Frame</button>
+    </form>
+
+    <section id="error" class="error" hidden></section>
+    <section id="success" class="success" hidden>
+      <h2>Frame created</h2>
+      <p id="success-message"></p>
+      <p id="success-restart"></p>
+      <p class="path">Home: <code id="success-path"></code></p>
+    </section>
+  </main>
+
+  <script src="/wizard.js"></script>
+</body>
+</html>

@@ -122,6 +122,213 @@ func TestBootstrap_HappyPath(t *testing.T) {
 	}
 }
 
+func TestBootstrap_HappyPath_FullBundle(t *testing.T) {
+	dir := t.TempDir()
+	addr, _, errCh := startBootstrap(t, dir)
+
+	resp := postSetup(t, addr, SetupRequest{
+		Name:     "frame",
+		Voice:    "Terse and direct.",
+		Values:   "the operator's time, accuracy.",
+		Provider: "claude-api",
+		Model:    "claude-opus-4-7",
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d body=%s", resp.StatusCode, readBody(t, resp))
+	}
+	resp.Body.Close()
+	<-errCh
+
+	// All four template files present in the home folder.
+	homeDir := filepath.Join(dir, "frame")
+	for _, fname := range []string{"aspect.json", "SOUL.md", "CLAUDE.md", "PRIMER.md"} {
+		fp := filepath.Join(homeDir, fname)
+		if _, err := os.Stat(fp); err != nil {
+			t.Errorf("missing %s: %v", fname, err)
+		}
+	}
+
+	// SOUL.md should contain the operator's voice + values.
+	soul, err := os.ReadFile(filepath.Join(homeDir, "SOUL.md"))
+	if err != nil {
+		t.Fatalf("read SOUL.md: %v", err)
+	}
+	if !strings.Contains(string(soul), "Terse and direct.") {
+		t.Error("SOUL.md missing operator's voice")
+	}
+	if !strings.Contains(string(soul), "the operator's time, accuracy.") {
+		t.Error("SOUL.md missing operator's values")
+	}
+
+	// aspect.json should round-trip with role:frame.
+	ajRaw, err := os.ReadFile(filepath.Join(homeDir, "aspect.json"))
+	if err != nil {
+		t.Fatalf("read aspect.json: %v", err)
+	}
+	var aj map[string]any
+	if err := json.Unmarshal(ajRaw, &aj); err != nil {
+		t.Fatalf("aspect.json invalid: %v", err)
+	}
+	if aj["role"] != "frame" {
+		t.Errorf("aspect.json role=%v", aj["role"])
+	}
+	if aj["name"] != "frame" {
+		t.Errorf("aspect.json name=%v", aj["name"])
+	}
+	pc, _ := aj["provider_config"].(map[string]any)
+	if pc["model"] != "claude-opus-4-7" {
+		t.Errorf("aspect.json model=%v", pc["model"])
+	}
+}
+
+func TestBootstrap_DefaultsAppliedWhenOptionalFieldsAbsent(t *testing.T) {
+	// Operator submits only the required name. Defaults should fill in
+	// voice/values/provider/model so the templates render.
+	dir := t.TempDir()
+	addr, _, errCh := startBootstrap(t, dir)
+
+	resp := postSetup(t, addr, SetupRequest{Name: "frame"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d body=%s", resp.StatusCode, readBody(t, resp))
+	}
+	resp.Body.Close()
+	<-errCh
+
+	soul, err := os.ReadFile(filepath.Join(dir, "frame", "SOUL.md"))
+	if err != nil {
+		t.Fatalf("read SOUL.md: %v", err)
+	}
+	if strings.Contains(string(soul), "{{") {
+		t.Errorf("SOUL.md contains unresolved placeholder: %s", string(soul))
+	}
+}
+
+func TestBootstrap_HandleIndexRefusesPathTraversal(t *testing.T) {
+	// embed.FS rejects ".." path elements via fs.ValidPath; a request
+	// like /../etc/passwd should produce a 404 from handleIndex without
+	// any filesystem access. This pins the property explicitly so a
+	// future refactor that switches off embed.FS doesn't regress.
+	dir := t.TempDir()
+	addr, stop, errCh := startBootstrap(t, dir)
+	defer func() {
+		stop()
+		<-errCh
+	}()
+
+	// Request the encoded form so net/http doesn't normalize the dotdot
+	// before our handler sees it. Both should 404.
+	for _, path := range []string{"/../etc/passwd", "/..%2Fescape", "/styles.css/../../../etc/passwd"} {
+		req, _ := http.NewRequest("GET", "http://"+addr+path, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("traversal %s: status=%d (want 404 or 400)", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+}
+
+func TestBootstrap_WizardIndexHasSecurityHeaders(t *testing.T) {
+	dir := t.TempDir()
+	addr, stop, errCh := startBootstrap(t, dir)
+	defer func() {
+		stop()
+		<-errCh
+	}()
+
+	resp, err := http.Get("http://" + addr + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	for _, h := range []string{"Content-Security-Policy", "X-Frame-Options", "X-Content-Type-Options"} {
+		if resp.Header.Get(h) == "" {
+			t.Errorf("missing security header %s", h)
+		}
+	}
+}
+
+func TestBootstrap_ConcurrentDifferentNamesProduceOneFrame(t *testing.T) {
+	// Regression for the TOCTOU bug: concurrent setups with different
+	// names must not produce two frame dirs. Check-and-set-before-write
+	// ensures the second submission is rejected before its filesystem
+	// work begins.
+	dir := t.TempDir()
+	addr, _, errCh := startBootstrap(t, dir)
+
+	type result struct{ status int }
+	results := make(chan result, 2)
+	var wg sync.WaitGroup
+	for i, name := range []string{"frame_a", "frame_b"} {
+		wg.Add(1)
+		i, name := i, name
+		go func() {
+			defer wg.Done()
+			_ = i
+			resp := postSetup(t, addr, SetupRequest{Name: name})
+			results <- result{resp.StatusCode}
+			resp.Body.Close()
+		}()
+	}
+	wg.Wait()
+	close(results)
+	<-errCh
+
+	gotOK := 0
+	for r := range results {
+		if r.status == 200 {
+			gotOK++
+		}
+	}
+	if gotOK != 1 {
+		t.Errorf("expected exactly one 200 across concurrent different-name setups, got %d", gotOK)
+	}
+
+	// And exactly one frame dir exists in agentsDir.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frameCount := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			frameCount++
+		}
+	}
+	if frameCount != 1 {
+		t.Errorf("expected exactly one frame dir, got %d", frameCount)
+	}
+
+	// And Detect should find that single frame cleanly.
+	d, err := Detect(dir)
+	if err != nil {
+		t.Fatalf("post-concurrent Detect: %v", err)
+	}
+	if d.Frame == nil {
+		t.Fatal("expected one frame, got none")
+	}
+}
+
+func TestBootstrap_RejectsUnknownProvider(t *testing.T) {
+	dir := t.TempDir()
+	addr, stop, errCh := startBootstrap(t, dir)
+	defer func() {
+		stop()
+		<-errCh
+	}()
+
+	resp := postSetup(t, addr, SetupRequest{Name: "frame", Provider: "made-up-llm"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(string(body), "made-up-llm") {
+		t.Errorf("error should name bad provider: %s", body)
+	}
+}
+
 func TestBootstrap_RejectsSecondSetup(t *testing.T) {
 	// After a successful setup, Run begins shutting down. We can't
 	// reliably hit a second POST after that, so this test exercises the
@@ -330,7 +537,7 @@ func TestBootstrap_PayloadSizeLimit(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestBootstrap_StubIndexServed(t *testing.T) {
+func TestBootstrap_WizardIndexServed(t *testing.T) {
 	dir := t.TempDir()
 	addr, stop, errCh := startBootstrap(t, dir)
 	defer func() {
@@ -346,9 +553,82 @@ func TestBootstrap_StubIndexServed(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("index status: %d", resp.StatusCode)
 	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("expected text/html, got %q", ct)
+	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "bootstrap mode") {
-		t.Errorf("index body missing bootstrap text: %s", string(body))
+	// Wizard markers — not chasing wording, just confirming the SPA loaded
+	// rather than the old stub.
+	for _, want := range []string{"<form id=\"setup-form\"", "/wizard.js", "/styles.css"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("wizard index missing %q in body", want)
+		}
+	}
+}
+
+func TestBootstrap_WizardStaticAssetsServed(t *testing.T) {
+	dir := t.TempDir()
+	addr, stop, errCh := startBootstrap(t, dir)
+	defer func() {
+		stop()
+		<-errCh
+	}()
+
+	for path, wantCT := range map[string]string{
+		"/styles.css": "text/css",
+		"/wizard.js":  "application/javascript",
+	} {
+		resp, err := http.Get("http://" + addr + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		if resp.StatusCode != 200 {
+			t.Errorf("%s: status=%d", path, resp.StatusCode)
+		}
+		ct := resp.Header.Get("Content-Type")
+		if !strings.HasPrefix(ct, wantCT) {
+			t.Errorf("%s: content-type=%q want prefix %q", path, ct, wantCT)
+		}
+		resp.Body.Close()
+	}
+}
+
+func TestBootstrap_ConfigEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	addr, stop, errCh := startBootstrap(t, dir)
+	defer func() {
+		stop()
+		<-errCh
+	}()
+
+	resp, err := http.Get("http://" + addr + "/bootstrap/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("config status: %d", resp.StatusCode)
+	}
+	var cfg struct {
+		Providers     []string          `json:"providers"`
+		DefaultModels map[string]string `json:"default_models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if len(cfg.Providers) == 0 {
+		t.Error("config returned no providers")
+	}
+	want := map[string]bool{"claude-api": false, "openai-api": false, "ollama-local": false}
+	for _, p := range cfg.Providers {
+		if _, ok := want[p]; ok {
+			want[p] = true
+		}
+	}
+	for p, present := range want {
+		if !present {
+			t.Errorf("config missing provider %q", p)
+		}
 	}
 }
 
@@ -359,7 +639,9 @@ func TestWriteFrameHome_RefusesPathEscape(t *testing.T) {
 	// resolved outside agentsDir. Since the name regex disallows the
 	// chars needed for escape, this is mostly defense-in-depth — assert
 	// the validateName gate fires first.
-	_, err := writeFrameHome(dir, "../escape")
+	req := SetupRequest{Name: "../escape"}
+	applyDefaults(&req)
+	_, err := writeFrameHome(dir, req)
 	if err == nil {
 		t.Fatal("expected error on path-escape name")
 	}
@@ -370,7 +652,9 @@ func TestWriteFrameHome_RefusesExistingDir(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "frame"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := writeFrameHome(dir, "frame")
+	req := SetupRequest{Name: "frame"}
+	applyDefaults(&req)
+	_, err := writeFrameHome(dir, req)
 	if err == nil {
 		t.Fatal("expected error when home already exists")
 	}
