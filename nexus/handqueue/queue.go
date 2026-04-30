@@ -228,8 +228,12 @@ func (q *Queue) Submit(ctx context.Context, req frames.DispatchPayload) (frames.
 		// Spillover: idle aspect; allow above N but under H.
 		q.spawnLocked(item)
 		q.mu.Unlock()
-	case q.activeCount >= q.cfg.HardCeiling:
-		// At hard ceiling: reject without spawning.
+	case aspectActive == 0 && q.activeCount >= q.cfg.HardCeiling:
+		// At hard ceiling AND aspect is idle: this arrival would have
+		// been spillover but there's no headroom. Reject per §6.3 —
+		// the aspect can't enqueue (per §3 "the aspect never enqueues
+		// if they have nothing in flight"; spillover is the only path
+		// for an idle aspect, and it's blocked by H).
 		err := &HardCeilingError{
 			Active:  q.activeCount,
 			SoftCap: q.cfg.MaxConcurrent,
@@ -244,7 +248,7 @@ func (q *Queue) Submit(ctx context.Context, req frames.DispatchPayload) (frames.
 		return frames.DispatchResultPayload{}, err
 	default:
 		// Aspect already has active worker and pool is at/above soft
-		// cap: enqueue tail.
+		// cap: enqueue tail. Queue depth is not capped at v0.1 (§2.2).
 		q.pending = append(q.pending, item)
 		q.log.Debug("dispatch enqueued",
 			"aspect", aspect,
