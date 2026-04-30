@@ -152,7 +152,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	_ = embeddedFrame // P6/P7/P8 will consume this; for now suppress unused warning.
+	_ = embeddedFrame // P6 will consume this; for now suppress unused warning.
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
@@ -208,6 +208,39 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Admin callbacks (#79 lock — REST-only admin surface). Wired only
+	// when an EmbeddedFrame is present, since admin operations belong
+	// to the Frame per spec §3.3. Shutdown is the only fully-implemented
+	// op at P7; compact/rewind ship as 501 not_implemented (REST shape
+	// locked, implementations land when the underlying machinery does).
+	var adminCallbacks *broker.AdminCallbacks
+	if embeddedFrame != nil {
+		adminCallbacks = &broker.AdminCallbacks{
+			Shutdown: func(_ context.Context) error {
+				logger.Info("frame: admin shutdown requested")
+				stop() // cancels the signal-notify ctx → broker's ListenAndServe returns
+				return nil
+			},
+			DispatchStatus: func(_ context.Context) (broker.DispatchStatusReport, error) {
+				stats := queue.Stats()
+				busy := make([]string, 0, len(stats.ActiveByAspect))
+				for a := range stats.ActiveByAspect {
+					busy = append(busy, a)
+				}
+				return broker.DispatchStatusReport{
+					ActiveWorkers: stats.ActiveTotal,
+					SoftCap:       stats.SoftCap,
+					HardCeiling:   stats.HardCeiling,
+					QueueDepth:    stats.QueueDepth,
+					BusyAspects:   busy,
+				}, nil
+			},
+			// Compact / Rewind: nil → 501 not_implemented. Lands in P9
+			// or follow-up parts when the underlying session-storage
+			// surfaces those operations.
+		}
+	}
+
 	b := broker.New(broker.Config{
 		Addr:       *addr,
 		AuthToken:  token,
@@ -216,6 +249,7 @@ func main() {
 		Logger:     logger,
 		Projection: proj,
 		HandQueue:  queue,
+		Admin:      adminCallbacks,
 	}, r)
 
 	// Stale-reap sweep. Runs until ctx cancels.
