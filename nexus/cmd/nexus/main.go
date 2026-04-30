@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"os"
@@ -16,11 +17,17 @@ import (
 
 	"github.com/nexus-cw/nexus/nexus/autospawn"
 	"github.com/nexus-cw/nexus/nexus/broker"
+	"github.com/nexus-cw/nexus/nexus/frame"
 	"github.com/nexus-cw/nexus/nexus/handqueue"
 	"github.com/nexus-cw/nexus/nexus/roster"
 	"github.com/nexus-cw/nexus/nexus/sessions"
 	"github.com/nexus-cw/nexus/nexus/storage"
 )
+
+// exitCodeBootstrapDone signals a successful first-boot setup. Supervisor
+// scripts (or operator) restart the process; on the next boot, the new
+// Frame is detected and Nexus comes up in normal mode.
+const exitCodeBootstrapDone = 64
 
 func main() {
 	addr := flag.String("addr", ":7888", "broker listen address")
@@ -35,14 +42,49 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// First-boot detection. If no Frame personality exists, Nexus comes
+	// up in bootstrap mode (HTTP shell only — no broker, no aspects, no
+	// database) until the operator runs the setup wizard. After a
+	// successful setup, exit with exitCodeBootstrapDone so the supervisor
+	// restarts the process and Nexus boots in normal mode with the new
+	// Frame attached. See docs/2026-04-28-frame-role-spec.md §5.
+	resolvedAspectDir := resolveAspectDir(*aspectDir)
+	if resolvedAspectDir != "" {
+		detected, derr := frame.Detect(resolvedAspectDir)
+		if derr != nil {
+			logger.Error("frame detect failed", "err", derr, "agents_dir", resolvedAspectDir)
+			os.Exit(1)
+		}
+		if detected.Frame == nil {
+			logger.Info("frame: bootstrap mode — no Frame personality found", "agents_dir", resolvedAspectDir)
+			berr := frame.Run(ctx, frame.BootstrapConfig{
+				Addr:      *addr,
+				AgentsDir: resolvedAspectDir,
+				Logger:    logger,
+			})
+			if berr == nil {
+				logger.Info("frame: bootstrap complete — exiting for restart")
+				os.Exit(exitCodeBootstrapDone)
+			}
+			if errors.Is(berr, context.Canceled) {
+				logger.Info("frame: bootstrap interrupted")
+				os.Exit(0)
+			}
+			logger.Error("frame: bootstrap failed", "err", berr)
+			os.Exit(1)
+		}
+		logger.Info("frame: detected", "name", detected.Frame.Name, "path", detected.Frame.Path)
+	}
+
+	// Normal mode from here on.
 	token := os.Getenv(*tokenEnv)
 	if token == "" {
 		logger.Error("missing auth token", "env_var", *tokenEnv)
 		os.Exit(2)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	db, err := storage.Open(ctx, *dataDir, logger)
 	if err != nil {
@@ -227,6 +269,17 @@ func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessP
 // later registers via WS authenticates via the legacy master token
 // until manually reconciled. Errors are logged and treated as
 // "no aspects to reconcile" to keep boot resilient.
+// resolveAspectDir picks the aspect directory from --aspect-dir, then
+// NEXUS_ASPECT_DIR. Returns "" when neither is set, in which case the
+// caller skips frame detection (and bootstrap mode is unreachable —
+// operator must point Nexus at an agents dir for first-boot to work).
+func resolveAspectDir(aspectDirFlag string) string {
+	if aspectDirFlag != "" {
+		return aspectDirFlag
+	}
+	return os.Getenv("NEXUS_ASPECT_DIR")
+}
+
 func discoverAspectIDs(aspectDirFlag string, log *slog.Logger) []string {
 	dir := aspectDirFlag
 	if dir == "" {
