@@ -59,7 +59,7 @@ These aren't permissions the Frame is granted over a baseline aspect — they're
 - **Holds admin endpoints.** `/nexus/admin/*` (rewind, compact, shutdown) are operations on the Nexus, which is the Frame's own body. No other aspect can call them, because no other aspect is the Nexus.
 
 ### 3.4 Constraints
-- **Not a Hand source.** The Frame doesn't dispatch Hands; it has its own context and uses it directly. Hands belong to specialist aspects.
+- ~~**Not a Hand source.** The Frame doesn't dispatch Hands; it has its own context and uses it directly. Hands belong to specialist aspects.~~ **[SUPERSEDED 2026-04-30 by `2026-04-30-hand-dispatch-v0_1.md` §5.3.]** The Frame participates in dispatch as-if-equal with aspects (any aspect can dispatch — Frame is no exception) and additionally exposes a network-protection override surface (abort/kill worker, force-shutdown aspect/network, take-surface-offline). Override gestures require an `admin: true` flag on the bearer token, which only Frame's token carries. See the v0.1 spec for the full model.
 - **No special crypto privileges.** The Frame holds no keys other aspects can't hold. Bootstrap authority is via the in-process trust boundary, not a credential.
 - **One per Nexus.** A Nexus has exactly one Frame. Multiple Frames per Nexus is out of scope (it would re-create the "who speaks for the network" ambiguity this spec exists to resolve).
 
