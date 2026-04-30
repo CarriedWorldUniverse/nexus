@@ -229,7 +229,6 @@ func (a *Agent) sendRegister(ctx context.Context) error {
 			Home:         a.cfg.Home,
 			SessionID:    a.sessionID,
 			Metadata:     a.cfg.Aspect.Metadata,
-			Hands:        a.cfg.Aspect.Hands,
 		},
 	})
 	if err != nil {

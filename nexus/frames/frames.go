@@ -61,12 +61,14 @@ const (
 	KindTurn       Kind = "turn"
 	KindTurnResult Kind = "turn.result"
 
-	// Hand dispatch — stateless single-turn invocation routed through
-	// a dispatcher. hand.error when dispatch couldn't happen at all
-	// (target offline, queue saturated, unknown hand).
-	KindHandDispatch Kind = "hand.dispatch"
-	KindHandResult   Kind = "hand.result"
-	KindHandError    Kind = "hand.error"
+	// Dispatch — fresh-context turn run in an interchangeable worker
+	// slot loaded with the dispatching aspect's identity. Per
+	// hand-dispatch v0.1 §5.1: protocol vocabulary is generic.
+	// `dispatch.error` when dispatch can't happen at all (queue
+	// saturated, hard ceiling, identity mismatch).
+	KindDispatch       Kind = "dispatch"
+	KindDispatchResult Kind = "dispatch.result"
+	KindDispatchError  Kind = "dispatch.error"
 
 	// Chat — the existing comms surface in frame form.
 	KindChatSend     Kind = "chat.send"
@@ -185,7 +187,7 @@ func IsKnown(k Kind) bool {
 	case KindRegister, KindRegisterAck, KindDeregister,
 		KindOutpostRegister, KindOutpostRegisterAck, KindOutpostDeregister,
 		KindTurn, KindTurnResult,
-		KindHandDispatch, KindHandResult, KindHandError,
+		KindDispatch, KindDispatchResult, KindDispatchError,
 		KindChatSend, KindChatDeliver, KindChatReaction, KindChatRead,
 		KindKnowledgeStore, KindKnowledgeSearch, KindKnowledgeSearchResult,
 		KindSessionEntryAppended, KindSessionRewind, KindSessionFork,

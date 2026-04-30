@@ -166,7 +166,7 @@ func TestIsKnownCoversAllDeclaredKinds(t *testing.T) {
 		KindRegister, KindRegisterAck, KindDeregister,
 		KindOutpostRegister, KindOutpostRegisterAck, KindOutpostDeregister,
 		KindTurn, KindTurnResult,
-		KindHandDispatch, KindHandResult, KindHandError,
+		KindDispatch, KindDispatchResult, KindDispatchError,
 		KindChatSend, KindChatDeliver, KindChatReaction, KindChatRead,
 		KindKnowledgeStore, KindKnowledgeSearch, KindKnowledgeSearchResult,
 		KindSessionEntryAppended, KindSessionRewind, KindSessionFork,
@@ -222,13 +222,12 @@ func TestPayloadJSONTags(t *testing.T) {
 			[]string{`"heartbeat_interval_s":15`, `"stale_after_s":60`},
 		},
 		{
-			"HandDispatch",
-			HandDispatchPayload{
-				TargetAspect: "wren", HandName: "verify-canon",
-				ThreadID: "t-1", Invoker: "keel",
-				Input: map[string]any{"text": "x"},
+			"Dispatch",
+			DispatchPayload{
+				Aspect: "wren", Thread: "t-1", DispatchID: "d-1",
+				Payload: map[string]any{"text": "x"},
 			},
-			[]string{`"target_aspect":"wren"`, `"hand_name":"verify-canon"`, `"invoker":"keel"`},
+			[]string{`"aspect":"wren"`, `"thread":"t-1"`, `"dispatch_id":"d-1"`},
 		},
 		{
 			"SessionEntryAppended",

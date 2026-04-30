@@ -1,11 +1,17 @@
-// Package handqueue implements the dispatcher's hand-execution
+// Package handqueue implements the dispatcher's worker-execution
 // queue: FIFO job pool with a max-concurrency cap. Jobs execute by
-// spawning a harness subprocess in hand mode. Per transport spec §6.
+// spawning a harness subprocess in dispatch mode. Per hand-dispatch
+// v0.1 §2.
+//
+// The package name is legacy (per spec §9 directory-rename amnesty);
+// identifiers + types inside use the generic protocol vocabulary
+// (dispatch / worker) rather than the deployment-specific surface
+// vocabulary (hand / summon).
 //
 // v1 scope: single-host execution. The dispatcher that owns this
-// queue runs on the same machine as the target aspect's home. Cross-
-// host routing (send hand.dispatch to a remote Outpost, spawn there)
-// arrives when the Outpost gains its own queue in a later iteration.
+// queue runs on the same machine as the dispatching aspect's home.
+// Cross-host routing arrives when the Outpost gains its own queue in
+// a later iteration.
 package handqueue
 
 import (
@@ -17,18 +23,18 @@ import (
 	"github.com/nexus-cw/nexus/nexus/frames"
 )
 
-// Executor runs a single hand job and returns the result payload.
+// Executor runs a single dispatch and returns the result payload.
 // The real implementation spawns a harness subprocess; tests inject
 // a mock that returns canned results.
 type Executor interface {
-	Execute(ctx context.Context, req frames.HandDispatchPayload) (frames.HandResultPayload, error)
+	Execute(ctx context.Context, req frames.DispatchPayload) (frames.DispatchResultPayload, error)
 }
 
 // ExecutorFunc adapts a plain function to the Executor interface.
-type ExecutorFunc func(ctx context.Context, req frames.HandDispatchPayload) (frames.HandResultPayload, error)
+type ExecutorFunc func(ctx context.Context, req frames.DispatchPayload) (frames.DispatchResultPayload, error)
 
 // Execute implements Executor.
-func (f ExecutorFunc) Execute(ctx context.Context, req frames.HandDispatchPayload) (frames.HandResultPayload, error) {
+func (f ExecutorFunc) Execute(ctx context.Context, req frames.DispatchPayload) (frames.DispatchResultPayload, error) {
 	return f(ctx, req)
 }
 
@@ -60,13 +66,13 @@ type Queue struct {
 // job bundles a dispatch request with the response channel callers
 // block on.
 type job struct {
-	req    frames.HandDispatchPayload
+	req    frames.DispatchPayload
 	respCh chan jobResult
 }
 
 // jobResult is what Run delivers back to Submit's caller.
 type jobResult struct {
-	payload frames.HandResultPayload
+	payload frames.DispatchResultPayload
 	err     error
 }
 
@@ -100,16 +106,16 @@ func New(cfg Config) (*Queue, error) {
 
 // Submit enqueues a job and blocks until the executor returns or the
 // queue shuts down. ctx bounds the wait.
-func (q *Queue) Submit(ctx context.Context, req frames.HandDispatchPayload) (frames.HandResultPayload, error) {
+func (q *Queue) Submit(ctx context.Context, req frames.DispatchPayload) (frames.DispatchResultPayload, error) {
 	respCh := make(chan jobResult, 1)
 	j := job{req: req, respCh: respCh}
 
 	select {
 	case <-q.shutdownCh:
-		return frames.HandResultPayload{}, ErrQueueShutdown
+		return frames.DispatchResultPayload{}, ErrQueueShutdown
 	case q.jobs <- j:
 	case <-ctx.Done():
-		return frames.HandResultPayload{}, ctx.Err()
+		return frames.DispatchResultPayload{}, ctx.Err()
 	}
 
 	select {
@@ -119,7 +125,7 @@ func (q *Queue) Submit(ctx context.Context, req frames.HandDispatchPayload) (fra
 		// Job is already queued and may run anyway; caller just
 		// stops waiting. Worker discards the result when it comes
 		// back (channel has buffer 1, no blocking).
-		return frames.HandResultPayload{}, ctx.Err()
+		return frames.DispatchResultPayload{}, ctx.Err()
 	}
 }
 

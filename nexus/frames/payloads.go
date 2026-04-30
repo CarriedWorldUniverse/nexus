@@ -96,39 +96,52 @@ type TokenUsage struct {
 }
 
 // -------------------------------------------------------------------
-// Hand dispatch
+// Dispatch
 // -------------------------------------------------------------------
+//
+// Per hand-dispatch v0.1 §5.1: protocol uses generic vocabulary.
+// `dispatch` is a unit of work submitted by an aspect to the
+// dispatcher; the dispatcher boots an interchangeable worker slot
+// loaded with the dispatching aspect's identity framing. There is no
+// "target aspect" (the worker is the dispatching aspect on a fresh
+// turn) and no "hand name" (slots are anonymous; persona is inherited
+// from the dispatcher per-dispatch).
 
-// HandDispatchPayload is sent by any aspect to a dispatcher to enqueue
-// a hand invocation against another aspect.
-type HandDispatchPayload struct {
-	TargetAspect string          `json:"target_aspect"`
-	HandName     string          `json:"hand_name"`
-	ThreadID     string          `json:"thread_id,omitempty"`
-	Invoker      string          `json:"invoker"`
-	Input        map[string]any  `json:"input"`
+// DispatchPayload is sent by an aspect to the dispatcher to enqueue a
+// unit of work. The dispatcher fairness-schedules and spawns a worker
+// loaded with the dispatching aspect's home (NEXUS.md / SOUL.md /
+// PRIMER). Per spec §2.2 queue items carry: aspect, thread, payload,
+// submitted_at, dispatch_id. submitted_at lives on the envelope
+// timestamp; the rest are body fields here.
+type DispatchPayload struct {
+	Aspect     string         `json:"aspect"`
+	Thread     string         `json:"thread,omitempty"`
+	DispatchID string         `json:"dispatch_id,omitempty"`
+	Payload    map[string]any `json:"payload"`
 }
 
-// HandResultPayload comes back once the hand harness has completed.
-type HandResultPayload struct {
-	TargetAspect string         `json:"target_aspect"`
-	HandName     string         `json:"hand_name"`
-	ThreadID     string         `json:"thread_id,omitempty"`
-	Output       map[string]any `json:"output"`
-	Tokens       TokenUsage     `json:"tokens"`
-	Model        string         `json:"model,omitempty"`
-	Error        string         `json:"error,omitempty"` // non-empty if the hand ran but failed
+// DispatchResultPayload comes back once a worker has completed its
+// turn. Identity flows: the worker booted as the dispatching aspect,
+// so the result is attributed to that aspect (§2.1 result attribution).
+type DispatchResultPayload struct {
+	Aspect     string         `json:"aspect"`
+	Thread     string         `json:"thread,omitempty"`
+	DispatchID string         `json:"dispatch_id,omitempty"`
+	Output     map[string]any `json:"output"`
+	Tokens     TokenUsage     `json:"tokens"`
+	Model      string         `json:"model,omitempty"`
+	Error      string         `json:"error,omitempty"` // non-empty if the worker ran but failed
 }
 
-// HandErrorPayload signals that dispatch couldn't happen at all —
-// target unreachable, unknown hand, queue saturated, etc. Distinct
-// from HandResult with an error field (which means the hand DID run
-// and failed during execution).
-type HandErrorPayload struct {
-	TargetAspect string `json:"target_aspect"`
-	HandName     string `json:"hand_name"`
-	Reason       string `json:"reason"`
-	Code         string `json:"code"` // "offline" | "unknown_hand" | "queue_full" | "auth" | ...
+// DispatchErrorPayload signals that dispatch couldn't happen at all —
+// queue saturated, hard-ceiling reached, identity mismatch, etc.
+// Distinct from DispatchResult with an error field (which means the
+// worker DID run and failed during execution).
+type DispatchErrorPayload struct {
+	Aspect     string `json:"aspect,omitempty"`
+	DispatchID string `json:"dispatch_id,omitempty"`
+	Reason     string `json:"reason"`
+	Code       string `json:"code"` // "queue_full" | "hard_ceiling" | "identity_mismatch" | ...
 }
 
 // -------------------------------------------------------------------

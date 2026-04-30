@@ -37,9 +37,10 @@ type Config struct {
 	// a DB).
 	Projection *sessions.Projection
 
-	// HandQueue dispatches hand.dispatch frames. Optional — if nil,
-	// the broker responds with a hand.error indicating no dispatcher
-	// configured.
+	// HandQueue dispatches `dispatch` frames. Optional — if nil,
+	// the broker responds with a dispatch.error indicating no
+	// dispatcher configured. (Field name is legacy; the queue
+	// implements the generic dispatch protocol.)
 	HandQueue *handqueue.Queue
 }
 

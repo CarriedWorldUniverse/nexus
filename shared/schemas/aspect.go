@@ -16,6 +16,11 @@ const (
 )
 
 // AspectConfig is the on-disk shape of aspect.json. See spec §3.
+//
+// Per hand-dispatch v0.1 §8: per-aspect named-hand declarations are
+// removed. Workers spawned by the dispatcher inherit the dispatching
+// aspect's identity from its home (NEXUS.md/SOUL.md/PRIMER) at boot;
+// there is no `hands[]` array on aspect.json any more.
 type AspectConfig struct {
 	Name           string         `json:"name"`
 	ContextMode    ContextMode    `json:"context_mode"`
@@ -26,20 +31,7 @@ type AspectConfig struct {
 	NexusURLEnv    string         `json:"nexus_url_env"`
 	AuthTokenEnv   string         `json:"auth_token_env"`
 	CommsPerms     []string       `json:"commsPerms,omitempty"`
-	Hands          []HandConfig   `json:"hands,omitempty"`
 	Metadata       map[string]any `json:"metadata,omitempty"`
-}
-
-// HandConfig declares a stateless single-turn capability the aspect offers.
-// See spec §4.5.4.
-type HandConfig struct {
-	Name            string   `json:"name"`
-	Description     string   `json:"description"`
-	SystemPrompt    string   `json:"system_prompt"`
-	Tools           []string `json:"tools,omitempty"`
-	TimeoutS        int      `json:"timeout_s,omitempty"`
-	AllowedInvokers string   `json:"allowed_invokers,omitempty"`
-	Concurrency     int      `json:"concurrency,omitempty"`
 }
 
 // RegisterRequest is the body of POST /aspects/register. See spec §4.2.
@@ -55,7 +47,6 @@ type RegisterRequest struct {
 	Home         string         `json:"home"`
 	SessionID    string         `json:"session_id"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
-	Hands        []HandConfig   `json:"hands,omitempty"`
 }
 
 // RegisterResponse is returned to an aspect after successful registration.
@@ -95,7 +86,6 @@ type AspectState struct {
 	Home         string         `json:"home"`
 	SessionID    string         `json:"session_id"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
-	Hands        []HandConfig   `json:"hands,omitempty"`
 
 	// Dynamic — refreshed by heartbeats and enrichment fiber.
 	LastHeartbeat time.Time `json:"last_heartbeat"`

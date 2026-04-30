@@ -14,12 +14,12 @@ func TestSubmitRunsExecutor(t *testing.T) {
 	var calls atomic.Int32
 	q, err := New(Config{
 		MaxConcurrent: 1,
-		Executor: ExecutorFunc(func(ctx context.Context, req frames.HandDispatchPayload) (frames.HandResultPayload, error) {
+		Executor: ExecutorFunc(func(ctx context.Context, req frames.DispatchPayload) (frames.DispatchResultPayload, error) {
 			calls.Add(1)
-			return frames.HandResultPayload{
-				TargetAspect: req.TargetAspect,
-				HandName:     req.HandName,
-				Output:       map[string]any{"echo": req.HandName},
+			return frames.DispatchResultPayload{
+				Aspect:     req.Aspect,
+				DispatchID: req.DispatchID,
+				Output:     map[string]any{"echo": req.Aspect},
 			}, nil
 		}),
 	})
@@ -29,16 +29,16 @@ func TestSubmitRunsExecutor(t *testing.T) {
 	defer q.Shutdown(context.Background())
 
 	ctx := context.Background()
-	resp, err := q.Submit(ctx, frames.HandDispatchPayload{
-		TargetAspect: "wren",
-		HandName:     "verify-canon",
-		Input:        map[string]any{"text": "hi"},
+	resp, err := q.Submit(ctx, frames.DispatchPayload{
+		Aspect:     "wren",
+		DispatchID: "d-1",
+		Payload:    map[string]any{"text": "hi"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.HandName != "verify-canon" {
-		t.Errorf("HandName = %q", resp.HandName)
+	if resp.Aspect != "wren" {
+		t.Errorf("Aspect = %q", resp.Aspect)
 	}
 	if calls.Load() != 1 {
 		t.Errorf("executor calls = %d, want 1", calls.Load())
@@ -51,7 +51,7 @@ func TestConcurrencyCap(t *testing.T) {
 	start := make(chan struct{})
 	q, err := New(Config{
 		MaxConcurrent: 3,
-		Executor: ExecutorFunc(func(ctx context.Context, _ frames.HandDispatchPayload) (frames.HandResultPayload, error) {
+		Executor: ExecutorFunc(func(ctx context.Context, _ frames.DispatchPayload) (frames.DispatchResultPayload, error) {
 			n := inFlight.Add(1)
 			for {
 				m := maxSeen.Load()
@@ -65,7 +65,7 @@ func TestConcurrencyCap(t *testing.T) {
 			<-start
 			time.Sleep(50 * time.Millisecond)
 			inFlight.Add(-1)
-			return frames.HandResultPayload{}, nil
+			return frames.DispatchResultPayload{}, nil
 		}),
 	})
 	if err != nil {
@@ -77,8 +77,8 @@ func TestConcurrencyCap(t *testing.T) {
 	results := make(chan error, 10)
 	for i := 0; i < 10; i++ {
 		go func() {
-			_, err := q.Submit(context.Background(), frames.HandDispatchPayload{
-				TargetAspect: "x", HandName: "noop",
+			_, err := q.Submit(context.Background(), frames.DispatchPayload{
+				Aspect: "x",
 			})
 			results <- err
 		}()
@@ -102,13 +102,13 @@ func TestConcurrencyCap(t *testing.T) {
 func TestSubmitSurfacesExecutorError(t *testing.T) {
 	q, _ := New(Config{
 		MaxConcurrent: 1,
-		Executor: ExecutorFunc(func(context.Context, frames.HandDispatchPayload) (frames.HandResultPayload, error) {
-			return frames.HandResultPayload{}, errors.New("simulated failure")
+		Executor: ExecutorFunc(func(context.Context, frames.DispatchPayload) (frames.DispatchResultPayload, error) {
+			return frames.DispatchResultPayload{}, errors.New("simulated failure")
 		}),
 	})
 	defer q.Shutdown(context.Background())
 
-	_, err := q.Submit(context.Background(), frames.HandDispatchPayload{TargetAspect: "x", HandName: "n"})
+	_, err := q.Submit(context.Background(), frames.DispatchPayload{Aspect: "x"})
 	if err == nil || err.Error() != "simulated failure" {
 		t.Errorf("err = %v, want simulated failure", err)
 	}
@@ -120,21 +120,21 @@ func TestSubmitRespectsContext(t *testing.T) {
 	block := make(chan struct{})
 	q, _ := New(Config{
 		MaxConcurrent: 1,
-		Executor: ExecutorFunc(func(ctx context.Context, _ frames.HandDispatchPayload) (frames.HandResultPayload, error) {
+		Executor: ExecutorFunc(func(ctx context.Context, _ frames.DispatchPayload) (frames.DispatchResultPayload, error) {
 			<-block
-			return frames.HandResultPayload{}, nil
+			return frames.DispatchResultPayload{}, nil
 		}),
 	})
 	defer func() { close(block); q.Shutdown(context.Background()) }()
 
 	// Fill the first worker slot.
-	go q.Submit(context.Background(), frames.HandDispatchPayload{TargetAspect: "x", HandName: "first"})
+	go q.Submit(context.Background(), frames.DispatchPayload{Aspect: "x", DispatchID: "first"})
 	time.Sleep(20 * time.Millisecond)
 
 	// Second submit with a tight ctx should time out waiting for result.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := q.Submit(ctx, frames.HandDispatchPayload{TargetAspect: "x", HandName: "second"})
+	_, err := q.Submit(ctx, frames.DispatchPayload{Aspect: "x", DispatchID: "second"})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("err = %v, want DeadlineExceeded", err)
 	}

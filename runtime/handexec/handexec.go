@@ -1,12 +1,28 @@
-// Package handexec implements hand-mode execution for the harness
+// Package handexec implements dispatch-mode execution for the harness
 // binary. Spawned as a fresh subprocess by the dispatcher; reads the
-// invocation from the process args/env; invokes the configured
-// provider; writes a HandResultPayload JSON envelope to stdout;
-// exits. Per transport spec §6.3.
+// dispatch request from stdin; invokes the configured provider; writes
+// a DispatchResultPayload JSON envelope to stdout; exits.
+//
+// Per hand-dispatch v0.1: workers are interchangeable subprocess slots
+// drawn from a shared pool. Each worker boots loaded with the
+// dispatching aspect's identity framing (NEXUS.md / SOUL.md / PRIMER
+// from the aspect home). There are no per-aspect named hands and no
+// per-hand config — the persona inherited from the dispatching aspect
+// IS the slot's persona for the duration of one dispatch.
 //
 // One-shot lifecycle by design — no reconnect loops, no persistent
-// state. Any hand-owned credentials live in the aspect home and are
+// state. Any aspect-owned credentials live in the aspect home and are
 // loaded per-invocation.
+//
+// NOTE (§6.5): identity-bundle loading (NEXUS.md / SOUL.md / PRIMER →
+// composed system prompt) lives behind the Frame harness work. v0.1
+// keeps the spawn machinery in place but currently invokes the
+// provider with the dispatch payload directly; the identity-framing
+// composition lands when the Frame harness ports identity loaders here.
+//
+// The package directory name (`handexec`, parent `nexus/handqueue`)
+// is legacy and kept per spec §9 amnesty — only identifiers and types
+// inside have moved to the generic vocabulary.
 package handexec
 
 import (
@@ -22,70 +38,61 @@ import (
 	"github.com/nexus-cw/nexus/shared/schemas"
 )
 
-// Request is the JSON shape the harness hand-mode reads from stdin.
-// (Arguments could carry it too, but JSON on stdin keeps args clean.)
+// Request is the JSON shape the harness dispatch-mode reads from
+// stdin. Mirrors the body fields of frames.DispatchPayload.
 type Request struct {
-	HandName string         `json:"hand_name"`
-	ThreadID string         `json:"thread_id,omitempty"`
-	Invoker  string         `json:"invoker"`
-	Input    map[string]any `json:"input"`
+	Aspect     string         `json:"aspect"`
+	Thread     string         `json:"thread,omitempty"`
+	DispatchID string         `json:"dispatch_id,omitempty"`
+	Payload    map[string]any `json:"payload"`
 }
 
-// Run reads a Request from stdin, executes the hand against the
-// aspect's configured provider, writes a HandResultPayload to
-// stdout as JSON, returns.
+// Run reads a Request from stdin, executes a single dispatch turn
+// against the aspect's configured provider, writes a
+// DispatchResultPayload to stdout as JSON, returns.
 //
-// On error, writes a minimal HandResultPayload with Error set, plus
-// returns an error so the caller process can exit non-zero.
+// On error, writes a minimal DispatchResultPayload with Error set,
+// plus returns an error so the caller process can exit non-zero.
+//
+// `aspectHome` is the on-disk home for the dispatching aspect — the
+// identity-loading layer (§6.5) consumes this; for now we accept it
+// but only forward the dispatch payload to the provider.
 func Run(ctx context.Context, aspectHome string, aspect schemas.AspectConfig, provider providers.Provider) error {
 	req, err := readRequest(os.Stdin)
 	if err != nil {
-		return writeAndReturnError("read stdin", err)
+		return writeAndReturnError(req, "read stdin", err)
 	}
 
-	hand, ok := findHand(aspect, req.HandName)
-	if !ok {
-		return writeAndReturnError("unknown hand", fmt.Errorf("hand %q not declared in aspect.json", req.HandName))
-	}
-
-	// Build the provider invocation. Hand's system_prompt + the
-	// caller-supplied input, serialised as a prompt. Tools are
-	// wired into the provider call once the runtime's tool
-	// allowlist layer arrives (later part); for now we rely on the
-	// aspect's declared tool list from aspect.json and let the
-	// provider negotiate.
-	promptBytes, err := json.Marshal(req.Input)
+	// The dispatch payload is forwarded to the provider as the prompt
+	// body. The identity-framing system prompt is composed by the
+	// Frame harness layer (§6.5) and not implemented here yet — v0.1
+	// of this refactor is the wire-vocabulary cut, not the identity-
+	// loading wiring.
+	promptBytes, err := json.Marshal(req.Payload)
 	if err != nil {
-		return writeAndReturnError("marshal input", err)
+		return writeAndReturnError(req, "marshal payload", err)
 	}
 
 	result, err := provider.Invoke(ctx, providers.InvokeRequest{
-		Prompt:       string(promptBytes),
-		SystemPrompt: hand.SystemPrompt,
+		Prompt: string(promptBytes),
 	})
 	if err != nil {
-		return writeAndReturnError("provider.Invoke", err)
+		return writeAndReturnError(req, "provider.Invoke", err)
 	}
 
-	// Parse the provider's string output back into a map if it's
-	// JSON-shaped; otherwise wrap it in {text: ...}.
 	output := parseOutput(result.Output)
 
-	resp := frames.HandResultPayload{
-		TargetAspect: aspect.Name,
-		HandName:     req.HandName,
-		ThreadID:     req.ThreadID,
-		Output:       output,
+	resp := frames.DispatchResultPayload{
+		Aspect:     aspect.Name,
+		Thread:     req.Thread,
+		DispatchID: req.DispatchID,
+		Output:     output,
 		Tokens: frames.TokenUsage{
 			Input:  result.Tokens.Input,
 			Output: result.Tokens.Output,
 			Total:  result.Tokens.Total,
 		},
 	}
-
-	// Model name comes from the provider's result if provided;
-	// otherwise leave empty and let the dispatcher default in the
-	// audit log.
 	return writeResponse(resp)
 }
 
@@ -101,19 +108,10 @@ func readRequest(r io.Reader) (Request, error) {
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return Request{}, fmt.Errorf("parse request: %w", err)
 	}
-	if req.HandName == "" {
-		return Request{}, errors.New("hand_name required")
+	if req.Aspect == "" {
+		return Request{}, errors.New("aspect required")
 	}
 	return req, nil
-}
-
-func findHand(cfg schemas.AspectConfig, name string) (schemas.HandConfig, bool) {
-	for _, h := range cfg.Hands {
-		if h.Name == name {
-			return h, true
-		}
-	}
-	return schemas.HandConfig{}, false
 }
 
 // parseOutput attempts to decode the provider string as JSON into a
@@ -126,11 +124,11 @@ func parseOutput(s string) map[string]any {
 	return map[string]any{"text": s}
 }
 
-// writeResponse writes the HandResultPayload as a single-line JSON
+// writeResponse writes the DispatchResultPayload as a single-line JSON
 // envelope to stdout. The dispatcher reads stdout; stderr carries
 // the harness's regular log output (which the dispatcher should
 // forward to its own logs).
-func writeResponse(resp frames.HandResultPayload) error {
+func writeResponse(resp frames.DispatchResultPayload) error {
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return fmt.Errorf("marshal response: %w", err)
@@ -139,15 +137,15 @@ func writeResponse(resp frames.HandResultPayload) error {
 	return err
 }
 
-// writeAndReturnError emits a HandResultPayload with Error set,
+// writeAndReturnError emits a DispatchResultPayload with Error set,
 // returns the underlying error so the caller process can exit non-
-// zero. Keeps the dispatcher's parse path consistent even on
-// failures.
-func writeAndReturnError(label string, err error) error {
-	// Payload has TargetAspect/HandName unset on error — the
-	// dispatcher already knows which hand it dispatched.
-	_ = writeResponse(frames.HandResultPayload{
-		Error: fmt.Sprintf("%s: %v", label, err),
+// zero. Keeps the dispatcher's parse path consistent even on failures.
+func writeAndReturnError(req Request, label string, err error) error {
+	_ = writeResponse(frames.DispatchResultPayload{
+		Aspect:     req.Aspect,
+		Thread:     req.Thread,
+		DispatchID: req.DispatchID,
+		Error:      fmt.Sprintf("%s: %v", label, err),
 	})
 	return fmt.Errorf("%s: %w", label, err)
 }
