@@ -6,6 +6,7 @@ package broker
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -404,20 +405,18 @@ func (c *wsConn) handleChatSendFrame(env frames.Envelope) {
 		from = c.registeredAs
 	}
 
-	// Assign a message id from the frame's ULID so the router can
-	// record participation without needing a separate id generator.
+	// Derive a stable int64 msg id from the frame's ULID. ULIDs are
+	// 26-char Crockford-base32 strings; the first ~10 chars are the
+	// monotonic timestamp, so a string-prefix scheme would make
+	// consecutive messages collide on their first 8 bytes. FNV-64a
+	// over the full ULID gives proper distribution at negligible cost.
 	var msgID int64
 	if env.ID != "" {
-		// Use a truncated hash of the ULID as a stable int64 id.
-		// Not a perfect id (collisions theoretically possible across
-		// many messages), but sufficient for v1 ThreadIndex tracking
-		// where exact uniqueness matters only within a session lifetime.
-		for i, b := range []byte(env.ID) {
-			if i >= 8 {
-				break
-			}
-			msgID = (msgID << 8) | int64(b)
-		}
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(env.ID))
+		// hash sum is uint64; cast to int64 — sign doesn't matter for
+		// equality checks, which is the only thing ThreadIndex does.
+		msgID = int64(h.Sum64())
 	}
 
 	ctx := c.broker.ctx
