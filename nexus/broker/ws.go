@@ -5,7 +5,6 @@ package broker
 
 import (
 	"context"
-	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -32,6 +31,13 @@ type wsConn struct {
 	connectedAt  time.Time
 	log          *slog.Logger
 	mu           sync.Mutex // serialises writes to conn
+
+	// auth holds the TokenInfo resolved from the WS upgrade's bearer
+	// token. Set once at accept time; never mutated for the life of
+	// the connection. Used by dispatch handlers (and Drift D override
+	// handlers) to enforce identity-mismatch and admin checks per
+	// hand-dispatch v0.1 §5.3 and §5.4.
+	auth TokenInfo
 }
 
 // Maximum time we'll spend reading one frame before tearing down the
@@ -49,8 +55,12 @@ const maxFrameBytes = 1 << 20 // 1 MiB
 // dispatches them to kind handlers.
 func (b *Broker) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// Auth runs BEFORE upgrade so bad tokens get a clean 401, not a
-	// half-open WS that immediately closes.
-	if !b.authCheckHeader(r) {
+	// half-open WS that immediately closes. Resolve the bearer token
+	// to a TokenInfo (per-aspect identity + admin flag) and stash on
+	// the wsConn so subsequent frames can enforce identity per
+	// hand-dispatch v0.1 §5.4.
+	authInfo, ok := b.resolveUpgradeAuth(r)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -74,7 +84,8 @@ func (b *Broker) handleConnect(w http.ResponseWriter, r *http.Request) {
 		conn:        wsc,
 		broker:      b,
 		connectedAt: time.Now().UTC(),
-		log:         b.log.With("conn_id", connID),
+		log:         b.log.With("conn_id", connID, "agent_id", authInfo.AgentID),
+		auth:        authInfo,
 	}
 
 	// The WS connection outlives the HTTP request, so we can't use
@@ -90,16 +101,19 @@ func (b *Broker) handleConnect(w http.ResponseWriter, r *http.Request) {
 	go c.serve(parentCtx)
 }
 
-// authCheckHeader extracts the bearer token from the upgrade request
-// and compares to the configured token in constant time.
-func (b *Broker) authCheckHeader(r *http.Request) bool {
-	const prefix = "Bearer "
-	header := r.Header.Get("Authorization")
-	if len(header) <= len(prefix) || header[:len(prefix)] != prefix {
-		return false
+// resolveUpgradeAuth extracts the bearer from the upgrade request and
+// resolves it to a TokenInfo via the broker's TokenStore. Returns
+// (info, true) on a successful resolve; (zero, false) on missing or
+// unknown token. Per-aspect tokens (minted via ReconcileAgentTokens)
+// resolve to the aspect's identity; the legacy shared AuthToken — if
+// configured — resolves to the Frame identity (admin=true) for
+// back-compat with pre-drift-C callers.
+func (b *Broker) resolveUpgradeAuth(r *http.Request) (TokenInfo, bool) {
+	token := ExtractBearer(r.Header.Get("Authorization"))
+	if token == "" {
+		return TokenInfo{}, false
 	}
-	given := header[len(prefix):]
-	return subtle.ConstantTimeCompare([]byte(given), []byte(b.cfg.AuthToken)) == 1
+	return b.cfg.Tokens.ResolveToken(token)
 }
 
 // serve runs the per-connection read loop. Exits when the connection
@@ -210,6 +224,17 @@ func (c *wsConn) executeDispatch(env frames.Envelope) {
 		return
 	}
 
+	// Identity enforcement per hand-dispatch v0.1 §5.4: caller's
+	// resolved identity must match the dispatch's aspect field.
+	// Frame (admin=true) is allowed to dispatch on behalf of any
+	// aspect — Frame's coordination role can spawn workers under any
+	// identity, mirroring agent-network's enforceIdentity carve-out
+	// for the operator role. Aspects can only dispatch as themselves.
+	if !c.auth.Admin && c.auth.AgentID != payload.Aspect {
+		c.sendIdentityMismatch(env, payload.DispatchID, c.auth.AgentID, payload.Aspect)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	result, err := c.broker.cfg.HandQueue.Submit(ctx, payload)
@@ -224,6 +249,18 @@ func (c *wsConn) executeDispatch(env frames.Envelope) {
 		return
 	}
 	c.send(resp)
+}
+
+// sendIdentityMismatch is the structured 403 for a dispatch where the
+// caller's resolved identity doesn't match the payload's aspect (per
+// hand-dispatch v0.1 §5.4). The expected/claimed split is included in
+// the reason text so debugging callers can see both sides without
+// having to consult the broker logs.
+func (c *wsConn) sendIdentityMismatch(req frames.Envelope, dispatchID, expected, claimed string) {
+	c.log.Warn("dispatch identity mismatch",
+		"expected", expected, "claimed", claimed, "dispatch_id", dispatchID)
+	reason := "caller identity " + expected + " cannot dispatch as " + claimed
+	c.sendDispatchError(req, dispatchID, "identity_mismatch", reason)
 }
 
 // sendDispatchError writes a dispatch.error response correlated to

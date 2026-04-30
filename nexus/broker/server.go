@@ -10,7 +10,6 @@ package broker
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -25,8 +24,26 @@ import (
 
 // Config configures a Broker.
 type Config struct {
-	Addr               string        // host:port, e.g. ":7888"
-	AuthToken          string        // bearer token required on all endpoints
+	Addr string // host:port, e.g. ":7888"
+
+	// AuthToken is the LEGACY shared bearer token. Pre-drift-C, every
+	// caller used this single token and the broker trusted whoever
+	// presented it. Post-drift-C the broker resolves per-aspect tokens
+	// via the TokenStore (hand-dispatch v0.1 §5.3, §5.4); AuthToken is
+	// retained as a back-compat shim — when set, presenting it
+	// resolves to the Frame identity (admin=true). Leave empty in new
+	// deployments; populate per-aspect tokens via TokenStore instead.
+	AuthToken string
+
+	// Tokens carries the per-aspect bearer tokens and admin flags
+	// resolved from agent_tokens. Required for per-aspect identity
+	// resolution; if nil, the broker constructs an empty store and
+	// only the legacy AuthToken (if set) will authenticate. The
+	// caller (cmd/nexus) is responsible for calling
+	// ReconcileAgentTokens / ReconcileFrameToken before
+	// ListenAndServe.
+	Tokens *TokenStore
+
 	HeartbeatIntervalS int           // value returned to aspects on register
 	StaleAfter         time.Duration // aspect becomes "stale" after this gap
 	Logger             *slog.Logger
@@ -74,6 +91,17 @@ func New(cfg Config, r *roster.Roster) *Broker {
 	if cfg.StaleAfter == 0 {
 		cfg.StaleAfter = 30 * time.Second
 	}
+	// Always have a usable TokenStore. If the caller didn't provide
+	// one (older test paths), construct an empty store. Legacy
+	// AuthToken — when set — is registered as the master-fallback so
+	// pre-drift-C tests and callers continue to authenticate as the
+	// Frame identity (admin=true) without per-aspect minting.
+	if cfg.Tokens == nil {
+		cfg.Tokens = NewTokenStore()
+	}
+	if cfg.AuthToken != "" {
+		cfg.Tokens.SetLegacyMaster(cfg.AuthToken)
+	}
 	return &Broker{cfg: cfg, roster: r, log: cfg.Logger, dispatcher: newDispatcher()}
 }
 
@@ -118,24 +146,44 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	}
 }
 
-// auth rejects any request that doesn't carry the configured bearer token.
+// auth rejects any request whose bearer token does not resolve to a
+// known identity. The resolved TokenInfo is stashed on the request
+// context so handlers downstream can read it via authUserFromContext.
 // Health is left unauthenticated so process supervisors can poll it.
 func (b *Broker) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		const prefix = "Bearer "
-		header := r.Header.Get("Authorization")
-		if len(header) <= len(prefix) || header[:len(prefix)] != prefix {
+		token := ExtractBearer(r.Header.Get("Authorization"))
+		if token == "" {
 			writeError(w, http.StatusUnauthorized, "missing bearer token")
 			return
 		}
-		given := header[len(prefix):]
-		if subtle.ConstantTimeCompare([]byte(given), []byte(b.cfg.AuthToken)) != 1 {
+		info, ok := b.cfg.Tokens.ResolveToken(token)
+		if !ok {
 			writeError(w, http.StatusUnauthorized, "invalid bearer token")
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(withAuthUser(r.Context(), info)))
 	})
 }
+
+// authUserCtxKey is the unexported context key under which the
+// resolved TokenInfo is stored. Exported only via withAuthUser /
+// AuthUserFromContext helpers below.
+type authUserCtxKey struct{}
+
+// withAuthUser returns a copy of ctx carrying the TokenInfo.
+func withAuthUser(ctx context.Context, info TokenInfo) context.Context {
+	return context.WithValue(ctx, authUserCtxKey{}, info)
+}
+
+// AuthUserFromContext extracts the TokenInfo a previous auth pass
+// installed on the request context. Returns (zero, false) if absent.
+// Drift D's override handlers will use this to gate admin-only ops.
+func AuthUserFromContext(ctx context.Context) (TokenInfo, bool) {
+	v, ok := ctx.Value(authUserCtxKey{}).(TokenInfo)
+	return v, ok
+}
+
 
 func (b *Broker) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
