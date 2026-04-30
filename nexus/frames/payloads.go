@@ -137,11 +137,18 @@ type DispatchResultPayload struct {
 // queue saturated, hard-ceiling reached, identity mismatch, etc.
 // Distinct from DispatchResult with an error field (which means the
 // worker DID run and failed during execution).
+//
+// For hard_ceiling rejections per spec §6.3, Active/SoftCap/Limit are
+// populated so the caller can decide whether to retry, abort, or
+// surface upward.
 type DispatchErrorPayload struct {
 	Aspect     string `json:"aspect,omitempty"`
 	DispatchID string `json:"dispatch_id,omitempty"`
 	Reason     string `json:"reason"`
 	Code       string `json:"code"` // "queue_full" | "hard_ceiling" | "identity_mismatch" | ...
+	Active     int    `json:"active,omitempty"`
+	SoftCap    int    `json:"soft_cap,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
 }
 
 // -------------------------------------------------------------------

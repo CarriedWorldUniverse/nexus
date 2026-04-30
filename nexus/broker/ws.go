@@ -14,6 +14,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/nexus-cw/nexus/nexus/frames"
+	"github.com/nexus-cw/nexus/nexus/handqueue"
 	"github.com/nexus-cw/nexus/nexus/roster"
 	"github.com/nexus-cw/nexus/nexus/sessions"
 )
@@ -235,11 +236,27 @@ func (c *wsConn) executeDispatch(env frames.Envelope) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	result, err := c.broker.cfg.HandQueue.Submit(ctx, payload)
+	// The dispatcher owns the per-dispatch deadline (spec §5.5). Submit
+	// blocks until the worker exits or the dispatcher's timeout fires.
+	// We use Background here so the broker's caller context doesn't
+	// abort an in-flight dispatch (per spec §6.4: caller cancellation
+	// does not abort a dispatch — only Frame override or the timeout).
+	result, err := c.broker.cfg.HandQueue.Submit(context.Background(), payload)
 	if err != nil {
-		c.sendDispatchError(env, payload.DispatchID, "queue_error", err.Error())
+		// Translate structured queue errors into structured dispatch
+		// errors. HardCeilingError carries the §6.3 fields.
+		var hc *handqueue.HardCeilingError
+		switch {
+		case errors.As(err, &hc):
+			c.sendHardCeiling(env, payload.DispatchID, hc)
+		case errors.Is(err, handqueue.ErrQueueShutdown):
+			c.sendDispatchError(env, payload.DispatchID, "shutdown", err.Error())
+		default:
+			// Dispatcher timeouts surface as a generic queue error
+			// here; the worker-side timeout already posted a
+			// structured timeout result on the originating thread.
+			c.sendDispatchError(env, payload.DispatchID, "queue_error", err.Error())
+		}
 		return
 	}
 
@@ -261,6 +278,27 @@ func (c *wsConn) sendIdentityMismatch(req frames.Envelope, dispatchID, expected,
 		"expected", expected, "claimed", claimed, "dispatch_id", dispatchID)
 	reason := "caller identity " + expected + " cannot dispatch as " + claimed
 	c.sendDispatchError(req, dispatchID, "identity_mismatch", reason)
+}
+
+// sendHardCeiling is the §6.3 structured error: dispatch_rejected with
+// reason=hard_ceiling, plus active / soft_cap / limit fields.
+func (c *wsConn) sendHardCeiling(req frames.Envelope, dispatchID string, hc *handqueue.HardCeilingError) {
+	c.log.Warn("dispatch hard_ceiling rejection",
+		"dispatch_id", dispatchID, "active", hc.Active, "limit", hc.Limit)
+	errPayload := frames.DispatchErrorPayload{
+		DispatchID: dispatchID,
+		Reason:     "hard_ceiling",
+		Code:       "hard_ceiling",
+		Active:     hc.Active,
+		SoftCap:    hc.SoftCap,
+		Limit:      hc.Limit,
+	}
+	env, err := frames.NewResponse(frames.KindDispatchError, req.ID, errPayload)
+	if err != nil {
+		c.log.Error("build dispatch.error frame failed", "err", err)
+		return
+	}
+	c.send(env)
 }
 
 // sendDispatchError writes a dispatch.error response correlated to
