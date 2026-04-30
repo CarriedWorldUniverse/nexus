@@ -63,11 +63,21 @@ func Run(ctx context.Context, aspectHome string, aspect schemas.AspectConfig, pr
 		return writeAndReturnError(req, "read stdin", err)
 	}
 
+	// TODO(§6.5): Frame harness composes the identity-framing system
+	// prompt from aspectHome/NEXUS.md, aspectHome/SOUL.md, and
+	// aspectHome/PRIMER.md, then prepends to req.Payload before
+	// invoking the provider. The dispatcher already passes:
+	//   - aspectHome (this function arg) as the worker's cwd via
+	//     SpawnExecutor's cmd.Dir.
+	//   - NEXUS_TOKEN env carrying the dispatching aspect's bearer
+	//     token, so any callbacks (post results, knowledge) auth as
+	//     that aspect.
+	// Drift D establishes the spawning machinery + identity-passing;
+	// §6.5 wires prompt-composition on top.
+	//
 	// The dispatch payload is forwarded to the provider as the prompt
 	// body. The identity-framing system prompt is composed by the
-	// Frame harness layer (§6.5) and not implemented here yet — v0.1
-	// of this refactor is the wire-vocabulary cut, not the identity-
-	// loading wiring.
+	// Frame harness layer (§6.5) and not implemented here yet.
 	promptBytes, err := json.Marshal(req.Payload)
 	if err != nil {
 		return writeAndReturnError(req, "marshal payload", err)
