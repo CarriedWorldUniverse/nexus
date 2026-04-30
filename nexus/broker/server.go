@@ -59,6 +59,13 @@ type Config struct {
 	// dispatcher configured. (Field name is legacy; the queue
 	// implements the generic dispatch protocol.)
 	HandQueue *handqueue.Queue
+
+	// Admin wires the embedded Frame's admin-action callbacks (#79
+	// lock — REST-only admin surface). When nil, the /api/admin/*
+	// endpoints are not registered. P5 supplies these from the
+	// EmbeddedFrame; pre-§6.5 deployments without a Frame leave Admin
+	// nil and lose the admin surface (correct — no Frame = no admin).
+	Admin *AdminCallbacks
 }
 
 // Broker owns the HTTP server and its roster.
@@ -79,6 +86,10 @@ type Broker struct {
 	// which wsConn holds each aspect name, and delivers correlated
 	// response frames. Used by SendTurn (and later SendHand etc).
 	dispatcher *Dispatcher
+
+	// adminOps tracks in-flight long-running admin operations
+	// (shutdown/compact/rewind). Lazily allocated by registerAdmin.
+	adminOps *adminOpStore
 }
 
 func New(cfg Config, r *roster.Roster) *Broker {
@@ -120,6 +131,11 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	// external monitoring.
 	mux.Handle("GET /api/aspects", b.auth(http.HandlerFunc(b.handleList)))
 	mux.HandleFunc("GET /health", b.handleHealth)
+
+	// Admin REST surface (#79 lock). Registered only when a Frame is
+	// embedded and supplies AdminCallbacks. Per spec §3.3, admin ops
+	// belong to the Frame because the Frame IS the Nexus.
+	b.registerAdmin(mux)
 
 	b.srv = &http.Server{
 		Addr:              b.cfg.Addr,
