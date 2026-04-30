@@ -72,7 +72,6 @@ func (r *Roster) Register(req *schemas.RegisterRequest) (state *schemas.AspectSt
 		Home:          req.Home,
 		SessionID:     req.SessionID,
 		Metadata:      req.Metadata,
-		Hands:         req.Hands,
 		LastHeartbeat: time.Now().UTC(),
 		Status:        "live",
 	}

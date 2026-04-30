@@ -14,8 +14,8 @@ import (
 
 // TestMain lets the test binary double as a fake harness for
 // SpawnExecutor tests. When HANDQUEUE_FAKE_HARNESS env is set, we
-// act like a hand-mode harness: read a handexec.Request from stdin,
-// write a canned HandResultPayload to stdout, exit.
+// act like a dispatch-mode harness: read a handexec.Request from
+// stdin, write a canned DispatchResultPayload to stdout, exit.
 func TestMain(m *testing.M) {
 	if os.Getenv("HANDQUEUE_FAKE_HARNESS") != "" {
 		runFakeHarness()
@@ -32,11 +32,12 @@ func runFakeHarness() {
 		fmt.Fprintln(os.Stderr, "fake harness decode:", err)
 		os.Exit(2)
 	}
-	resp := frames.HandResultPayload{
-		HandName: req.HandName,
+	resp := frames.DispatchResultPayload{
+		Aspect:     req.Aspect,
+		Thread:     req.Thread,
+		DispatchID: req.DispatchID,
 		Output: map[string]any{
-			"echoed_input": req.Input,
-			"invoker":      req.Invoker,
+			"echoed_payload": req.Payload,
 		},
 	}
 	// Mimic a harness that logs to stdout before the JSON envelope.
@@ -62,36 +63,30 @@ func TestSpawnExecutorRoundTrip(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	res, err := ex.Execute(ctx, frames.HandDispatchPayload{
-		TargetAspect: "wren",
-		HandName:     "verify-canon",
-		ThreadID:     "t-1",
-		Invoker:      "keel",
-		Input:        map[string]any{"text": "a passage"},
+	res, err := ex.Execute(ctx, frames.DispatchPayload{
+		Aspect:     "wren",
+		Thread:     "t-1",
+		DispatchID: "d-1",
+		Payload:    map[string]any{"text": "a passage"},
 	})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if res.HandName != "verify-canon" {
-		t.Errorf("HandName = %q", res.HandName)
+	if res.Aspect != "wren" {
+		t.Errorf("Aspect = %q", res.Aspect)
 	}
-	if res.TargetAspect != "wren" {
-		t.Errorf("TargetAspect = %q", res.TargetAspect)
-	}
-	if res.Output["invoker"] != "keel" {
-		t.Errorf("Output.invoker = %v", res.Output["invoker"])
+	if res.DispatchID != "d-1" {
+		t.Errorf("DispatchID = %q", res.DispatchID)
 	}
 	// The fake prints "fake harness starting up" before the JSON —
 	// SpawnExecutor must still find the JSON line.
-	echoedRaw, ok := res.Output["echoed_input"]
+	echoedRaw, ok := res.Output["echoed_payload"]
 	if !ok {
-		t.Errorf("Output.echoed_input missing — stdout parse failed")
+		t.Errorf("Output.echoed_payload missing — stdout parse failed")
 	}
-	// The echoed_input was a map in the request; JSON round-trip
-	// keeps it as a map[string]any.
 	echoedMap, ok := echoedRaw.(map[string]any)
 	if !ok {
-		t.Fatalf("echoed_input type = %T, want map", echoedRaw)
+		t.Fatalf("echoed_payload type = %T, want map", echoedRaw)
 	}
 	if echoedMap["text"] != "a passage" {
 		t.Errorf("echoed text = %v", echoedMap["text"])
@@ -105,9 +100,8 @@ func TestSpawnExecutorRejectsUnknownAspect(t *testing.T) {
 			return "", false
 		}),
 	}
-	_, err := ex.Execute(context.Background(), frames.HandDispatchPayload{
-		TargetAspect: "unknown",
-		HandName:     "x",
+	_, err := ex.Execute(context.Background(), frames.DispatchPayload{
+		Aspect: "unknown",
 	})
 	if err == nil || !strings.Contains(err.Error(), "not locally resolvable") {
 		t.Errorf("err = %v, want not-resolvable", err)

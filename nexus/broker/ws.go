@@ -176,37 +176,37 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleOutpostDeregisterFrame(env)
 	case frames.KindSessionEntryAppended:
 		c.handleSessionEntryAppended(env)
-	case frames.KindHandDispatch:
-		c.handleHandDispatchFrame(env)
+	case frames.KindDispatch:
+		c.handleDispatchFrame(env)
 	default:
 		c.log.Info("frame kind not yet handled", "kind", env.Kind)
 	}
 }
 
-// handleHandDispatchFrame enqueues the job on the broker's
-// HandQueue, awaits the result, and writes a hand.result frame back
-// to the requester correlated by the request's ID.
+// handleDispatchFrame enqueues the job on the broker's HandQueue,
+// awaits the result, and writes a dispatch.result frame back to the
+// requester correlated by the request's ID.
 //
-// Runs in a goroutine to avoid stalling the per-connection read
-// loop during long-running hand execution (same pattern as the
-// aspect's turn handler).
-func (c *wsConn) handleHandDispatchFrame(env frames.Envelope) {
-	go c.executeHandDispatch(env)
+// Runs in a goroutine to avoid stalling the per-connection read loop
+// during long-running dispatch execution (same pattern as the aspect's
+// turn handler).
+func (c *wsConn) handleDispatchFrame(env frames.Envelope) {
+	go c.executeDispatch(env)
 }
 
-func (c *wsConn) executeHandDispatch(env frames.Envelope) {
+func (c *wsConn) executeDispatch(env frames.Envelope) {
 	if c.broker.cfg.HandQueue == nil {
-		c.sendHandError(env, "no_dispatcher", "broker has no HandQueue configured")
+		c.sendDispatchError(env, "", "no_dispatcher", "broker has no HandQueue configured")
 		return
 	}
 
-	var payload frames.HandDispatchPayload
+	var payload frames.DispatchPayload
 	if err := frames.PayloadAs(env, &payload); err != nil {
-		c.sendHandError(env, "bad_request", "hand.dispatch payload malformed: "+err.Error())
+		c.sendDispatchError(env, "", "bad_request", "dispatch payload malformed: "+err.Error())
 		return
 	}
-	if payload.TargetAspect == "" || payload.HandName == "" {
-		c.sendHandError(env, "bad_request", "target_aspect and hand_name required")
+	if payload.Aspect == "" {
+		c.sendDispatchError(env, payload.DispatchID, "bad_request", "aspect required")
 		return
 	}
 
@@ -214,28 +214,29 @@ func (c *wsConn) executeHandDispatch(env frames.Envelope) {
 	defer cancel()
 	result, err := c.broker.cfg.HandQueue.Submit(ctx, payload)
 	if err != nil {
-		c.sendHandError(env, "queue_error", err.Error())
+		c.sendDispatchError(env, payload.DispatchID, "queue_error", err.Error())
 		return
 	}
 
-	resp, rerr := frames.NewResponse(frames.KindHandResult, env.ID, result)
+	resp, rerr := frames.NewResponse(frames.KindDispatchResult, env.ID, result)
 	if rerr != nil {
-		c.log.Error("build hand.result frame failed", "err", rerr)
+		c.log.Error("build dispatch.result frame failed", "err", rerr)
 		return
 	}
 	c.send(resp)
 }
 
-// sendHandError writes a hand.error response correlated to the
-// dispatch request.
-func (c *wsConn) sendHandError(req frames.Envelope, code, reason string) {
-	errPayload := frames.HandErrorPayload{
-		Reason: reason,
-		Code:   code,
+// sendDispatchError writes a dispatch.error response correlated to
+// the dispatch request.
+func (c *wsConn) sendDispatchError(req frames.Envelope, dispatchID, code, reason string) {
+	errPayload := frames.DispatchErrorPayload{
+		DispatchID: dispatchID,
+		Reason:     reason,
+		Code:       code,
 	}
-	env, err := frames.NewResponse(frames.KindHandError, req.ID, errPayload)
+	env, err := frames.NewResponse(frames.KindDispatchError, req.ID, errPayload)
 	if err != nil {
-		c.log.Error("build hand.error frame failed", "err", err)
+		c.log.Error("build dispatch.error frame failed", "err", err)
 		return
 	}
 	c.send(env)

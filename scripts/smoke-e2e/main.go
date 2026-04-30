@@ -1,14 +1,14 @@
 // Command smoke-e2e exercises the §6.4 cross-aspect stack end-to-end:
 // spawns a Nexus, auto-starts a wren aspect from a test aspect dir,
-// drives a hand.dispatch over WS, asserts the hand.result round-
-// trip — everything talks WS.
+// drives a `dispatch` frame over WS, asserts the `dispatch.result`
+// round-trip — everything talks WS.
 //
 // Two modes:
 //
 //   - Default: uses a fake harness (this binary itself, via
 //     HANDQUEUE_FAKE_HARNESS env) so no real Claude calls happen.
 //     Proves the wire: Nexus binds, aspect registers via WS,
-//     hand.dispatch enqueues, subprocess spawns, hand.result flows
+//     dispatch enqueues, subprocess spawns, dispatch.result flows
 //     back correlated.
 //
 //   - -live: uses the real harness binary (built from this repo)
@@ -54,7 +54,7 @@ var (
 
 // TestMain hook: the smoke binary itself acts as a fake harness
 // when HANDQUEUE_FAKE_HARNESS is set. Reads handexec.Request from
-// stdin, writes a canned HandResultPayload to stdout. Keeps the
+// stdin, writes a canned DispatchResultPayload to stdout. Keeps the
 // default mode dependency-free (no Claude).
 func init() {
 	if os.Getenv("HANDQUEUE_FAKE_HARNESS") != "" {
@@ -69,13 +69,15 @@ func runFakeHarness() {
 		fmt.Fprintln(os.Stderr, "fake harness: decode stdin:", err)
 		os.Exit(2)
 	}
-	resp := frames.HandResultPayload{
-		HandName: req.HandName,
+	resp := frames.DispatchResultPayload{
+		Aspect:     req.Aspect,
+		Thread:     req.Thread,
+		DispatchID: req.DispatchID,
 		Output: map[string]any{
 			"consistent": true,
 			"issues":     []string{},
 			"fake":       true,
-			"echoed":     req.Input,
+			"echoed":     req.Payload,
 		},
 	}
 	raw, _ := json.Marshal(resp)
@@ -249,38 +251,37 @@ func run() error {
 		return fmt.Errorf("caller register ack: kind=%v err=%v", ack.Kind, err)
 	}
 
-	// Dispatch a hand.
-	dispatchEnv, _ := frames.NewRequest(frames.KindHandDispatch, frames.HandDispatchPayload{
-		TargetAspect: "wren",
-		HandName:     "verify-canon",
-		ThreadID:     "smoke-thread-1",
-		Invoker:      "smoke-caller",
-		Input:        map[string]any{"text": "A passage for canon check."},
+	// Submit a dispatch.
+	dispatchEnv, _ := frames.NewRequest(frames.KindDispatch, frames.DispatchPayload{
+		Aspect:     "wren",
+		Thread:     "smoke-thread-1",
+		DispatchID: "smoke-dispatch-1",
+		Payload:    map[string]any{"text": "A passage for canon check."},
 	})
 	if err := writeFrame(caller, dispatchEnv); err != nil {
-		return fmt.Errorf("send hand.dispatch: %w", err)
+		return fmt.Errorf("send dispatch: %w", err)
 	}
 
 	resp, err := readFrame(caller)
 	if err != nil {
-		return fmt.Errorf("read hand.result: %w", err)
+		return fmt.Errorf("read dispatch.result: %w", err)
 	}
 	if resp.InReplyTo != dispatchEnv.ID {
 		return fmt.Errorf("response InReplyTo = %q, want %q", resp.InReplyTo, dispatchEnv.ID)
 	}
-	if resp.Kind == frames.KindHandError {
-		var errPayload frames.HandErrorPayload
+	if resp.Kind == frames.KindDispatchError {
+		var errPayload frames.DispatchErrorPayload
 		_ = frames.PayloadAs(resp, &errPayload)
-		return fmt.Errorf("hand.error: code=%s reason=%s", errPayload.Code, errPayload.Reason)
+		return fmt.Errorf("dispatch.error: code=%s reason=%s", errPayload.Code, errPayload.Reason)
 	}
-	if resp.Kind != frames.KindHandResult {
-		return fmt.Errorf("response kind = %q, want hand.result", resp.Kind)
+	if resp.Kind != frames.KindDispatchResult {
+		return fmt.Errorf("response kind = %q, want dispatch.result", resp.Kind)
 	}
-	var result frames.HandResultPayload
+	var result frames.DispatchResultPayload
 	if err := frames.PayloadAs(resp, &result); err != nil {
 		return fmt.Errorf("parse result: %w", err)
 	}
-	fmt.Printf("hand.result: target=%s hand=%s output=%v\n", result.TargetAspect, result.HandName, result.Output)
+	fmt.Printf("dispatch.result: aspect=%s dispatch_id=%s output=%v\n", result.Aspect, result.DispatchID, result.Output)
 
 	if *live {
 		// Real mode: result["consistent"] should exist as bool.
@@ -308,20 +309,11 @@ func writeWrenHome(aspectDir string) error {
 		return err
 	}
 	cfg := schemas.AspectConfig{
-		Name:        "wren",
-		ContextMode: schemas.ContextThread,
-		Provider:    "claude-api",
+		Name:         "wren",
+		ContextMode:  schemas.ContextThread,
+		Provider:     "claude-api",
 		Capabilities: []string{"canon-verify"},
-		Hands: []schemas.HandConfig{
-			{
-				Name:         "verify-canon",
-				Description:  "Verify whether a passage is canon-consistent.",
-				SystemPrompt: "You are wren's verify-canon hand. Respond with a single JSON object {\"consistent\": boolean, \"issues\": [\"...\"]} and nothing else.",
-				TimeoutS:     120,
-				Concurrency:  1,
-			},
-		},
-		Metadata: map[string]any{"auto_spawn": false},
+		Metadata:     map[string]any{"auto_spawn": false},
 	}
 	raw, _ := json.MarshalIndent(cfg, "", "  ")
 	if err := os.WriteFile(filepath.Join(wrenDir, "aspect.json"), raw, 0o644); err != nil {
