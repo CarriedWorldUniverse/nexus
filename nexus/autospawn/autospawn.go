@@ -123,6 +123,14 @@ func Discover(cfg Config) ([]Candidate, error) {
 		if aspectCfg.Name == "" {
 			continue
 		}
+		// Frame aspects (role: frame) are embedded in the Nexus process
+		// directly — see nexus/frame package. They must NOT be
+		// subprocess-spawned; otherwise the broker roster would see two
+		// registrations under the same name (one in-process, one from
+		// the spawned harness) and collide.
+		if aspectCfg.EffectiveRole() == schemas.RoleFrame {
+			continue
+		}
 		// auto_spawn: false opt-out lives under metadata for
 		// forward-compat without having to extend the canonical
 		// schema.

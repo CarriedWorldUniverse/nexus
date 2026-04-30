@@ -94,6 +94,32 @@ func TestDiscoverOptOut(t *testing.T) {
 	}
 }
 
+func TestDiscoverSkipsFrame(t *testing.T) {
+	// Frame aspects (role: frame) embed in the Nexus process; they must
+	// not also be subprocess-spawned, or the broker roster collides on
+	// the name. Discover skips them — embedding is the frame package's
+	// job, not autospawn's.
+	base := t.TempDir()
+
+	writeAspect(t, base, "keel", schemas.AspectConfig{
+		Role:        schemas.RoleFrame,
+		ContextMode: schemas.ContextGlobal,
+		Provider:    "claude-api",
+	})
+	writeAspect(t, base, "wren", schemas.AspectConfig{
+		ContextMode: schemas.ContextThread,
+		Provider:    "claude-api",
+	})
+
+	got, err := Discover(Config{ScanDir: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Name != "wren" {
+		t.Errorf("discovered %+v, want only [wren] (frame skipped)", got)
+	}
+}
+
 func TestDiscoverNonexistentDir(t *testing.T) {
 	// Non-existent scan dir returns empty candidates and no error.
 	got, err := Discover(Config{ScanDir: "/this/does/not/exist"})

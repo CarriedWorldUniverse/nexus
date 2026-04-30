@@ -15,6 +15,21 @@ const (
 	ContextStateless ContextMode = "stateless"
 )
 
+// Role declares whether an aspect home defines a regular aspect or the
+// Nexus's Frame. See frame-role spec §3 — exactly one Frame per Nexus.
+//
+// On-disk values: "aspect" or "frame". Empty (field absent) is treated
+// as RoleAspect for backwards compatibility with pre-Frame aspect.json
+// files. Anything else is unknown — callers should surface as a typo
+// rather than silently coerce, since an unknown role likely means the
+// operator tried to configure something and misspelled it.
+type Role string
+
+const (
+	RoleAspect Role = "aspect"
+	RoleFrame  Role = "frame"
+)
+
 // AspectConfig is the on-disk shape of aspect.json. See spec §3.
 //
 // Per hand-dispatch v0.1 §8: per-aspect named-hand declarations are
@@ -23,6 +38,7 @@ const (
 // there is no `hands[]` array on aspect.json any more.
 type AspectConfig struct {
 	Name           string         `json:"name"`
+	Role           Role           `json:"role,omitempty"` // empty = RoleAspect (back-compat)
 	ContextMode    ContextMode    `json:"context_mode"`
 	Provider       string         `json:"provider"`
 	ProviderConfig map[string]any `json:"provider_config"`
@@ -32,6 +48,30 @@ type AspectConfig struct {
 	AuthTokenEnv   string         `json:"auth_token_env"`
 	CommsPerms     []string       `json:"commsPerms,omitempty"`
 	Metadata       map[string]any `json:"metadata,omitempty"`
+}
+
+// EffectiveRole returns the role with empty-string normalized to RoleAspect.
+// Use this rather than reading c.Role directly so back-compat is uniform.
+// Unknown role strings (e.g. typos) pass through unchanged — callers
+// should check Known() to distinguish "valid role" from "unknown string."
+func (c AspectConfig) EffectiveRole() Role {
+	if c.Role == "" {
+		return RoleAspect
+	}
+	return c.Role
+}
+
+// Known reports whether r is one of the recognized role values. False
+// means the on-disk role string was not the empty string AND not in the
+// known set — likely a typo. Callers should surface this loudly rather
+// than coerce.
+func (r Role) Known() bool {
+	switch r {
+	case RoleAspect, RoleFrame:
+		return true
+	default:
+		return false
+	}
 }
 
 // RegisterRequest is the body of POST /aspects/register. See spec §4.2.
