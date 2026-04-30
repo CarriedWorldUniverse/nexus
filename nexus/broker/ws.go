@@ -193,6 +193,8 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleSessionEntryAppended(env)
 	case frames.KindDispatch:
 		c.handleDispatchFrame(env)
+	case frames.KindChatSend:
+		c.handleChatSendFrame(env)
 	default:
 		c.log.Info("frame kind not yet handled", "kind", env.Kind)
 	}
@@ -377,6 +379,53 @@ func (c *wsConn) handleSessionEntryAppended(env frames.Envelope) {
 		c.log.Warn("session projection write failed",
 			"aspect", payload.Aspect, "entry", payload.EntryID, "err", err)
 	}
+}
+
+// handleChatSendFrame receives a chat.send frame from an aspect and
+// routes it to the ChatRouter (P6 deliberation funnel). Fire-and-forget:
+// the broker does not ack chat.send per the transport spec (chat is
+// best-effort). When no ChatRouter is configured, log and drop (same
+// behaviour as the previous "not yet handled" default).
+func (c *wsConn) handleChatSendFrame(env frames.Envelope) {
+	if c.broker.cfg.ChatRouter == nil || c.broker.cfg.ChatRouter.RouteChat == nil {
+		c.log.Info("chat.send: no router configured, dropping", "from", c.registeredAs)
+		return
+	}
+	var payload frames.ChatSendPayload
+	if err := frames.PayloadAs(env, &payload); err != nil {
+		c.log.Warn("chat.send payload malformed", "err", err, "from", c.registeredAs)
+		return
+	}
+
+	// Assign the sender from the authenticated connection if the
+	// payload doesn't carry one (aspects always set From, but defensive).
+	from := payload.From
+	if from == "" {
+		from = c.registeredAs
+	}
+
+	// Assign a message id from the frame's ULID so the router can
+	// record participation without needing a separate id generator.
+	var msgID int64
+	if env.ID != "" {
+		// Use a truncated hash of the ULID as a stable int64 id.
+		// Not a perfect id (collisions theoretically possible across
+		// many messages), but sufficient for v1 ThreadIndex tracking
+		// where exact uniqueness matters only within a session lifetime.
+		for i, b := range []byte(env.ID) {
+			if i >= 8 {
+				break
+			}
+			msgID = (msgID << 8) | int64(b)
+		}
+	}
+
+	ctx := c.broker.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go c.broker.cfg.ChatRouter.RouteChat(ctx, msgID, from, payload.Content,
+		int64(payload.ReplyTo), payload.Topic)
 }
 
 // handleRegisterFrame processes the first-frame-after-connect register

@@ -15,9 +15,13 @@ import (
 	"syscall"
 	"time"
 
+	bridle "github.com/nexus-cw/bridle"
+	claudeprovider "github.com/nexus-cw/bridle/provider/claude"
 	"github.com/nexus-cw/nexus/nexus/autospawn"
 	"github.com/nexus-cw/nexus/nexus/broker"
 	"github.com/nexus-cw/nexus/nexus/frame"
+	"github.com/nexus-cw/nexus/nexus/frame/funnel"
+	"github.com/nexus-cw/nexus/nexus/frame/route"
 	"github.com/nexus-cw/nexus/nexus/handqueue"
 	"github.com/nexus-cw/nexus/nexus/roster"
 	"github.com/nexus-cw/nexus/nexus/sessions"
@@ -152,7 +156,11 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	_ = embeddedFrame // P6 will consume this; for now suppress unused warning.
+	// P6: build the deliberation funnel from the embedded Frame. The
+	// funnel is the bridge between incoming chat frames and the Frame's
+	// AI personality. When no Frame is embedded (legacy mode), chatRouter
+	// stays nil and the broker logs + drops chat.send frames.
+	chatRouter := buildChatRouter(ctx, embeddedFrame, logger)
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
@@ -250,6 +258,7 @@ func main() {
 		Projection: proj,
 		HandQueue:  queue,
 		Admin:      adminCallbacks,
+		ChatRouter: chatRouter,
 	}, r)
 
 	// Stale-reap sweep. Runs until ctx cancels.
@@ -369,6 +378,86 @@ func discoverAspectIDs(aspectDirFlag string, log *slog.Logger) []string {
 		ids = append(ids, c.Name)
 	}
 	return ids
+}
+
+// buildChatRouter constructs the funnel and returns a ChatRouterCallbacks
+// wired to it. Returns nil when no Frame is embedded (legacy / no-aspect-dir
+// mode), causing the broker to log + drop chat.send frames.
+//
+// The provider is determined by the Frame's aspect.json `provider` field.
+// v1 supports "claude-api" (and "claude" alias); other providers log a
+// warning and fall back to nil (no deliberation). This keeps the Frame
+// operational as a routing surface even when the provider isn't recognised.
+func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, log *slog.Logger) *broker.ChatRouterCallbacks {
+	if ef == nil {
+		return nil
+	}
+
+	provider := ef.Aspect.Config.Provider
+	model := ""
+	if pc := ef.Aspect.Config.ProviderConfig; pc != nil {
+		if m, ok := pc["model"].(string); ok {
+			model = m
+		}
+	}
+
+	var p bridle.Provider
+	switch provider {
+	case "claude-api", "claude":
+		p = claudeprovider.New("")
+	default:
+		log.Warn("frame funnel: unrecognised provider; deliberation disabled",
+			"provider", provider, "frame", ef.Aspect.Name)
+		return nil
+	}
+
+	if model == "" {
+		log.Warn("frame funnel: no model configured in aspect.json; deliberation disabled",
+			"frame", ef.Aspect.Name)
+		return nil
+	}
+
+	threads := route.NewThreadIndex()
+	f, err := funnel.New(funnel.Config{
+		AspectID: ef.Aspect.Name,
+		Harness:  bridle.NewHarness(p),
+		Provider: bridle.ProviderID(provider),
+		Model:    model,
+		Runner:   &funnel.NullRunner{},
+		Threads:  threads,
+		Logger:   log,
+	})
+	if err != nil {
+		log.Error("frame funnel: construction failed; deliberation disabled",
+			"err", err, "frame", ef.Aspect.Name)
+		return nil
+	}
+
+	log.Info("frame funnel: deliberation loop ready",
+		"frame", ef.Aspect.Name, "provider", provider, "model", model)
+
+	frameName := ef.Aspect.Name
+	return &broker.ChatRouterCallbacks{
+		RouteChat: func(rctx context.Context, msgID int64, from, content string, replyTo int64, topic string) {
+			// Route predicate: only deliberate on messages ShouldRouteToFrame
+			// approves. The broker sends us every chat.send frame; we filter
+			// here so the funnel only runs turns for messages the Frame cares about.
+			routeMsg := route.Message{
+				ID:      msgID,
+				From:    from,
+				Content: content,
+				ReplyTo: replyTo,
+				Topic:   topic,
+			}
+			if !route.ShouldRouteToFrame(routeMsg, frameName, threads) {
+				return
+			}
+			f.Receive(bridle.InboxItem{From: from, Content: content})
+			if _, err := f.Deliberate(rctx, ""); err != nil {
+				log.Warn("frame funnel: deliberation error", "err", err, "msg_id", msgID)
+			}
+		},
+	}
 }
 
 func reaper(ctx context.Context, r *roster.Roster, staleAfter, every time.Duration, log *slog.Logger) {
