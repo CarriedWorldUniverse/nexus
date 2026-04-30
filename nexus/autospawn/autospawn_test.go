@@ -114,3 +114,79 @@ func TestDiscoverEmptyDefaultsToStandardDir(t *testing.T) {
 		t.Errorf("want nil error, got %v", err)
 	}
 }
+
+// lastNexusToken returns the effective NEXUS_TOKEN from an env slice,
+// applying os.Exec's last-wins rule for duplicate keys.
+func lastNexusToken(env []string) string {
+	const key = "NEXUS_TOKEN="
+	got := ""
+	for _, e := range env {
+		if len(e) > len(key) && e[:len(key)] == key {
+			got = e[len(key):]
+		}
+	}
+	return got
+}
+
+// TestChildEnvPerAspectTokenWins — when TokenResolver yields a token
+// for the aspect, that NEXUS_TOKEN must be the effective one (last
+// occurrence wins), overriding the legacy shared token in BaseEnv.
+func TestChildEnvPerAspectTokenWins(t *testing.T) {
+	parent := []string{"PATH=/usr/bin"}
+	base := []string{"NEXUS_UPSTREAM=ws://x", "NEXUS_TOKEN=shared"}
+	tr := AspectTokenResolverFunc(func(a string) (string, bool) {
+		if a == "wren" {
+			return "wren-tok", true
+		}
+		return "", false
+	})
+
+	env := childEnv(parent, base, tr, "wren")
+	if got := lastNexusToken(env); got != "wren-tok" {
+		t.Errorf("effective NEXUS_TOKEN = %q, want wren-tok", got)
+	}
+}
+
+// TestChildEnvFallbackOnResolverMiss — when TokenResolver returns
+// false (unknown aspect), BaseEnv's legacy NEXUS_TOKEN remains in
+// effect. Deliberate graceful-degrade per task spec.
+func TestChildEnvFallbackOnResolverMiss(t *testing.T) {
+	parent := []string{"PATH=/usr/bin"}
+	base := []string{"NEXUS_TOKEN=shared-fallback"}
+	tr := AspectTokenResolverFunc(func(string) (string, bool) {
+		return "", false
+	})
+
+	env := childEnv(parent, base, tr, "ghost")
+	if got := lastNexusToken(env); got != "shared-fallback" {
+		t.Errorf("effective NEXUS_TOKEN = %q, want shared-fallback", got)
+	}
+}
+
+// TestChildEnvNilResolver — back-compat: when no resolver is set, the
+// env is exactly parent + BaseEnv.
+func TestChildEnvNilResolver(t *testing.T) {
+	parent := []string{"PATH=/usr/bin"}
+	base := []string{"NEXUS_TOKEN=legacy"}
+
+	env := childEnv(parent, base, nil, "wren")
+	if got := lastNexusToken(env); got != "legacy" {
+		t.Errorf("effective NEXUS_TOKEN = %q, want legacy", got)
+	}
+}
+
+// TestChildEnvEmptyTokenIsMiss — resolver returning ("", true) is
+// treated as a miss; we don't append an empty NEXUS_TOKEN= entry that
+// would clobber the BaseEnv fallback.
+func TestChildEnvEmptyTokenIsMiss(t *testing.T) {
+	parent := []string{}
+	base := []string{"NEXUS_TOKEN=fallback"}
+	tr := AspectTokenResolverFunc(func(string) (string, bool) {
+		return "", true // pathological — empty but ok=true
+	})
+
+	env := childEnv(parent, base, tr, "wren")
+	if got := lastNexusToken(env); got != "fallback" {
+		t.Errorf("effective NEXUS_TOKEN = %q, want fallback", got)
+	}
+}

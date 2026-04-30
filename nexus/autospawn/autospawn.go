@@ -21,6 +21,32 @@ import (
 	"github.com/nexus-cw/nexus/shared/schemas"
 )
 
+// AspectTokenResolver looks up the per-aspect bearer token for the
+// child process. Mirrors handqueue.AspectTokenResolver: when an aspect
+// is being autospawned, that aspect's harness must authenticate to the
+// broker AS that aspect (per-aspect identity §5.4), not via a shared
+// master token. Spawn injects the resolver-supplied token as
+// NEXUS_TOKEN in the child env, overriding any NEXUS_TOKEN passed via
+// BaseEnv.
+//
+// Returns (token, true) when the store has an entry for the aspect;
+// (empty, false) on miss. On miss, Spawn falls back to whatever
+// NEXUS_TOKEN is in BaseEnv — typically the legacy shared token —
+// so boot ordering and unknown-aspect cases degrade gracefully
+// instead of failing closed. (Once all aspects have been reconciled,
+// the legacy fallback can be dropped — see follow-on cleanup task.)
+type AspectTokenResolver interface {
+	TokenFor(aspect string) (string, bool)
+}
+
+// AspectTokenResolverFunc adapts a plain function to AspectTokenResolver.
+type AspectTokenResolverFunc func(aspect string) (string, bool)
+
+// TokenFor implements AspectTokenResolver.
+func (f AspectTokenResolverFunc) TokenFor(aspect string) (string, bool) {
+	return f(aspect)
+}
+
 // Config tunes the scan + spawn behaviour.
 type Config struct {
 	// ScanDir is the directory to scan. Defaults to "./aspects".
@@ -34,7 +60,20 @@ type Config struct {
 	// BaseEnv is propagated to every spawned child. NEXUS_UPSTREAM
 	// / NEXUS_OUTPOST / NEXUS_TOKEN live here. Parent's os.Environ
 	// is also inherited so $PATH and basic settings work.
+	//
+	// When TokenResolver is set and yields a per-aspect token, that
+	// per-aspect NEXUS_TOKEN overrides any NEXUS_TOKEN entry in
+	// BaseEnv for that child. BaseEnv's NEXUS_TOKEN therefore acts
+	// as the legacy fallback for aspects the resolver doesn't know
+	// about (e.g. unrecognised in the token store at startup).
 	BaseEnv []string
+
+	// TokenResolver maps aspect name → bearer token. Optional; when
+	// nil, every child inherits BaseEnv's NEXUS_TOKEN unchanged
+	// (legacy shared-token mode). When set, each child's NEXUS_TOKEN
+	// is the resolver-supplied per-aspect token, with the BaseEnv
+	// value reserved for the resolver-miss fallback path.
+	TokenResolver AspectTokenResolver
 
 	// Logger is optional.
 	Logger *slog.Logger
@@ -130,7 +169,7 @@ func Spawn(cfg Config, candidates []Candidate) error {
 
 	for _, c := range candidates {
 		cmd := exec.Command(cfg.HarnessPath, "-home", c.Path)
-		cmd.Env = append(os.Environ(), cfg.BaseEnv...)
+		cmd.Env = childEnv(os.Environ(), cfg.BaseEnv, cfg.TokenResolver, c.Name)
 
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
@@ -149,6 +188,28 @@ func Spawn(cfg Config, candidates []Candidate) error {
 		log.Info("autospawn: started", "aspect", c.Name, "home", c.Path, "pid", cmd.Process.Pid)
 	}
 	return nil
+}
+
+// childEnv builds the environment slice for an autospawned child:
+// parent env + BaseEnv, plus a per-aspect NEXUS_TOKEN appended last
+// when the resolver yields one. Go's os.Exec applies the LAST
+// occurrence of a duplicate key as the effective value, so the
+// per-aspect token overrides any NEXUS_TOKEN in BaseEnv. When the
+// resolver returns false, BaseEnv's NEXUS_TOKEN remains in effect —
+// the legacy graceful-degrade path for aspects not yet reconciled.
+//
+// Pure helper for unit testing — no syscall side effects, takes the
+// "parent env" as a parameter so tests can pass their own.
+func childEnv(parent, base []string, tokens AspectTokenResolver, aspect string) []string {
+	out := make([]string, 0, len(parent)+len(base)+1)
+	out = append(out, parent...)
+	out = append(out, base...)
+	if tokens != nil {
+		if tok, ok := tokens.TokenFor(aspect); ok && tok != "" {
+			out = append(out, "NEXUS_TOKEN="+tok)
+		}
+	}
+	return out
 }
 
 // logPipe reads lines from the child and emits them with an aspect
