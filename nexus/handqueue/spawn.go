@@ -25,6 +25,29 @@ func (f AspectHomeResolverFunc) HomeFor(aspect string) (string, bool) {
 	return f(aspect)
 }
 
+// AspectTokenResolver looks up the per-aspect bearer token. Per
+// hand-dispatch v0.1 §2.1 (identity inheritance / result attribution):
+// when the dispatcher spawns a worker for aspect X, that worker must
+// authenticate to the broker AS aspect X — same bearer token aspect X
+// uses for its own connection. This makes hand-posts indistinguishable
+// from aspect-posts at the auth layer.
+//
+// Returns (token, true) when the token store has an entry for the
+// aspect; (empty, false) if not. SpawnExecutor falls back to a static
+// FallbackToken (typically the legacy shared NEXUS_TOKEN) on miss so
+// boot/test paths keep working until per-aspect tokens are everywhere.
+type AspectTokenResolver interface {
+	TokenFor(aspect string) (string, bool)
+}
+
+// AspectTokenResolverFunc adapts a plain function to AspectTokenResolver.
+type AspectTokenResolverFunc func(aspect string) (string, bool)
+
+// TokenFor implements AspectTokenResolver.
+func (f AspectTokenResolverFunc) TokenFor(aspect string) (string, bool) {
+	return f(aspect)
+}
+
 // SpawnExecutor runs a dispatch by spawning a harness subprocess in
 // dispatch mode. The harness binary path is configurable so tests can
 // point at a mock; production wires it to the same binary that runs
@@ -44,9 +67,19 @@ type SpawnExecutor struct {
 	// HomeResolver maps aspect name → home folder on this host.
 	HomeResolver AspectHomeResolver
 
+	// TokenResolver maps aspect name → bearer token. Per spec §2.1
+	// identity inheritance: workers authenticate to the broker as the
+	// dispatching aspect (same token), so hand-posts are
+	// indistinguishable from aspect-posts. Optional; if nil, falls
+	// back to whatever NEXUS_TOKEN is in ExtraEnv.
+	TokenResolver AspectTokenResolver
+
 	// Env entries passed to the child, in addition to the parent's.
-	// Typically carries NEXUS_UPSTREAM / NEXUS_OUTPOST / NEXUS_TOKEN
-	// so the worker can query knowledge etc. via WS if/when that lands.
+	// Typically carries NEXUS_UPSTREAM / NEXUS_OUTPOST so the worker
+	// can dial back. Per-aspect NEXUS_TOKEN is injected by Execute
+	// when TokenResolver returns one for the dispatching aspect; an
+	// ExtraEnv NEXUS_TOKEN is the fallback for the no-resolver case
+	// and is overridden by the resolver-supplied token when present.
 	ExtraEnv []string
 }
 
@@ -63,8 +96,23 @@ func (s *SpawnExecutor) Execute(ctx context.Context, req frames.DispatchPayload)
 	}
 
 	cmd := exec.CommandContext(ctx, harness, "-home", home, "-hand")
-	if len(s.ExtraEnv) > 0 {
-		cmd.Env = append(cmd.Environ(), s.ExtraEnv...)
+	// Build env with identity-inheritance per spec §2.1: child
+	// inherits parent env + ExtraEnv, then per-aspect NEXUS_TOKEN
+	// (if a resolver supplies one) overrides any shared fallback.
+	// Working directory is set to the dispatching aspect's home so
+	// any path-relative behavior in the harness (file refs, knowledge
+	// lookup) targets the right aspect.
+	//
+	// TODO(§6.5): the Frame harness will consume `home` to load
+	// NEXUS.md / SOUL.md / PRIMER and compose the system prompt.
+	// The spawning machinery here passes home + bearer token; prompt
+	// composition lives behind the harness layer in §6.5.
+	cmd.Dir = home
+	cmd.Env = append(cmd.Environ(), s.ExtraEnv...)
+	if s.TokenResolver != nil {
+		if tok, ok := s.TokenResolver.TokenFor(req.Aspect); ok && tok != "" {
+			cmd.Env = append(cmd.Env, "NEXUS_TOKEN="+tok)
+		}
 	}
 
 	stdinReq := handexec.Request{
