@@ -66,6 +66,24 @@ type Config struct {
 	// EmbeddedFrame; pre-§6.5 deployments without a Frame leave Admin
 	// nil and lose the admin surface (correct — no Frame = no admin).
 	Admin *AdminCallbacks
+
+	// ChatRouter routes chat.send frames to the embedded Frame's
+	// deliberation funnel (§6.5 P6). When nil, chat.send frames are
+	// logged as "not yet handled" — same behaviour as before P6.
+	// Only chat.send is routed here; chat.deliver and other comms
+	// frames are handled by the aspect WS path.
+	ChatRouter *ChatRouterCallbacks
+}
+
+// ChatRouterCallbacks wires the broker's chat.send handling to the
+// Frame funnel. A nil RouteChat is treated as "no router" — the
+// broker logs and drops chat.send frames.
+type ChatRouterCallbacks struct {
+	// RouteChat is called for every chat.send frame the broker receives.
+	// It runs in a goroutine; the broker does not block on it. Errors
+	// are logged; the caller can't surface them to the sender (WS chat
+	// send is fire-and-forget per the transport spec).
+	RouteChat func(ctx context.Context, msgID int64, from, content string, replyTo int64, topic string)
 }
 
 // Broker owns the HTTP server and its roster.

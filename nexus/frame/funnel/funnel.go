@@ -32,6 +32,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"sync"
@@ -375,6 +376,17 @@ func randHex(n int) string {
 		panic("funnel: crypto/rand failed: " + err.Error())
 	}
 	return hex.EncodeToString(b)
+}
+
+// NullRunner is a ToolRunner that returns an empty JSON object for
+// every call. Used when the Frame has no in-process tools registered —
+// the model still gets a coherent (if useless) tool response so the
+// turn can complete cleanly. Replace with a real runner once send_comms
+// and other tools are wired.
+type NullRunner struct{}
+
+func (NullRunner) Run(_ context.Context, _ bridle.ToolCall) (json.RawMessage, error) {
+	return json.RawMessage(`{}`), nil
 }
 
 // collectSink is a no-op EventSink. v1 funnel doesn't act on bridle
