@@ -59,8 +59,15 @@ func main() {
 	// only dispatches to aspects whose home is on this Nexus host;
 	// cross-host hand dispatch lands when Outposts gain their own
 	// queues.
+	// HardCeiling defaults to roster_size + 1 per spec §2.1, computed
+	// once at startup. Roster grows via registration; restart picks up
+	// any size change. v0.1 defaults to soft+1 if no roster is yet
+	// populated (early boot before aspects connect) — handqueue's
+	// constructor will further bump to MaxConcurrent+1 if needed.
+	hardCeiling := len(r.List()) + 1
 	queue, err := handqueue.New(handqueue.Config{
-		MaxConcurrent: 5,
+		MaxConcurrent: 3,
+		HardCeiling:   hardCeiling,
 		Executor: &handqueue.SpawnExecutor{
 			HomeResolver: handqueue.AspectHomeResolverFunc(func(aspect string) (string, bool) {
 				for _, a := range r.List() {
