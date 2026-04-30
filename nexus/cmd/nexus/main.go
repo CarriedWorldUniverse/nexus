@@ -54,6 +54,43 @@ func main() {
 	r := roster.New()
 	proj := sessions.New(db)
 
+	// Per-aspect token store. Resolved aspect IDs come from the
+	// autospawn discovery pass — those are the aspects this Nexus
+	// is responsible for bringing up, and therefore the ones whose
+	// tokens we mint/load at boot. Aspects that register later via
+	// the WS surface but weren't on the autospawn list resolve via
+	// the legacy master token until reconciled (deliberate graceful
+	// degrade; cleanup tracked separately).
+	tokenStore := broker.NewTokenStore()
+	aspectIDs := discoverAspectIDs(*aspectDir, logger)
+	if len(aspectIDs) > 0 {
+		if err := tokenStore.ReconcileAgentTokens(ctx, db, aspectIDs); err != nil {
+			logger.Error("token reconcile (aspects)", "err", err)
+			os.Exit(1)
+		}
+		logger.Info("token reconcile (aspects)", "count", len(aspectIDs))
+	}
+	if _, err := tokenStore.ReconcileFrameToken(ctx, db); err != nil {
+		logger.Error("token reconcile (frame)", "err", err)
+		os.Exit(1)
+	}
+
+	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
+	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
+	// surface that as (_, false) so SpawnExecutor / autospawn can fall
+	// back to the legacy NEXUS_TOKEN in their respective ExtraEnv/BaseEnv.
+	// Deliberate transition pattern: an aspect that registers without a
+	// reconciled token still spawns under the master token until the
+	// next reconcile pass picks it up. Drop the fallback once all
+	// aspects are reconciled (separate cleanup task).
+	tokenResolverFunc := func(aspect string) (string, bool) {
+		t := tokenStore.TokenForAgent(aspect)
+		if t == "" {
+			return "", false
+		}
+		return t, true
+	}
+
 	// Hand dispatch queue. Executor spawns harness subprocesses in
 	// hand mode. Resolves aspect home paths from the roster — v1
 	// only dispatches to aspects whose home is on this Nexus host;
@@ -77,7 +114,11 @@ func main() {
 				}
 				return "", false
 			}),
+			TokenResolver: handqueue.AspectTokenResolverFunc(tokenResolverFunc),
 			ExtraEnv: []string{
+				// Legacy fallback: when TokenResolver returns false for
+				// an unknown aspect, this NEXUS_TOKEN is still in the
+				// child env (spec'd as the master back-compat path).
 				"NEXUS_TOKEN=" + token,
 			},
 		},
@@ -91,6 +132,7 @@ func main() {
 	b := broker.New(broker.Config{
 		Addr:       *addr,
 		AuthToken:  token,
+		Tokens:     tokenStore,
 		StaleAfter: *staleAfter,
 		Logger:     logger,
 		Projection: proj,
@@ -103,7 +145,8 @@ func main() {
 	// Auto-spawn: after the broker has bound its listener (brief
 	// delay), scan the aspect dir and fire off harness children.
 	// Non-blocking; failures are logged per-aspect.
-	go runAutoSpawn(ctx, logger, *aspectDir, *harnessPath, *addr, token)
+	go runAutoSpawn(ctx, logger, *aspectDir, *harnessPath, *addr, token,
+		autospawn.AspectTokenResolverFunc(tokenResolverFunc))
 
 	if err := b.ListenAndServe(ctx); err != nil {
 		logger.Error("broker exited with error", "err", err)
@@ -116,7 +159,7 @@ func main() {
 // NEXUS_ASPECT_DIR env) and spawns a harness for each. Skipped if
 // no dir is configured. Runs after a short delay so the broker's
 // listener has bound before children try to dial in.
-func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessPathFlag, brokerAddr, token string) {
+func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessPathFlag, brokerAddr, token string, tokens autospawn.AspectTokenResolver) {
 	dir := aspectDirFlag
 	if dir == "" {
 		dir = os.Getenv("NEXUS_ASPECT_DIR")
@@ -155,9 +198,12 @@ func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessP
 		HarnessPath: harnessPath,
 		BaseEnv: []string{
 			"NEXUS_UPSTREAM=" + wsURL,
+			// Legacy NEXUS_TOKEN — used only when TokenResolver returns
+			// no per-aspect token for this child (graceful degrade).
 			"NEXUS_TOKEN=" + token,
 		},
-		Logger: log,
+		TokenResolver: tokens,
+		Logger:        log,
 	}
 
 	candidates, err := autospawn.Discover(cfg)
@@ -172,6 +218,33 @@ func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessP
 	if err := autospawn.Spawn(cfg, candidates); err != nil {
 		log.Error("auto-spawn failed", "err", err)
 	}
+}
+
+// discoverAspectIDs returns the names of aspects discoverable under
+// aspectDirFlag (or NEXUS_ASPECT_DIR). Empty slice when no scan dir
+// is configured or the dir is empty / missing — in that case startup
+// continues with only the Frame token reconciled, and any aspect that
+// later registers via WS authenticates via the legacy master token
+// until manually reconciled. Errors are logged and treated as
+// "no aspects to reconcile" to keep boot resilient.
+func discoverAspectIDs(aspectDirFlag string, log *slog.Logger) []string {
+	dir := aspectDirFlag
+	if dir == "" {
+		dir = os.Getenv("NEXUS_ASPECT_DIR")
+	}
+	if dir == "" {
+		return nil
+	}
+	candidates, err := autospawn.Discover(autospawn.Config{ScanDir: dir})
+	if err != nil {
+		log.Warn("discover aspect ids: scan failed; tokens not reconciled", "dir", dir, "err", err)
+		return nil
+	}
+	ids := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		ids = append(ids, c.Name)
+	}
+	return ids
 }
 
 func reaper(ctx context.Context, r *roster.Roster, staleAfter, every time.Duration, log *slog.Logger) {
