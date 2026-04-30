@@ -1,0 +1,11 @@
+{
+  "name": "{{name}}",
+  "role": "frame",
+  "context_mode": "global",
+  "provider": "{{provider}}",
+  "provider_config": {
+    "model": "{{model}}"
+  },
+  "port": 0,
+  "capabilities": ["bootstrap", "broadcast", "admin"]
+}

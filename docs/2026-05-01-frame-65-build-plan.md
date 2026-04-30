@@ -72,7 +72,7 @@ P6 uses a **standard MCP client** to load tools — mcphub (#83) is a future opt
 
 **What:** Template Markdown files for SOUL.md / NEXUS.md (formerly CLAUDE.md per #68) / PRIMER.md, with simple `{{placeholder}}` substitution for the wizard's answers. v1 ships one template — "default" — extensible.
 
-**Where:** `nexus/frame/templates/default/*.md.tmpl`, `nexus/frame/templates/render.go`.
+**Where:** `nexus/frame/templates/embed/default/{aspect.json,SOUL.md,CLAUDE.md,PRIMER.md}` (embedded via `go:embed`), `nexus/frame/templates/templates.go`. Differs from frame-role spec §5.4's filesystem path — templates ship in the binary, not on disk under `<nexus_root>/templates/`. Spec §5.4 to be reconciled in a follow-up patch.
 
 **Tests:** Substitution happy path, missing placeholder behavior (fail vs leave-as-is — pick one and pin it), unknown placeholder, all three files render together.
 
