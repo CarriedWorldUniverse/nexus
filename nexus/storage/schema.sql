@@ -151,6 +151,30 @@ CREATE INDEX IF NOT EXISTS idx_sp_session    ON session_projection(aspect, sessi
 CREATE INDEX IF NOT EXISTS idx_sp_received   ON session_projection(received_at);
 
 -- -------------------------------------------------------------------
+-- Per-aspect bearer tokens (hand-dispatch v0.1 §5.3, §5.4)
+-- -------------------------------------------------------------------
+-- Each aspect (and the special `frame` identity) holds its own bearer
+-- token. The dispatcher resolves a presented token to its aspect_id and
+-- admin flag; identity-mismatch and admin-required checks cover the
+-- spec's authentication and override-authorization invariants.
+--
+-- `agent_id` is the aspect's name (matches roster.Name) for normal
+-- aspects. The reserved id `frame` carries admin=1 and is the only
+-- identity allowed to call override gestures.
+--
+-- Tokens are minted on first encounter by ReconcileAgentTokens and
+-- persisted; subsequent broker startups load them back. Operator can
+-- reset by deleting the row (next reconcile mints a fresh token).
+CREATE TABLE IF NOT EXISTS agent_tokens (
+  agent_id     TEXT PRIMARY KEY,
+  token        TEXT NOT NULL UNIQUE,
+  admin        INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_tokens_token ON agent_tokens(token);
+
+-- -------------------------------------------------------------------
 -- Schema metadata — marker only. Real migrations defer until first
 -- backwards-incompatible change (per §10 of registration spec).
 -- -------------------------------------------------------------------
