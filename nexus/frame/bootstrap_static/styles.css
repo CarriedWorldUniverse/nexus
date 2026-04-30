@@ -1,0 +1,157 @@
+:root {
+  --bg: #0f1115;
+  --panel: #181b22;
+  --panel-2: #1f232c;
+  --border: #2a2f3a;
+  --text: #e7eaf0;
+  --text-dim: #9aa3b3;
+  --accent: #76d6c0;
+  --accent-dim: #4f9787;
+  --error: #ff7b7b;
+  --success: #76d6c0;
+  --required: #f5b46e;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.wizard {
+  max-width: 44rem;
+  margin: 3rem auto;
+  padding: 0 1.5rem;
+}
+
+header h1 {
+  font-size: 1.6rem;
+  margin: 0 0 0.5rem;
+  letter-spacing: -0.01em;
+}
+
+header .lede {
+  color: var(--text-dim);
+  margin: 0 0 2rem;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1.5rem;
+}
+
+fieldset {
+  border: none;
+  padding: 0;
+  margin: 0 0 1.5rem;
+}
+
+legend {
+  padding: 0;
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+label {
+  display: block;
+  margin: 0.5rem 0 0.25rem;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+label .required {
+  color: var(--required);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-left: 0.5rem;
+}
+
+input[type="text"],
+textarea,
+select {
+  width: 100%;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+  font-family: inherit;
+  font-size: inherit;
+  transition: border-color 0.15s;
+}
+
+input[type="text"]:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 3em;
+}
+
+.hint {
+  margin: 0.4rem 0 0;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+}
+
+.hint code {
+  background: var(--panel-2);
+  padding: 0 0.3rem;
+  border-radius: 2px;
+}
+
+button {
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  border-radius: 4px;
+  padding: 0.6rem 1.2rem;
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+button:hover:not(:disabled) { background: var(--accent-dim); color: var(--text); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.error,
+.success {
+  margin-top: 1.5rem;
+  padding: 1rem 1.2rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.error { border-color: var(--error); color: var(--error); }
+.success { border-color: var(--success); }
+
+.success h2 {
+  margin: 0 0 0.5rem;
+  color: var(--success);
+  font-size: 1.1rem;
+}
+
+.success .path code {
+  background: var(--panel-2);
+  padding: 0.15rem 0.4rem;
+  border-radius: 2px;
+  word-break: break-all;
+}

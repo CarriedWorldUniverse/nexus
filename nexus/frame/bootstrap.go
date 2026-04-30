@@ -1,32 +1,39 @@
 package frame
 
-// Bootstrap-mode HTTP shell — runs when Detect finds no Frame. Serves a
-// minimal landing page (P4 will replace with the real wizard SPA) and
-// accepts a single POST that writes the new Frame's home folder. Returns
-// when setup completes successfully so the caller can exit cleanly and
-// be restarted with the new Frame attached.
+// Bootstrap-mode HTTP shell — runs when Detect finds no Frame. Serves the
+// embedded wizard SPA at / and a single POST /bootstrap/setup that writes
+// the new Frame's home folder via the templates package. Returns when
+// setup completes so the caller can exit cleanly and be restarted with
+// the new Frame attached.
 //
-// P2 scope: HTTP shell only. Templates (P3) and the rich wizard UI (P4)
-// land in subsequent parts. P2 writes a minimal aspect.json with
-// role:frame and the operator-supplied name; that's enough for a
-// normal-mode startup to succeed and detect the new Frame.
+// P2 introduced the HTTP shell + atomic write of a minimal aspect.json.
+// P3 added Markdown templates with placeholder substitution.
+// P4 (this file's current state) wires the templates into setup, ships
+//     the wizard SPA via go:embed, and exposes /bootstrap/config so the
+//     SPA can stay in lockstep with server-side validation.
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/nexus-cw/nexus/nexus/frame/templates"
 )
+
+//go:embed bootstrap_static
+var bootstrapStaticFS embed.FS
 
 // Reserved aspect names — operators can't use these for the Frame because
 // they'd collide with built-in identities or cause confusion in chat.
@@ -46,11 +53,20 @@ var reservedNames = map[string]struct{}{
 // and short enough that broker logs stay readable.
 var nameValid = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
 
-// SetupRequest is the wire payload for POST /bootstrap/setup. Minimal at
-// P2 — just the fields needed to write a valid aspect.json. P3+ extends
-// this with voice/values/provider/api-key as templates land.
+// SetupRequest is the wire payload for POST /bootstrap/setup. The wizard
+// (P4) gathers these answers; the bootstrap server hands them to the
+// templates package to render the new Frame's home folder.
+//
+// All fields except Name have defaults applied if the wizard left them
+// empty — see applyDefaults. The strict-vars contract in templates
+// requires every key to be present; defaults turn "operator skipped"
+// into "operator accepted the default."
 type SetupRequest struct {
-	Name string `json:"name"`
+	Name     string `json:"name"`
+	Voice    string `json:"voice,omitempty"`
+	Values   string `json:"values,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 // SetupResponse is what the operator's browser sees on success. The
@@ -161,18 +177,75 @@ func newBootstrapServer(cfg BootstrapConfig) *bootstrapServer {
 
 func (s *bootstrapServer) mux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /bootstrap/config", s.handleConfig)
 	mux.HandleFunc("POST /bootstrap/setup", s.handleSetup)
+	// Catch-all for static SPA assets (index.html + any sibling files).
+	// Must be last so the /bootstrap/* and /healthz routes win.
+	mux.HandleFunc("GET /", s.handleIndex)
 	return mux
 }
 
-// handleIndex returns a stub page so an operator hitting the server in a
-// browser sees something. P4 replaces this with the real wizard SPA.
+// handleIndex serves the embedded wizard SPA at /. Static files (HTML,
+// CSS, JS) live under bootstrap_static/ and ship in the binary via
+// go:embed. Strip the bootstrap_static prefix so URLs like /styles.css
+// resolve to bootstrap_static/styles.css inside the embed.FS.
 func (s *bootstrapServer) handleIndex(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	requested := strings.TrimPrefix(r.URL.Path, "/")
+	if requested == "" {
+		requested = "index.html"
+	}
+	fpath := "bootstrap_static/" + requested
+	data, err := fs.ReadFile(bootstrapStaticFS, fpath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	switch {
+	case strings.HasSuffix(fpath, ".html"):
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	case strings.HasSuffix(fpath, ".css"):
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	case strings.HasSuffix(fpath, ".js"):
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	}
+	// Security headers — bootstrap port is unauthenticated by design and
+	// runs only until first-boot completes, but the page writes filesystem
+	// state. Same-origin only; no framing; minimal hygiene.
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; form-action 'self'")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(stubPage))
+	_, _ = w.Write(data)
+}
+
+// handleConfig returns the wizard's static configuration — provider list,
+// default model per provider, and any other choices the SPA needs to
+// render. Surfaced via /bootstrap/config so the SPA stays in sync with
+// server-side validation rather than duplicating the allowlist.
+//
+// Single source of truth: providerDefaults. Adding a provider needs one
+// edit there and nothing here.
+func (s *bootstrapServer) handleConfig(w http.ResponseWriter, r *http.Request) {
+	providers := make([]string, 0, len(providerDefaults))
+	for k := range providerDefaults {
+		providers = append(providers, k)
+	}
+	sort.Strings(providers)
+	defaults := make(map[string]string, len(providerDefaults))
+	for k, v := range providerDefaults {
+		defaults[k] = v
+	}
+	cfg := struct {
+		Providers     []string          `json:"providers"`
+		DefaultModels map[string]string `json:"default_models"`
+	}{
+		Providers:     providers,
+		DefaultModels: defaults,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(cfg)
 }
 
 func (s *bootstrapServer) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -182,16 +255,18 @@ func (s *bootstrapServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSetup writes the new Frame's home folder. Single-shot: once a
-// setup succeeds the server is on its way down; further POSTs return 409.
+// setup begins, further POSTs return 409.
+//
+// Single-shot semantics use check-and-set-before-write: we claim the
+// `used` slot under the lock BEFORE calling writeFrameHome, so concurrent
+// POSTs are rejected at the door. This avoids the unlock-between-check-
+// and-write window where two requests with different names could both
+// succeed in writing distinct frame dirs (leaving Detect to find two
+// frame-role aspects on restart, which is ErrMultipleFrames).
+//
+// On write failure after claiming the slot, we restore `used = false` so
+// the operator can retry. The done channel only closes on success.
 func (s *bootstrapServer) handleSetup(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	if s.used {
-		s.mu.Unlock()
-		writeError(w, http.StatusConflict, "bootstrap_already_complete", "setup has already run; restart Nexus to continue")
-		return
-	}
-	s.mu.Unlock()
-
 	if r.ContentLength > 64*1024 {
 		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "setup payload exceeds 64KB")
 		return
@@ -210,24 +285,37 @@ func (s *bootstrapServer) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	homePath, err := writeFrameHome(s.cfg.AgentsDir, req.Name)
+	applyDefaults(&req)
+	if err := validateProvider(req.Provider); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_provider", err.Error())
+		return
+	}
+
+	// Claim the single-shot slot atomically before doing any filesystem
+	// work. Concurrent POSTs are rejected with 409 here, not after their
+	// own write succeeds.
+	s.mu.Lock()
+	if s.used {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, "bootstrap_already_complete", "setup has already run; restart Nexus to continue")
+		return
+	}
+	s.used = true
+	s.mu.Unlock()
+
+	homePath, err := writeFrameHome(s.cfg.AgentsDir, req)
 	if err != nil {
+		// Release the slot so the operator can retry after fixing the
+		// underlying issue (disk full, permissions, etc.).
+		s.mu.Lock()
+		s.used = false
+		s.mu.Unlock()
 		s.cfg.Logger.Error("frame: bootstrap write failed", "name", req.Name, "err", err)
 		writeError(w, http.StatusInternalServerError, "write_failed", err.Error())
 		return
 	}
 
-	s.mu.Lock()
-	if s.used {
-		// Concurrent POST raced us; rollback our write to avoid drift.
-		s.mu.Unlock()
-		_ = os.RemoveAll(homePath)
-		writeError(w, http.StatusConflict, "bootstrap_already_complete", "another setup completed first")
-		return
-	}
-	s.used = true
 	close(s.done)
-	s.mu.Unlock()
 
 	s.cfg.Logger.Info("frame: bootstrap complete", "name", req.Name, "path", homePath)
 
@@ -256,21 +344,61 @@ func validateName(name string) error {
 	return nil
 }
 
-// writeFrameHome creates <agentsDir>/<name>/aspect.json with role:frame
-// and the supplied name. Returns the absolute home path on success.
+// providerDefaults is the single source of truth for both the wizard's
+// allowed provider list AND the default model per provider. applyDefaults
+// and handleConfig both read from this map so adding a provider needs
+// only one edit.
+var providerDefaults = map[string]string{
+	"claude-api":   "claude-opus-4-7",
+	"openai-api":   "gpt-4o",
+	"ollama-local": "llama3.2:3b",
+}
+
+// applyDefaults fills in optional SetupRequest fields with sensible
+// defaults so the strict-vars contract in templates.Render always sees
+// a complete map. Operator-empty fields become operator-accepted defaults.
+func applyDefaults(req *SetupRequest) {
+	if req.Voice == "" {
+		req.Voice = "Direct, low-affect, plain. Reports what's happening, asks for clarification when needed, doesn't perform."
+	}
+	if req.Values == "" {
+		req.Values = "the network running well, the operator's time, honest reporting, the aspects' work landing cleanly."
+	}
+	if req.Provider == "" {
+		req.Provider = "claude-api"
+	}
+	if req.Model == "" {
+		req.Model = providerDefaults[req.Provider]
+	}
+}
+
+// validateProvider checks the provider against the allowed set.
+func validateProvider(p string) error {
+	if _, ok := providerDefaults[p]; !ok {
+		names := make([]string, 0, len(providerDefaults))
+		for k := range providerDefaults {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		return fmt.Errorf("provider %q not allowed; one of: %s", p, strings.Join(names, ", "))
+	}
+	return nil
+}
+
+// writeFrameHome creates <agentsDir>/<name>/{aspect.json,SOUL.md,CLAUDE.md,
+// PRIMER.md} from the "default" template, substituting the wizard's
+// answers. Returns the absolute home path on success.
 //
-// Atomicity: writes a temp file in the home dir then renames into place.
-// If the rename fails, the partial home dir is left for the operator to
-// inspect — better than masking an unclear error with a silent cleanup.
-func writeFrameHome(agentsDir, name string) (string, error) {
-	if err := validateName(name); err != nil {
+// Atomicity: writes the home dir, then each file via temp+rename. If any
+// step fails the partial home is left for inspection — masking errors
+// with silent cleanup costs more in debuggability than it saves.
+func writeFrameHome(agentsDir string, req SetupRequest) (string, error) {
+	if err := validateName(req.Name); err != nil {
 		return "", err
 	}
 
-	homePath := filepath.Clean(filepath.Join(agentsDir, name))
+	homePath := filepath.Clean(filepath.Join(agentsDir, req.Name))
 
-	// Confirm the joined path is still inside agentsDir — defensive
-	// even though validateName already excludes path-traversal chars.
 	absAgents, err := filepath.Abs(agentsDir)
 	if err != nil {
 		return "", fmt.Errorf("resolve agents dir: %w", err)
@@ -294,6 +422,17 @@ func writeFrameHome(agentsDir, name string) (string, error) {
 		return "", fmt.Errorf("stat home: %w", statErr)
 	}
 
+	bundle, rerr := templates.Render("default", map[string]string{
+		"name":     req.Name,
+		"voice":    req.Voice,
+		"values":   req.Values,
+		"provider": req.Provider,
+		"model":    req.Model,
+	})
+	if rerr != nil {
+		return "", fmt.Errorf("render template: %w", rerr)
+	}
+
 	if err := os.MkdirAll(absAgents, 0o755); err != nil {
 		return "", fmt.Errorf("ensure agents dir: %w", err)
 	}
@@ -301,28 +440,16 @@ func writeFrameHome(agentsDir, name string) (string, error) {
 		return "", fmt.Errorf("create home: %w", err)
 	}
 
-	cfg := schemas.AspectConfig{
-		Name:        name,
-		Role:        schemas.RoleFrame,
-		ContextMode: schemas.ContextGlobal,
-		// Provider intentionally left empty at P2 — P3 templates fill
-		// this in with the operator's chosen LLM. A nexus startup with
-		// a frame missing Provider will surface a clear error at P5
-		// time; that's fine for v1 ops.
-	}
-	raw, mErr := json.MarshalIndent(cfg, "", "  ")
-	if mErr != nil {
-		return "", fmt.Errorf("marshal aspect.json: %w", mErr)
-	}
-
-	tmpPath := filepath.Join(absHome, "aspect.json.tmp")
-	if err := os.WriteFile(tmpPath, raw, 0o644); err != nil {
-		return "", fmt.Errorf("write tmp aspect.json: %w", err)
-	}
-	finalPath := filepath.Join(absHome, "aspect.json")
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("rename aspect.json: %w", err)
+	for fname, content := range bundle {
+		tmpPath := filepath.Join(absHome, fname+".tmp")
+		if err := os.WriteFile(tmpPath, content, 0o644); err != nil {
+			return "", fmt.Errorf("write tmp %s: %w", fname, err)
+		}
+		finalPath := filepath.Join(absHome, fname)
+		if err := os.Rename(tmpPath, finalPath); err != nil {
+			_ = os.Remove(tmpPath)
+			return "", fmt.Errorf("rename %s: %w", fname, err)
+		}
 	}
 
 	return absHome, nil
@@ -338,29 +465,3 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 		"message": msg,
 	})
 }
-
-// stubPage is the placeholder index served at GET /. P4 replaces this
-// with the real wizard SPA. Kept inline so P2 has no static-asset
-// dependencies — easier to reason about, harder to confuse with the
-// real wizard during P4 review.
-const stubPage = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Nexus — first-boot</title>
-  <style>
-    body{font-family:system-ui,sans-serif;max-width:42rem;margin:3rem auto;padding:0 1rem;color:#222}
-    code{background:#f0f0f0;padding:0.2rem 0.4rem;border-radius:3px}
-  </style>
-</head>
-<body>
-  <h1>Nexus is in bootstrap mode.</h1>
-  <p>No Frame personality found. The first-boot wizard will land here in a future build (§6.5 P4).</p>
-  <p>For now, set up the Frame by POSTing JSON to <code>/bootstrap/setup</code>:</p>
-  <pre>curl -X POST http://localhost:7888/bootstrap/setup \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"frame"}'</pre>
-  <p>After the setup succeeds, restart Nexus.</p>
-</body>
-</html>
-`
