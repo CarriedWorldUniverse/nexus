@@ -28,6 +28,7 @@ import (
 	"github.com/nexus-cw/nexus/nexus/roster"
 	"github.com/nexus-cw/nexus/nexus/sessions"
 	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/nexus-cw/nexus/nexus/usage"
 )
 
 // exitCodeBootstrapDone signals a successful first-boot setup. Supervisor
@@ -162,7 +163,7 @@ func main() {
 	// funnel is the bridge between incoming chat frames and the Frame's
 	// AI personality. When no Frame is embedded (legacy mode), chatRouter
 	// stays nil and the broker logs + drops chat.send frames.
-	chatRouter := buildChatRouter(ctx, embeddedFrame, chat.NewSQLStore(db), logger)
+	chatRouter := buildChatRouter(ctx, embeddedFrame, chat.NewSQLStore(db), usage.NewSQLStore(db), logger)
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
@@ -390,7 +391,27 @@ func discoverAspectIDs(aspectDirFlag string, log *slog.Logger) []string {
 // v1 supports "claude-api" (and "claude" alias); other providers log a
 // warning and fall back to nil (no deliberation). This keeps the Frame
 // operational as a routing surface even when the provider isn't recognised.
-func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.Store, log *slog.Logger) *broker.ChatRouterCallbacks {
+// usageRecorderAdapter bridges the funnel.UsageRecorder interface to
+// usage.SQLStore. Lives in main rather than in usage/ to avoid the
+// usage package importing funnel (which would create a cycle through
+// framecomms).
+type usageRecorderAdapter struct {
+	store *usage.SQLStore
+}
+
+func (a *usageRecorderAdapter) Record(ctx context.Context, msgID int64, turnID, aspectID, model string, u bridle.Usage) error {
+	_, err := a.store.Record(ctx, usage.Record{
+		MsgID:        msgID,
+		TurnID:       turnID,
+		AspectID:     aspectID,
+		Model:        model,
+		InputTokens:  u.InputTokens,
+		OutputTokens: u.OutputTokens,
+	})
+	return err
+}
+
+func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.Store, usageStore *usage.SQLStore, log *slog.Logger) *broker.ChatRouterCallbacks {
 	if ef == nil {
 		return nil
 	}
@@ -429,18 +450,20 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 	gateway := framecomms.NewGateway(store, ef.Aspect.Name)
 	commsRunner := funnel.CommsRunner{Gateway: gateway}
 	pulser := &framecomms.ChatPulser{Gateway: gateway}
+	recorder := &usageRecorderAdapter{store: usageStore}
 
 	threads := route.NewThreadIndex()
 	f, err := funnel.New(funnel.Config{
-		AspectID: ef.Aspect.Name,
-		Harness:  bridle.NewHarness(p),
-		Provider: bridle.ProviderID(provider),
-		Model:    model,
-		Tools:    funnel.CommsToolDefs(),
-		Runner:   funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
-		Threads:  threads,
-		Pulser:   pulser,
-		Logger:   log,
+		AspectID:      ef.Aspect.Name,
+		Harness:       bridle.NewHarness(p),
+		Provider:      bridle.ProviderID(provider),
+		Model:         model,
+		Tools:         funnel.CommsToolDefs(),
+		Runner:        funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		Threads:       threads,
+		Pulser:        pulser,
+		UsageRecorder: recorder,
+		Logger:        log,
 	})
 	if err != nil {
 		log.Error("frame funnel: construction failed; deliberation disabled",
@@ -468,7 +491,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 			if !route.ShouldRouteToFrame(routeMsg, frameName, threads) {
 				return
 			}
-			f.Receive(bridle.InboxItem{From: from, Content: content})
+			f.ReceiveWithMsgID(bridle.InboxItem{From: from, Content: content}, msgID)
 			if _, err := f.Deliberate(rctx, ""); err != nil {
 				log.Warn("frame funnel: deliberation error", "err", err, "msg_id", msgID)
 			}
