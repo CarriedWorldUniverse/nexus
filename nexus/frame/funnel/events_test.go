@@ -82,7 +82,7 @@ func TestEmit_TurnStartAndEndFireAroundDeliberate(t *testing.T) {
 	}
 
 	got := sink.types()
-	want := []EventType{EventTurnStart, EventTurnEnd}
+	want := []EventType{EventTurnStart, EventTurnEnd, EventFilterJudging}
 	if len(got) != len(want) {
 		t.Fatalf("event count: got %d %v, want %d %v", len(got), got, len(want), want)
 	}
@@ -142,9 +142,10 @@ func TestEmit_TurnEndCarriesUsageAndDuration(t *testing.T) {
 	}
 
 	events := sink.snapshot()
-	end := events[len(events)-1]
+	// turn.end is the second event (after turn.start, before filter.judging).
+	end := events[1]
 	if end.Type != EventTurnEnd {
-		t.Fatalf("last event: got %q, want %q", end.Type, EventTurnEnd)
+		t.Fatalf("event[1]: got %q, want %q", end.Type, EventTurnEnd)
 	}
 	payload, ok := end.Payload.(TurnEndPayload)
 	if !ok {
@@ -210,8 +211,8 @@ func TestEmit_PanickingSinkDoesNotBreakDeliberation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deliberation should succeed despite panicking sink: %v", err)
 	}
-	if result.FinalText != "ok" {
-		t.Errorf("result text: got %q, want ok", result.FinalText)
+	if result.TurnResult.FinalText != "ok" {
+		t.Errorf("result text: got %q, want ok", result.TurnResult.FinalText)
 	}
 }
 
@@ -255,13 +256,14 @@ func TestEmit_CompactStartAndEndFireWhenThresholdCrossed(t *testing.T) {
 	}
 
 	got := sink.types()
-	// Expected order: turn.start turn.end (turn 1), compact.start
-	// compact.end (compaction inside turn 2's Deliberate), turn.start
-	// turn.end (turn 2 itself).
+	// Expected order:
+	//   turn 1: turn.start turn.end filter.judging
+	//   turn 2 entry triggers compaction: compact.start compact.end
+	//   turn 2 proper:  turn.start turn.end filter.judging
 	want := []EventType{
-		EventTurnStart, EventTurnEnd,
+		EventTurnStart, EventTurnEnd, EventFilterJudging,
 		EventCompactStart, EventCompactEnd,
-		EventTurnStart, EventTurnEnd,
+		EventTurnStart, EventTurnEnd, EventFilterJudging,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("event count: got %d %v, want %d %v", len(got), got, len(want), want)

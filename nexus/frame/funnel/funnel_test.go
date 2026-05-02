@@ -140,8 +140,8 @@ func TestDeliberate_HappyPath_FoldsInbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Deliberate: %v", err)
 	}
-	if res.FinalText != "ack" {
-		t.Errorf("FinalText=%q want ack", res.FinalText)
+	if res.TurnResult.FinalText != "ack" {
+		t.Errorf("FinalText=%q want ack", res.TurnResult.FinalText)
 	}
 	if prov.calls.Load() != 1 {
 		t.Errorf("provider calls=%d want 1", prov.calls.Load())
@@ -326,8 +326,8 @@ func TestDeliberate_CompactFailureContinues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("turn 2: %v", err)
 	}
-	if res.FinalText != "fallback" {
-		t.Errorf("FinalText=%q want fallback", res.FinalText)
+	if res.TurnResult.FinalText != "fallback" {
+		t.Errorf("FinalText=%q want fallback", res.TurnResult.FinalText)
 	}
 }
 
