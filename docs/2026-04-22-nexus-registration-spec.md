@@ -89,7 +89,33 @@ agent.exe C:\src\nexus-cw\nexus\agents\harrow
 
 The home folder is the aspect. Everything the runtime needs is inside.
 
-### 2.3 Provider layer
+### 2.2.1 Harness shape — deliberation loop, not flat request/response
+
+**Locked 2026-05-02 (resolves backlog #81 + #84):** the aspect runtime drives a **deliberation loop**, not a flat single-turn request/response. A single comms event from chat enters as one entry on an inbox; the runtime composes one or more turns through the provider before emitting any output to chat. Flat single-turn is the degenerate case (one-turn deliberation).
+
+**Why deliberation, not flat:** comms-first prompting trains aspects to always emit something. A flat "one chat in, one response out" loop produces noise on every routed message — even messages the aspect should ignore or react to silently. The deliberation loop gives the model room to:
+
+- Triage incoming inbox content (decide whether to engage at all, decide whether to act vs reply vs react)
+- Use tools (knowledge search, ticket reads, file reads, send_comms for clarifying questions, etc.) before committing to an output
+- Run multiple model turns in one deliberation if the work needs them (read → analyse → emit)
+- Decide at end-of-deliberation whether the exchange becomes thread history or is dropped
+
+The §6.5 Frame harness build (P1–P9, completed 2026-05-01) implements this pattern via the `nexus/frame/funnel` package. The funnel-shape contract there defines the canonical loop:
+
+1. **Receive comms** into an inbox (chat → funnel).
+2. **Triage** decides engage/dismiss using hard rules + (optionally) a cheap model classification. Hard rules ship in v1; cheap-model triage is a tunable add-on.
+3. **On engage:** funnel calls `bridle.RunTurn` once or more. Each call is one provider invocation. The funnel composes turns; bridle is the single-turn primitive.
+4. **Mid-turn comms** that arrive during deliberation accumulate in the inbox-as-array; folded into the next turn's prompt automatically.
+5. **send_comms is a tool** the model can call from inside any turn — outbound chat goes through the runtime's tool runner, not a special completion path. Mid-turn chat output is supported.
+6. **Log-decision turn** at end of deliberation decides whether the exchange becomes session history (appended to SessionTail) or is dropped (e.g. content-filter suppression — see funnel post-hoc filter pattern).
+
+**Compaction shape:** when SessionTail token count crosses `shouldCompact(tokens, window, reserve)` (see §2.7), the funnel rebuilds SessionTail with a summary-as-first-message and a counter reset. Compaction is funnel-controlled, not provider-controlled — the runtime owns this.
+
+**Aspect runtime composes the funnel** for `global` and `thread` context modes. `stateless` (Hands) bypasses the funnel — Hands are by definition flat single-turn and don't need triage or deliberation gates.
+
+**Harness library:** `nexus-cw/bridle` is the rolled-our-own single-turn driver the funnel composes. Decision history: harrow's three rounds of comparison (KB #113-115) evaluated PydanticAI, Strands, LangGraph, Eino, ADK Go, OpenHands, Codex CLI, Terminus, mini-SWE-agent, ForgeCode, PI. Conclusion: **roll our own in Go, reference the patterns from PydanticAI / Eino / Terminus 2 / mini-SWE-agent.** The language-tax argument is decisive — the existing Nexus stack is Go runtime + JS broker/dashboard; Python or Rust would add a third runtime indefinitely. Bridle is in-flight (#87 created repo; #91 claudecode provider). Per-provider streaming + tool-call format normalization is bridle's responsibility; everything above it (deliberation, triage, compaction, comms inbox) is funnel's.
+
+
 
 The runtime executable is provider-agnostic. A provider module is a plug-in that knows how to call a specific AI backend with credentials and configuration. **Detailed interface, tool translation, triage, dispatch-time provider overrides, and per-provider appendices live in [`2026-04-24-provider-adapter-spec.md`](2026-04-24-provider-adapter-spec.md).** This section is the architectural summary.
 
