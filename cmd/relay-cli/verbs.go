@@ -419,8 +419,9 @@ func uuidv7() (string, error) {
 		return "", err
 	}
 	ms := uint64(time.Now().UnixMilli())
-	binary.BigEndian.PutUint64(b[0:8], ms<<16) // shift left so ms occupies top 48 bits
-	// Bytes 6-7: 4-bit version (0x7) + 12 bits random; 12 bits already random, set version nibble
+	binary.BigEndian.PutUint16(b[0:2], uint16(ms>>32))
+	binary.BigEndian.PutUint32(b[2:6], uint32(ms))
+	// Bytes 6-7: 4-bit version (0x7) + 12 bits random; b[6:8] still holds rand.Read bytes
 	b[6] = (b[6] & 0x0f) | 0x70
 	// Byte 8: 2-bit variant (10) + 6 bits random
 	b[8] = (b[8] & 0x3f) | 0x80
