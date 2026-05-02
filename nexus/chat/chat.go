@@ -88,6 +88,21 @@ type Store interface {
 	// to chat. Recipients is a list of aspect ids (case-sensitive).
 	// Returns the share id.
 	ShareFile(ctx context.Context, sharedBy, path string, recipients []string) (shareID int64, err error)
+
+	// ListSince returns messages with id > sinceID, oldest first,
+	// across the whole chat history. Used for Lock 6 replay scans —
+	// the broker filters by recipient via the RecipientPolicy
+	// before deciding which to push back to a reconnecting aspect.
+	//
+	// Limit caps the result count; the broker should paginate by
+	// passing a sensible cap (e.g. 500) and re-call with the new
+	// since-cursor until the page is short of the limit.
+	//
+	// Doing the recipient filter at the broker layer (not here)
+	// keeps this method simple and matches operator #9177's framing:
+	// "give me all message for forge after id=N, deliver each as a
+	// separate comm.send."
+	ListSince(ctx context.Context, sinceID int64, limit int) ([]Message, error)
 }
 
 // SQLStore is the sqlite-backed Store. Holds a *sql.DB; safe for
@@ -380,6 +395,60 @@ func (s *SQLStore) ShareFile(ctx context.Context, sharedBy, path string, recipie
 		return 0, fmt.Errorf("chat.ShareFile: id: %w", err)
 	}
 	return id, nil
+}
+
+// ListSince returns messages with id > sinceID across the whole
+// chat history, oldest first, capped at limit. Used for Lock 6
+// replay scans — broker filters by recipient before delivering.
+//
+// Limit 0 means "no SQL limit"; callers should pass a sensible cap
+// (e.g. 500). For huge offline windows the broker paginates by
+// re-calling with the new since-cursor (the last id seen) until a
+// page comes back short of the limit.
+func (s *SQLStore) ListSince(ctx context.Context, sinceID int64, limit int) ([]Message, error) {
+	q := `
+		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at
+		FROM chat_messages
+		WHERE id > ?
+		ORDER BY id ASC
+	`
+	args := []any{sinceID}
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := s.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("chat.ListSince: query: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Message
+	for rows.Next() {
+		var msg Message
+		var replyToCol sql.NullInt64
+		var topicCol sql.NullString
+		var createdAtRaw string
+		if err := rows.Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw); err != nil {
+			return nil, fmt.Errorf("chat.ListSince: scan: %w", err)
+		}
+		if replyToCol.Valid {
+			msg.ReplyTo = replyToCol.Int64
+		}
+		if topicCol.Valid {
+			msg.Topic = topicCol.String
+		}
+		msg.CreatedAt, err = parseSQLiteTime(createdAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("chat.ListSince: parse created_at %q: %w", createdAtRaw, err)
+		}
+		out = append(out, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("chat.ListSince: rows: %w", err)
+	}
+	return out, nil
 }
 
 // FormatRFC3339 renders a Message's CreatedAt in the canonical wire
