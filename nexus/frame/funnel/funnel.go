@@ -111,6 +111,18 @@ type Config struct {
 	// through, matching the v1 §6.5 Frame harness behavior.
 	Filter OutputFilter
 
+	// UsageRecorder records per-turn token usage for forensics
+	// (Lock 4 attribution per operator #9254/#9258). Called after
+	// each successful turn with the bridle.Usage from the result
+	// and the chat msg_id that triggered the deliberation. Nil
+	// means no recording — the funnel still runs, the operator
+	// just can't query "where did the tokens go" later.
+	//
+	// The recorder is fire-and-forget at this seam — errors are
+	// logged but don't fail the deliberation. Forensics can't
+	// block the chat path.
+	UsageRecorder UsageRecorder
+
 	// Pulser fires chat-visible status pulses before long ops
 	// (compaction always; long tool chains and provider retries
 	// once F1.4 wires them). Per Lock 5 of the architecture: the
@@ -134,6 +146,13 @@ type Funnel struct {
 	// inbox holds comms that arrived since the last deliberation. Folded
 	// into the next bridle.RunTurn call. Drained at deliberation start.
 	inbox []bridle.InboxItem
+
+	// triggeringMsgID is the chat msg_id that prompted the next
+	// deliberation. Set by ReceiveWithMsgID; consumed and cleared
+	// by Deliberate so each turn's UsageRecorder.Record call gets
+	// the correct attribution. Zero means "no chat trigger" — the
+	// recorder writes MsgID=0, which the usage table stores as NULL.
+	triggeringMsgID int64
 
 	// sessionTail accumulates events across turns. Compacted when
 	// cumulativeTokens crosses the threshold.
@@ -178,6 +197,9 @@ func New(cfg Config) (*Funnel, error) {
 	if cfg.Pulser == nil {
 		cfg.Pulser = NoopPulser{}
 	}
+	if cfg.UsageRecorder == nil {
+		cfg.UsageRecorder = NoopUsageRecorder{}
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -196,6 +218,27 @@ func (f *Funnel) Receive(item bridle.InboxItem) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.inbox = append(f.inbox, item)
+}
+
+// ReceiveWithMsgID is Receive plus Lock 4 attribution: stores the
+// chat msg_id that triggered this deliberation so the funnel's
+// UsageRecorder can attribute the resulting turn's tokens back to
+// the originating chat message (operator #9254/#9258 forensics).
+//
+// If multiple Receive calls land before Deliberate runs, the LATEST
+// one wins — that's the message most-recently visible to the model
+// and the closest fit for "what triggered this turn" attribution.
+// Earlier messages are still folded into the inbox; their token
+// cost gets attributed to the latest msgID. Acceptable: the operator
+// query is "where did the tokens go" and a clustered deliberation
+// gets credited to the trigger that closed the latency window.
+func (f *Funnel) ReceiveWithMsgID(item bridle.InboxItem, msgID int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inbox = append(f.inbox, item)
+	if msgID > 0 {
+		f.triggeringMsgID = msgID
+	}
 }
 
 // InboxLen reports the current inbox depth. Useful for observability.
@@ -231,6 +274,13 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	pending := make([]bridle.InboxItem, len(f.inbox))
 	copy(pending, f.inbox)
 	f.inbox = f.inbox[:0]
+
+	// Capture and clear the triggering chat msg_id for Lock 4
+	// usage attribution. Subsequent ReceiveWithMsgID calls during
+	// this deliberation queue into the next cycle's inbox; their
+	// msg_ids will attribute to the next turn.
+	triggerMsgID := f.triggeringMsgID
+	f.triggeringMsgID = 0
 
 	// Check compaction threshold before running the turn. If we'd cross
 	// it, summarize first and rotate the session.
@@ -297,6 +347,16 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 			Duration:   time.Since(turnStart),
 		},
 	})
+
+	// Lock 4 usage attribution. Always recorded (success and error
+	// paths) so a turn that errored still has its partial usage
+	// captured — billing apportions to errored turns too. Errors
+	// from the recorder are logged but never fail the deliberation.
+	if recErr := f.cfg.UsageRecorder.Record(ctx, triggerMsgID, turnID, f.cfg.AspectID, f.cfg.Model, result.Usage); recErr != nil {
+		f.log.Warn("funnel: usage record failed",
+			"err", recErr, "turn_id", turnID, "msg_id", triggerMsgID)
+	}
+
 	if err != nil {
 		// Error path skips the cumulative-token update and the post-hoc
 		// filter — neither has anything meaningful to do with a turn
