@@ -125,17 +125,49 @@ var _ funnelChatGatewayInterface = (*Gateway)(nil)
 // file otherwise free of funnel references.
 type funnelChatGatewayInterface = funnel.ChatGateway
 
-func TestGateway_ReservedMethodsReturnNotImplemented(t *testing.T) {
+func TestGateway_ReactToToggles(t *testing.T) {
 	g := openTestGateway(t)
 	ctx := context.Background()
+	msgID, _ := g.SendChat(ctx, "ping", 0, "")
 
-	if err := g.ReactTo(ctx, 1, "👍"); err == nil || !strings.Contains(err.Error(), "not implemented") {
-		t.Errorf("react_to should return not-implemented: got %v", err)
+	// First call: adds. Second call: removes. Both must succeed.
+	if err := g.ReactTo(ctx, msgID, "👀"); err != nil {
+		t.Errorf("first react_to: %v", err)
 	}
-	if _, err := g.AnnounceFile(ctx, "/x", "y"); err == nil || !strings.Contains(err.Error(), "not implemented") {
-		t.Errorf("announce_file should return not-implemented: got %v", err)
-	}
-	if _, err := g.ShareFile(ctx, "/x", []string{"a"}); err == nil || !strings.Contains(err.Error(), "not implemented") {
-		t.Errorf("share_file should return not-implemented: got %v", err)
+	if err := g.ReactTo(ctx, msgID, "👀"); err != nil {
+		t.Errorf("second react_to (toggle off): %v", err)
 	}
 }
+
+func TestGateway_AnnounceFilePostsToChat(t *testing.T) {
+	g := openTestGateway(t)
+	ctx := context.Background()
+	msgID, err := g.AnnounceFile(ctx, "/tmp/spec.md", "draft v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msgID == 0 {
+		t.Error("expected non-zero msg_id")
+	}
+	// The announce should be visible as a chat message.
+	msgs, err := g.ReadThread(ctx, msgID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "draft v1" {
+		t.Errorf("announce message not retrievable: %+v", msgs)
+	}
+}
+
+func TestGateway_ShareFileReturnsID(t *testing.T) {
+	g := openTestGateway(t)
+	ctx := context.Background()
+	id, err := g.ShareFile(ctx, "/tmp/private.md", []string{"anvil"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == 0 {
+		t.Error("expected non-zero share id")
+	}
+}
+

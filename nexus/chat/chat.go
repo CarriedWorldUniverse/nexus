@@ -24,6 +24,7 @@ package chat
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -68,6 +69,25 @@ type Store interface {
 	// for v1's traffic. F1.4c+ may move this to a denormalized
 	// thread_id column if needed.
 	ListThread(ctx context.Context, threadID, sinceID int64, limit int) ([]Message, error)
+
+	// ToggleReaction adds the reaction if absent, removes it if
+	// present. Returns the new state (true = now reacted, false =
+	// now unreacted) so callers can render confirmation. Per Lock 3:
+	// reactions are toggle-semantics — calling react_to(msg, "👍")
+	// twice with the same reactor first reacts, then unreacts.
+	ToggleReaction(ctx context.Context, msgID int64, reactor, emoji string) (reacted bool, err error)
+
+	// AnnounceSharedFile records a file announcement: persists a
+	// chat message with the description and links a shared_files row
+	// to it. Returns both the announce message id (which is what the
+	// model will see in chat) and the share id (so the model can
+	// reference the file resource).
+	AnnounceSharedFile(ctx context.Context, sharedBy, path, description string) (msgID, shareID int64, err error)
+
+	// ShareFile records a direct share to recipients without posting
+	// to chat. Recipients is a list of aspect ids (case-sensitive).
+	// Returns the share id.
+	ShareFile(ctx context.Context, sharedBy, path string, recipients []string) (shareID int64, err error)
 }
 
 // SQLStore is the sqlite-backed Store. Holds a *sql.DB; safe for
@@ -242,6 +262,124 @@ func parseSQLiteTime(raw string) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return t.UTC(), nil
+}
+
+// ToggleReaction implements toggle-semantics for a (msg, reactor,
+// emoji) triple. The unique constraint on (msg_id, reactor, emoji)
+// is the source of truth: an INSERT that fails with constraint
+// violation means the row exists, and we DELETE instead.
+//
+// Race window: two concurrent toggles from the same reactor on the
+// same msg+emoji can interleave (insert→insert-fails-delete vs
+// delete→insert), but the outcome is correct under any interleaving
+// because each operation is atomic. The reported `reacted` may not
+// match the caller's mental model under heavy concurrent toggling,
+// but that's only a UI concern and doesn't break the table.
+func (s *SQLStore) ToggleReaction(ctx context.Context, msgID int64, reactor, emoji string) (bool, error) {
+	if msgID == 0 || reactor == "" || emoji == "" {
+		return false, fmt.Errorf("chat.ToggleReaction: msgID, reactor, emoji all required")
+	}
+	// Try INSERT first; on UNIQUE conflict, DELETE.
+	_, err := s.DB.ExecContext(ctx, `
+		INSERT INTO chat_reactions (msg_id, reactor, emoji)
+		VALUES (?, ?, ?)
+	`, msgID, reactor, emoji)
+	if err == nil {
+		return true, nil
+	}
+	// Constraint violation = row exists, toggle off.
+	res, derr := s.DB.ExecContext(ctx, `
+		DELETE FROM chat_reactions
+		WHERE msg_id = ? AND reactor = ? AND emoji = ?
+	`, msgID, reactor, emoji)
+	if derr != nil {
+		return false, fmt.Errorf("chat.ToggleReaction: delete after insert conflict: %w (insert err: %v)", derr, err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		// Insert failed for a non-conflict reason (FK violation,
+		// disk full, etc.) and the delete found nothing to remove.
+		// Surface the original insert error.
+		return false, fmt.Errorf("chat.ToggleReaction: %w", err)
+	}
+	return false, nil
+}
+
+// AnnounceSharedFile inserts a chat message announcing the file and
+// a shared_files row linking back to it. Done in a transaction so
+// the chat post and the file record commit together — partial state
+// (an announcement message with no shared_files row, or vice versa)
+// would confuse downstream consumers.
+func (s *SQLStore) AnnounceSharedFile(ctx context.Context, sharedBy, path, description string) (int64, int64, error) {
+	if sharedBy == "" || path == "" || description == "" {
+		return 0, 0, fmt.Errorf("chat.AnnounceSharedFile: sharedBy, path, description all required")
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("chat.AnnounceSharedFile: begin tx: %w", err)
+	}
+	defer tx.Rollback() // no-op after commit; safe to defer unconditionally
+
+	msgRes, err := tx.ExecContext(ctx, `
+		INSERT INTO chat_messages (thread_id, from_agent, content, reply_to, kind)
+		VALUES (NULL, ?, ?, NULL, 'chat')
+	`, sharedBy, description)
+	if err != nil {
+		return 0, 0, fmt.Errorf("chat.AnnounceSharedFile: insert message: %w", err)
+	}
+	msgID, err := msgRes.LastInsertId()
+	if err != nil {
+		return 0, 0, fmt.Errorf("chat.AnnounceSharedFile: msg id: %w", err)
+	}
+
+	shareRes, err := tx.ExecContext(ctx, `
+		INSERT INTO shared_files (path, description, shared_by, announce_msg_id, recipients_json)
+		VALUES (?, ?, ?, ?, NULL)
+	`, path, description, sharedBy, msgID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("chat.AnnounceSharedFile: insert share: %w", err)
+	}
+	shareID, err := shareRes.LastInsertId()
+	if err != nil {
+		return 0, 0, fmt.Errorf("chat.AnnounceSharedFile: share id: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("chat.AnnounceSharedFile: commit: %w", err)
+	}
+	return msgID, shareID, nil
+}
+
+// ShareFile inserts a shared_files row with no chat message — the
+// share is private to the named recipients. recipients_json stores
+// the recipient list as a JSON array; aspects looking up shares
+// addressed to them filter on this column.
+func (s *SQLStore) ShareFile(ctx context.Context, sharedBy, path string, recipients []string) (int64, error) {
+	if sharedBy == "" || path == "" {
+		return 0, fmt.Errorf("chat.ShareFile: sharedBy and path required")
+	}
+	if len(recipients) == 0 {
+		return 0, fmt.Errorf("chat.ShareFile: at least one recipient required")
+	}
+
+	recipientsJSON, err := json.Marshal(recipients)
+	if err != nil {
+		return 0, fmt.Errorf("chat.ShareFile: marshal recipients: %w", err)
+	}
+
+	res, err := s.DB.ExecContext(ctx, `
+		INSERT INTO shared_files (path, description, shared_by, announce_msg_id, recipients_json)
+		VALUES (?, NULL, ?, NULL, ?)
+	`, path, sharedBy, string(recipientsJSON))
+	if err != nil {
+		return 0, fmt.Errorf("chat.ShareFile: insert: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("chat.ShareFile: id: %w", err)
+	}
+	return id, nil
 }
 
 // FormatRFC3339 renders a Message's CreatedAt in the canonical wire

@@ -70,12 +70,25 @@ func (g *Gateway) SendChat(ctx context.Context, content string, replyTo int64, t
 	return msg.ID, nil
 }
 
-// ReactTo is reserved — F1.4b.3 will add a reactions table and
-// wire toggles. Until then, return a "not implemented" error in
-// the result so the model can read it and decide what to do
-// rather than hard-aborting the turn.
-func (g *Gateway) ReactTo(_ context.Context, _ int64, _ string) error {
-	return fmt.Errorf("react_to: not implemented in F1.4b.2 (storage shape lands in F1.4b.3)")
+// ReactTo toggles a reaction on the named message. The Gateway's
+// AspectID is the reactor; per-reactor independence means anvil
+// reacting 👍 doesn't affect wren's separate 👍 on the same message.
+// Calling twice with the same emoji removes the reaction (toggle
+// semantics).
+//
+// The model receives a JSON tool result with {ok: true} regardless
+// of whether the toggle added or removed — the model already knows
+// what it asked for; the gateway's role is to make it durable. Tests
+// can observe the toggle direction via the underlying store API.
+func (g *Gateway) ReactTo(ctx context.Context, msgID int64, emoji string) error {
+	if g.Store == nil {
+		return fmt.Errorf("framecomms.Gateway: no store configured")
+	}
+	if g.AspectID == "" {
+		return fmt.Errorf("framecomms.Gateway: AspectID required to react")
+	}
+	_, err := g.Store.ToggleReaction(ctx, msgID, g.AspectID, emoji)
+	return err
 }
 
 // ReadThread pulls thread history from the store. Lock 2's pull
@@ -108,12 +121,29 @@ func (g *Gateway) ReadThread(ctx context.Context, threadID, sinceID int64) ([]fu
 	return out, nil
 }
 
-// AnnounceFile is reserved — F1.4b.3 wires file announcements.
-func (g *Gateway) AnnounceFile(_ context.Context, _, _ string) (int64, error) {
-	return 0, fmt.Errorf("announce_file: not implemented in F1.4b.2 (storage shape lands in F1.4b.3)")
+// AnnounceFile inserts a chat post announcing the file plus a
+// shared_files row linking back to it. Returns the chat msg_id (the
+// model's reference for follow-up activity) — the share_id stays
+// internal for now.
+func (g *Gateway) AnnounceFile(ctx context.Context, path, description string) (int64, error) {
+	if g.Store == nil {
+		return 0, fmt.Errorf("framecomms.Gateway: no store configured")
+	}
+	if g.AspectID == "" {
+		return 0, fmt.Errorf("framecomms.Gateway: AspectID required to announce")
+	}
+	msgID, _, err := g.Store.AnnounceSharedFile(ctx, g.AspectID, path, description)
+	return msgID, err
 }
 
-// ShareFile is reserved — F1.4b.3 wires file sharing.
-func (g *Gateway) ShareFile(_ context.Context, _ string, _ []string) (int64, error) {
-	return 0, fmt.Errorf("share_file: not implemented in F1.4b.2 (storage shape lands in F1.4b.3)")
+// ShareFile records a direct share with no chat post. Returns the
+// share id the model can reference.
+func (g *Gateway) ShareFile(ctx context.Context, path string, recipients []string) (int64, error) {
+	if g.Store == nil {
+		return 0, fmt.Errorf("framecomms.Gateway: no store configured")
+	}
+	if g.AspectID == "" {
+		return 0, fmt.Errorf("framecomms.Gateway: AspectID required to share")
+	}
+	return g.Store.ShareFile(ctx, g.AspectID, path, recipients)
 }
