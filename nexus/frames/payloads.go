@@ -1,6 +1,7 @@
 package frames
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/nexus-cw/nexus/shared/schemas"
@@ -15,6 +16,15 @@ import (
 // HTTP-register path is a shape-preserving move.
 type RegisterPayload struct {
 	schemas.RegisterRequest
+
+	// SinceMsgID, when non-zero, requests Lock 6 replay: Nexus
+	// queries the chat DB for messages addressed to this aspect
+	// with msg_id > SinceMsgID and emits each as its own
+	// ChatDeliverPayload (with Replay=true) before resuming live
+	// delivery. Aspects with no persisted state file (cold start,
+	// state file lost) leave this 0; they get only live frames
+	// going forward — acceptable degradation per Lock 6.
+	SinceMsgID int64 `json:"since_msg_id,omitempty"`
 }
 
 // RegisterAckPayload tells the client what cadence to heartbeat at
@@ -167,14 +177,25 @@ type ChatSendPayload struct {
 
 // ChatDeliverPayload is a message being delivered to an aspect that
 // should see it (mentioned, reply, thread participant, etc.).
+//
+// Lock 6 (operator #9206/#9213/#9218): ReceivedAt is the message's
+// server-stamped Nexus-side ingestion time, RFC 3339 UTC. Aspects
+// surface this to the model on replay so deliberation can decide
+// whether a stale request is still actionable. Same field for live
+// frames (near-zero age) and replay frames (potentially hours old).
+//
+// The ID field is the chat msg_id, which doubles as the cursor for
+// Lock 6's replay-via-DB-query path: aspects persist the highest ID
+// they've processed and pass it as `since_msg_id` on register.
 type ChatDeliverPayload struct {
-	ID      int      `json:"id"`
-	From    string   `json:"from"`
-	Content string   `json:"content"`
-	ReplyTo int      `json:"reply_to,omitempty"`
-	Thread  string   `json:"thread,omitempty"`
-	At      string   `json:"at"`
-	Reason  string   `json:"reason"` // why this aspect is being notified: "mention", "reply", "thread", "all"
+	ID         int    `json:"id"`
+	From       string `json:"from"`
+	Content    string `json:"content"`
+	ReplyTo    int    `json:"reply_to,omitempty"`
+	Thread     string `json:"thread,omitempty"`
+	ReceivedAt string `json:"received_at"`        // RFC 3339 UTC; server-stamped at Nexus DB insert
+	Reason     string `json:"reason"`              // mention | reply | thread | all
+	Replay     bool   `json:"replay,omitempty"`    // true iff this frame was emitted as part of a since_msg_id replay
 }
 
 // ChatReactionPayload toggles an emoji reaction.
@@ -185,11 +206,68 @@ type ChatReactionPayload struct {
 }
 
 // ChatReadPayload is a request for a specific message or thread.
-// Response comes back as a ChatDeliverPayload (for a single message)
-// or a ChatReadResultPayload (for a thread).
+// Response comes back as a ChatReadResultPayload.
+//
+// Lock 2 pull path: aspects use this to read context they weren't
+// pushed, without triggering a fresh deliberation cycle. SinceID
+// caps how far back the response includes (e.g. for paginated
+// re-reads of a long thread).
 type ChatReadPayload struct {
-	MsgID    int    `json:"msg_id,omitempty"`
-	ThreadID string `json:"thread_id,omitempty"`
+	MsgID    int   `json:"msg_id,omitempty"`
+	ThreadID int64 `json:"thread_id,omitempty"`
+	SinceID  int64 `json:"since_id,omitempty"`
+}
+
+// ChatReadResultPayload is the response to a ChatRead request — the
+// thread's messages oldest-first. Limit applied server-side to bound
+// large threads; aspects can paginate via SinceID.
+type ChatReadResultPayload struct {
+	Messages []ChatDeliverPayload `json:"messages"`
+}
+
+// AnnounceFilePayload surfaces a file path to chat with a brief
+// description. Server creates a chat_messages row + shared_files
+// row linked to it; the response (an Ack-shaped frame) carries the
+// new chat msg_id.
+type AnnounceFilePayload struct {
+	From        string `json:"from"`
+	Path        string `json:"path"`
+	Description string `json:"description"`
+}
+
+// ShareFilePayload records a direct share to recipients without a
+// chat post. Server creates a shared_files row with recipients_json
+// populated; response carries the share_id.
+type ShareFilePayload struct {
+	From       string   `json:"from"`
+	Path       string   `json:"path"`
+	Recipients []string `json:"recipients"`
+}
+
+// FileResultPayload is the ack for AnnounceFile or ShareFile. For
+// announces, MsgID is the chat msg_id the model can reference; for
+// shares, ShareID is the resource id. Exactly one is non-zero.
+type FileResultPayload struct {
+	MsgID   int64 `json:"msg_id,omitempty"`
+	ShareID int64 `json:"share_id,omitempty"`
+}
+
+// AspectActivityPayload is Lock 5 telemetry over the wire — the
+// out-of-process counterpart to the in-process funnel.EventSink.
+// Aspects emit these; Nexus fans them out to dashboard activity
+// surfaces (the activity strip, mobile "agent responding"
+// indicator). Ephemeral — not stored, not chat posts.
+//
+// Type matches funnel.EventType strings ("turn.start", "turn.end",
+// "compact.start", "compact.end", "filter.judging",
+// "provider.retry"). Payload is opaque JSON the dashboard layer
+// shapes per type — keeps the frame definition stable as new event
+// types are added.
+type AspectActivityPayload struct {
+	Type      string          `json:"type"`
+	AspectID  string          `json:"aspect_id"`
+	EmittedAt string          `json:"emitted_at"` // RFC 3339 UTC
+	Payload   json.RawMessage `json:"payload"`
 }
 
 // -------------------------------------------------------------------

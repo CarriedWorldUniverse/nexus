@@ -71,10 +71,15 @@ const (
 	KindDispatchError  Kind = "dispatch.error"
 
 	// Chat — the existing comms surface in frame form.
-	KindChatSend     Kind = "chat.send"
-	KindChatDeliver  Kind = "chat.deliver"
-	KindChatReaction Kind = "chat.reaction"
-	KindChatRead     Kind = "chat.read"
+	KindChatSend       Kind = "chat.send"
+	KindChatDeliver    Kind = "chat.deliver"
+	KindChatReaction   Kind = "chat.reaction"
+	KindChatRead       Kind = "chat.read"
+	KindChatReadResult Kind = "chat.read.result"
+	KindAnnounceFile   Kind = "announce_file"
+	KindShareFile      Kind = "share_file"
+	KindFileResult     Kind = "file.result"
+	KindAspectActivity Kind = "aspect.activity"
 
 	// Knowledge — aspect-to-Nexus store/query.
 	KindKnowledgeStore        Kind = "knowledge.store"
@@ -189,6 +194,8 @@ func IsKnown(k Kind) bool {
 		KindTurn, KindTurnResult,
 		KindDispatch, KindDispatchResult, KindDispatchError,
 		KindChatSend, KindChatDeliver, KindChatReaction, KindChatRead,
+		KindChatReadResult, KindAnnounceFile, KindShareFile, KindFileResult,
+		KindAspectActivity,
 		KindKnowledgeStore, KindKnowledgeSearch, KindKnowledgeSearchResult,
 		KindSessionEntryAppended, KindSessionRewind, KindSessionFork,
 		KindShutdown:

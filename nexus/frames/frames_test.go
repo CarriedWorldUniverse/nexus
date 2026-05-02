@@ -168,6 +168,8 @@ func TestIsKnownCoversAllDeclaredKinds(t *testing.T) {
 		KindTurn, KindTurnResult,
 		KindDispatch, KindDispatchResult, KindDispatchError,
 		KindChatSend, KindChatDeliver, KindChatReaction, KindChatRead,
+		KindChatReadResult, KindAnnounceFile, KindShareFile, KindFileResult,
+		KindAspectActivity,
 		KindKnowledgeStore, KindKnowledgeSearch, KindKnowledgeSearchResult,
 		KindSessionEntryAppended, KindSessionRewind, KindSessionFork,
 		KindShutdown,
@@ -236,6 +238,55 @@ func TestPayloadJSONTags(t *testing.T) {
 				EntryKind: "turn.user",
 			},
 			[]string{`"aspect":"harrow"`, `"entry_id":"e-1"`, `"entry_kind":"turn.user"`},
+		},
+		{
+			"ChatDeliver_WithReceivedAt_Lock6",
+			ChatDeliverPayload{
+				ID: 42, From: "operator", Content: "hi",
+				ReceivedAt: "2026-05-02T05:30:00Z", Reason: "mention",
+			},
+			// Lock 6: received_at must be in the wire shape; no
+			// silent fallback to the old `at` field.
+			[]string{`"id":42`, `"received_at":"2026-05-02T05:30:00Z"`, `"reason":"mention"`},
+		},
+		{
+			"ChatDeliver_ReplayFlag_Lock6",
+			ChatDeliverPayload{
+				ID: 100, From: "operator", Content: "old msg",
+				ReceivedAt: "2026-05-01T00:00:00Z", Reason: "mention", Replay: true,
+			},
+			[]string{`"replay":true`},
+		},
+		{
+			"AnnounceFile",
+			AnnounceFilePayload{From: "frame", Path: "/tmp/x.md", Description: "spec"},
+			[]string{`"from":"frame"`, `"path":"/tmp/x.md"`, `"description":"spec"`},
+		},
+		{
+			"ShareFile",
+			ShareFilePayload{From: "frame", Path: "/x", Recipients: []string{"anvil", "wren"}},
+			[]string{`"recipients":["anvil","wren"]`},
+		},
+		{
+			"FileResult_Announce",
+			FileResultPayload{MsgID: 9001},
+			[]string{`"msg_id":9001`},
+		},
+		{
+			"AspectActivity",
+			AspectActivityPayload{
+				Type: "turn.start", AspectID: "forge",
+				EmittedAt: "2026-05-02T05:30:00Z",
+				Payload:   []byte(`{"turn_id":"t-1"}`),
+			},
+			[]string{`"type":"turn.start"`, `"aspect_id":"forge"`, `"turn_id":"t-1"`},
+		},
+		{
+			"ChatReadResult",
+			ChatReadResultPayload{Messages: []ChatDeliverPayload{
+				{ID: 1, From: "operator", Content: "root", ReceivedAt: "2026-05-02T05:30:00Z", Reason: "thread"},
+			}},
+			[]string{`"messages":[`, `"id":1`},
 		},
 	}
 	for _, c := range cases {
