@@ -1,7 +1,7 @@
 # Aspect Runtime Architecture — Funnel/Bridle on the Aspect Side
 
 **Date:** 2026-05-02
-**Status:** Draft — operator-confirmed locks at #9085, #9089; awaiting review
+**Status:** Draft — operator-confirmed locks at #9085, #9089, #9092; awaiting review
 **Owner:** keel
 **Companion to:** [`2026-04-22-nexus-registration-spec.md`](2026-04-22-nexus-registration-spec.md) §2.2.1 (harness shape) and [`2026-04-25-nexus-transport-spec.md`](2026-04-25-nexus-transport-spec.md) (WS protocol)
 
@@ -11,7 +11,7 @@
 
 This doc captures the architecture decisions made in chat #9078–9089 about where the funnel and bridle run, how recipient routing works, and how comms tools behave mid-turn. It's the load-bearing decision set the rebuild Nexus + aspect runtime + transport will all build against.
 
-## Three locks
+## Four locks
 
 ### Lock 1 — Aspect-side funnel + bridle in a single binary
 
@@ -103,6 +103,55 @@ Mute-until-done was the wrong shape. Restoring full comms tools fixes a pile of 
 
 - The "did the model emit a meaningful natural reply, or did it ramble / produce empty content / leak thinking" case. This is now a *narrower* filter than agent-network's #72 — it only governs the final reply, not the whole output stream.
 - "Self-suppression" outputs ("I don't have anything to add to this thread" / "this isn't for me") still get suppressed. The aspect engaged because Nexus pushed it, but if the model decides not to emit a substantive reply, the filter respects that.
+
+### Lock 4 — Funnel owns context size; provider-agnostic cache layer
+
+Two things that have to be in the loop, not bolted on later:
+
+**Summarization / compaction.** The funnel's deliberation loop is responsible for keeping turn context bounded. Claude Code's auto-compact is the wrong shape — it fires on its own clock, mid-deliberation, and we lose the ability to checkpoint at semantic boundaries. The funnel must:
+
+- Track running token count per turn (provider-reported usage on each bridle round).
+- Decide *when* to summarize: between turns of a deliberation, never mid-turn. Trigger thresholds live in funnel config (e.g. soft @ 60% window, hard @ 80%).
+- Decide *what* to summarize: prior turn outputs, tool-call results, stale chat history. Identity/system prompt + recent operator messages stay verbatim.
+- Run summarization as its own bridle call (cheap model, focused prompt) and substitute the summary into the next turn's context. The summary is funnel-state, not a chat post.
+- Funnel-controlled compaction was already shipped in agent-network ticket #102 — we carry that pattern across.
+
+```
+funnel.Deliberate(message):
+  loop:
+    if context_tokens > soft_threshold:
+       summary = bridle.Summarize(stale_segments)
+       context = identity + recent + summary
+    output = bridle.RunTurn(context, tools)
+    if output.toolCalls: handle, append, continue
+    else: break
+  filter.Judge(output)
+```
+
+**Provider-agnostic cache abstraction.** Bridle today wraps Claude Code (Anthropic-shaped caching: explicit `cache_control` breakpoints, 5-min TTL, max 4 blocks). Other providers cache differently:
+
+- **OpenAI** — automatic prefix caching, no explicit breakpoints, transparent to caller.
+- **Gemini** — explicit `CachedContent` resource with TTL, created via separate API call.
+- **Local (ollama, llama.cpp)** — no caching primitive; KV-cache reuse depends on prompt-prefix stability at the runtime layer.
+
+Bridle needs a `CacheStrategy` interface so funnel can compose context once and bridle adapts:
+
+```go
+type CacheStrategy interface {
+    // Decorate annotates a context with provider-specific cache hints.
+    // For Anthropic: inserts cache_control breakpoints.
+    // For OpenAI: no-op (automatic).
+    // For Gemini: pre-creates CachedContent and rewrites context to ref it.
+    // For local: no-op.
+    Decorate(ctx Context) ProviderRequest
+}
+```
+
+Funnel hands bridle a structured context (identity-block, summary-block, recent-block, message-block) with stability hints ("identity is stable across turns; summary is stable until next compaction; recent rotates"). Bridle's per-provider strategy decides how to express that to the wire.
+
+**Why this matters for non-Claude aspects:** without the abstraction, every new provider risks either re-sending the full prompt every turn (bad cost) or breaking invariants in subtle ways (e.g. inserting Anthropic-style markers into an OpenAI request). Wire it once at the bridle/funnel seam.
+
+**Implications for build sequence:** Cache strategy lands with the bridle provider matrix expansion (after F1 funnel rewrite, before remote-aspect federation). Summarization is part of F1.
 
 ## Frame as a special case
 
