@@ -19,7 +19,9 @@ import (
 	claudeprovider "github.com/nexus-cw/bridle/provider/claude"
 	"github.com/nexus-cw/nexus/nexus/autospawn"
 	"github.com/nexus-cw/nexus/nexus/broker"
+	"github.com/nexus-cw/nexus/nexus/chat"
 	"github.com/nexus-cw/nexus/nexus/frame"
+	"github.com/nexus-cw/nexus/nexus/frame/framecomms"
 	"github.com/nexus-cw/nexus/nexus/frame/funnel"
 	"github.com/nexus-cw/nexus/nexus/frame/route"
 	"github.com/nexus-cw/nexus/nexus/handqueue"
@@ -160,7 +162,7 @@ func main() {
 	// funnel is the bridge between incoming chat frames and the Frame's
 	// AI personality. When no Frame is embedded (legacy mode), chatRouter
 	// stays nil and the broker logs + drops chat.send frames.
-	chatRouter := buildChatRouter(ctx, embeddedFrame, logger)
+	chatRouter := buildChatRouter(ctx, embeddedFrame, chat.NewSQLStore(db), logger)
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
@@ -388,7 +390,7 @@ func discoverAspectIDs(aspectDirFlag string, log *slog.Logger) []string {
 // v1 supports "claude-api" (and "claude" alias); other providers log a
 // warning and fall back to nil (no deliberation). This keeps the Frame
 // operational as a routing surface even when the provider isn't recognised.
-func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, log *slog.Logger) *broker.ChatRouterCallbacks {
+func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.Store, log *slog.Logger) *broker.ChatRouterCallbacks {
 	if ef == nil {
 		return nil
 	}
@@ -417,14 +419,27 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, log *slog.Log
 		return nil
 	}
 
+	// F1.4b.4: wire the comms tool surface (Lock 3) and the
+	// chat-pulse impl (Lock 5). The Frame's gateway writes via the
+	// chat.Store; CommsRunner translates send_chat / react_to /
+	// chat.read / announce_file / share_file tool calls into
+	// gateway methods. ChatPulser fires real chat-visible status
+	// pulses via the same gateway, replacing F1.3's NoopPulser
+	// default.
+	gateway := framecomms.NewGateway(store, ef.Aspect.Name)
+	commsRunner := funnel.CommsRunner{Gateway: gateway}
+	pulser := &framecomms.ChatPulser{Gateway: gateway}
+
 	threads := route.NewThreadIndex()
 	f, err := funnel.New(funnel.Config{
 		AspectID: ef.Aspect.Name,
 		Harness:  bridle.NewHarness(p),
 		Provider: bridle.ProviderID(provider),
 		Model:    model,
-		Runner:   &funnel.NullRunner{},
+		Tools:    funnel.CommsToolDefs(),
+		Runner:   funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
 		Threads:  threads,
+		Pulser:   pulser,
 		Logger:   log,
 	})
 	if err != nil {
@@ -434,7 +449,8 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, log *slog.Log
 	}
 
 	log.Info("frame funnel: deliberation loop ready",
-		"frame", ef.Aspect.Name, "provider", provider, "model", model)
+		"frame", ef.Aspect.Name, "provider", provider, "model", model,
+		"tools", len(funnel.CommsToolDefs()))
 
 	frameName := ef.Aspect.Name
 	return &broker.ChatRouterCallbacks{
