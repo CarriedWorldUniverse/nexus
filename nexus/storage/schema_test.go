@@ -18,7 +18,7 @@ func TestOpenCreatesAndBootstraps(t *testing.T) {
 
 	expectedTables := []string{
 		"knowledge", "knowledge_fts", "threads", "chat_messages",
-		"chat_reactions", "shared_files",
+		"chat_reactions", "shared_files", "chat_usage",
 		"tickets", "activity", "schema_meta",
 	}
 	for _, tbl := range expectedTables {
