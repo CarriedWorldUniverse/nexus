@@ -105,6 +105,12 @@ type Config struct {
 	// call.
 	Events EventSink
 
+	// Filter judges each turn's natural reply for meaningfulness
+	// before it can post (Lock 1.3 / Lock 3 post-hoc filter). Nil
+	// falls back to AlwaysPostFilter — every non-empty reply goes
+	// through, matching the v1 §6.5 Frame harness behavior.
+	Filter OutputFilter
+
 	Logger *slog.Logger
 }
 
@@ -157,6 +163,9 @@ func New(cfg Config) (*Funnel, error) {
 	if cfg.Events == nil {
 		cfg.Events = NoopSink{}
 	}
+	if cfg.Filter == nil {
+		cfg.Filter = AlwaysPostFilter{}
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -185,17 +194,24 @@ func (f *Funnel) InboxLen() int {
 }
 
 // Deliberate runs one full deliberation cycle: drain inbox → check
-// compaction threshold → bridle.RunTurn → log-decision turn (deferred
-// to v2 — for v1, all turns are kept). Returns the bridle.TurnResult
-// of the primary turn (compaction's summarize turn isn't surfaced).
+// compaction threshold → bridle.RunTurn → post-hoc filter judges
+// the natural reply (Lock 1.3 / Lock 3). Returns the bridle.TurnResult
+// of the primary turn (compaction's summarize turn isn't surfaced)
+// alongside the FilterDecision the funnel made about whether the
+// reply should post.
+//
+// Callers consult FilterDecision.ShouldPost to decide whether to
+// surface result.FinalText to chat. F1.2/F1.4 wire the actual posting
+// path; today's caller in cmd/nexus/main.go just respects the
+// decision implicitly by not having a posting path yet.
 //
 // Returns ErrEmptyInbox if no comms are pending and userMessage is
 // empty — a no-op deliberation isn't useful.
-func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (bridle.TurnResult, error) {
+func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (DeliberateResult, error) {
 	f.mu.Lock()
 	if len(f.inbox) == 0 && userMessage == "" {
 		f.mu.Unlock()
-		return bridle.TurnResult{}, ErrEmptyInbox
+		return DeliberateResult{}, ErrEmptyInbox
 	}
 
 	// Drain inbox under lock. Mid-deliberation Receive calls will
@@ -270,7 +286,16 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (bridle.Tur
 		},
 	})
 	if err != nil {
-		return result, err
+		// Error path skips the cumulative-token update and the post-hoc
+		// filter — neither has anything meaningful to do with a turn
+		// that didn't produce a normal completion. The turn.end event
+		// above already fired with whatever Usage the provider returned
+		// (often zero, but some SDKs report partial usage on timeout).
+		// F1.4 token-attribution work should NOT rely on
+		// cumulativeTokens being precise across error retries — this
+		// is the right place to look if attribution numbers ever
+		// disagree with the provider's billing.
+		return DeliberateResult{TurnResult: result}, err
 	}
 
 	// Append the turn's session delta + update cumulative tokens. If
@@ -280,6 +305,19 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (bridle.Tur
 	f.cumulativeTokens += result.Usage.InputTokens + result.Usage.OutputTokens
 	f.mu.Unlock()
 
+	// Post-hoc filter judges the natural reply. Lock 5's
+	// EventFilterJudging fires before the call so dashboards can
+	// distinguish "filter is running" from "filter result back."
+	f.emit(ctx, Event{
+		Type:    EventFilterJudging,
+		Payload: FilterJudgingPayload{TurnID: turnID},
+	})
+	decision := f.runFilter(ctx, FilterInput{
+		FinalText: result.FinalText,
+		AspectID:  f.cfg.AspectID,
+		TurnID:    turnID,
+	})
+
 	f.log.Info("funnel: turn complete",
 		"aspect", f.cfg.AspectID,
 		"steps", result.StepCount,
@@ -287,9 +325,24 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (bridle.Tur
 		"input_tokens", result.Usage.InputTokens,
 		"output_tokens", result.Usage.OutputTokens,
 		"cumulative", f.cumulativeTokens,
-		"stop_reason", result.StopReason)
+		"stop_reason", result.StopReason,
+		"filter_post", decision.ShouldPost,
+		"filter_reason", decision.Reason)
 
-	return result, nil
+	return DeliberateResult{TurnResult: result, Filter: decision}, nil
+}
+
+// DeliberateResult is the funnel-level outcome of one deliberation
+// cycle: the bridle TurnResult plus the post-hoc filter's decision
+// about whether the natural reply should post to chat. Per Lock 1.3
+// / Lock 3 of the architecture.
+//
+// Callers consult Filter.ShouldPost to decide whether to surface
+// TurnResult.FinalText. F1.4 (comms tool surface) wires the actual
+// posting path and consumes this directly.
+type DeliberateResult struct {
+	TurnResult bridle.TurnResult
+	Filter     FilterDecision
 }
 
 // compact runs a summarize turn, rolls the session, and replaces the
@@ -510,6 +563,48 @@ func (f *Funnel) snapshotCumulative() int {
 // lifetime.
 func newTurnID() string {
 	return "turn-" + time.Now().UTC().Format("20060102T150405.000000Z") + "-" + randHex(3)
+}
+
+// filterTimeout caps how long the funnel waits for a filter's Judge
+// to return. CheapModelFilter sets its own ~1.5s internal cap; a
+// custom filter that ignores ctx and blocks would otherwise stall
+// the deliberation indefinitely. 2s gives the cheap-model filter
+// some headroom while still bounding the worst case.
+const filterTimeout = 2 * time.Second
+
+// runFilter wraps OutputFilter.Judge with a goroutine + timeout so a
+// blocking or misbehaving filter cannot stall deliberation. Mirrors
+// the safety pattern around emit() — the filter is observability-
+// adjacent and must not hold up the chat path.
+//
+// On timeout, fail open (ShouldPost=true). Same reasoning as
+// CheapModelFilter's internal failure path: suppressing real content
+// because telemetry hung is worse than the noise of letting a thin
+// reply through.
+func (f *Funnel) runFilter(ctx context.Context, in FilterInput) FilterDecision {
+	ch := make(chan FilterDecision, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				f.log.Warn("funnel: filter panicked; failing open",
+					"panic", r, "turn_id", in.TurnID)
+				ch <- FilterDecision{ShouldPost: true}
+			}
+		}()
+		ch <- f.cfg.Filter.Judge(ctx, in)
+	}()
+	select {
+	case d := <-ch:
+		return d
+	case <-time.After(filterTimeout):
+		f.log.Warn("funnel: filter timed out; failing open",
+			"timeout", filterTimeout, "turn_id", in.TurnID)
+		return FilterDecision{ShouldPost: true}
+	case <-ctx.Done():
+		f.log.Warn("funnel: context cancelled during filter; failing open",
+			"turn_id", in.TurnID)
+		return FilterDecision{ShouldPost: true}
+	}
 }
 
 // estimateContextTokens approximates input tokens for a TurnStart
