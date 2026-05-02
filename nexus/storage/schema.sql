@@ -94,6 +94,44 @@ CREATE INDEX IF NOT EXISTS idx_chat_from_agent ON chat_messages(from_agent);
 CREATE INDEX IF NOT EXISTS idx_chat_created_at ON chat_messages(created_at);
 
 -- -------------------------------------------------------------------
+-- Chat reactions (toggle-emoji on a chat message — Lock 3 react_to)
+-- -------------------------------------------------------------------
+-- One row per (msg, reactor, emoji). Toggling means delete-or-insert
+-- on this triple — the gateway handles the toggle semantics; the
+-- table stores only the current state.
+CREATE TABLE IF NOT EXISTS chat_reactions (
+  id           INTEGER PRIMARY KEY,
+  msg_id       INTEGER NOT NULL,
+  reactor      TEXT NOT NULL,
+  emoji        TEXT NOT NULL,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (msg_id) REFERENCES chat_messages(id) ON DELETE CASCADE,
+  UNIQUE (msg_id, reactor, emoji)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_reactions_msg ON chat_reactions(msg_id);
+
+-- -------------------------------------------------------------------
+-- Shared files (announce_file / share_file — Lock 3 file surface)
+-- -------------------------------------------------------------------
+-- Files surfaced to chat (announce_file) get a paired chat_messages
+-- row; the announce_msg_id links them. Direct shares (share_file)
+-- have NULL announce_msg_id and a recipients JSON array column.
+CREATE TABLE IF NOT EXISTS shared_files (
+  id              INTEGER PRIMARY KEY,
+  path            TEXT NOT NULL,
+  description     TEXT,
+  shared_by       TEXT NOT NULL,
+  announce_msg_id INTEGER,
+  recipients_json TEXT,                              -- JSON array of aspect ids; NULL for announces
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (announce_msg_id) REFERENCES chat_messages(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_files_shared_by ON shared_files(shared_by);
+CREATE INDEX IF NOT EXISTS idx_shared_files_announce  ON shared_files(announce_msg_id);
+
+-- -------------------------------------------------------------------
 -- Tickets (durable tasks tracked across aspects)
 -- -------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS tickets (
