@@ -111,6 +111,15 @@ type Config struct {
 	// through, matching the v1 §6.5 Frame harness behavior.
 	Filter OutputFilter
 
+	// Pulser fires chat-visible status pulses before long ops
+	// (compaction always; long tool chains and provider retries
+	// once F1.4 wires them). Per Lock 5 of the architecture: the
+	// funnel — not the aspect author — must announce long work, so
+	// silence-during-work is distinguishable from stuck/crashed.
+	// Nil falls back to NoopPulser (lifecycle events still fire via
+	// Events; Pulser is the human-visible chat layer).
+	Pulser StatusPulser
+
 	Logger *slog.Logger
 }
 
@@ -165,6 +174,9 @@ func New(cfg Config) (*Funnel, error) {
 	}
 	if cfg.Filter == nil {
 		cfg.Filter = AlwaysPostFilter{}
+	}
+	if cfg.Pulser == nil {
+		cfg.Pulser = NoopPulser{}
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -361,6 +373,18 @@ func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error 
 
 	tokensBefore := f.snapshotCumulative()
 	compactStart := time.Now()
+
+	// Pulse the chat surface BEFORE the lifecycle event fires so the
+	// human-visible signal precedes the machine-readable one. Per
+	// Lock 5 the funnel must announce long ops before they start —
+	// silence-during-compaction was the exact failure mode operators
+	// kept reading as "stuck" in agent-network.
+	f.pulse(ctx, StatusPulse{
+		Kind:              PulseKindCompact,
+		Reason:            "compacting context — summarizing prior session before next turn",
+		EstimatedDuration: estimatedCompactDuration,
+	})
+
 	f.emit(ctx, Event{
 		Type: EventCompactStart,
 		Payload: CompactStartPayload{
