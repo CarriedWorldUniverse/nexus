@@ -132,6 +132,33 @@ CREATE INDEX IF NOT EXISTS idx_shared_files_shared_by ON shared_files(shared_by)
 CREATE INDEX IF NOT EXISTS idx_shared_files_announce  ON shared_files(announce_msg_id);
 
 -- -------------------------------------------------------------------
+-- Token usage attribution per Lock 4 (operator #9254/#9258)
+-- -------------------------------------------------------------------
+-- Forensics, NOT chat-visible. Operator's framing: "I don't want to
+-- know while I'm building something — I just want to be able to find
+-- where it all went if we run out, so we can look at why and adjust."
+--
+-- Each row records (msg_id triggering the turn, turn_id internal
+-- handle, input/output tokens, model, recorded_at). Joinable from
+-- the chat history view: "click chat msg #N → see what that turn
+-- cost." Server-stamped recorded_at; aspects don't supply timestamps.
+CREATE TABLE IF NOT EXISTS chat_usage (
+  id            INTEGER PRIMARY KEY,
+  msg_id        INTEGER,                          -- triggering chat msg; NULL for non-comms turns
+  turn_id       TEXT NOT NULL,
+  aspect        TEXT NOT NULL,
+  model         TEXT NOT NULL,
+  input_tokens  INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  recorded_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (msg_id) REFERENCES chat_messages(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_usage_msg     ON chat_usage(msg_id);
+CREATE INDEX IF NOT EXISTS idx_chat_usage_aspect  ON chat_usage(aspect);
+CREATE INDEX IF NOT EXISTS idx_chat_usage_recorded ON chat_usage(recorded_at);
+
+-- -------------------------------------------------------------------
 -- Tickets (durable tasks tracked across aspects)
 -- -------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS tickets (
