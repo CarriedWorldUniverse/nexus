@@ -99,6 +99,12 @@ type Config struct {
 	// one place to find the participation index.
 	Threads *route.ThreadIndex
 
+	// Events receives lifecycle events emitted as the funnel works
+	// (turn start/end, compaction start/end, filter judgments). Per
+	// Lock 5. Nil falls back to NoopSink — emission is always safe to
+	// call.
+	Events EventSink
+
 	Logger *slog.Logger
 }
 
@@ -147,6 +153,9 @@ func New(cfg Config) (*Funnel, error) {
 	}
 	if cfg.Compaction.ThresholdTokens == 0 {
 		cfg.Compaction = DefaultCompactionPolicy()
+	}
+	if cfg.Events == nil {
+		cfg.Events = NoopSink{}
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -233,8 +242,33 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (bridle.Tur
 		MaxSteps:     f.cfg.MaxStepsPerTurn,
 	}
 
+	turnID := newTurnID()
+	turnStart := time.Now()
+	f.emit(ctx, Event{
+		Type: EventTurnStart,
+		Payload: TurnStartPayload{
+			TurnID:        turnID,
+			Round:         1,
+			ContextTokens: estimateContextTokens(tail, pending, userMessage),
+		},
+	})
+
 	sink := &collectSink{}
 	result, err := f.cfg.Harness.RunTurn(ctx, req, f.cfg.Runner, sink)
+	// turn.end must fire whether the turn succeeded or errored — the
+	// Lock 5 spec promises every turn.start has a paired turn.end.
+	// Without this, dashboards listening for paired events would
+	// register every provider error as a stuck turn.
+	f.emit(ctx, Event{
+		Type: EventTurnEnd,
+		Payload: TurnEndPayload{
+			TurnID:     turnID,
+			Usage:      result.Usage,
+			StopReason: result.StopReason,
+			StepCount:  result.StepCount,
+			Duration:   time.Since(turnStart),
+		},
+	})
 	if err != nil {
 		return result, err
 	}
@@ -261,11 +295,27 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (bridle.Tur
 // compact runs a summarize turn, rolls the session, and replaces the
 // SessionTail with a single summary record. Cumulative token counter
 // resets. See docs/2026-05-01-funnel-compaction-design.md.
+//
+// Single-caller assumption: compact assumes the calling Deliberate
+// loop serializes itself. Two concurrent Deliberate calls would race
+// here. v1 has one caller (the Frame's main loop), and that's the
+// invariant. If Deliberate ever fans out, this needs a guard.
 func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error {
 	if len(tail) == 0 {
 		// Nothing to compact.
 		return nil
 	}
+
+	tokensBefore := f.snapshotCumulative()
+	compactStart := time.Now()
+	f.emit(ctx, Event{
+		Type: EventCompactStart,
+		Payload: CompactStartPayload{
+			Reason:       CompactReasonSoft,
+			TokensBefore: tokensBefore,
+			TargetTokens: f.cfg.Compaction.MaxSummaryTokens,
+		},
+	})
 
 	model := f.cfg.Compaction.SummarizationModel
 	if model == "" {
@@ -309,6 +359,15 @@ func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error 
 	f.cumulativeTokens = result.Usage.OutputTokens // the summary itself counts toward the next budget
 	f.sessionHandle = bridle.SessionHandle{ID: newSessionID()}
 	f.mu.Unlock()
+
+	f.emit(ctx, Event{
+		Type: EventCompactEnd,
+		Payload: CompactEndPayload{
+			TokensBefore: tokensBefore,
+			TokensAfter:  result.Usage.OutputTokens,
+			Duration:     time.Since(compactStart),
+		},
+	})
 
 	f.log.Info("funnel: compaction complete",
 		"summary_tokens", result.Usage.OutputTokens,
@@ -396,3 +455,78 @@ func (NullRunner) Run(_ context.Context, _ bridle.ToolCall) (json.RawMessage, er
 type collectSink struct{}
 
 func (collectSink) Emit(_ bridle.Event) {}
+
+// emitTimeout caps how long emit() waits for a sink before logging
+// and moving on. A blocking sink (e.g. a slow channel reader, a
+// blocked WS write) must not stall deliberation — that's the exact
+// "looks like a hang" failure Lock 5 was built to prevent.
+const emitTimeout = 100 * time.Millisecond
+
+// emit is the single internal entrypoint for lifecycle events. It
+// stamps AspectID + EmittedAt so call sites can stay terse, recovers
+// from sink panics so a misbehaving sink can never break the
+// deliberation loop, and bounds Emit's wall-clock cost so a slow or
+// blocked sink can't stall a turn.
+//
+// Sinks that need long-running work should buffer to a channel and
+// return; the funnel does not wait for downstream delivery.
+func (f *Funnel) emit(ctx context.Context, e Event) {
+	e.AspectID = f.cfg.AspectID
+	e.EmittedAt = time.Now()
+	done := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				f.log.Warn("funnel: event sink panicked; suppressing",
+					"event", e.Type, "panic", r)
+			}
+			close(done)
+		}()
+		f.cfg.Events.Emit(ctx, e)
+	}()
+	select {
+	case <-done:
+	case <-time.After(emitTimeout):
+		f.log.Warn("funnel: event sink slow; abandoning emit",
+			"event", e.Type, "timeout", emitTimeout)
+	case <-ctx.Done():
+		f.log.Warn("funnel: context cancelled during emit", "event", e.Type)
+	}
+}
+
+// snapshotCumulative reads the cumulative token count under the
+// funnel's lock. Used by event payload construction so the count
+// reflects the moment the event fires, not whatever the loop later
+// updates it to.
+func (f *Funnel) snapshotCumulative() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cumulativeTokens
+}
+
+// newTurnID mints a unique id for a single bridle.RunTurn invocation.
+// Format mirrors session ids (timestamp + random suffix) — they're
+// ordered, debuggable, and collision-free for a single Frame's
+// lifetime.
+func newTurnID() string {
+	return "turn-" + time.Now().UTC().Format("20060102T150405.000000Z") + "-" + randHex(3)
+}
+
+// estimateContextTokens approximates input tokens for a TurnStart
+// payload — we don't have a tokenizer here and we don't want to drag
+// one in just for a telemetry estimate. Rough heuristic: 4 chars per
+// token, summed over tail content + inbox + user message.
+//
+// The real number lands in TurnEnd via bridle.Usage. This estimate
+// exists so dashboard panels can show a "going in at ~X tokens" hint
+// before a slow turn completes.
+func estimateContextTokens(tail []bridle.SessionEvent, inbox []bridle.InboxItem, userMessage string) int {
+	chars := len(userMessage)
+	for _, ev := range tail {
+		chars += len(ev.Content)
+	}
+	for _, item := range inbox {
+		chars += len(item.Content)
+	}
+	return chars / 4
+}
