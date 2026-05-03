@@ -354,3 +354,231 @@ type ShutdownPayload struct {
 	Reason        string `json:"reason"`
 	GracePeriodS  int    `json:"grace_period_s,omitempty"`
 }
+
+// -------------------------------------------------------------------
+// Tickets (operator-aspect WS extension §4.1)
+// -------------------------------------------------------------------
+
+// TicketCreatePayload — aspect or operator creates a ticket.
+type TicketCreatePayload struct {
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	Assignee    string `json:"assignee,omitempty"`
+	Priority    string `json:"priority,omitempty"` // low | normal | high | urgent
+	Domain      string `json:"domain,omitempty"`
+	SourceMsgID int64  `json:"source_msg_id,omitempty"`
+}
+
+// TicketUpdatePayload — patch fields. Pointer fields distinguish
+// "field omitted" (nil) from "field cleared to NULL" (empty string).
+// Mirrors the broker's `!== undefined` semantics for the same case.
+type TicketUpdatePayload struct {
+	ID          int64   `json:"id"`
+	Status      *string `json:"status,omitempty"`
+	Assignee    *string `json:"assignee,omitempty"`
+	Priority    *string `json:"priority,omitempty"`
+	Title       *string `json:"title,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Domain      *string `json:"domain,omitempty"`
+}
+
+// TicketListPayload — combinable filters; Limit caps at 200, default 50.
+type TicketListPayload struct {
+	Assignee string `json:"assignee,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Creator  string `json:"creator,omitempty"`
+	Domain   string `json:"domain,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+}
+
+// TicketSummary is the per-row shape returned by list — projection
+// drops description to avoid response overflow at scale.
+type TicketSummary struct {
+	ID        int64  `json:"id"`
+	Title     string `json:"title"`
+	Status    string `json:"status"`
+	Priority  string `json:"priority"`
+	Domain    string `json:"domain,omitempty"`
+	Assignee  string `json:"assignee,omitempty"`
+	Creator   string `json:"creator"`
+	CreatedAt string `json:"created_at"` // RFC 3339 UTC
+}
+
+// TicketListResultPayload is the response to TicketListPayload.
+type TicketListResultPayload struct {
+	Tickets []TicketSummary `json:"tickets"`
+}
+
+// TicketGetPayload — fetch one ticket with description + notes.
+type TicketGetPayload struct {
+	ID int64 `json:"id"`
+}
+
+// TicketDetail extends TicketSummary with description + lifecycle
+// timestamps. Returned by ticket.get; not used for list rows.
+type TicketDetail struct {
+	TicketSummary
+	Description string `json:"description,omitempty"`
+	SourceMsgID int64  `json:"source_msg_id,omitempty"`
+	UpdatedAt   string `json:"updated_at"`
+	ClosedAt    string `json:"closed_at,omitempty"`
+}
+
+// TicketNote is one entry in a ticket's chronological note thread.
+type TicketNote struct {
+	ID        int64  `json:"id"`
+	Author    string `json:"author"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
+}
+
+// TicketGetResultPayload pairs a ticket with its notes.
+type TicketGetResultPayload struct {
+	Ticket TicketDetail `json:"ticket"`
+	Notes  []TicketNote `json:"notes"`
+}
+
+// TicketNoteAddPayload — append a progress note. Author derives from
+// the connection's identity, not from the payload (no spoofing).
+type TicketNoteAddPayload struct {
+	TicketID int64  `json:"ticket_id"`
+	Content  string `json:"content"`
+}
+
+// -------------------------------------------------------------------
+// Files (operator-aspect WS extension §4.2)
+// -------------------------------------------------------------------
+
+// FileListPayload — list files; Owner filter optional.
+type FileListPayload struct {
+	Owner string `json:"owner,omitempty"`
+}
+
+// FileSummary is the metadata view of a stored file. Bytes are not
+// in this payload — see FileGetResultPayload.DownloadURL for the
+// signed-URL pattern that keeps binary out of the WS pipe.
+type FileSummary struct {
+	ID        int64  `json:"id"`
+	Owner     string `json:"owner"`
+	Path      string `json:"path"`
+	Size      int64  `json:"size"`
+	MimeType  string `json:"mime_type,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
+// FileListResultPayload is the response.
+type FileListResultPayload struct {
+	Files []FileSummary `json:"files"`
+}
+
+// FileGetPayload — request a specific file's metadata + download URL.
+type FileGetPayload struct {
+	ID int64 `json:"id"`
+}
+
+// FileGetResultPayload returns metadata plus a short-lived download URL
+// (Nexus-signed HMAC token, default 5m / max 30m TTL, scoped to file_id
+// + verb). Bytes flow over REST GET; this WS frame carries the handle.
+type FileGetResultPayload struct {
+	File        FileSummary `json:"file"`
+	DownloadURL string      `json:"download_url"`
+	ExpiresAt   string      `json:"expires_at"` // RFC 3339 UTC
+}
+
+// -------------------------------------------------------------------
+// Docs (operator-aspect WS extension §4.3)
+// -------------------------------------------------------------------
+
+// DocsListPayload — enumerate docs under the configured root. Path
+// filter is an optional subdir relative to root; absolute paths and
+// `..` segments rejected server-side.
+type DocsListPayload struct {
+	Path string `json:"path,omitempty"`
+}
+
+// DocEntry is a single doc file's metadata.
+type DocEntry struct {
+	Path     string `json:"path"`     // relative to docs root
+	Size     int64  `json:"size"`
+	Modified string `json:"modified"` // RFC 3339 UTC
+}
+
+// DocsListResultPayload is the response.
+type DocsListResultPayload struct {
+	Docs []DocEntry `json:"docs"`
+}
+
+// DocsGetPayload — read a single doc. Server enforces: relative path,
+// no `..` segments, must resolve inside the docs root, must be UTF-8
+// text (binary docs rejected with status=400).
+type DocsGetPayload struct {
+	Path string `json:"path"`
+}
+
+// DocsGetResultPayload returns the file content as UTF-8 text.
+type DocsGetResultPayload struct {
+	Path     string `json:"path"`
+	Content  string `json:"content"`
+	Modified string `json:"modified"`
+}
+
+// -------------------------------------------------------------------
+// Usage (operator-aspect WS extension §4.4)
+// -------------------------------------------------------------------
+
+// UsageQueryPayload — period bucket + optional aspect filter + group_by
+// dimension. Backed by the chat_usage table (F3.1).
+type UsageQueryPayload struct {
+	Period  string `json:"period,omitempty"`   // 1h | 24h | 7d | 30d (default 7d)
+	Aspect  string `json:"aspect,omitempty"`   // filter to one aspect
+	GroupBy string `json:"group_by,omitempty"` // aspect | msg_id | day (default aspect)
+}
+
+// UsageRow is one aggregated bucket. Key shape depends on GroupBy:
+// aspect-id, msg-id (string-rendered int), or YYYY-MM-DD.
+type UsageRow struct {
+	Key          string `json:"key"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	TotalTokens  int64  `json:"total_tokens"`
+}
+
+// UsageQueryResultPayload is the response.
+type UsageQueryResultPayload struct {
+	Period string     `json:"period"`
+	Rows   []UsageRow `json:"rows"`
+}
+
+// -------------------------------------------------------------------
+// Network and agents (operator-aspect WS extension §4.5; admin-gated)
+// -------------------------------------------------------------------
+
+// NetworkRestartPayload — restart whole network or a specific aspect.
+// Empty Target = restart-all. Operator/Frame role only.
+type NetworkRestartPayload struct {
+	Target string `json:"target,omitempty"`
+}
+
+// NetworkShutdownPayload — graceful shutdown across the network.
+type NetworkShutdownPayload struct {
+	GracePeriodS int `json:"grace_period_s,omitempty"`
+}
+
+// NetworkMaintenancePayload — toggle maintenance mode (suppress
+// non-admin frames except status reads).
+type NetworkMaintenancePayload struct {
+	Enabled bool   `json:"enabled"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// AgentStartPayload — bring up an aspect (empty = "all").
+type AgentStartPayload struct {
+	AspectID string `json:"aspect_id,omitempty"`
+}
+
+// AgentSayPayload — direct prompt injection bypassing chat. Used by
+// the operator dashboard "say to agent" affordance.
+type AgentSayPayload struct {
+	AspectID string `json:"aspect_id"`
+	Content  string `json:"content"`
+}
