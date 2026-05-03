@@ -163,7 +163,8 @@ func main() {
 	// funnel is the bridge between incoming chat frames and the Frame's
 	// AI personality. When no Frame is embedded (legacy mode), chatRouter
 	// stays nil and the broker logs + drops chat.send frames.
-	chatRouter := buildChatRouter(ctx, embeddedFrame, chat.NewSQLStore(db), usage.NewSQLStore(db), logger)
+	chatStore := chat.NewSQLStore(db)
+	chatRouter := buildChatRouter(ctx, embeddedFrame, chatStore, usage.NewSQLStore(db), logger)
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
@@ -252,6 +253,14 @@ func main() {
 		}
 	}
 
+	// Lock 6 replay engine. Aspects reconnecting with since_msg_id > 0
+	// trigger a query against chatStore for messages addressed to them
+	// since the cursor; broker emits each as a chat.deliver with
+	// Replay=true. RecipientPolicy uses the same defaults the broker's
+	// live fan-out uses, so replay shape matches what the aspect would
+	// have seen if it had been online.
+	replayer := broker.NewReplayer(chatStore, broker.RecipientPolicy{})
+
 	b := broker.New(broker.Config{
 		Addr:       *addr,
 		AuthToken:  token,
@@ -262,6 +271,8 @@ func main() {
 		HandQueue:  queue,
 		Admin:      adminCallbacks,
 		ChatRouter: chatRouter,
+		Replayer:   replayer,
+		ChatStore:  chatStore,
 	}, r)
 
 	// Stale-reap sweep. Runs until ctx cancels.
