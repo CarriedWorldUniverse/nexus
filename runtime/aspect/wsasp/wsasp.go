@@ -26,6 +26,7 @@ import (
 	"github.com/nexus-cw/nexus/nexus/frame/funnel"
 	"github.com/nexus-cw/nexus/nexus/frames"
 	"github.com/nexus-cw/nexus/runtime/wsclient"
+	"github.com/nexus-cw/nexus/shared/schemas"
 )
 
 // Config wires an aspect-side WS client.
@@ -50,6 +51,13 @@ type Config struct {
 	// Replay flag is propagated for callers that want to surface
 	// staleness; live frames have replay=false.
 	OnDeliver func(msg DeliveredMessage)
+
+	// Register is the full schemas.RegisterRequest the wrapper sends
+	// at handshake. The aspect binary populates this before calling
+	// Run; wsasp injects it into the register frame alongside the
+	// Lock 6 since_msg_id cursor. SessionID, PID, StartedAt, etc.
+	// are caller's responsibility — wsasp doesn't own identity.
+	Register schemas.RegisterRequest
 }
 
 // DeliveredMessage is the funnel-side representation of an inbound
@@ -142,18 +150,16 @@ func (c *Client) registerOnReady(ctx context.Context) {
 }
 
 // sendRegister builds and sends the register frame with the current
-// cursor. Failures are logged and retried on next ready.
+// cursor and the caller-supplied RegisterRequest. Failures are
+// logged and retried on next ready.
 func (c *Client) sendRegister(ctx context.Context) {
 	c.mu.Lock()
 	since := c.cursor
 	c.mu.Unlock()
 
 	env, err := frames.New(frames.KindRegister, frames.RegisterPayload{
-		SinceMsgID: since,
-		// Note: schemas.RegisterRequest fields are populated
-		// elsewhere (this wrapper doesn't own identity beyond
-		// AspectName + auth). F2.5 in the cmd/aspect main wires
-		// the full RegisterRequest before calling sendRegister.
+		RegisterRequest: c.cfg.Register,
+		SinceMsgID:      since,
 	})
 	if err != nil {
 		return
