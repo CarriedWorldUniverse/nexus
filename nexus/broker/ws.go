@@ -111,7 +111,14 @@ func (b *Broker) handleConnect(w http.ResponseWriter, r *http.Request) {
 // configured — resolves to the Frame identity (admin=true) for
 // back-compat with pre-drift-C callers.
 func (b *Broker) resolveUpgradeAuth(r *http.Request) (TokenInfo, bool) {
+	// Authorization header is the primary source. Browser WebSocket API
+	// can't set custom headers on the upgrade, so fall back to a `token`
+	// query parameter for browser-driven operator clients (SPA, smoke-
+	// test page). Aspect binaries always use the header.
 	token := ExtractBearer(r.Header.Get("Authorization"))
+	if token == "" {
+		token = r.URL.Query().Get("token")
+	}
 	if token == "" {
 		return TokenInfo{}, false
 	}
