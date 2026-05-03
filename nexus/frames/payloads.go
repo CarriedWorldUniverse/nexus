@@ -74,6 +74,12 @@ type ViaOutpostStamp struct {
 type ForwardedRegisterPayload struct {
 	schemas.RegisterRequest
 	ViaOutpostStamp
+
+	// SinceMsgID mirrors RegisterPayload.SinceMsgID for forwarded
+	// aspects: outposts MUST propagate the field if the downstream
+	// aspect set it. Lock 6 replay applies regardless of whether the
+	// connection is direct or routed via an Outpost.
+	SinceMsgID int64 `json:"since_msg_id,omitempty"`
 }
 
 // -------------------------------------------------------------------

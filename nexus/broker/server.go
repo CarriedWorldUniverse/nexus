@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/nexus-cw/nexus/nexus/chat"
 	"github.com/nexus-cw/nexus/nexus/handqueue"
 	"github.com/nexus-cw/nexus/nexus/roster"
 	"github.com/nexus-cw/nexus/nexus/sessions"
@@ -73,6 +74,21 @@ type Config struct {
 	// Only chat.send is routed here; chat.deliver and other comms
 	// frames are handled by the aspect WS path.
 	ChatRouter *ChatRouterCallbacks
+
+	// Replayer drives Lock 6 reconnect/replay. When an aspect registers
+	// with since_msg_id > 0, the broker queries chat history for
+	// messages addressed to that aspect since the cursor and emits each
+	// as a chat.deliver frame with Replay=true before resuming live
+	// delivery. Optional: when nil, since_msg_id is ignored and aspects
+	// only receive live frames going forward (Lock 6's "graceful
+	// degradation" path — no replay, but no crash).
+	Replayer *Replayer
+
+	// ChatStore powers chat.read frames (Lock 2 pull path). Aspects
+	// invoke chat.read to fetch thread context they weren't pushed,
+	// without triggering a fresh deliberation cycle. When nil, chat.read
+	// frames return an empty result with an error string.
+	ChatStore chat.Store
 }
 
 // ChatRouterCallbacks wires the broker's chat.send handling to the
