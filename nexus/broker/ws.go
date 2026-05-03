@@ -196,9 +196,78 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleDispatchFrame(env)
 	case frames.KindChatSend:
 		c.handleChatSendFrame(env)
+	case frames.KindChatRead:
+		c.handleChatReadFrame(env)
 	default:
 		c.log.Info("frame kind not yet handled", "kind", env.Kind)
 	}
+}
+
+// handleChatReadFrame answers a chat.read request — Lock 2 pull path.
+// Aspects use this to fetch context they weren't pushed, without
+// triggering a fresh deliberation cycle on the broker side.
+//
+// Server returns a chat.read.result with the messages oldest-first.
+// SinceID gives pagination — if the caller has already seen messages
+// up to N in the thread, sending SinceID=N returns only newer rows.
+func (c *wsConn) handleChatReadFrame(env frames.Envelope) {
+	store := c.broker.cfg.ChatStore
+	if store == nil {
+		// No store → empty result rather than hard error. The aspect
+		// can read this as "nothing here" without crashing on a
+		// malformed reply.
+		empty, _ := frames.NewResponse(frames.KindChatReadResult, env.ID, frames.ChatReadResultPayload{})
+		c.send(empty)
+		return
+	}
+	var p frames.ChatReadPayload
+	if err := frames.PayloadAs(env, &p); err != nil {
+		c.log.Warn("chat.read payload malformed", "err", err, "from", c.registeredAs)
+		empty, _ := frames.NewResponse(frames.KindChatReadResult, env.ID, frames.ChatReadResultPayload{})
+		c.send(empty)
+		return
+	}
+	if p.ThreadID <= 0 {
+		// chat.read without a thread is a no-op. The funnel calls this
+		// with a thread id known via prior chat.deliver; calling
+		// without one is most likely a model bug, not a real read
+		// request — return empty and move on.
+		empty, _ := frames.NewResponse(frames.KindChatReadResult, env.ID, frames.ChatReadResultPayload{})
+		c.send(empty)
+		return
+	}
+
+	ctx := c.broker.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	const maxMessages = 200 // bounded so a thread with 5k entries doesn't slurp them all
+	msgs, err := store.ListThread(ctx, p.ThreadID, p.SinceID, maxMessages)
+	if err != nil {
+		c.log.Warn("chat.read: store error",
+			"thread", p.ThreadID, "since", p.SinceID, "err", err)
+		empty, _ := frames.NewResponse(frames.KindChatReadResult, env.ID, frames.ChatReadResultPayload{})
+		c.send(empty)
+		return
+	}
+
+	out := make([]frames.ChatDeliverPayload, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, frames.ChatDeliverPayload{
+			ID:         int(m.ID),
+			From:       m.From,
+			Content:    m.Content,
+			ReplyTo:    int(m.ReplyTo),
+			ReceivedAt: m.CreatedAt.UTC().Format(time.RFC3339),
+			// Reason left empty — aspect knows it's a pull, not a push,
+			// from the frame's response correlation. Replay=false
+			// (this is a synchronous read, not Lock 6 replay).
+		})
+	}
+	resp, _ := frames.NewResponse(frames.KindChatReadResult, env.ID, frames.ChatReadResultPayload{
+		Messages: out,
+	})
+	c.send(resp)
 }
 
 // handleDispatchFrame enqueues the job on the broker's HandQueue,
@@ -481,6 +550,56 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 		StaleAfterS:        int(c.broker.cfg.StaleAfter.Seconds()),
 	})
 	c.send(ack)
+
+	// Lock 6 replay: if the aspect's register frame carried a non-zero
+	// since_msg_id, query chat history for messages addressed to this
+	// aspect since the cursor and emit each as its own chat.deliver
+	// with Replay=true. Goroutine so the read loop isn't blocked.
+	// Failures are logged and do not propagate — replay is best-effort
+	// per Lock 6's graceful-degradation framing.
+	if payload.SinceMsgID > 0 && c.broker.cfg.Replayer != nil {
+		go c.replayAddressedSince(state.Name, int64(payload.SinceMsgID))
+	}
+}
+
+// replayAddressedSince walks the chat history forward from the
+// supplied cursor and emits a chat.deliver frame for each message the
+// recipient policy says should have been delivered to this aspect.
+// Lock 6: replay frames carry Replay=true; otherwise identical shape
+// to live delivery. ReceivedAt is the message's original ingestion
+// time so the model can age-check on receipt.
+func (c *wsConn) replayAddressedSince(aspect string, since int64) {
+	ctx := c.broker.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	msgs, err := c.broker.cfg.Replayer.AddressedSince(ctx, aspect, since)
+	if err != nil {
+		c.log.Warn("lock-6 replay failed",
+			"aspect", aspect, "since", since, "err", err)
+		return
+	}
+	if len(msgs) == 0 {
+		return
+	}
+	c.log.Info("lock-6 replay starting",
+		"aspect", aspect, "since", since, "count", len(msgs))
+	for _, m := range msgs {
+		env, err := frames.New(frames.KindChatDeliver, frames.ChatDeliverPayload{
+			ID:         int(m.ID),
+			From:       m.From,
+			Content:    m.Content,
+			ReplyTo:    int(m.ReplyTo),
+			ReceivedAt: m.CreatedAt.UTC().Format(time.RFC3339),
+			Reason:     "replay",
+			Replay:     true,
+		})
+		if err != nil {
+			c.log.Warn("lock-6 replay: build frame", "err", err)
+			continue
+		}
+		c.send(env)
+	}
 }
 
 // handleDeregisterFrame processes a graceful-shutdown deregister frame.
