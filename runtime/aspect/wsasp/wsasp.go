@@ -295,6 +295,94 @@ func (c *Client) SendChat(ctx context.Context, content string, replyTo int64, to
 	return 0, nil
 }
 
+// ReactTo toggles an emoji reaction on a chat msg. Fire-and-forget:
+// the broker doesn't synchronise reaction toggles back, and the
+// funnel/model doesn't need confirmation (the next chat.deliver for
+// any subsequent message in that thread will reflect the reactions
+// view). Buffers if WS is down, mirrors SendChat's semantics.
+func (c *Client) ReactTo(ctx context.Context, msgID int64, emoji string) error {
+	env, err := frames.New(frames.KindChatReaction, frames.ChatReactionPayload{
+		From:  c.cfg.AspectName,
+		MsgID: int(msgID),
+		Emoji: emoji,
+	})
+	if err != nil {
+		return err
+	}
+	c.queueOrSend(ctx, env)
+	return nil
+}
+
+// ReadThread sends a chat.read request and awaits the chat.read.result
+// response. Unlike SendChat / ReactTo, this is request/response shape —
+// the model invokes it as a tool and expects messages back. Bypasses
+// the outbound buffer: if the WS is down, the read fails (callers can
+// retry; a buffered read makes no sense — the caller is waiting for
+// data, not fire-and-forget).
+func (c *Client) ReadThread(ctx context.Context, threadID, sinceID int64) ([]frames.ChatDeliverPayload, error) {
+	env, err := frames.New(frames.KindChatRead, frames.ChatReadPayload{
+		ThreadID: threadID,
+		SinceID:  sinceID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.ws.Request(ctx, env)
+	if err != nil {
+		return nil, fmt.Errorf("wsasp: chat.read: %w", err)
+	}
+	var out frames.ChatReadResultPayload
+	if err := frames.PayloadAs(resp, &out); err != nil {
+		return nil, fmt.Errorf("wsasp: chat.read.result decode: %w", err)
+	}
+	return out.Messages, nil
+}
+
+// AnnounceFile posts an announcement of a file path with a brief
+// description. Returns the new chat msg_id so the model can reference
+// the announcement in subsequent context.
+func (c *Client) AnnounceFile(ctx context.Context, path, description string) (int64, error) {
+	env, err := frames.New(frames.KindAnnounceFile, frames.AnnounceFilePayload{
+		From:        c.cfg.AspectName,
+		Path:        path,
+		Description: description,
+	})
+	if err != nil {
+		return 0, err
+	}
+	resp, err := c.ws.Request(ctx, env)
+	if err != nil {
+		return 0, fmt.Errorf("wsasp: announce_file: %w", err)
+	}
+	var out frames.FileResultPayload
+	if err := frames.PayloadAs(resp, &out); err != nil {
+		return 0, fmt.Errorf("wsasp: file.result decode: %w", err)
+	}
+	return out.MsgID, nil
+}
+
+// ShareFile records a direct share to recipients without posting to
+// chat. Returns a share id the model can quote in subsequent context.
+func (c *Client) ShareFile(ctx context.Context, path string, recipients []string) (int64, error) {
+	env, err := frames.New(frames.KindShareFile, frames.ShareFilePayload{
+		From:       c.cfg.AspectName,
+		Path:       path,
+		Recipients: recipients,
+	})
+	if err != nil {
+		return 0, err
+	}
+	resp, err := c.ws.Request(ctx, env)
+	if err != nil {
+		return 0, fmt.Errorf("wsasp: share_file: %w", err)
+	}
+	var out frames.FileResultPayload
+	if err := frames.PayloadAs(resp, &out); err != nil {
+		return 0, fmt.Errorf("wsasp: file.result decode: %w", err)
+	}
+	return out.ShareID, nil
+}
+
 // queueOrSend tries an immediate send; on disconnect, buffers.
 func (c *Client) queueOrSend(ctx context.Context, env frames.Envelope) {
 	if c.ws.Connected() {
