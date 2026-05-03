@@ -446,24 +446,41 @@ type TicketNoteAddPayload struct {
 }
 
 // -------------------------------------------------------------------
-// Files (operator-aspect WS extension §4.2)
+// Files (per 2026-05-04-files-subsystem-spec.md — Nexus is broker, not store)
 // -------------------------------------------------------------------
 
-// FileListPayload — list files; Owner filter optional.
-type FileListPayload struct {
-	Owner string `json:"owner,omitempty"`
+// FileAnnouncePayload — aspect or operator publishes a file reference.
+// The bytes stay on the announcing aspect's filesystem (ws:// URL) or a
+// public URL (https://, gs://, s3://); Nexus stores only the reference.
+type FileAnnouncePayload struct {
+	Name        string `json:"name"`
+	URL         string `json:"url"`               // ws://<aspect>/file/<path> or public URL
+	MimeType    string `json:"mime_type,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
-// FileSummary is the metadata view of a stored file. Bytes are not
-// in this payload — see FileGetResultPayload.DownloadURL for the
-// signed-URL pattern that keeps binary out of the WS pipe.
-type FileSummary struct {
+// FileAnnounceResultPayload — ack with the new files-table id.
+type FileAnnounceResultPayload struct {
 	ID        int64  `json:"id"`
-	Owner     string `json:"owner"`
-	Path      string `json:"path"`
-	Size      int64  `json:"size"`
-	MimeType  string `json:"mime_type,omitempty"`
-	CreatedAt string `json:"created_at"`
+	CreatedAt string `json:"created_at"` // RFC 3339 UTC
+}
+
+// FileListPayload — list announced files.
+type FileListPayload struct {
+	Owner string `json:"owner,omitempty"` // filter by announcing aspect-id
+	Limit int    `json:"limit,omitempty"` // default 50
+}
+
+// FileSummary is the metadata view returned in list. URL deliberately
+// omitted — it's an internal routing detail, requesters always go
+// through Nexus via file.get.
+type FileSummary struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Owner       string `json:"owner"` // announcing aspect-id
+	MimeType    string `json:"mime_type,omitempty"`
+	Description string `json:"description,omitempty"`
+	CreatedAt   string `json:"created_at"`
 }
 
 // FileListResultPayload is the response.
@@ -471,18 +488,46 @@ type FileListResultPayload struct {
 	Files []FileSummary `json:"files"`
 }
 
-// FileGetPayload — request a specific file's metadata + download URL.
+// FileGetPayload — request a specific file. Nexus inspects the URL
+// scheme and either returns the public URL directly (https://) or
+// dispatches a file.fetch to the owning aspect's funnel (ws://) and
+// forwards the file.deliver response to the requester.
 type FileGetPayload struct {
 	ID int64 `json:"id"`
 }
 
-// FileGetResultPayload returns metadata plus a short-lived download URL
-// (Nexus-signed HMAC token, default 5m / max 30m TTL, scoped to file_id
-// + verb). Bytes flow over REST GET; this WS frame carries the handle.
+// FileGetResultPayload — exactly one of {URL, Content} is non-empty.
+// URL is set for public references; Content is set for ws:// references
+// and carries the bytes inline (base64 in v0.1; binary WS frames are
+// the post-cutover upgrade path for large assets).
 type FileGetResultPayload struct {
-	File        FileSummary `json:"file"`
-	DownloadURL string      `json:"download_url"`
-	ExpiresAt   string      `json:"expires_at"` // RFC 3339 UTC
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	MimeType string `json:"mime_type,omitempty"`
+	URL      string `json:"url,omitempty"`      // public URL — requester fetches independently
+	Content  string `json:"content,omitempty"`  // base64-encoded bytes — set for ws:// references
+	Encoding string `json:"encoding,omitempty"` // "base64" when Content is set
+}
+
+// FileFetchPayload — Nexus → aspect funnel. Internal frame. The funnel
+// handles this directly via its service-frame dispatch table without
+// invoking the deliberation loop or model. Funnel resolves the path
+// component against the aspect's local filesystem (with path traversal
+// hardening — reject `..` segments, absolute paths, paths escaping the
+// aspect's home).
+type FileFetchPayload struct {
+	RequestID string `json:"request_id"` // correlates with the originating file.get
+	Path      string `json:"path"`       // <path> from ws://<aspect>/file/<path>
+}
+
+// FileDeliverPayload — aspect funnel → Nexus. Carries bytes (or an
+// error if the file is unreadable / not found / outside the home dir).
+type FileDeliverPayload struct {
+	RequestID string `json:"request_id"`
+	Content   string `json:"content,omitempty"`   // base64-encoded bytes
+	Encoding  string `json:"encoding,omitempty"`  // "base64"
+	MimeType  string `json:"mime_type,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // -------------------------------------------------------------------
