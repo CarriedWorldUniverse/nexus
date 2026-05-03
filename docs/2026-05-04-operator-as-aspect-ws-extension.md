@@ -164,41 +164,21 @@ type TicketNoteAddPayload struct {
 
 ### 4.2 Files
 
-```go
-type FileListPayload struct {
-    Owner string `json:"owner,omitempty"`
-}
+**Superseded by [`2026-05-04-files-subsystem-spec.md`](2026-05-04-files-subsystem-spec.md).** This earlier draft assumed Nexus stored bytes and used a signed-URL download pattern; harrow's files spec replaces that with a broker model — Nexus holds references only, files stay on the announcing aspect's filesystem (or a public URL like Google Drive), and `ws://aspect/file/path` URIs are resolved via a `file.fetch` frame routed to the owning aspect's funnel.
 
-type FileListResultPayload struct {
-    Files []FileSummary `json:"files"`
-}
+That model is strictly better:
+- Single source of truth (no stale copies in Nexus)
+- File deletes propagate naturally (404 on next fetch)
+- Author controls visibility/lifecycle — Nexus is just routing
+- New pattern emerges: "funnel service frames" — non-turn frames the funnel handles directly via a dispatch table. Future cases (health checks, capability queries) follow the same shape.
 
-type FileSummary struct {
-    ID        int64  `json:"id"`
-    Owner     string `json:"owner"`
-    Path      string `json:"path"`
-    Size      int64  `json:"size"`
-    MimeType  string `json:"mime_type,omitempty"`
-    CreatedAt string `json:"created_at"`
-}
+Frames defined in the files spec:
+- `file.announce` / `file.announce.result` — aspect or operator announces a file by reference
+- `file.list` / `file.list.result` — list files (no URL in summaries; routing is internal)
+- `file.get` — by id; Nexus inspects the URL scheme. Public `https://` returns URL directly; `ws://aspect/file/path` triggers a `file.fetch` to the owning funnel and forwards the `file.deliver` response with bytes inline (base64) to the requester
+- `file.fetch` / `file.deliver` — internal funnel-handled exchange; bytes go base64-in-JSON for v0.1 (binary WS frames are the post-cutover upgrade path for large assets)
 
-type FileGetPayload struct {
-    ID int64 `json:"id"`
-}
-
-type FileGetResultPayload struct {
-    File FileSummary `json:"file"`
-    // Bytes deliberately not over WS — the result includes a short-lived
-    // signed URL the client uses to GET the bytes via REST. WS frames
-    // stay JSON-shaped; large binary stays out of the WebSocket pipe.
-    DownloadURL string `json:"download_url"`
-    ExpiresAt   string `json:"expires_at"` // RFC 3339 UTC
-}
-```
-
-Binary upload (`POST /api/images`) and download (`GET /api/files/:id`) stay REST. The WS surface handles metadata only. The signed-URL pattern keeps the WS-only-as-control-plane property: every interaction goes over WS, but the bytes flow through HTTP.
-
-**Issuer + TTL.** Nexus signs the URL itself: a short-lived bearer token (default 5 minutes, max 30) scoped to the specific `file_id` and HTTP verb (`GET` for downloads, `PUT` for the upload-ack flow if we ever add it). The token is HMAC-signed with a per-Nexus secret rotated on restart; expired tokens are rejected at the REST layer. No external signing service. The token never leaves the operator's session — if the Nexus is unreachable, the URL is unusable, which is the desired behaviour for a single-tenant deployment.
+Path traversal hardening on the funnel-side handler. Offline aspect → `file unavailable` error to requester (no queue, no retry; caching is post-cutover).
 
 ### 4.3 Docs
 
