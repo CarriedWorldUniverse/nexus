@@ -48,6 +48,12 @@ type Config struct {
 	// hostname; must be stable across reconnects.
 	OutpostID string
 
+	// TLSCertFile / TLSKeyFile point at the PEM-encoded server cert
+	// and key used by the local aspect-facing listener. Required —
+	// the outpost has no plain-HTTP path. Operator decision (#9667).
+	TLSCertFile string
+	TLSKeyFile  string
+
 	// OriginPatterns is the WebSocket Origin allowlist for inbound
 	// /connect upgrades from local aspects. Mirrors broker.Config.OriginPatterns:
 	// non-browser aspects (Go ws clients) connect freely, browser-based
@@ -127,6 +133,10 @@ func New(cfg Config) (*Outpost, error) {
 // upstream WS client (which dials and reconnects). Blocks until ctx
 // is cancelled. Deregisters on clean shutdown.
 func (o *Outpost) Run(ctx context.Context) error {
+	if o.cfg.TLSCertFile == "" || o.cfg.TLSKeyFile == "" {
+		return errors.New("outpost: TLSCertFile and TLSKeyFile required " +
+			"(run `nexus cert init` to provision, then point --tls-cert / --tls-key at them)")
+	}
 	// Start the local aspect-facing listener.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /connect", o.handleConnect)
@@ -138,29 +148,43 @@ func (o *Outpost) Run(ctx context.Context) error {
 	listenErrCh := make(chan error, 1)
 	go func() {
 		o.log.Info("outpost listening", "addr", o.cfg.ListenAddr)
-		if err := o.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := o.srv.ListenAndServeTLS(o.cfg.TLSCertFile, o.cfg.TLSKeyFile); err != nil && err != http.ErrServerClosed {
 			listenErrCh <- err
 		}
 	}()
 
+	// Run upstream + register loops under a derived context so any
+	// shutdown trigger (caller ctx, listener error, upstream error)
+	// cancels both goroutines. Without this, a listener-error branch
+	// would call srv.Shutdown but block on <-upstreamErrCh until the
+	// upstream's reconnect loop independently exited.
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
 	// Upstream register-on-connect loop.
 	registerDone := make(chan struct{})
-	go o.upstreamRegisterLoop(ctx, registerDone)
+	go o.upstreamRegisterLoop(runCtx, registerDone)
 
 	// Upstream connect + reconnect.
 	upstreamErrCh := make(chan error, 1)
 	go func() {
-		upstreamErrCh <- o.upstream.Run(ctx)
+		upstreamErrCh <- o.upstream.Run(runCtx)
 	}()
 
+	upstreamExited := false
 	select {
-	case <-ctx.Done():
-		o.log.Info("outpost stopping", "reason", ctx.Err())
+	case <-runCtx.Done():
+		o.log.Info("outpost stopping", "reason", runCtx.Err())
 	case err := <-listenErrCh:
 		o.log.Error("local listener failed", "err", err)
 	case err := <-upstreamErrCh:
 		o.log.Error("upstream exited", "err", err)
+		upstreamExited = true
 	}
+
+	// Cancel the derived ctx so upstream + register loops exit if
+	// they haven't already.
+	runCancel()
 
 	// Graceful shutdown: close aspect connections, deregister
 	// upstream, stop listener.
@@ -170,7 +194,9 @@ func (o *Outpost) Run(ctx context.Context) error {
 
 	_ = o.sendOutpostDeregister(shutdownCtx)
 
-	<-upstreamErrCh
+	if !upstreamExited {
+		<-upstreamErrCh
+	}
 	<-registerDone
 	return nil
 }

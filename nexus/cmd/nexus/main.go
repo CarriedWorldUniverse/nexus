@@ -50,6 +50,11 @@ func main() {
 	dataDir := flag.String("data-dir", "", "data directory holding nexus.db (falls back to NEXUS_DATA_DIR env, then ./data)")
 	aspectDir := flag.String("aspect-dir", "", "directory to scan for aspect homes to auto-spawn (falls back to NEXUS_ASPECT_DIR env; disabled if neither set)")
 	harnessPath := flag.String("harness-path", "", "path to the harness binary used for auto-spawn (falls back to NEXUS_HARNESS env)")
+	// Defaults from env so explicit `--tls-cert=` (empty) is honored
+	// as the operator's intent (fail-fast at broker startup) rather
+	// than silently falling back to env.
+	tlsCert := flag.String("tls-cert", os.Getenv("NEXUS_TLS_CERT"), "path to TLS server cert PEM (default: NEXUS_TLS_CERT env). Required.")
+	tlsKey := flag.String("tls-key", os.Getenv("NEXUS_TLS_KEY"), "path to TLS server key PEM (default: NEXUS_TLS_KEY env). Required.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -301,6 +306,8 @@ func main() {
 		Replayer:        replayer,
 		ChatStore:       chatStore,
 		RecipientPolicy: recipientPolicy,
+		TLSCertFile:     *tlsCert,
+		TLSKeyFile:      *tlsKey,
 	}, r)
 
 	// Wire the embedded Frame's chat gateway to broker.HandleChatSend so
@@ -397,7 +404,11 @@ func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessP
 	if upstream[0] == ':' {
 		upstream = "127.0.0.1" + upstream
 	}
-	wsURL := "ws://" + upstream + "/connect"
+	// Broker is TLS-only post PR-A2.2; auto-spawned aspects must dial
+	// wss://. If the spawned harness's wsclient hits a self-signed dev
+	// cert, the operator must have added it to the host's system trust
+	// store (see `nexus cert init` + the printed trust hint).
+	wsURL := "wss://" + upstream + "/connect"
 
 	cfg := autospawn.Config{
 		ScanDir:     dir,
