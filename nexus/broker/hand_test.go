@@ -32,6 +32,7 @@ func newBrokerWithQueue(t *testing.T, fn func(ctx context.Context, req frames.Di
 
 	b := New(Config{
 		AuthToken:          "testtoken",
+		AllowLegacyMaster:  true,
 		HeartbeatIntervalS: 15,
 		StaleAfter:         30 * time.Second,
 		HandQueue:          q,
@@ -331,6 +332,7 @@ func newTestServerNoQueue(t *testing.T) (*testHandler, *roster.Roster, *Broker) 
 	r := roster.New()
 	b := New(Config{
 		AuthToken:          "testtoken",
+		AllowLegacyMaster:  true,
 		HeartbeatIntervalS: 15,
 		StaleAfter:         30 * time.Second,
 	}, r)

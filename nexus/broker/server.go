@@ -106,6 +106,15 @@ type Config struct {
 	// chats; Lock 6 replay still works on register).
 	RecipientPolicy *RecipientPolicy
 
+	// AllowLegacyMaster opts in to the back-compat fallback that
+	// promotes AuthToken to a Frame-identity master token. Default
+	// false: legacy auth is disabled and aspects must present their
+	// per-aspect bearer (or the broker rejects). Operators set this
+	// during the per-aspect-token migration; once all aspects have
+	// rotated, leave it false. Cmd wrapper reads NEXUS_ALLOW_LEGACY_MASTER
+	// env into this field.
+	AllowLegacyMaster bool
+
 	// TLSCertFile / TLSKeyFile point at the PEM-encoded server cert
 	// and key used by ListenAndServe. Required — the broker has no
 	// plain-HTTP path. Operator runs `nexus cert init` once per host
@@ -179,14 +188,19 @@ func New(cfg Config, r *roster.Roster) *Broker {
 	}
 	// Always have a usable TokenStore. If the caller didn't provide
 	// one (older test paths), construct an empty store. Legacy
-	// AuthToken — when set — is registered as the master-fallback so
-	// pre-drift-C tests and callers continue to authenticate as the
-	// Frame identity (admin=true) without per-aspect minting.
+	// AuthToken — when set AND opt-in flag is on — is registered as
+	// the master-fallback so pre-drift-C tests and callers continue
+	// to authenticate as the Frame identity (admin=true) without
+	// per-aspect minting. Per #31 / operator A/A/A, the auto-promote
+	// is off by default; operators opt in via AllowLegacyMaster (or
+	// NEXUS_ALLOW_LEGACY_MASTER=1 in the cmd wrapper).
 	if cfg.Tokens == nil {
 		cfg.Tokens = NewTokenStore()
 	}
-	if cfg.AuthToken != "" {
+	if cfg.AuthToken != "" && cfg.AllowLegacyMaster {
 		cfg.Tokens.SetLegacyMaster(cfg.AuthToken)
+		cfg.Logger.Warn("legacy master token enabled — every /connect via this token will WARN. " +
+			"Migrate aspects to per-aspect tokens; clear NEXUS_ALLOW_LEGACY_MASTER once done.")
 	}
 	return &Broker{cfg: cfg, roster: r, log: cfg.Logger, dispatcher: newDispatcher()}
 }

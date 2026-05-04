@@ -242,6 +242,76 @@ func TestExtractBearer_ConstantTime(t *testing.T) {
 	}
 }
 
+// Regression for issue #31 / PR-A2.3: when AllowLegacyMaster is false
+// (default), an AuthToken passed to broker.New must NOT be promoted
+// to a legacy-master fallback — presenting it must fail to resolve.
+// When AllowLegacyMaster is true, it resolves with ViaLegacy=true so
+// connect handlers can WARN.
+func TestLegacyMaster_GatedByAllowFlag(t *testing.T) {
+	// Default off: AuthToken set, AllowLegacyMaster false → no legacy
+	// fallback; presenting the token doesn't resolve.
+	bOff := New(Config{AuthToken: "legacytok", HeartbeatIntervalS: 15}, nil)
+	if _, ok := bOff.cfg.Tokens.ResolveToken("legacytok"); ok {
+		t.Error("legacy master resolved despite AllowLegacyMaster=false")
+	}
+
+	// Opt-in: AllowLegacyMaster true → token resolves with ViaLegacy=true.
+	bOn := New(Config{
+		AuthToken:         "legacytok",
+		AllowLegacyMaster: true,
+		HeartbeatIntervalS: 15,
+	}, nil)
+	info, ok := bOn.cfg.Tokens.ResolveToken("legacytok")
+	if !ok {
+		t.Fatal("legacy master not resolved despite AllowLegacyMaster=true")
+	}
+	if info.AgentID != FrameAgentID {
+		t.Errorf("AgentID = %q, want %q", info.AgentID, FrameAgentID)
+	}
+	if !info.Admin {
+		t.Error("Admin = false, want true")
+	}
+	if !info.ViaLegacy {
+		t.Error("ViaLegacy = false; connect handler won't WARN")
+	}
+}
+
+// Regression: if a per-aspect token's bytes happen to match the
+// legacy master string, the per-aspect identity wins — never silently
+// elevate to FrameAgentID/admin/ViaLegacy.
+func TestPerAspectWinsOnTokenCollision(t *testing.T) {
+	store := NewTokenStore()
+	store.SetTokenForTest("wren", "shared-bytes", false)
+	store.SetLegacyMaster("shared-bytes")
+
+	info, ok := store.ResolveToken("shared-bytes")
+	if !ok {
+		t.Fatal("expected resolve")
+	}
+	if info.AgentID != "wren" {
+		t.Errorf("AgentID = %q, want wren (per-aspect must win on collision)", info.AgentID)
+	}
+	if info.Admin {
+		t.Error("Admin = true (legacy master overwrote per-aspect identity)")
+	}
+	if info.ViaLegacy {
+		t.Error("ViaLegacy = true (legacy branch ran despite per-aspect match)")
+	}
+}
+
+// Per-aspect tokens never carry ViaLegacy=true.
+func TestPerAspectTokensNotMarkedViaLegacy(t *testing.T) {
+	store := NewTokenStore()
+	store.SetTokenForTest("wren", "wrentok", false)
+	info, ok := store.ResolveToken("wrentok")
+	if !ok {
+		t.Fatal("expected resolve")
+	}
+	if info.ViaLegacy {
+		t.Error("per-aspect token resolved with ViaLegacy=true")
+	}
+}
+
 // SetTokenForTest hooks the test path so we can install known tokens
 // without the DB round-trip.
 func TestSetTokenForTest(t *testing.T) {

@@ -21,6 +21,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *roster.Roster, *Broker) {
 	r := roster.New()
 	b := New(Config{
 		AuthToken:          "testtoken",
+		AllowLegacyMaster:  true, // tests use the legacy fallback path
 		HeartbeatIntervalS: 15,
 		StaleAfter:         30 * time.Second,
 	}, r)
@@ -253,6 +254,7 @@ func TestOriginAllowlistRejectsUnlistedBrowserOrigin(t *testing.T) {
 	// the actual server origin once we know it.
 	b := New(Config{
 		AuthToken:          "testtoken",
+		AllowLegacyMaster:  true,
 		HeartbeatIntervalS: 15,
 		StaleAfter:         30 * time.Second,
 	}, r)
