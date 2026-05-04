@@ -31,6 +31,13 @@ func TestMain(m *testing.M) {
 
 // runFakeHarness reads stdin, produces a canned response.
 func runFakeHarness() {
+	// Crash mode: write a sensitive-looking line to stderr and exit
+	// non-zero. Used to verify the spawner does NOT round-trip stderr
+	// content into DispatchResultPayload.Error (issue #35 follow-up).
+	if os.Getenv("HANDQUEUE_FAKE_HARNESS_CRASH") != "" {
+		fmt.Fprintln(os.Stderr, "leaked api-key sk-ant-secret-value-DO-NOT-LEAK")
+		os.Exit(7)
+	}
 	var req handexec.Request
 	dec := json.NewDecoder(os.Stdin)
 	if err := dec.Decode(&req); err != nil {
@@ -239,6 +246,48 @@ func TestSpawnExecutorTokenFallback(t *testing.T) {
 	}
 	if got := res.Output["saw_token"]; got != "fallback-shared-tok" {
 		t.Errorf("saw_token = %v, want fallback-shared-tok", got)
+	}
+}
+
+// Regression for the #35 follow-up review finding: when the harness
+// subprocess exits non-zero, its stderr can carry sensitive content
+// (API keys, prompt fragments, partial credentials). The spawner MUST
+// NOT round-trip that stderr into DispatchResultPayload.Error — that
+// payload crosses the dispatch boundary and is visible to whichever
+// aspect requested the dispatch.
+func TestSpawnExecutorRedactsCrashStderr(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	homeDir := t.TempDir()
+	ex := &SpawnExecutor{
+		HarnessPath: self,
+		HomeResolver: AspectHomeResolverFunc(func(string) (string, bool) {
+			return homeDir, true
+		}),
+		ExtraEnv: []string{
+			"HANDQUEUE_FAKE_HARNESS=1",
+			"HANDQUEUE_FAKE_HARNESS_CRASH=1",
+		},
+	}
+	res, runErr := ex.Execute(context.Background(), frames.DispatchPayload{
+		Aspect: "wren", DispatchID: "d-1", Payload: map[string]any{},
+	})
+	if runErr == nil {
+		t.Fatal("expected error from crashed harness, got nil")
+	}
+	// The DispatchResultPayload.Error field is the cross-boundary
+	// surface — it must contain only an opaque code, never the stderr
+	// content from the subprocess.
+	if strings.Contains(res.Error, "sk-ant-secret-value-DO-NOT-LEAK") {
+		t.Errorf("DispatchResultPayload.Error leaked stderr secret: %q", res.Error)
+	}
+	if strings.Contains(res.Error, "leaked api-key") {
+		t.Errorf("DispatchResultPayload.Error leaked stderr text: %q", res.Error)
+	}
+	if res.Error == "" {
+		t.Error("DispatchResultPayload.Error is empty — caller has no signal to surface")
 	}
 }
 

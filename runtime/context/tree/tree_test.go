@@ -2,6 +2,7 @@ package tree
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -301,7 +302,7 @@ func TestPayloadRoundTrip(t *testing.T) {
 	e, _ := tt.Append(ctx, Entry{Kind: KindTurnUser, Payload: src})
 
 	// Find it back via findEntry.
-	found, ok, err := tt.findEntry(e.ID)
+	found, ok, err := tt.findEntry(ctx, e.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,5 +330,39 @@ func TestFilesLandInExpectedDir(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "mysess.head.json")); err != nil {
 		t.Errorf("sidecar not found: %v", err)
+	}
+}
+
+// Regression for issue #39: every Tree method that takes a
+// context.Context must honor it. A cancelled ctx must short-circuit
+// the call rather than completing as if cancellation didn't happen.
+func TestTreeMethodsHonorContext(t *testing.T) {
+	tt := openTestTree(t)
+
+	// Seed an entry under a live ctx so subsequent reads have something
+	// to find.
+	seedID := ""
+	{
+		e, err := tt.Append(context.Background(), Entry{Kind: KindTurnUser, Payload: map[string]any{"text": "seed"}})
+		if err != nil {
+			t.Fatalf("seed Append: %v", err)
+		}
+		seedID = e.ID
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := tt.Append(ctx, Entry{Kind: KindTurnUser}); !errors.Is(err, context.Canceled) {
+		t.Errorf("Append err = %v, want context.Canceled", err)
+	}
+	if err := tt.SetHead(ctx, seedID); !errors.Is(err, context.Canceled) {
+		t.Errorf("SetHead err = %v, want context.Canceled", err)
+	}
+	if _, err := tt.Replay(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Replay err = %v, want context.Canceled", err)
+	}
+	if _, err := tt.All(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("All err = %v, want context.Canceled", err)
 	}
 }
