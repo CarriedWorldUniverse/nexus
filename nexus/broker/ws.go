@@ -62,11 +62,15 @@ func (b *Broker) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wsc, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// Same-origin check is relaxed because we authenticate via
-		// bearer token. Without this, aspects dialing from another
-		// host (the whole point of the distributed topology) would
-		// be rejected.
-		InsecureSkipVerify: true,
+		// Origin allowlist gates browser-based callers (Origin header
+		// present). Non-browser aspects (Go ws clients) don't send an
+		// Origin and connect freely; bearer-token auth still gates
+		// them at line 49 above. UI surfaces are aspects too — they
+		// authenticate the same way, and their Origin must match this
+		// list. Pre-#22 the broker set InsecureSkipVerify=true, which
+		// allowed any browser-tab JS on the same machine to dial the
+		// broker if it could reach the local socket. See Config.OriginPatterns.
+		OriginPatterns: b.cfg.OriginPatterns,
 	})
 	if err != nil {
 		b.log.Warn("ws accept failed", "err", err)
@@ -627,6 +631,19 @@ func (c *wsConn) handleDeregisterFrame(env frames.Envelope) {
 	}
 	if payload.Name == "" || payload.SessionID == "" {
 		c.respondError(env, "name and session_id required")
+		return
+	}
+	// Identity enforcement: a caller may only deregister itself, unless
+	// admin (Frame role). Without this check, any authenticated peer
+	// could DoS another aspect by guessing/observing its session_id —
+	// session_ids leak via projection rows and prior register acks.
+	// Mirrors the dispatch identity check at handleDispatchFrame; the
+	// admin carve-out is deliberate parity with that handler and will
+	// be retired together when the per-aspect please-dispatch relay
+	// model lands (PR-A3).
+	if !c.auth.Admin && c.auth.AgentID != payload.Name {
+		c.respondError(env, "identity_mismatch: caller "+c.auth.AgentID+
+			" cannot deregister "+payload.Name)
 		return
 	}
 	if err := c.broker.roster.Deregister(payload.Name, payload.SessionID); err != nil {
