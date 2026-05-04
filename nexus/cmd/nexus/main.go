@@ -307,8 +307,41 @@ func main() {
 		frameGateway.Sender = b
 	}
 
-	// Stale-reap sweep. Runs until ctx cancels.
-	go reaper(ctx, r, *staleAfter, *reapEvery, logger)
+	// Stale-reap sweep. Runs until ctx cancels. Reaper queries the
+	// broker's dispatcher to refresh heartbeats for live WS-connected
+	// aspects before the sweep — under the WS transport an open
+	// connection IS the heartbeat per Lock 2.
+	go reaper(ctx, r, b, *staleAfter, *reapEvery, logger)
+
+	// Embedded-frame heartbeat (#133). The in-process Frame has no WS
+	// connection of its own, so the reaper's WS-connected refresh
+	// doesn't see it. Tick its Heartbeat directly; the funnel is alive
+	// for as long as cmd/nexus is alive, so the heartbeat is just a
+	// liveness marker for the roster. Half the staleAfter window so
+	// reaper sweeps never catch a transient gap.
+	if embeddedFrame != nil {
+		go func() {
+			interval := *staleAfter / 2
+			if interval <= 0 {
+				interval = 15 * time.Second
+			}
+			t := time.NewTicker(interval)
+			defer t.Stop()
+			// Stamp once immediately so registration → first-tick gap
+			// can't trip stale.
+			_ = embeddedFrame.Heartbeat(r, time.Now().UTC())
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case now := <-t.C:
+					if err := embeddedFrame.Heartbeat(r, now.UTC()); err != nil {
+						logger.Warn("embedded frame heartbeat failed", "err", err)
+					}
+				}
+			}
+		}()
+	}
 
 	// Auto-spawn: after the broker has bound its listener (brief
 	// delay), scan the aspect dir and fire off harness children.
@@ -515,6 +548,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 		Model:         model,
 		Tools:         funnel.CommsToolDefs(),
 		Runner:        funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		ChatGateway:   gateway,
 		Threads:       threads,
 		Pulser:        pulser,
 		UsageRecorder: recorder,
@@ -562,7 +596,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 	}, gateway
 }
 
-func reaper(ctx context.Context, r *roster.Roster, staleAfter, every time.Duration, log *slog.Logger) {
+func reaper(ctx context.Context, r *roster.Roster, b *broker.Broker, staleAfter, every time.Duration, log *slog.Logger) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -570,6 +604,13 @@ func reaper(ctx context.Context, r *roster.Roster, staleAfter, every time.Durati
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
+			// Refresh heartbeats for aspects with a live WS connection
+			// before sweeping. Lock 2: an open connection IS the
+			// heartbeat under the WS transport, so the reaper would
+			// otherwise mark every connected aspect stale after 30s.
+			if b != nil {
+				r.RefreshHeartbeats(b.ConnectedAspects(), now)
+			}
 			stale, down := r.ReapStale(now, staleAfter)
 			for _, name := range stale {
 				log.Warn("aspect stale", "name", name)
