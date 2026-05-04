@@ -60,6 +60,18 @@ func (b *Broker) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	// Per #31: every legacy-master /connect emits a WARN with source +
+	// resolved identity so operators see migration progress. Connect
+	// events are rare (aspects connect once, stay connected), so the
+	// noise is bounded; once all aspects have rotated to per-aspect
+	// tokens, AllowLegacyMaster gets flipped off and the line goes
+	// silent.
+	if authInfo.ViaLegacy {
+		b.log.Warn("legacy master token resolve",
+			"remote", r.RemoteAddr,
+			"resolved_as", authInfo.AgentID,
+			"hint", "rotate to per-aspect tokens; then set NEXUS_ALLOW_LEGACY_MASTER=0")
+	}
 
 	wsc, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		// Origin allowlist gates browser-based callers (Origin header

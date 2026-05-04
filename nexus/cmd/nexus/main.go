@@ -293,21 +293,28 @@ func main() {
 	// online (modulo @-mention semantics that depend on live state).
 	replayer := broker.NewReplayer(chatStore, *recipientPolicy)
 
+	// Legacy-master opt-in (#31): operators upgrading from the
+	// pre-per-aspect-token world set NEXUS_ALLOW_LEGACY_MASTER=1 to
+	// keep their existing NEXUS_TOKEN-based deployments working
+	// during migration. Default off.
+	allowLegacy := os.Getenv("NEXUS_ALLOW_LEGACY_MASTER") == "1"
+
 	b := broker.New(broker.Config{
-		Addr:            *addr,
-		AuthToken:       token,
-		Tokens:          tokenStore,
-		StaleAfter:      *staleAfter,
-		Logger:          logger,
-		Projection:      proj,
-		HandQueue:       queue,
-		Admin:           adminCallbacks,
-		ChatRouter:      chatRouter,
-		Replayer:        replayer,
-		ChatStore:       chatStore,
-		RecipientPolicy: recipientPolicy,
-		TLSCertFile:     *tlsCert,
-		TLSKeyFile:      *tlsKey,
+		Addr:              *addr,
+		AuthToken:         token,
+		AllowLegacyMaster: allowLegacy,
+		Tokens:            tokenStore,
+		StaleAfter:        *staleAfter,
+		Logger:            logger,
+		Projection:        proj,
+		HandQueue:         queue,
+		Admin:             adminCallbacks,
+		ChatRouter:        chatRouter,
+		Replayer:          replayer,
+		ChatStore:         chatStore,
+		RecipientPolicy:   recipientPolicy,
+		TLSCertFile:       *tlsCert,
+		TLSKeyFile:        *tlsKey,
 	}, r)
 
 	// Wire the embedded Frame's chat gateway to broker.HandleChatSend so

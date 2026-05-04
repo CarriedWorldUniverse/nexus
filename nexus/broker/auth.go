@@ -45,6 +45,12 @@ const FrameAgentID = "frame"
 type TokenInfo struct {
 	AgentID string
 	Admin   bool
+	// ViaLegacy is true when the bearer was matched via the legacy
+	// master fallback (vs a per-aspect token). Connect handlers WARN
+	// on this so operators can track migration progress; once all
+	// aspects rotate to per-aspect tokens, AllowLegacyMaster gets
+	// flipped off and ViaLegacy becomes unreachable.
+	ViaLegacy bool
 }
 
 // TokenStore holds the in-memory token map and provides the resolve /
@@ -300,10 +306,21 @@ func (s *TokenStore) ResolveToken(token string) (TokenInfo, bool) {
 		}
 		found |= eq
 	}
-	if s.legacyMaster != "" {
+	// Legacy-master compare runs only if no per-aspect token matched.
+	// If a per-aspect token's bytes ever collide with the legacy
+	// master string (impossible for production-minted random tokens,
+	// but possible if an operator manually sets NEXUS_TOKEN to a
+	// value that happens to match a registered aspect token), the
+	// per-aspect identity wins. Without this guard, the legacy branch
+	// would unconditionally overwrite `hit` with admin=true — a
+	// silent privilege escalation. Trade-off: this branch runs only
+	// on miss, which is a deviation from strict constant-time across
+	// every call. The threat-model comment already accepts the
+	// branch-predictor residue; correctness wins here.
+	if found == 0 && s.legacyMaster != "" {
 		eq := subtle.ConstantTimeCompare(tokenBytes, []byte(s.legacyMaster))
 		if eq == 1 {
-			hit = TokenInfo{AgentID: FrameAgentID, Admin: true}
+			hit = TokenInfo{AgentID: FrameAgentID, Admin: true, ViaLegacy: true}
 		}
 		found |= eq
 	}
