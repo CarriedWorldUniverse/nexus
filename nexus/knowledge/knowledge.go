@@ -226,7 +226,14 @@ func (s *Store) Search(ctx context.Context, q Query) ([]Hit, error) {
 	query.WriteString(whereScope)
 	query.WriteString(`)`)
 
-	args := []any{q.Text}
+	// Sanitize user text into a single FTS5 phrase. Raw user text gets
+	// parsed by FTS5 for operators (AND/OR/NEAR/* /-/^/quoted phrases),
+	// which is both an operator-injection vector (a low-trust caller
+	// can craft scope-bypass / wildcard-explosion queries) and a
+	// syntax-error footgun (stray `"` or `-` returns SQLITE_ERROR
+	// rather than zero hits). Quoting the whole input as a phrase
+	// neutralizes operators and makes syntax errors impossible.
+	args := []any{sanitizeFTSQuery(q.Text)}
 	args = append(args, scopeArgs...)
 
 	if q.MaxRank != 0 {
@@ -264,6 +271,26 @@ func (s *Store) Search(ctx context.Context, q Query) ([]Hit, error) {
 		return nil, fmt.Errorf("knowledge.Search: rows: %w", err)
 	}
 	return hits, nil
+}
+
+// sanitizeFTSQuery wraps user-supplied text as a single FTS5 phrase
+// query, escaping internal double-quotes by doubling them (FTS5's
+// quoting rule). Output is always a valid FTS5 query string; callers
+// can pass any byte sequence and get a phrase-only match.
+//
+// Examples:
+//   foo bar              ->  "foo bar"
+//   say "hi"             ->  "say ""hi"""
+//   -keyword OR *        ->  "-keyword OR *"   (operators neutralized)
+//
+// Side effects: caller loses the ability to use FTS operators
+// deliberately. That's the trade — knowledge.Search's contract is
+// "match this text", not "execute this query". A future structured-
+// query API can expose operators behind an allowlisted parser.
+func sanitizeFTSQuery(text string) string {
+	// Doubling " is FTS5's escape for a literal double-quote inside a
+	// phrase. Wrap the whole thing in quotes to force phrase parsing.
+	return `"` + strings.ReplaceAll(text, `"`, `""`) + `"`
 }
 
 // List returns entries from a single agent (convenience for dashboard

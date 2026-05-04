@@ -353,6 +353,125 @@ func TestSearchMaxRankThreshold(t *testing.T) {
 	}
 }
 
+// Regression for issue #37: user query text must not be parsed as
+// FTS5 operators. A single-word search still hits via phrase match.
+func TestSearchPhraseQuoteHappyPath(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	s.Put(ctx, "keel", "t1", "the quick brown fox", PutOptions{})
+
+	hits, err := s.Search(ctx, Query{
+		Text:  "quick",
+		Scope: Scope{Agent: "keel", OwnAgent: true},
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Errorf("len(hits) = %d, want 1", len(hits))
+	}
+}
+
+// Multi-token phrase semantics: post-fix, "quick brown" matches a row
+// containing those tokens adjacent and in order, but "brown quick"
+// does not. This pins the AND-to-phrase behavior change documented in
+// sanitizeFTSQuery's comment.
+func TestSearchMultiTokenPhraseAdjacencyAndOrder(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	s.Put(ctx, "keel", "t1", "the quick brown fox", PutOptions{})
+
+	hits, err := s.Search(ctx, Query{
+		Text:  "quick brown",
+		Scope: Scope{Agent: "keel", OwnAgent: true},
+	})
+	if err != nil {
+		t.Fatalf("Search adjacent: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Errorf("adjacent in-order phrase: len(hits) = %d, want 1", len(hits))
+	}
+
+	hits, err = s.Search(ctx, Query{
+		Text:  "brown quick",
+		Scope: Scope{Agent: "keel", OwnAgent: true},
+	})
+	if err != nil {
+		t.Fatalf("Search reversed: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("reversed-order phrase: len(hits) = %d, want 0 (phrase, not AND)", len(hits))
+	}
+}
+
+// FTS5 operators in user text must be neutralized (treated as
+// literal phrase tokens). A query of "OR" against content that
+// doesn't actually contain "OR" must miss, not return all rows.
+func TestSearchOperatorsNeutralized(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	s.Put(ctx, "keel", "t1", "alpha content one", PutOptions{})
+	s.Put(ctx, "keel", "t2", "beta content two", PutOptions{})
+
+	// Pre-fix: "alpha OR beta" parses as FTS operator and matches both.
+	// Post-fix: it's a phrase query for the literal string "alpha OR
+	// beta", which appears in neither row.
+	hits, err := s.Search(ctx, Query{
+		Text:  "alpha OR beta",
+		Scope: Scope{Agent: "keel", OwnAgent: true},
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("operator query returned %d hits, want 0 (operators must be neutralized)", len(hits))
+	}
+}
+
+// Stray FTS5-syntax characters used to surface as SQLITE_ERROR.
+// Post-fix: any byte sequence is a valid phrase query.
+func TestSearchSyntaxFootgunsDoNotCrash(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	s.Put(ctx, "keel", "t1", "harmless content", PutOptions{})
+
+	footguns := []string{
+		`unbalanced "`,
+		`stray - dash`,
+		`wildcard *`,
+		`column:filter`,
+		`NEAR(a b)`,
+		`^prefix`,
+		`""`,
+	}
+	for _, q := range footguns {
+		t.Run(q, func(t *testing.T) {
+			_, err := s.Search(ctx, Query{
+				Text:  q,
+				Scope: Scope{Agent: "keel", OwnAgent: true},
+			})
+			if err != nil {
+				t.Errorf("Search(%q) errored: %v — sanitization should make any input a valid phrase", q, err)
+			}
+		})
+	}
+}
+
+func TestSanitizeFTSQuery(t *testing.T) {
+	cases := map[string]string{
+		"foo bar":      `"foo bar"`,
+		`say "hi"`:     `"say ""hi"""`,
+		`-keyword OR *`: `"-keyword OR *"`,
+		``:             `""`,
+		`pre"mid"post`: `"pre""mid""post"`,
+	}
+	for in, want := range cases {
+		if got := sanitizeFTSQuery(in); got != want {
+			t.Errorf("sanitizeFTSQuery(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestList(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
