@@ -103,6 +103,12 @@ type Store interface {
 	// "give me all message for forge after id=N, deliver each as a
 	// separate comm.send."
 	ListSince(ctx context.Context, sinceID int64, limit int) ([]Message, error)
+
+	// GetByID fetches a single message by its id. Returns the zero
+	// Message and a sql.ErrNoRows-shaped error when not found. Used
+	// by the recipient policy's ParentLookup to find the author of
+	// a parent message when computing reply-recipient.
+	GetByID(ctx context.Context, id int64) (Message, error)
 }
 
 // SQLStore is the sqlite-backed Store. Holds a *sql.DB; safe for
@@ -449,6 +455,35 @@ func (s *SQLStore) ListSince(ctx context.Context, sinceID int64, limit int) ([]M
 		return nil, fmt.Errorf("chat.ListSince: rows: %w", err)
 	}
 	return out, nil
+}
+
+// GetByID fetches a single chat message by id. Returns sql.ErrNoRows
+// when not found so callers can distinguish "missing parent" from
+// "DB error" — RecipientPolicy treats no-rows as "no parent author"
+// rather than aborting recipient computation.
+func (s *SQLStore) GetByID(ctx context.Context, id int64) (Message, error) {
+	var msg Message
+	var replyToCol sql.NullInt64
+	var topicCol sql.NullString
+	var createdAtRaw string
+	err := s.DB.QueryRowContext(ctx, `
+		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at
+		FROM chat_messages WHERE id = ?
+	`, id).Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw)
+	if err != nil {
+		return Message{}, err
+	}
+	if replyToCol.Valid {
+		msg.ReplyTo = replyToCol.Int64
+	}
+	if topicCol.Valid {
+		msg.Topic = topicCol.String
+	}
+	msg.CreatedAt, err = parseSQLiteTime(createdAtRaw)
+	if err != nil {
+		return Message{}, fmt.Errorf("chat.GetByID: parse created_at %q: %w", createdAtRaw, err)
+	}
+	return msg, nil
 }
 
 // FormatRFC3339 renders a Message's CreatedAt in the canonical wire

@@ -10,6 +10,7 @@ package broker
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -22,6 +23,14 @@ import (
 	"github.com/nexus-cw/nexus/nexus/sessions"
 	"github.com/nexus-cw/nexus/shared/schemas"
 )
+
+// chatHTML is the operator-aspect smoke-test page (chat.html). Served
+// at GET /chat.html so a browser on any tailnet peer can drive the
+// nexus over WS without a separate static-file server. Single-file,
+// no build step. Source lives at nexus/broker/static/chat.html.
+//
+//go:embed static/chat.html
+var chatHTML []byte
 
 // Config configures a Broker.
 type Config struct {
@@ -89,6 +98,13 @@ type Config struct {
 	// without triggering a fresh deliberation cycle. When nil, chat.read
 	// frames return an empty result with an error string.
 	ChatStore chat.Store
+
+	// RecipientPolicy decides which aspects receive chat.deliver for
+	// each chat.send. When non-nil, HandleChatSend uses it to fan out
+	// after persistence. When nil, only persistence + the legacy
+	// ChatRouter callback fire (live aspects don't see cross-aspect
+	// chats; Lock 6 replay still works on register).
+	RecipientPolicy *RecipientPolicy
 }
 
 // ChatRouterCallbacks wires the broker's chat.send handling to the
@@ -165,6 +181,14 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	// external monitoring.
 	mux.Handle("GET /api/aspects", b.auth(http.HandlerFunc(b.handleList)))
 	mux.HandleFunc("GET /health", b.handleHealth)
+	// Operator-aspect chat UI — single-page smoke-test client. Served
+	// at /chat.html for direct browser access. Token + URL fields are
+	// inputs in the page itself; no server-side state needed.
+	mux.HandleFunc("GET /chat.html", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write(chatHTML)
+	})
 
 	// Admin REST surface (#79 lock). Registered only when a Frame is
 	// embedded and supplies AdminCallbacks. Per spec §3.3, admin ops

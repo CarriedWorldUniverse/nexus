@@ -17,6 +17,7 @@ import (
 
 	bridle "github.com/nexus-cw/bridle"
 	claudeprovider "github.com/nexus-cw/bridle/provider/claude"
+	claudecodeprovider "github.com/nexus-cw/bridle/provider/claudecode"
 	"github.com/nexus-cw/nexus/nexus/autospawn"
 	"github.com/nexus-cw/nexus/nexus/broker"
 	"github.com/nexus-cw/nexus/nexus/chat"
@@ -164,7 +165,7 @@ func main() {
 	// AI personality. When no Frame is embedded (legacy mode), chatRouter
 	// stays nil and the broker logs + drops chat.send frames.
 	chatStore := chat.NewSQLStore(db)
-	chatRouter := buildChatRouter(ctx, embeddedFrame, chatStore, usage.NewSQLStore(db), logger)
+	chatRouter, frameGateway := buildChatRouter(ctx, embeddedFrame, chatStore, usage.NewSQLStore(db), logger)
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
@@ -253,27 +254,58 @@ func main() {
 		}
 	}
 
+	// RecipientPolicy: who receives chat.deliver for each chat.send.
+	// Used both by live fan-out (broker.HandleChatSend) and Lock 6
+	// replay (broker.Replayer). One policy, two consumers.
+	frameName := ""
+	if embeddedFrame != nil {
+		frameName = embeddedFrame.Aspect.Name
+	}
+	recipientPolicy := &broker.RecipientPolicy{
+		Parent: func(parentID int64) (string, error) {
+			msg, err := chatStore.GetByID(ctx, parentID)
+			if err != nil {
+				return "", err
+			}
+			return msg.From, nil
+		},
+		Aspects: func() []string {
+			return r.AspectNames()
+		},
+		FrameName: frameName,
+	}
+
 	// Lock 6 replay engine. Aspects reconnecting with since_msg_id > 0
 	// trigger a query against chatStore for messages addressed to them
 	// since the cursor; broker emits each as a chat.deliver with
-	// Replay=true. RecipientPolicy uses the same defaults the broker's
-	// live fan-out uses, so replay shape matches what the aspect would
-	// have seen if it had been online.
-	replayer := broker.NewReplayer(chatStore, broker.RecipientPolicy{})
+	// Replay=true. Same RecipientPolicy as the live path so replay
+	// shape matches what the aspect would have seen if it had been
+	// online (modulo @-mention semantics that depend on live state).
+	replayer := broker.NewReplayer(chatStore, *recipientPolicy)
 
 	b := broker.New(broker.Config{
-		Addr:       *addr,
-		AuthToken:  token,
-		Tokens:     tokenStore,
-		StaleAfter: *staleAfter,
-		Logger:     logger,
-		Projection: proj,
-		HandQueue:  queue,
-		Admin:      adminCallbacks,
-		ChatRouter: chatRouter,
-		Replayer:   replayer,
-		ChatStore:  chatStore,
+		Addr:            *addr,
+		AuthToken:       token,
+		Tokens:          tokenStore,
+		StaleAfter:      *staleAfter,
+		Logger:          logger,
+		Projection:      proj,
+		HandQueue:       queue,
+		Admin:           adminCallbacks,
+		ChatRouter:      chatRouter,
+		Replayer:        replayer,
+		ChatStore:       chatStore,
+		RecipientPolicy: recipientPolicy,
 	}, r)
+
+	// Wire the embedded Frame's chat gateway to broker.HandleChatSend so
+	// in-process Frame posts persist + fan-out via the same canonical
+	// path as out-of-process aspect WS frames (per
+	// docs/2026-05-04-unify-frame-aspect-chat-path.md). When no Frame
+	// is embedded, frameGateway is nil and this is a no-op.
+	if frameGateway != nil {
+		frameGateway.Sender = b
+	}
 
 	// Stale-reap sweep. Runs until ctx cancels.
 	go reaper(ctx, r, *staleAfter, *reapEvery, logger)
@@ -422,9 +454,14 @@ func (a *usageRecorderAdapter) Record(ctx context.Context, msgID int64, turnID, 
 	return err
 }
 
-func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.Store, usageStore *usage.SQLStore, log *slog.Logger) *broker.ChatRouterCallbacks {
+// buildChatRouter returns the chat-router callbacks plus the gateway it
+// wired the funnel to. The caller is expected to assign gateway.Sender
+// to the broker after broker.New so in-process Frame posts go through
+// Broker.HandleChatSend (the unified chat-send path). When ef is nil
+// both returns are nil.
+func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.Store, usageStore *usage.SQLStore, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway) {
 	if ef == nil {
-		return nil
+		return nil, nil
 	}
 
 	provider := ef.Aspect.Config.Provider
@@ -439,16 +476,21 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 	switch provider {
 	case "claude-api", "claude":
 		p = claudeprovider.New("")
+	case "claude-code", "claudecode", "":
+		// Subscription-auth path: shells out to the local `claude` CLI.
+		// Default for unset provider since the rebuild deploy runs on
+		// subscription, not API key.
+		p = claudecodeprovider.New()
 	default:
 		log.Warn("frame funnel: unrecognised provider; deliberation disabled",
 			"provider", provider, "frame", ef.Aspect.Name)
-		return nil
+		return nil, nil
 	}
 
 	if model == "" {
 		log.Warn("frame funnel: no model configured in aspect.json; deliberation disabled",
 			"frame", ef.Aspect.Name)
-		return nil
+		return nil, nil
 	}
 
 	// F1.4b.4: wire the comms tool surface (Lock 3) and the
@@ -457,7 +499,9 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 	// chat.read / announce_file / share_file tool calls into
 	// gateway methods. ChatPulser fires real chat-visible status
 	// pulses via the same gateway, replacing F1.3's NoopPulser
-	// default.
+	// default. The caller is expected to set gateway.Sender after
+	// broker.New so SendChat takes the unified Broker.HandleChatSend
+	// path (per docs/2026-05-04-unify-frame-aspect-chat-path.md).
 	gateway := framecomms.NewGateway(store, ef.Aspect.Name)
 	commsRunner := funnel.CommsRunner{Gateway: gateway}
 	pulser := &framecomms.ChatPulser{Gateway: gateway}
@@ -479,7 +523,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 	if err != nil {
 		log.Error("frame funnel: construction failed; deliberation disabled",
 			"err", err, "frame", ef.Aspect.Name)
-		return nil
+		return nil, nil
 	}
 
 	log.Info("frame funnel: deliberation loop ready",
@@ -489,6 +533,14 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 	frameName := ef.Aspect.Name
 	return &broker.ChatRouterCallbacks{
 		RouteChat: func(rctx context.Context, msgID int64, from, content string, replyTo int64, topic string) {
+			// Frame's own posts must never route back to the funnel.
+			// HandleChatSend fires RouteChat for every persisted message,
+			// including ones the Frame just sent via SendChat — without
+			// this guard, a Frame post containing "@frame" would queue a
+			// spurious deliberation cycle on the same goroutine.
+			if from == frameName {
+				return
+			}
 			// Route predicate: only deliberate on messages ShouldRouteToFrame
 			// approves. The broker sends us every chat.send frame; we filter
 			// here so the funnel only runs turns for messages the Frame cares about.
@@ -507,7 +559,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 				log.Warn("frame funnel: deliberation error", "err", err, "msg_id", msgID)
 			}
 		},
-	}
+	}, gateway
 }
 
 func reaper(ctx context.Context, r *roster.Roster, staleAfter, every time.Duration, log *slog.Logger) {

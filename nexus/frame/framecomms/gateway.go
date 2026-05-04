@@ -37,9 +37,23 @@ import (
 // handleChatSendFrame → ChatRouter.RouteChat path and DO trigger
 // Frame deliberation when ShouldRouteToFrame approves. That path is
 // unchanged by this gateway.
+// ChatSender is the canonical chat-send seam. The broker's
+// HandleChatSend satisfies it; the Gateway uses it for SendChat so
+// in-process Frame posts go through the same persist+fan-out path
+// as out-of-process aspect WS frames (per docs/2026-05-04 unify spec).
+//
+// Defined here (not in chat or broker) to avoid the import cycle:
+// broker imports chat, framecomms imports chat — so framecomms can't
+// import broker. The interface seam keeps the dependency edge
+// pointing the right way.
+type ChatSender interface {
+	HandleChatSend(ctx context.Context, from, content string, replyTo int64, topic string) (int64, error)
+}
+
 type Gateway struct {
-	Store    chat.Store
-	AspectID string // typically the Frame's name; used as the From on sends
+	Store    chat.Store // still used for ReactTo / ReadThread / AnnounceFile / ShareFile
+	Sender   ChatSender // canonical SendChat path; nil = legacy direct-Insert fallback
+	AspectID string     // typically the Frame's name; used as the From on sends
 }
 
 // NewGateway wires a Gateway around a Store and aspect identity.
@@ -47,21 +61,29 @@ type Gateway struct {
 // fail at call time rather than at construction (callers wire
 // gateways from startup config — failing loud at the call site
 // surfaces misconfiguration in operator-visible logs).
+//
+// Sender is left nil here for back-compat with tests that don't
+// have a broker. Production wiring (cmd/nexus) sets Sender to the
+// broker after construction so SendChat takes the unified path.
 func NewGateway(store chat.Store, aspectID string) *Gateway {
 	return &Gateway{Store: store, AspectID: aspectID}
 }
 
-// SendChat persists the message and returns the new id. The aspect
-// id from the Gateway is used as the From; the funnel doesn't pass
-// it because the gateway already knows who's posting (the Frame
-// owns one Gateway, and the Gateway carries identity). Bypasses
-// the Frame's own RouteChat path on purpose — see Gateway doc.
+// SendChat persists the message and returns the new id. When a
+// Sender is configured (production), this delegates to
+// broker.HandleChatSend so persistence + recipient fan-out + the
+// Frame's own ChatRouter callback all run in one place. Without a
+// Sender (legacy tests), falls back to a direct Store.Insert — same
+// behavior as before the unify spec, minus fan-out.
 func (g *Gateway) SendChat(ctx context.Context, content string, replyTo int64, topic string) (int64, error) {
-	if g.Store == nil {
-		return 0, fmt.Errorf("framecomms.Gateway: no store configured")
-	}
 	if g.AspectID == "" {
 		return 0, fmt.Errorf("framecomms.Gateway: AspectID required to send")
+	}
+	if g.Sender != nil {
+		return g.Sender.HandleChatSend(ctx, g.AspectID, content, replyTo, topic)
+	}
+	if g.Store == nil {
+		return 0, fmt.Errorf("framecomms.Gateway: no store or sender configured")
 	}
 	msg, err := g.Store.Insert(ctx, g.AspectID, content, replyTo, topic)
 	if err != nil {

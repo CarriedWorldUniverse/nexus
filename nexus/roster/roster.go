@@ -129,6 +129,20 @@ func (r *Roster) List() []schemas.AspectState {
 	return out
 }
 
+// AspectNames returns a snapshot of registered aspect names. Used by
+// the broker's RecipientPolicy to expand @all into the live roster.
+// Returns names in arbitrary order; callers that need stability sort
+// the result.
+func (r *Roster) AspectNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.aspects))
+	for name := range r.aspects {
+		out = append(out, name)
+	}
+	return out
+}
+
 // Get returns a single aspect's state, or false if absent.
 func (r *Roster) Get(name string) (schemas.AspectState, bool) {
 	r.mu.RLock()
