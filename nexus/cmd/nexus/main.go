@@ -38,6 +38,11 @@ import (
 const exitCodeBootstrapDone = 64
 
 func main() {
+	// Subcommand dispatch — `nexus cert <verb>` peels off here before
+	// the broker flagset is parsed. Other subcommands land beside it.
+	if len(os.Args) >= 2 && os.Args[1] == "cert" {
+		os.Exit(runCertSubcommand(os.Args[2:]))
+	}
 	addr := flag.String("addr", ":7888", "broker listen address")
 	tokenEnv := flag.String("token-env", "NEXUS_TOKEN", "env var holding the shared bearer token")
 	staleAfter := flag.Duration("stale-after", 30*time.Second, "aspect becomes stale after this gap without heartbeat")
