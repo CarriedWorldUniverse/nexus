@@ -6,6 +6,7 @@ package broker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -39,6 +40,17 @@ type wsConn struct {
 	// handlers) to enforce identity-mismatch and admin checks per
 	// hand-dispatch v0.1 §5.3 and §5.4.
 	auth TokenInfo
+
+	// host is the source IP (without port) extracted from RemoteAddr
+	// at accept time. Used to release the per-IP connection slot in
+	// cleanup; immutable after construction.
+	host string
+
+	// badFrameCount is the run of consecutive frame-decode failures
+	// on this connection. Resets to zero on every successful decode.
+	// When it reaches Config.MaxConsecutiveBadFrames the connection
+	// is closed (#34). Single-reader (the serve loop) so no lock.
+	badFrameCount int
 }
 
 // Maximum size of a single frame's JSON payload. Generous but
@@ -58,6 +70,18 @@ func (b *Broker) handleConnect(w http.ResponseWriter, r *http.Request) {
 	authInfo, ok := b.resolveUpgradeAuth(r)
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	// Reserve against the connection caps (#25). Reject before WS
+	// upgrade if the global or per-IP limit is reached so an attacker
+	// can't exhaust file descriptors / goroutines by opening
+	// connections faster than they close.
+	reserved, host := b.reserveConn(r.RemoteAddr)
+	if !reserved {
+		b.log.Warn("connection cap reached; refusing /connect",
+			"remote", r.RemoteAddr,
+			"agent_id", authInfo.AgentID)
+		http.Error(w, "too many connections", http.StatusServiceUnavailable)
 		return
 	}
 	// Per #31: every legacy-master /connect emits a WARN with source +
@@ -86,6 +110,7 @@ func (b *Broker) handleConnect(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		b.log.Warn("ws accept failed", "err", err)
+		b.releaseConn(host)
 		return
 	}
 	wsc.SetReadLimit(maxFrameBytes)
@@ -98,6 +123,7 @@ func (b *Broker) handleConnect(w http.ResponseWriter, r *http.Request) {
 		connectedAt: time.Now().UTC(),
 		log:         b.log.With("conn_id", connID, "agent_id", authInfo.AgentID),
 		auth:        authInfo,
+		host:        host,
 	}
 
 	// The WS connection outlives the HTTP request, so we can't use
@@ -191,12 +217,24 @@ func (c *wsConn) serve(parentCtx context.Context) {
 
 		env, err := frames.Decode(data)
 		if err != nil {
-			c.log.Warn("frame decode failed", "err", err)
-			// Tolerate garbage: don't close the connection for one
-			// bad frame. An attacker spamming garbage gets ignored;
-			// a legitimate peer with a bug recovers on its next send.
+			c.badFrameCount++
+			c.log.Warn("frame decode failed",
+				"err", err,
+				"consecutive", c.badFrameCount)
+			// Tolerate isolated garbage frames so a legitimate peer
+			// with a single buggy send recovers on its next frame.
+			// But cap the run: an attacker streaming malformed 1 MiB
+			// frames (#34) gets cut off after MaxConsecutiveBadFrames
+			// so they can't burn CPU + bandwidth indefinitely.
+			if c.badFrameCount >= c.broker.cfg.MaxConsecutiveBadFrames {
+				c.log.Warn("bad-frame cap reached; closing connection",
+					"count", c.badFrameCount)
+				_ = c.conn.Close(websocket.StatusPolicyViolation, "too many bad frames")
+				return
+			}
 			continue
 		}
+		c.badFrameCount = 0
 
 		// Route correlated responses FIRST — even if the Kind is
 		// unknown to us. A response to a request we sent out (e.g.
@@ -364,11 +402,20 @@ func (c *wsConn) executeDispatch(env frames.Envelope) {
 	result, err := c.broker.cfg.HandQueue.Submit(context.Background(), payload)
 	if err != nil {
 		// Translate structured queue errors into structured dispatch
-		// errors. HardCeilingError carries the §6.3 fields.
+		// errors. HardCeilingError + QueueFullError carry the §6.3
+		// fields the caller needs to decide whether to retry, fan out
+		// to spillover, or surface to the operator.
 		var hc *handqueue.HardCeilingError
+		var qfe *handqueue.QueueFullError
 		switch {
 		case errors.As(err, &hc):
 			c.sendHardCeiling(env, payload.DispatchID, hc)
+		case errors.As(err, &qfe):
+			// queue_full is a distinct caller-facing condition from
+			// hard_ceiling: pending FIFO is at MaxQueueDepth. Surface
+			// depth/limit so the caller can backpressure.
+			c.sendDispatchError(env, payload.DispatchID, "queue_full",
+				fmt.Sprintf("queue depth %d at limit %d", qfe.Depth, qfe.Limit))
 		case errors.Is(err, handqueue.ErrQueueShutdown):
 			c.sendDispatchError(env, payload.DispatchID, "shutdown", err.Error())
 		default:
@@ -725,6 +772,8 @@ func (c *wsConn) cleanup() {
 		}
 	}
 	_ = c.conn.Close(websocket.StatusNormalClosure, "connection ended")
+	// Release the connection-cap slots reserved at handleConnect.
+	c.broker.releaseConn(c.host)
 }
 
 // newConnID returns a short id for logging connection lifetimes. We

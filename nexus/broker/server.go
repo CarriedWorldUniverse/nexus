@@ -14,7 +14,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/nexus-cw/nexus/nexus/chat"
@@ -106,6 +108,27 @@ type Config struct {
 	// chats; Lock 6 replay still works on register).
 	RecipientPolicy *RecipientPolicy
 
+	// MaxConnections caps the total number of concurrently-accepted
+	// /connect upgrades. Pre-#25 the broker accepted unbounded
+	// connections; an attacker (even unauthenticated, per the
+	// pre-401-delay path) could exhaust file descriptors / goroutines
+	// by opening connections faster than they were closed. Default
+	// from defaultMaxConnections when zero.
+	MaxConnections int
+
+	// MaxConnectionsPerIP caps per source-IP concurrent connections.
+	// Without this, one misbehaving (or attacker-controlled) host
+	// can consume the global cap and lock out legitimate aspects.
+	// Default from defaultMaxConnectionsPerIP when zero.
+	MaxConnectionsPerIP int
+
+	// MaxConsecutiveBadFrames is the threshold for the per-connection
+	// bad-frame counter (#34). After this many consecutive decode
+	// failures the connection is closed. The counter resets on every
+	// successful decode. Default from defaultMaxConsecutiveBadFrames
+	// when zero.
+	MaxConsecutiveBadFrames int
+
 	// AllowLegacyMaster opts in to the back-compat fallback that
 	// promotes AuthToken to a Frame-identity master token. Default
 	// false: legacy auth is disabled and aspects must present their
@@ -153,11 +176,28 @@ type ChatRouterCallbacks struct {
 }
 
 // Broker owns the HTTP server and its roster.
+// Default DoS-resistance knobs. Generous defaults for the v1
+// deployment shape (small aspect roster, single Nexus host); operators
+// in larger or hostile-adjacent deployments tune via Config.
+const (
+	defaultMaxConnections          = 256
+	defaultMaxConnectionsPerIP     = 32
+	defaultMaxConsecutiveBadFrames = 16
+)
+
 type Broker struct {
 	cfg    Config
 	roster *roster.Roster
 	srv    *http.Server
 	log    *slog.Logger
+
+	// Connection accounting for #25. connMu guards both fields.
+	// connTotal is the current count of accepted /connect upgrades;
+	// connPerIP[host] is the per-source-IP count (host:port stripped
+	// to host before lookup).
+	connMu    sync.Mutex
+	connTotal int
+	connPerIP map[string]int
 
 	// ctx drives the lifetime of WS goroutines. Set in ListenAndServe
 	// from the caller's context; cancelled when ListenAndServe returns
@@ -197,12 +237,74 @@ func New(cfg Config, r *roster.Roster) *Broker {
 	if cfg.Tokens == nil {
 		cfg.Tokens = NewTokenStore()
 	}
+	if cfg.MaxConnections == 0 {
+		cfg.MaxConnections = defaultMaxConnections
+	}
+	if cfg.MaxConnectionsPerIP == 0 {
+		cfg.MaxConnectionsPerIP = defaultMaxConnectionsPerIP
+	}
+	if cfg.MaxConsecutiveBadFrames == 0 {
+		cfg.MaxConsecutiveBadFrames = defaultMaxConsecutiveBadFrames
+	}
 	if cfg.AuthToken != "" && cfg.AllowLegacyMaster {
 		cfg.Tokens.SetLegacyMaster(cfg.AuthToken)
 		cfg.Logger.Warn("legacy master token enabled — every /connect via this token will WARN. " +
 			"Migrate aspects to per-aspect tokens; clear NEXUS_ALLOW_LEGACY_MASTER once done.")
 	}
-	return &Broker{cfg: cfg, roster: r, log: cfg.Logger, dispatcher: newDispatcher()}
+	return &Broker{
+		cfg:        cfg,
+		roster:     r,
+		log:        cfg.Logger,
+		dispatcher: newDispatcher(),
+		connPerIP:  make(map[string]int),
+	}
+}
+
+// reserveConn accounts a new /connect against the global + per-IP
+// caps. Returns (true, host) on success — caller must call releaseConn
+// with the returned host on disconnect. Returns (false, "") if either
+// cap is reached; caller should reject with 503.
+func (b *Broker) reserveConn(remoteAddr string) (bool, string) {
+	host := remoteAddr
+	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = h
+	}
+	// SplitHostPort failure (or empty remoteAddr in test wiring)
+	// leaves host equal to the raw input. The global cap still
+	// protects under malformed input; the per-IP map may accumulate
+	// a phantom key for that exact malformed string but it's bounded
+	// by the global cap and cleaned up via releaseConn on disconnect.
+	b.connMu.Lock()
+	defer b.connMu.Unlock()
+	if b.connTotal >= b.cfg.MaxConnections {
+		return false, ""
+	}
+	if b.connPerIP[host] >= b.cfg.MaxConnectionsPerIP {
+		return false, ""
+	}
+	b.connTotal++
+	b.connPerIP[host]++
+	return true, host
+}
+
+// releaseConn decrements the connection accounting after a /connect
+// disconnects. host is the value returned by reserveConn; if empty,
+// this is a no-op (paired with a failed reserve).
+func (b *Broker) releaseConn(host string) {
+	if host == "" {
+		return
+	}
+	b.connMu.Lock()
+	defer b.connMu.Unlock()
+	if b.connTotal > 0 {
+		b.connTotal--
+	}
+	if b.connPerIP[host] > 0 {
+		b.connPerIP[host]--
+		if b.connPerIP[host] == 0 {
+			delete(b.connPerIP, host)
+		}
+	}
 }
 
 // ListenAndServe blocks serving the broker until the context is cancelled.
