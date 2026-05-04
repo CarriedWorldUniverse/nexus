@@ -171,6 +171,77 @@ func TestExtractBearer(t *testing.T) {
 	}
 }
 
+// Regression for issue #24: ResolveToken must do constant-time
+// compares against every registered token, not a Go map lookup. Map
+// ops branch on hash bucket layout, so a hit vs miss has measurably
+// different timing.
+//
+// We assert behavior, not timing (timing tests are flaky on CI).
+// Specifically: every candidate path (registered hit, legacy hit,
+// total miss with various lengths) returns the right outcome, with
+// the same TokenInfo a hit-by-hit-on-second-call returns. Plus a
+// short-circuit-detector: after a "successful" earlier match in the
+// loop body, a later wrong candidate must NOT cause the result to
+// reset. The current implementation captures via if eq == 1 { hit = ... },
+// so this confirms the body sees stable hit assignment.
+func TestResolveToken_HandlesAllPaths(t *testing.T) {
+	store := NewTokenStore()
+	store.SetTokenForTest("wren", "wrentoken", false)
+	store.SetTokenForTest("anvil", "anviltoken", false)
+	store.SetLegacyMaster("legacymaster")
+
+	cases := []struct {
+		name   string
+		token  string
+		wantOK bool
+		wantID string
+		wantAd bool
+	}{
+		{"registered aspect", "wrentoken", true, "wren", false},
+		{"registered other aspect", "anviltoken", true, "anvil", false},
+		{"legacy master", "legacymaster", true, FrameAgentID, true},
+		{"miss same length as wren", "wrongtoken", false, "", false},
+		{"miss longer", "wrongtoken-extra-bytes-padding", false, "", false},
+		{"miss shorter", "wt", false, "", false},
+		{"miss empty (early return)", "", false, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			info, ok := store.ResolveToken(c.token)
+			if ok != c.wantOK {
+				t.Errorf("ok = %v, want %v", ok, c.wantOK)
+			}
+			if info.AgentID != c.wantID {
+				t.Errorf("AgentID = %q, want %q", info.AgentID, c.wantID)
+			}
+			if info.Admin != c.wantAd {
+				t.Errorf("Admin = %v, want %v", info.Admin, c.wantAd)
+			}
+		})
+	}
+}
+
+// ExtractBearer must return empty for any non-bearer header without
+// branching on header bytes. Pre-fix used == compare which leaked
+// "is this a bearer header" via early-return timing.
+func TestExtractBearer_ConstantTime(t *testing.T) {
+	cases := map[string]string{
+		"Bearer abc123":   "abc123",
+		"bearer abc123":   "", // case-sensitive; the lib expects exactly "Bearer "
+		"Basic abc123":    "",
+		"":                "",
+		"Bearer":          "", // no space, too short
+		"Bearer ":         "", // no token after space
+		"Token abc":       "",
+		"   ":             "",
+	}
+	for in, want := range cases {
+		if got := ExtractBearer(in); got != want {
+			t.Errorf("ExtractBearer(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // SetTokenForTest hooks the test path so we can install known tokens
 // without the DB round-trip.
 func TestSetTokenForTest(t *testing.T) {

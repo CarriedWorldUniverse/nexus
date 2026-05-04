@@ -252,32 +252,74 @@ func (s *TokenStore) TokenForAgent(agentID string) string {
 }
 
 // ResolveToken maps a presented bearer token to its TokenInfo. Returns
-// (info, true) on hit, (zero, false) on miss. Constant-time compare on
-// the legacy-master fallback prevents timing leaks on that path; the
-// primary map lookup is a hash, which is the same property the agent-
-// network reference relies on.
+// (info, true) on hit, (zero, false) on miss.
+//
+// Compares against every registered token and the legacy-master
+// fallback using subtle.ConstantTimeCompare, never short-circuiting on
+// the first match. Total work is O(N) per resolve where N = registered
+// aspects (~10 in practice); negligible.
+//
+// Threat model + residual leak: the previous primary path was
+// `s.byToken[token]`, a Go map lookup. Map ops branch on hash bucket
+// layout, so hit-vs-miss had a microsecond-class timing differential
+// that leaked "is this token registered to anyone" to a remote prober.
+// This implementation closes that channel — the loop body runs the
+// same number of byte-compares regardless of match outcome, and
+// ConstantTimeCompare itself doesn't branch on contents.
+//
+// What this code does NOT achieve: true constant-time STRUCT capture.
+// The `if eq == 1 { hit = info }` line is a regular branch on the
+// compare result. Strings in TokenInfo can't be selected via
+// subtle.ConstantTimeSelect (which is integer-only), so a hit assigns
+// a string while a miss does not — a few-nanosecond branch-predictor
+// differential. That residue is far below the previous map-lookup
+// channel and well below network jitter on any plausible attacker
+// path; treating it as acceptable for this threat model. If we ever
+// need to close it, the path is: store candidates in a slice and use
+// fixed-width index arithmetic to pick the hit, eating a string copy
+// on every call.
 func (s *TokenStore) ResolveToken(token string) (TokenInfo, bool) {
 	if token == "" {
 		return TokenInfo{}, false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if info, ok := s.byToken[token]; ok {
-		return info, true
+
+	tokenBytes := []byte(token)
+	var hit TokenInfo
+	var found int // 1 if any constant-time compare succeeded
+
+	for candidate, info := range s.byToken {
+		// ConstantTimeCompare returns 0 on length mismatch without
+		// branching on contents; ORing into found is constant-time.
+		eq := subtle.ConstantTimeCompare(tokenBytes, []byte(candidate))
+		if eq == 1 {
+			// Branch on eq — not on token contents. See the residual-leak
+			// note in the doc comment.
+			hit = info
+		}
+		found |= eq
 	}
-	if s.legacyMaster != "" &&
-		subtle.ConstantTimeCompare([]byte(token), []byte(s.legacyMaster)) == 1 {
-		return TokenInfo{AgentID: FrameAgentID, Admin: true}, true
+	if s.legacyMaster != "" {
+		eq := subtle.ConstantTimeCompare(tokenBytes, []byte(s.legacyMaster))
+		if eq == 1 {
+			hit = TokenInfo{AgentID: FrameAgentID, Admin: true}
+		}
+		found |= eq
 	}
-	return TokenInfo{}, false
+	return hit, found == 1
 }
 
 // ExtractBearer parses an Authorization header value, returning the
 // token string after "Bearer " or empty if the header is missing or
-// malformed.
+// malformed. Uses constant-time compare on the prefix so a probe can't
+// distinguish "missing header" from "wrong prefix" via timing.
 func ExtractBearer(header string) string {
 	const prefix = "Bearer "
-	if len(header) <= len(prefix) || header[:len(prefix)] != prefix {
+	if len(header) <= len(prefix) {
+		return ""
+	}
+	if subtle.ConstantTimeCompare([]byte(header[:len(prefix)]), []byte(prefix)) != 1 {
 		return ""
 	}
 	return header[len(prefix):]

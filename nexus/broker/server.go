@@ -105,6 +105,23 @@ type Config struct {
 	// ChatRouter callback fire (live aspects don't see cross-aspect
 	// chats; Lock 6 replay still works on register).
 	RecipientPolicy *RecipientPolicy
+
+	// OriginPatterns is the WebSocket Origin allowlist for /connect
+	// upgrades. Browser-based callers (dashboard SPA, future UI agents)
+	// send an Origin header; non-browser aspects (Go ws clients) do
+	// not. The broker treats UI surfaces the same as any other aspect:
+	// they authenticate via per-aspect bearer token, and their Origin
+	// must match this list.
+	//
+	// Empty list = no browser origins accepted. Non-browser aspects
+	// (no Origin header) connect regardless. This is the v1 default
+	// since the dashboard reaches the broker via REST today; once a
+	// browser-side WS client lands, its origin is added here.
+	//
+	// Patterns follow nhooyr.io/websocket's matching: literal host
+	// matches (e.g. "https://localhost:7888") or wildcard subdomain
+	// patterns. See websocket.AcceptOptions.OriginPatterns.
+	OriginPatterns []string
 }
 
 // ChatRouterCallbacks wires the broker's chat.send handling to the

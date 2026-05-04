@@ -237,6 +237,111 @@ func TestDeregisterRemovesRoster(t *testing.T) {
 	}
 }
 
+// Regression for issue #32: a non-admin caller cannot deregister
+// another aspect. Pre-fix, handleDeregisterFrame trusted payload.Name
+// without checking caller identity — any authenticated peer could DoS
+// any other aspect by guessing/observing its session_id.
+// Regression for issue #22: when an Origin header is presented (browser
+// caller), the broker must reject upgrades whose Origin isn't in the
+// configured allowlist. Non-browser aspects (no Origin) still connect
+// freely; that's covered by every other test in this file. We exercise
+// both rejection and acceptance to distinguish "allowlist enforced"
+// from "library rejects everything."
+func TestOriginAllowlistRejectsUnlistedBrowserOrigin(t *testing.T) {
+	r := roster.New()
+	// httptest binds a random ephemeral port on 127.0.0.1, so allowlist
+	// the actual server origin once we know it.
+	b := New(Config{
+		AuthToken:          "testtoken",
+		HeartbeatIntervalS: 15,
+		StaleAfter:         30 * time.Second,
+	}, r)
+	srv := httptest.NewServer(newMux(b))
+	t.Cleanup(srv.Close)
+	allowed := "http://" + strings.TrimPrefix(srv.URL, "http://")
+	b.cfg.OriginPatterns = []string{allowed}
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/connect"
+
+	// Negative case: unlisted origin must be rejected.
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel1()
+	_, _, err := websocket.Dial(ctx1, wsURL, &websocket.DialOptions{
+		HTTPHeader: map[string][]string{
+			"Authorization": {"Bearer testtoken"},
+			"Origin":        {"http://evil.example.com"},
+		},
+	})
+	if err == nil {
+		t.Fatal("dial with unlisted origin should fail, got nil err")
+	}
+
+	// Positive case: an allowlisted origin connects. This pins that the
+	// allowlist is doing actual matching, not blanket-rejecting all
+	// Origin-bearing requests.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+	c, _, err := websocket.Dial(ctx2, wsURL, &websocket.DialOptions{
+		HTTPHeader: map[string][]string{
+			"Authorization": {"Bearer testtoken"},
+			"Origin":        {allowed},
+		},
+	})
+	if err != nil {
+		t.Fatalf("dial with allowlisted origin should succeed, got: %v", err)
+	}
+	_ = c.Close(websocket.StatusNormalClosure, "done")
+}
+
+func TestDeregisterRejectsCrossAspectIdentity(t *testing.T) {
+	srv, r, b := newTestServer(t)
+
+	// Wire per-aspect tokens so we connect as a non-admin aspect.
+	b.cfg.Tokens.SetTokenForTest("wren", "wrentok", false)
+	b.cfg.Tokens.SetTokenForTest("anvil", "anviltok", false)
+
+	// Register anvil first via its own token so there's something to
+	// try to deregister.
+	canvil := dialWS(t, srv, "anviltok")
+	regAnvil, _ := frames.NewRequest(frames.KindRegister, frames.RegisterPayload{
+		RegisterRequest: schemas.RegisterRequest{
+			Name:        "anvil",
+			ContextMode: schemas.ContextGlobal,
+			Provider:    "claude-api",
+			SessionID:   "anvil-sess-1",
+			Home:        "/tmp/anvil",
+			StartedAt:   time.Now().UTC(),
+		},
+	})
+	sendFrame(t, canvil, regAnvil)
+	_ = recvFrame(t, canvil)
+
+	if len(r.List()) != 1 {
+		t.Fatalf("expected anvil registered, got %d", len(r.List()))
+	}
+
+	// Connect as wren and try to deregister anvil.
+	cwren := dialWS(t, srv, "wrentok")
+	deregEnv, _ := frames.NewRequest(frames.KindDeregister, frames.DeregisterPayload{
+		DeregisterRequest: schemas.DeregisterRequest{
+			Name:      "anvil",
+			SessionID: "anvil-sess-1",
+			Reason:    "DoS attempt",
+		},
+	})
+	sendFrame(t, cwren, deregEnv)
+	resp := recvFrame(t, cwren)
+
+	if resp.Kind != frames.Kind("deregister.error") {
+		t.Errorf("kind = %q, want deregister.error", resp.Kind)
+	}
+
+	// Anvil must still be registered.
+	if len(r.List()) != 1 {
+		t.Errorf("anvil was wrongly deregistered by wren: roster = %d", len(r.List()))
+	}
+}
+
 func TestDisconnectAutoDeregisters(t *testing.T) {
 	srv, r, _ := newTestServer(t)
 	c := dialWS(t, srv, "testtoken")

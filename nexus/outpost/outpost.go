@@ -48,6 +48,13 @@ type Config struct {
 	// hostname; must be stable across reconnects.
 	OutpostID string
 
+	// OriginPatterns is the WebSocket Origin allowlist for inbound
+	// /connect upgrades from local aspects. Mirrors broker.Config.OriginPatterns:
+	// non-browser aspects (Go ws clients) connect freely, browser-based
+	// callers must match this list. Empty list (default) = no browser
+	// origins accepted.
+	OriginPatterns []string
+
 	// Logger is optional.
 	Logger *slog.Logger
 }
@@ -307,7 +314,9 @@ func (o *Outpost) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wsc, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true,
+		// See broker.handleConnect for the rationale; same Origin
+		// allowlist policy applied here.
+		OriginPatterns: o.cfg.OriginPatterns,
 	})
 	if err != nil {
 		o.log.Warn("ws accept failed", "err", err)
@@ -321,7 +330,7 @@ func (o *Outpost) handleConnect(w http.ResponseWriter, r *http.Request) {
 func (o *Outpost) authCheckHeader(r *http.Request) bool {
 	const prefix = "Bearer "
 	header := r.Header.Get("Authorization")
-	if len(header) <= len(prefix) || header[:len(prefix)] != prefix {
+	if len(header) <= len(prefix) || subtle.ConstantTimeCompare([]byte(header[:len(prefix)]), []byte(prefix)) != 1 {
 		return false
 	}
 	given := header[len(prefix):]
