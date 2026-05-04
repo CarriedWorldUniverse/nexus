@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/nexus-cw/nexus/runtime/providers"
 )
 
@@ -125,6 +126,65 @@ func TestBuildMessagesRejectsToolResultUntilPart7(t *testing.T) {
 	_, err := buildMessages(req)
 	if !errors.Is(err, providers.ErrUnsupported) {
 		t.Errorf("err = %v, want ErrUnsupported", err)
+	}
+}
+
+// Regression for issue #38: a ToolUseBlock with malformed Input must
+// surface as an error from normaliseResponse, not be silently dropped
+// to empty args. The runtime would otherwise dispatch a tool divergent
+// from the model's intent.
+func TestNormaliseResponseRejectsMalformedToolInput(t *testing.T) {
+	raw := []byte(`{
+		"id": "msg_1",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-test",
+		"content": [
+			{"type": "tool_use", "id": "tu_1", "name": "do_thing", "input": "not-json-at-all"}
+		],
+		"stop_reason": "tool_use",
+		"usage": {"input_tokens": 1, "output_tokens": 2}
+	}`)
+	var msg anthropic.Message
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	_, err := normaliseResponse(&msg)
+	if err == nil {
+		t.Fatal("expected error for malformed tool input, got nil")
+	}
+	if !errors.Is(err, providers.ErrProvider) {
+		t.Errorf("err = %v, want ErrProvider", err)
+	}
+}
+
+// normaliseResponse must accept a well-formed tool_use input and parse
+// it into the Arguments map.
+func TestNormaliseResponseParsesToolInput(t *testing.T) {
+	raw := []byte(`{
+		"id": "msg_1",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-test",
+		"content": [
+			{"type": "tool_use", "id": "tu_1", "name": "do_thing", "input": {"k": "v", "n": 7}}
+		],
+		"stop_reason": "tool_use",
+		"usage": {"input_tokens": 1, "output_tokens": 2}
+	}`)
+	var msg anthropic.Message
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	out, err := normaliseResponse(&msg)
+	if err != nil {
+		t.Fatalf("normaliseResponse: %v", err)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls len = %d, want 1", len(out.ToolCalls))
+	}
+	if got := out.ToolCalls[0].Arguments["k"]; got != "v" {
+		t.Errorf("Arguments[k] = %v, want v", got)
 	}
 }
 

@@ -117,6 +117,9 @@ func (t *Tree) SidecarPath() string { return t.sidecarPath }
 // released with the written entry — the hook gets the fully
 // populated Entry (id + ts + parent) and can forward it.
 func (t *Tree) Append(ctx context.Context, e Entry) (Entry, error) {
+	if err := ctx.Err(); err != nil {
+		return Entry{}, err
+	}
 	written, hook, err := t.appendLocked(ctx, e)
 	if err != nil {
 		return Entry{}, err
@@ -196,13 +199,16 @@ func (t *Tree) Head() (string, error) {
 // Intended for rewind / fork operations — the entry must already
 // exist in the JSONL (otherwise the next Replay would fail).
 func (t *Tree) SetHead(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	if id == "" {
 		return errors.New("tree.SetHead: empty id")
 	}
-	_, ok, err := t.findEntry(id)
+	_, ok, err := t.findEntry(ctx, id)
 	if err != nil {
 		return fmt.Errorf("tree.SetHead: scan: %w", err)
 	}
@@ -218,6 +224,9 @@ func (t *Tree) SetHead(ctx context.Context, id string) error {
 // view of the session regardless of where the JSONL physically
 // stored branches.
 func (t *Tree) Replay(ctx context.Context) ([]Entry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -229,7 +238,7 @@ func (t *Tree) Replay(ctx context.Context) ([]Entry, error) {
 		return nil, nil
 	}
 
-	index, err := t.loadIndex()
+	index, err := t.loadIndex(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("tree.Replay: index: %w", err)
 	}
@@ -258,9 +267,12 @@ func (t *Tree) Replay(ctx context.Context) ([]Entry, error) {
 // they belong to. Useful for export / backup / audit. Ordered by
 // file position, not timestamp.
 func (t *Tree) All(ctx context.Context) ([]Entry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.readAll()
+	return t.readAll(ctx)
 }
 
 // Fork sets the head to an earlier entry. A subsequent Append will
@@ -319,8 +331,8 @@ func (t *Tree) writeHead(id string) error {
 // O(n) per call; acceptable for typical session sizes (hundreds to
 // low thousands of turns). Streamed scan could replace this when
 // sessions grow past that scale.
-func (t *Tree) loadIndex() (map[string]Entry, error) {
-	entries, err := t.readAll()
+func (t *Tree) loadIndex(ctx context.Context) (map[string]Entry, error) {
+	entries, err := t.readAll(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +346,7 @@ func (t *Tree) loadIndex() (map[string]Entry, error) {
 // findEntry locates one entry by ID without building a full index.
 // Returns (entry, true, nil) on hit, (_, false, nil) on miss,
 // (_, _, err) on I/O failure.
-func (t *Tree) findEntry(id string) (Entry, bool, error) {
+func (t *Tree) findEntry(ctx context.Context, id string) (Entry, bool, error) {
 	f, err := os.Open(t.jsonlPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -347,6 +359,9 @@ func (t *Tree) findEntry(id string) (Entry, bool, error) {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // allow entries up to 1 MB
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return Entry{}, false, err
+		}
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
@@ -366,7 +381,7 @@ func (t *Tree) findEntry(id string) (Entry, bool, error) {
 	return Entry{}, false, nil
 }
 
-func (t *Tree) readAll() ([]Entry, error) {
+func (t *Tree) readAll(ctx context.Context) ([]Entry, error) {
 	f, err := os.Open(t.jsonlPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -381,6 +396,9 @@ func (t *Tree) readAll() ([]Entry, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	lineNum := 0
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		lineNum++
 		line := scanner.Bytes()
 		if len(line) == 0 {

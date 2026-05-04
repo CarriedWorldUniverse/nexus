@@ -119,7 +119,7 @@ func (p *Provider) Invoke(ctx context.Context, req providers.InvokeRequest) (pro
 		return providers.InvokeResult{}, normaliseError(err)
 	}
 
-	return normaliseResponse(resp), nil
+	return normaliseResponse(resp)
 }
 
 // Stream — not yet wired up. Part 2's scope is blocking Invoke;
@@ -427,7 +427,7 @@ func extractRequired(schema map[string]any) []string {
 
 // normaliseResponse converts the Anthropic SDK's Message response into
 // the Nexus InvokeResult shape.
-func normaliseResponse(resp *anthropic.Message) providers.InvokeResult {
+func normaliseResponse(resp *anthropic.Message) (providers.InvokeResult, error) {
 	out := providers.InvokeResult{
 		StopReason: normaliseStopReason(string(resp.StopReason)),
 		Tokens: providers.TokenCounts{
@@ -450,7 +450,14 @@ func normaliseResponse(resp *anthropic.Message) providers.InvokeResult {
 		case anthropic.ToolUseBlock:
 			args := map[string]any{}
 			if len(variant.Input) > 0 {
-				_ = json.Unmarshal(variant.Input, &args)
+				if err := json.Unmarshal(variant.Input, &args); err != nil {
+					// A malformed tool-use Input means the model intended
+					// arguments we can't recover. Forwarding empty args
+					// silently dispatches a tool call divergent from the
+					// model's intent — surface the failure instead.
+					return providers.InvokeResult{}, fmt.Errorf("%w: tool_use %q input parse: %v",
+						providers.ErrProvider, variant.Name, err)
+				}
 			}
 			out.ToolCalls = append(out.ToolCalls, providers.ToolCall{
 				ID:        variant.ID,
@@ -460,7 +467,7 @@ func normaliseResponse(resp *anthropic.Message) providers.InvokeResult {
 		}
 	}
 	out.Output = textBuilder.String()
-	return out
+	return out, nil
 }
 
 func normaliseStopReason(raw string) providers.StopReason {

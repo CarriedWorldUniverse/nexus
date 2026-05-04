@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 
 	"github.com/nexus-cw/nexus/nexus/frames"
@@ -87,7 +88,7 @@ func Run(ctx context.Context, aspectHome string, aspect schemas.AspectConfig, pr
 		Prompt: string(promptBytes),
 	})
 	if err != nil {
-		return writeAndReturnError(req, "provider.Invoke", err)
+		return writeAndReturnProviderError(req, err)
 	}
 
 	output := parseOutput(result.Output)
@@ -150,6 +151,13 @@ func writeResponse(resp frames.DispatchResultPayload) error {
 // writeAndReturnError emits a DispatchResultPayload with Error set,
 // returns the underlying error so the caller process can exit non-
 // zero. Keeps the dispatcher's parse path consistent even on failures.
+//
+// Used for harness-internal failures (stdin parse, payload marshal)
+// where the error text is generated locally and safe to surface.
+// Provider errors must go through writeAndReturnProviderError so they
+// are mapped to opaque codes — provider error strings can carry prompt
+// fragments, request bodies, or partial credentials and must not
+// round-trip across the dispatch boundary.
 func writeAndReturnError(req Request, label string, err error) error {
 	_ = writeResponse(frames.DispatchResultPayload{
 		Aspect:     req.Aspect,
@@ -158,4 +166,50 @@ func writeAndReturnError(req Request, label string, err error) error {
 		Error:      fmt.Sprintf("%s: %v", label, err),
 	})
 	return fmt.Errorf("%s: %w", label, err)
+}
+
+// writeAndReturnProviderError redacts a provider error before writing
+// the dispatch result, then returns the rich error to the local
+// process so it lands in stderr / process logs. The dispatch payload
+// receives only the opaque code from providerErrorCode — upstream
+// error strings (prompt fragments, account ids, masked-but-partial
+// credentials in 401 echoes) never cross the dispatch boundary.
+func writeAndReturnProviderError(req Request, err error) error {
+	code := providerErrorCode(err)
+	// Local-only log of the rich error for operator debugging.
+	slog.Error("dispatch provider error",
+		"aspect", req.Aspect,
+		"thread", req.Thread,
+		"dispatch_id", req.DispatchID,
+		"code", code,
+		"err", err)
+	_ = writeResponse(frames.DispatchResultPayload{
+		Aspect:     req.Aspect,
+		Thread:     req.Thread,
+		DispatchID: req.DispatchID,
+		Error:      code,
+	})
+	return fmt.Errorf("provider.Invoke: %w", err)
+}
+
+// providerErrorCode maps a provider error to a small set of opaque
+// codes safe to send across the dispatch boundary. Recipients pattern-
+// match on these codes; rich detail stays in local logs.
+func providerErrorCode(err error) string {
+	switch {
+	case errors.Is(err, providers.ErrAuth):
+		return "provider_auth"
+	case errors.Is(err, providers.ErrRateLimit):
+		return "provider_rate_limit"
+	case errors.Is(err, providers.ErrContextWindow):
+		return "provider_context_window"
+	case errors.Is(err, providers.ErrTimeout):
+		return "provider_timeout"
+	case errors.Is(err, providers.ErrUnsupported):
+		return "provider_unsupported"
+	case errors.Is(err, providers.ErrProvider):
+		return "provider_error"
+	default:
+		return "provider_internal"
+	}
 }

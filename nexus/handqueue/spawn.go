@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os/exec"
 
 	"github.com/nexus-cw/nexus/nexus/frames"
@@ -132,11 +133,23 @@ func (s *SpawnExecutor) Execute(ctx context.Context, req frames.DispatchPayload)
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		// Stderr from the subprocess can carry sensitive content —
+		// provider error strings the harness slog'd locally (API key
+		// fragments in 401 echoes, prompt fragments, account ids), or
+		// arbitrary panic traces. Keep it in the spawner's logs only;
+		// do NOT round-trip it across the dispatch boundary, where the
+		// dispatching aspect (possibly low-trust) would read it.
+		slog.Error("spawn: harness exited non-zero",
+			"aspect", req.Aspect,
+			"thread", req.Thread,
+			"dispatch_id", req.DispatchID,
+			"err", err,
+			"stderr", truncate(stderr.String(), 2000))
 		return frames.DispatchResultPayload{
 			Aspect:     req.Aspect,
 			Thread:     req.Thread,
 			DispatchID: req.DispatchID,
-			Error:      fmt.Sprintf("%s (stderr: %s)", err, truncate(stderr.String(), 500)),
+			Error:      "harness_failure",
 		}, err
 	}
 
