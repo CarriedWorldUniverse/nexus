@@ -530,3 +530,45 @@ func TestSubmitRespectsContext(t *testing.T) {
 		t.Errorf("err = %v, want DeadlineExceeded", err)
 	}
 }
+
+// Regression for issue #25: when MaxQueueDepth is reached, new
+// arrivals from the same aspect (which would otherwise enqueue tail)
+// reject with ErrQueueFull instead of growing pending without bound.
+func TestSubmitRejectsAtQueueDepthCap(t *testing.T) {
+	block := make(chan struct{})
+	q, err := New(Config{
+		MaxConcurrent: 1,
+		HardCeiling:   1, // force same-aspect arrivals to enqueue (no spillover)
+		MaxQueueDepth: 2,
+		Executor: ExecutorFunc(func(ctx context.Context, _ frames.DispatchPayload) (frames.DispatchResultPayload, error) {
+			<-block
+			return frames.DispatchResultPayload{}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { close(block); q.Shutdown(context.Background()) }()
+
+	// Worker slot taken by the first submit; subsequent same-aspect
+	// arrivals queue.
+	go q.Submit(context.Background(), frames.DispatchPayload{Aspect: "x", DispatchID: "active"})
+	time.Sleep(20 * time.Millisecond)
+
+	// Two more enqueue at depth=1, depth=2 (both within cap).
+	go q.Submit(context.Background(), frames.DispatchPayload{Aspect: "x", DispatchID: "q1"})
+	go q.Submit(context.Background(), frames.DispatchPayload{Aspect: "x", DispatchID: "q2"})
+	time.Sleep(20 * time.Millisecond)
+
+	// Third pending arrival pushes depth to 3 → ErrQueueFull.
+	_, err = q.Submit(context.Background(), frames.DispatchPayload{Aspect: "x", DispatchID: "overflow"})
+	if !errors.Is(err, ErrQueueFull) {
+		t.Errorf("err = %v, want ErrQueueFull", err)
+	}
+	var qfe *QueueFullError
+	if !errors.As(err, &qfe) {
+		t.Errorf("expected *QueueFullError, got %T", err)
+	} else if qfe.Limit != 2 {
+		t.Errorf("Limit = %d, want 2", qfe.Limit)
+	}
+}

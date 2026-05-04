@@ -295,6 +295,142 @@ func TestOriginAllowlistRejectsUnlistedBrowserOrigin(t *testing.T) {
 	_ = c.Close(websocket.StatusNormalClosure, "done")
 }
 
+// Regression for issue #25: handleConnect rejects with 503 once
+// MaxConnections is reached. Pre-fix the broker accepted unbounded
+// connections, exhausting fds/goroutines under flood.
+func TestConnectionCapRejectsAfterLimit(t *testing.T) {
+	r := roster.New()
+	b := New(Config{
+		AuthToken:          "testtoken",
+		AllowLegacyMaster:  true,
+		MaxConnections:     2,
+		HeartbeatIntervalS: 15,
+		StaleAfter:         30 * time.Second,
+	}, r)
+	srv := httptest.NewServer(newMux(b))
+	t.Cleanup(srv.Close)
+
+	// Open 2 connections (at the cap).
+	c1 := dialWS(t, srv, "testtoken")
+	c2 := dialWS(t, srv, "testtoken")
+	_ = c2
+
+	// Third connect must fail with 503.
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/connect"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, resp, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: map[string][]string{"Authorization": {"Bearer testtoken"}},
+	})
+	if err == nil {
+		t.Fatal("third dial should fail at connection cap")
+	}
+	if resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+		gotStatus := -1
+		if resp != nil {
+			gotStatus = resp.StatusCode
+		}
+		t.Errorf("status = %d, want 503", gotStatus)
+	}
+
+	// Close one held connection and assert a slot opens up. This pins
+	// releaseConn's symmetry: a bug that decremented connTotal but
+	// not connPerIP (or vice versa) would leave the cap full and
+	// fail this retry.
+	_ = c1.Close(websocket.StatusNormalClosure, "freeing slot")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		retryCtx, retryCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		c3, _, dialErr := websocket.Dial(retryCtx, wsURL, &websocket.DialOptions{
+			HTTPHeader: map[string][]string{"Authorization": {"Bearer testtoken"}},
+		})
+		retryCancel()
+		if dialErr == nil {
+			_ = c3.Close(websocket.StatusNormalClosure, "done")
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("after closing one connection, retry never succeeded — releaseConn accounting bug")
+}
+
+// Per-IP cap exercised independently: with global cap generous and
+// per-IP cap tight, three dials from the same source-IP fail at the
+// per-IP limit even though global has headroom.
+func TestPerIPConnectionCapRejectsAfterLimit(t *testing.T) {
+	r := roster.New()
+	b := New(Config{
+		AuthToken:           "testtoken",
+		AllowLegacyMaster:   true,
+		MaxConnections:      32,
+		MaxConnectionsPerIP: 2,
+		HeartbeatIntervalS:  15,
+		StaleAfter:          30 * time.Second,
+	}, r)
+	srv := httptest.NewServer(newMux(b))
+	t.Cleanup(srv.Close)
+
+	_ = dialWS(t, srv, "testtoken")
+	_ = dialWS(t, srv, "testtoken")
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/connect"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, resp, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPHeader: map[string][]string{"Authorization": {"Bearer testtoken"}},
+	})
+	if err == nil {
+		t.Fatal("third dial should fail at per-IP cap")
+	}
+	if resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+		gotStatus := -1
+		if resp != nil {
+			gotStatus = resp.StatusCode
+		}
+		t.Errorf("status = %d, want 503", gotStatus)
+	}
+}
+
+// Regression for issue #34: a connection streaming malformed frames
+// gets cut off after MaxConsecutiveBadFrames.
+func TestBadFrameCapClosesConnection(t *testing.T) {
+	r := roster.New()
+	b := New(Config{
+		AuthToken:               "testtoken",
+		AllowLegacyMaster:       true,
+		MaxConsecutiveBadFrames: 3, // small for fast test
+		HeartbeatIntervalS:      15,
+		StaleAfter:              30 * time.Second,
+	}, r)
+	srv := httptest.NewServer(newMux(b))
+	t.Cleanup(srv.Close)
+
+	c := dialWS(t, srv, "testtoken")
+
+	// Send 4 garbage frames. Per-frame writes until the server
+	// closes; the read after close returns an error.
+	for i := 0; i < 4; i++ {
+		writeCtx, writeCancel := context.WithTimeout(context.Background(), 1*time.Second)
+		err := c.Write(writeCtx, websocket.MessageText, []byte("not-json-at-all"))
+		writeCancel()
+		if err != nil {
+			break // server already closed
+		}
+	}
+	// Read should observe the close. Allow up to 2s.
+	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer readCancel()
+	_, _, err := c.Read(readCtx)
+	if err == nil {
+		t.Fatal("expected connection close after bad-frame cap")
+	}
+	closeStatus := websocket.CloseStatus(err)
+	if closeStatus != websocket.StatusPolicyViolation {
+		t.Errorf("close status = %d, want StatusPolicyViolation (%d)",
+			closeStatus, websocket.StatusPolicyViolation)
+	}
+}
+
 func TestDeregisterRejectsCrossAspectIdentity(t *testing.T) {
 	srv, r, b := newTestServer(t)
 

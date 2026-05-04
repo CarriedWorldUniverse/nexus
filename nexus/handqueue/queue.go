@@ -81,6 +81,14 @@ type Config struct {
 	// is silently capped, not errored.
 	MaxDeadline time.Duration
 
+	// MaxQueueDepth caps the number of dispatches in the pending FIFO
+	// (#25). Pre-cap, q.pending was unbounded — an authenticated peer
+	// flooding dispatches faster than workers drained could grow the
+	// queue (and the goroutines waiting on Submit) without limit. New
+	// arrivals past this depth reject with ErrQueueFull. Default
+	// from defaultMaxQueueDepth when zero.
+	MaxQueueDepth int
+
 	// Executor runs jobs. Required.
 	Executor Executor
 
@@ -144,6 +152,10 @@ var (
 	// dispatcher is at HardCeiling H. Per spec §6.3 the broker maps
 	// this to a structured DispatchErrorPayload with code=hard_ceiling.
 	ErrHardCeiling = errors.New("handqueue: hard_ceiling")
+	// ErrQueueFull is returned when a dispatch arrives while the
+	// pending FIFO already has MaxQueueDepth entries (#25). Caller
+	// should backpressure or surface to the dispatching aspect.
+	ErrQueueFull = errors.New("handqueue: queue_full")
 )
 
 // HardCeilingError carries the structured fields the broker needs to
@@ -165,6 +177,23 @@ func (e *HardCeilingError) Is(target error) bool {
 	return target == ErrHardCeiling
 }
 
+// QueueFullError carries the structured fields for the §6.3
+// dispatch error payload when MaxQueueDepth is reached.
+type QueueFullError struct {
+	Depth int
+	Limit int
+}
+
+// Error implements error.
+func (e *QueueFullError) Error() string {
+	return fmt.Sprintf("handqueue: queue_full (depth=%d limit=%d)", e.Depth, e.Limit)
+}
+
+// Is so errors.Is(err, ErrQueueFull) works.
+func (e *QueueFullError) Is(target error) bool {
+	return target == ErrQueueFull
+}
+
 // New constructs a Queue.
 func New(cfg Config) (*Queue, error) {
 	if cfg.Executor == nil {
@@ -175,6 +204,9 @@ func New(cfg Config) (*Queue, error) {
 	}
 	if cfg.HardCeiling < cfg.MaxConcurrent {
 		cfg.HardCeiling = cfg.MaxConcurrent + 1
+	}
+	if cfg.MaxQueueDepth <= 0 {
+		cfg.MaxQueueDepth = 256 // generous default; tunable per deployment
 	}
 	if cfg.DefaultDeadline <= 0 {
 		cfg.DefaultDeadline = DefaultDeadline
@@ -248,7 +280,20 @@ func (q *Queue) Submit(ctx context.Context, req frames.DispatchPayload) (frames.
 		return frames.DispatchResultPayload{}, err
 	default:
 		// Aspect already has active worker and pool is at/above soft
-		// cap: enqueue tail. Queue depth is not capped at v0.1 (§2.2).
+		// cap: enqueue tail, after the depth cap check (#25).
+		if len(q.pending) >= q.cfg.MaxQueueDepth {
+			err := &QueueFullError{
+				Depth: len(q.pending),
+				Limit: q.cfg.MaxQueueDepth,
+			}
+			q.mu.Unlock()
+			q.log.Warn("dispatch rejected: queue_full",
+				"aspect", aspect,
+				"dispatch_id", req.DispatchID,
+				"depth", err.Depth,
+				"limit", err.Limit)
+			return frames.DispatchResultPayload{}, err
+		}
 		q.pending = append(q.pending, item)
 		q.log.Debug("dispatch enqueued",
 			"aspect", aspect,
