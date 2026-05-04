@@ -129,6 +129,29 @@ func (r *Roster) List() []schemas.AspectState {
 	return out
 }
 
+// RefreshHeartbeats stamps LastHeartbeat=now on every named aspect
+// that's still registered. Used by the broker reaper before its
+// stale-sweep, with the names coming from the dispatcher (i.e.
+// "aspects with a live WS connection right now"). Under the WS
+// transport, an open connection IS the heartbeat per Lock 2 — this
+// keeps that contract from drifting into stale/down state just
+// because no one called the explicit Heartbeat method.
+//
+// Missing entries are silently skipped — a name in the list but not
+// in the roster means a deregister race; the next pass picks it up.
+func (r *Roster) RefreshHeartbeats(names []string, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, name := range names {
+		if a, ok := r.aspects[name]; ok {
+			a.LastHeartbeat = at
+			if a.Status != "live" {
+				a.Status = "live"
+			}
+		}
+	}
+}
+
 // AspectNames returns a snapshot of registered aspect names. Used by
 // the broker's RecipientPolicy to expand @all into the live roster.
 // Returns names in arbitrary order; callers that need stability sort

@@ -40,3 +40,5 @@ require (
 )
 
 replace github.com/nexus-cw/casket-go => ../casket-go
+
+replace github.com/nexus-cw/bridle => ../bridle

@@ -41,11 +41,6 @@ type wsConn struct {
 	auth TokenInfo
 }
 
-// Maximum time we'll spend reading one frame before tearing down the
-// connection. Prevents a slowloris-style attacker from tying up a
-// goroutine forever. Extends on every successful read.
-const readFrameTimeout = 5 * time.Minute
-
 // Maximum size of a single frame's JSON payload. Generous but
 // bounded.
 const maxFrameBytes = 1 << 20 // 1 MiB
@@ -133,10 +128,41 @@ func (c *wsConn) serve(parentCtx context.Context) {
 
 	c.log.Info("ws connection accepted")
 
+	// Liveness detection: send a server-side ping every 30s. coder/
+	// websocket handles pong correlation internally; if the peer doesn't
+	// reply within the per-ping timeout, Ping returns an error and we
+	// close. This catches dead half-open connections that no longer
+	// flow data either direction. The read loop below blocks on data
+	// frames (no per-frame timeout) — idle aspects that register and
+	// wait for dispatch don't trip a deadline just because they're
+	// quiet.
+	pingCtx, pingCancel := context.WithCancel(parentCtx)
+	defer pingCancel()
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pingCtx.Done():
+				return
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(pingCtx, 10*time.Second)
+				if err := c.conn.Ping(ctx); err != nil {
+					cancel()
+					c.log.Info("ws ping failed; closing", "err", err)
+					_ = c.conn.Close(websocket.StatusGoingAway, "ping failed")
+					return
+				}
+				cancel()
+			}
+		}
+	}()
+
 	for {
-		ctx, cancel := context.WithTimeout(parentCtx, readFrameTimeout)
-		msgType, data, err := c.conn.Read(ctx)
-		cancel()
+		// Read with parent context only — no per-frame deadline. Idle
+		// aspects don't trip a timeout; ping goroutine above catches
+		// dead connections.
+		msgType, data, err := c.conn.Read(parentCtx)
 		if err != nil {
 			c.log.Info("ws connection closed", "err", err)
 			return

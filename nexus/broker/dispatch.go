@@ -61,6 +61,20 @@ func (d *Dispatcher) connFor(name string) *wsConn {
 	return d.connsByAspect[name]
 }
 
+// ConnectedAspects returns the names currently holding a live WS
+// registration. Used by the reaper to keep WS-connected aspects out
+// of the stale/down sweep — under the WS transport, an open
+// connection IS the heartbeat (Lock 2).
+func (d *Dispatcher) ConnectedAspects() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]string, 0, len(d.connsByAspect))
+	for name := range d.connsByAspect {
+		out = append(out, name)
+	}
+	return out
+}
+
 // unbind removes the mapping when the connection goes away. If a
 // different connection has already replaced this one (displacement),
 // we must not unbind the newer entry.
@@ -145,6 +159,14 @@ func (b *Broker) SendTurn(ctx context.Context, aspect string, req frames.TurnPay
 		}
 		return result, nil
 	}
+}
+
+// ConnectedAspects returns the names of aspects holding a live WS
+// registration right now. Thin pass-through to the Dispatcher; exposed
+// on Broker so the reaper goroutine (cmd/nexus) doesn't need to reach
+// into broker internals.
+func (b *Broker) ConnectedAspects() []string {
+	return b.dispatcher.ConnectedAspects()
 }
 
 // ErrAspectNotConnected is returned by SendTurn (and future

@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -87,6 +88,20 @@ type Config struct {
 	MCP      *bridle.MCPClientConfig // optional; nil = no MCP-loaded tools
 	Tools    []bridle.ToolDef        // explicit in-process tool defs (incl. send_comms)
 	Runner   bridle.ToolRunner       // executes Tools
+
+	// ChatGateway is the chat-posting seam used to auto-post the model's
+	// natural reply at end-of-turn when the post-hoc filter approves
+	// (Filter.ShouldPost). Optional — when nil, the funnel still runs
+	// turns but FinalText doesn't reach chat. Production wiring sets
+	// this to the same ChatGateway the CommsRunner uses, so the
+	// auto-post and explicit send_chat tool calls converge on the same
+	// path (Broker.HandleChatSend → persistence + fan-out).
+	//
+	// Without this, providers that don't expose custom tools to the
+	// model (e.g. claudecode in subprocess mode) have no way to surface
+	// model output: the model produces FinalText, the filter approves,
+	// but nobody acts on the decision.
+	ChatGateway ChatGateway
 
 	// Compaction
 	Compaction CompactionPolicy
@@ -401,6 +416,32 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		"stop_reason", result.StopReason,
 		"filter_post", decision.ShouldPost,
 		"filter_reason", decision.Reason)
+
+	// Auto-post the model's natural reply when the filter approves and a
+	// gateway is wired. This closes the gap left when providers don't
+	// expose chat tools to the model (claudecode's subprocess mode):
+	// without this, the model produces FinalText, the filter says
+	// ShouldPost, but nobody calls SendChat — the reply never reaches
+	// chat. ReplyTo threads the post under the message that triggered
+	// the deliberation when one exists; non-triggered turns post
+	// top-level.
+	if decision.ShouldPost && f.cfg.ChatGateway != nil {
+		text := strings.TrimSpace(result.FinalText)
+		if text != "" {
+			if msgID, err := f.cfg.ChatGateway.SendChat(ctx, text, triggerMsgID, ""); err != nil {
+				f.log.Warn("funnel: auto-post failed",
+					"aspect", f.cfg.AspectID,
+					"trigger_msg_id", triggerMsgID,
+					"err", err)
+			} else {
+				f.log.Info("funnel: auto-posted",
+					"aspect", f.cfg.AspectID,
+					"msg_id", msgID,
+					"reply_to", triggerMsgID,
+					"chars", len(text))
+			}
+		}
+	}
 
 	return DeliberateResult{TurnResult: result, Filter: decision}, nil
 }
