@@ -6,7 +6,6 @@ package broker
 import (
 	"context"
 	"errors"
-	"hash/fnv"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -459,15 +458,11 @@ func (c *wsConn) handleSessionEntryAppended(env frames.Envelope) {
 }
 
 // handleChatSendFrame receives a chat.send frame from an aspect and
-// routes it to the ChatRouter (P6 deliberation funnel). Fire-and-forget:
-// the broker does not ack chat.send per the transport spec (chat is
-// best-effort). When no ChatRouter is configured, log and drop (same
-// behaviour as the previous "not yet handled" default).
+// hands it to the canonical Broker.HandleChatSend path: persist →
+// route → fan out → trigger Frame deliberation. Fire-and-forget: the
+// broker does not ack chat.send per the transport spec (chat is
+// best-effort). Errors are logged.
 func (c *wsConn) handleChatSendFrame(env frames.Envelope) {
-	if c.broker.cfg.ChatRouter == nil || c.broker.cfg.ChatRouter.RouteChat == nil {
-		c.log.Info("chat.send: no router configured, dropping", "from", c.registeredAs)
-		return
-	}
 	var payload frames.ChatSendPayload
 	if err := frames.PayloadAs(env, &payload); err != nil {
 		c.log.Warn("chat.send payload malformed", "err", err, "from", c.registeredAs)
@@ -481,26 +476,14 @@ func (c *wsConn) handleChatSendFrame(env frames.Envelope) {
 		from = c.registeredAs
 	}
 
-	// Derive a stable int64 msg id from the frame's ULID. ULIDs are
-	// 26-char Crockford-base32 strings; the first ~10 chars are the
-	// monotonic timestamp, so a string-prefix scheme would make
-	// consecutive messages collide on their first 8 bytes. FNV-64a
-	// over the full ULID gives proper distribution at negligible cost.
-	var msgID int64
-	if env.ID != "" {
-		h := fnv.New64a()
-		_, _ = h.Write([]byte(env.ID))
-		// hash sum is uint64; cast to int64 — sign doesn't matter for
-		// equality checks, which is the only thing ThreadIndex does.
-		msgID = int64(h.Sum64())
-	}
-
 	ctx := c.broker.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	go c.broker.cfg.ChatRouter.RouteChat(ctx, msgID, from, payload.Content,
-		int64(payload.ReplyTo), payload.Topic)
+	if _, err := c.broker.HandleChatSend(ctx, from, payload.Content,
+		int64(payload.ReplyTo), payload.Topic); err != nil {
+		c.log.Warn("chat.send: handler error", "err", err, "from", from)
+	}
 }
 
 // handleRegisterFrame processes the first-frame-after-connect register

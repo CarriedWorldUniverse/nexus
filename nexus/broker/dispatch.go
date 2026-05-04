@@ -52,6 +52,15 @@ func (d *Dispatcher) bind(name string, c *wsConn) {
 	d.connsByAspect[name] = c
 }
 
+// connFor returns the wsConn currently bound to the named aspect, or
+// nil if no aspect with that name is connected. Used by the chat
+// fan-out path to deliver chat.deliver frames to live aspects.
+func (d *Dispatcher) connFor(name string) *wsConn {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.connsByAspect[name]
+}
+
 // unbind removes the mapping when the connection goes away. If a
 // different connection has already replaced this one (displacement),
 // we must not unbind the newer entry.

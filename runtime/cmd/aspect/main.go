@@ -52,6 +52,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nexus-cw/bridle"
 	claudeprovider "github.com/nexus-cw/bridle/provider/claude"
+	claudecodeprovider "github.com/nexus-cw/bridle/provider/claudecode"
 	"github.com/nexus-cw/nexus/nexus/frame/funnel"
 	"github.com/nexus-cw/nexus/runtime/aspect/wsasp"
 	"github.com/nexus-cw/nexus/shared/schemas"
@@ -264,12 +265,22 @@ func loadAspectConfig(home string) (schemas.AspectConfig, error) {
 // Mirrors the embedded Frame's path in nexus/cmd/nexus/main.go so the
 // in-process Frame and out-of-process aspects share the same provider
 // surface.
+//
+// `claude-api`/`claude` use the bridle Anthropic SDK adapter (needs
+// ANTHROPIC_API_KEY env). `claude-code`/`claudecode` shells out to the
+// `claude` CLI (uses the operator's local Claude Code installation +
+// subscription auth, no API key required).
 func buildProvider(cfg schemas.AspectConfig) (bridle.Provider, error) {
 	switch cfg.Provider {
-	case "claude-api", "claude", "":
+	case "claude-api", "claude":
 		return claudeprovider.New(""), nil
+	case "claude-code", "claudecode", "":
+		// Default to claudecode when unset — operator's running on
+		// subscription, not API key, so this is the safe default for
+		// the rebuild deploy.
+		return claudecodeprovider.New(), nil
 	default:
-		return nil, fmt.Errorf("unsupported provider %q (only claude-api wired in v1)", cfg.Provider)
+		return nil, fmt.Errorf("unsupported provider %q (claude-api and claude-code supported in v1)", cfg.Provider)
 	}
 }
 
@@ -285,7 +296,7 @@ func pickModel(cfg schemas.AspectConfig) string {
 	// Defaults by provider — the funnel needs a model name regardless,
 	// and the providers package wraps "" with its own default.
 	switch cfg.Provider {
-	case "claude-api", "claude", "":
+	case "claude-api", "claude", "claude-code", "claudecode", "":
 		return "claude-sonnet-4-6"
 	default:
 		return ""

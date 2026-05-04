@@ -34,6 +34,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -556,11 +557,26 @@ const summarizationPrompt = `You are a session summarization assistant. The sess
 
 Be terse. Strip pleasantries. Preserve only what the model needs to continue. Output the briefing as a single message, no preamble.`
 
-// newSessionID mints a unique session id for bridle's --session-id /
-// --resume threading. Time-based + random suffix; collision-infeasible
-// for single-Frame use.
+// newSessionID mints a UUIDv4 session id for bridle's --session-id /
+// --resume threading. claude-code's CLI requires a UUID for --resume
+// (rejects timestamped strings); UUIDv4 is the safe lowest-common-
+// denominator for all bridle providers.
+//
+// Pre-fix this returned a time-based string (YYYYMMDDTHHMMSS.uuuuuuZ-XX),
+// which the claude-code provider's RunTurn would pass to `claude --resume`
+// and the CLI rejected with "not a UUID and does not match any session
+// title." Operator F2.6 smoke surfaced this — fixed during the test run.
 func newSessionID() string {
-	return time.Now().UTC().Format("20060102T150405.000000Z") + "-" + randHex(4)
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("funnel: crypto/rand failed: " + err.Error())
+	}
+	// RFC 4122 v4 bits: 4-bit version 0x4 in byte 6 high nibble, and
+	// the 2-bit variant 0b10 in byte 8 high bits.
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // randHex is a tiny helper for the session-id suffix. Not exported.
