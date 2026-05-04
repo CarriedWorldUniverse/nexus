@@ -106,6 +106,14 @@ type Config struct {
 	// chats; Lock 6 replay still works on register).
 	RecipientPolicy *RecipientPolicy
 
+	// TLSCertFile / TLSKeyFile point at the PEM-encoded server cert
+	// and key used by ListenAndServe. Required — the broker has no
+	// plain-HTTP path. Operator runs `nexus cert init` once per host
+	// to provision these (see PR-A2.1). Operator decision (#9667):
+	// always enforce certificate and TLS use; no exceptions.
+	TLSCertFile string
+	TLSKeyFile  string
+
 	// OriginPatterns is the WebSocket Origin allowlist for /connect
 	// upgrades. Browser-based callers (dashboard SPA, future UI agents)
 	// send an Origin header; non-browser aspects (Go ws clients) do
@@ -184,9 +192,13 @@ func New(cfg Config, r *roster.Roster) *Broker {
 }
 
 // ListenAndServe blocks serving the broker until the context is cancelled.
-// v1 uses plain HTTP for local dev; TLS wiring lands alongside the first
-// real aspect invocation.
+// TLS-always: requires cfg.TLSCertFile + cfg.TLSKeyFile. There is no
+// plain-HTTP listener. Operator decision (#9667).
 func (b *Broker) ListenAndServe(ctx context.Context) error {
+	if b.cfg.TLSCertFile == "" || b.cfg.TLSKeyFile == "" {
+		return errors.New("broker: TLSCertFile and TLSKeyFile required " +
+			"(run `nexus cert init` to provision, then pass --tls-cert / --tls-key)")
+	}
 	b.ctx, b.ctxCancel = context.WithCancel(ctx)
 	defer b.ctxCancel()
 
@@ -221,7 +233,7 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
 		b.log.Info("broker listening", "addr", b.cfg.Addr)
-		if err := b.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := b.srv.ListenAndServeTLS(b.cfg.TLSCertFile, b.cfg.TLSKeyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 		close(errCh)

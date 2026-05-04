@@ -12,6 +12,8 @@
 //	NEXUS_TOKEN         Required. Shared bearer token.
 //	OUTPOST_LISTEN      Optional, default :7950. Local WS listen addr.
 //	OUTPOST_ID          Optional, defaults to hostname.
+//	NEXUS_TLS_CERT      Required. Path to TLS server cert PEM.
+//	NEXUS_TLS_KEY       Required. Path to TLS server key PEM.
 package main
 
 import (
@@ -52,11 +54,20 @@ func main() {
 		outpostID = host
 	}
 
+	tlsCert := os.Getenv("NEXUS_TLS_CERT")
+	tlsKey := os.Getenv("NEXUS_TLS_KEY")
+	if tlsCert == "" || tlsKey == "" {
+		log.Error("NEXUS_TLS_CERT and NEXUS_TLS_KEY required (run `nexus cert init` to provision)")
+		os.Exit(2)
+	}
+
 	o, err := outpost.New(outpost.Config{
 		ListenAddr:  listenAddr,
 		UpstreamURL: upstream,
 		AuthToken:   token,
 		OutpostID:   outpostID,
+		TLSCertFile: tlsCert,
+		TLSKeyFile:  tlsKey,
 		Logger:      log,
 	})
 	if err != nil {

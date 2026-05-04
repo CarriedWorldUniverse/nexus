@@ -2,6 +2,7 @@ package outpost
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/nexus-cw/nexus/nexus/frames"
+	"github.com/nexus-cw/nexus/nexus/internal/testcerts"
 	"github.com/nexus-cw/nexus/shared/schemas"
 )
 
@@ -117,12 +119,15 @@ func freePort(t *testing.T) string {
 
 func TestOutpostRegistersUpstream(t *testing.T) {
 	nx := newFakeNexus(t, "tok")
+	certPath, keyPath := testcerts.Mint(t)
 
 	o, err := New(Config{
 		ListenAddr:  freePort(t),
 		UpstreamURL: nx.URL(),
 		AuthToken:   "tok",
 		OutpostID:   "test-outpost",
+		TLSCertFile: certPath,
+		TLSKeyFile:  keyPath,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -146,6 +151,7 @@ func TestOutpostRegistersUpstream(t *testing.T) {
 
 func TestAspectConnectIsForwardedWithViaStamp(t *testing.T) {
 	nx := newFakeNexus(t, "tok")
+	certPath, keyPath := testcerts.Mint(t)
 
 	listenAddr := freePort(t)
 	o, err := New(Config{
@@ -153,6 +159,8 @@ func TestAspectConnectIsForwardedWithViaStamp(t *testing.T) {
 		UpstreamURL: nx.URL(),
 		AuthToken:   "tok",
 		OutpostID:   "test-outpost-42",
+		TLSCertFile: certPath,
+		TLSKeyFile:  keyPath,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -171,17 +179,21 @@ func TestAspectConnectIsForwardedWithViaStamp(t *testing.T) {
 		t.Fatal("outpost never registered upstream; abort")
 	}
 
-	// Connect as an aspect to the Outpost.
-	outpostURL := "ws://" + strings.TrimPrefix(listenAddr, ":") + "/connect"
-	// The `freePort` returns `127.0.0.1:PORT`, so strip correctly.
+	// Connect as an aspect to the Outpost. Outpost serves TLS now, so
+	// dial with wss:// + a TLS-skip-verify HTTPClient since the test
+	// cert is self-signed and not in any trust store.
 	if !strings.Contains(listenAddr, ":") {
 		t.Fatalf("unexpected listen addr format: %q", listenAddr)
 	}
-	outpostURL = "ws://" + listenAddr + "/connect"
+	outpostURL := "wss://" + listenAddr + "/connect"
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer dialCancel()
+	insecureClient := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}}
 	c, _, err := websocket.Dial(dialCtx, outpostURL, &websocket.DialOptions{
+		HTTPClient: insecureClient,
 		HTTPHeader: http.Header{"Authorization": {"Bearer tok"}},
 	})
 	if err != nil {
