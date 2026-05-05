@@ -89,6 +89,37 @@ type Candidate struct {
 	Config schemas.AspectConfig
 }
 
+// DiscoverRoots scans multiple aspect-dir roots and returns the
+// combined candidate list. Per #21 the broker uses this to derive
+// canonical aspect homes — the source of truth for "where does
+// aspect X live" is the broker's scan, not the aspect's
+// self-reported register payload. Aspects discovered in earlier
+// roots win on duplicate names; the operator should not configure
+// the same aspect under multiple roots.
+func DiscoverRoots(cfg Config, roots []string) ([]Candidate, error) {
+	if len(roots) == 0 {
+		return Discover(cfg)
+	}
+	seen := make(map[string]struct{})
+	var combined []Candidate
+	for _, root := range roots {
+		one := cfg
+		one.ScanDir = root
+		got, err := Discover(one)
+		if err != nil {
+			return nil, fmt.Errorf("autospawn: scan %q: %w", root, err)
+		}
+		for _, c := range got {
+			if _, dup := seen[c.Name]; dup {
+				continue
+			}
+			seen[c.Name] = struct{}{}
+			combined = append(combined, c)
+		}
+	}
+	return combined, nil
+}
+
 // Discover lists all subdirectories of ScanDir that contain a
 // valid aspect.json and are not opted-out (auto_spawn: false).
 func Discover(cfg Config) ([]Candidate, error) {
@@ -216,19 +247,73 @@ func Spawn(cfg Config, candidates []Candidate) error {
 	return nil
 }
 
+// envAllowlist is the set of parent env variables forwarded to
+// autospawned children (#30). Anything else in os.Environ() is
+// dropped. Per operator decision (chat #9686) we ship a minimal list
+// and adjust later if a provider needs more:
+//
+//   PATH         — required for the harness binary to find tools
+//   HOME         — Unix home directory; provider configs read from here
+//   USERPROFILE  — Windows equivalent of HOME
+//   TEMP         — used by some providers for scratch files
+//
+// Per-aspect NEXUS_TOKEN is added separately by the token resolver;
+// any NEXUS_TOKEN in BaseEnv (the legacy graceful-degrade path) is
+// also passed through. Other NEXUS_* env vars are NOT forwarded
+// wholesale — explicit BaseEnv entries are the audited path.
+var envAllowlist = map[string]struct{}{
+	"PATH":        {},
+	"HOME":        {},
+	"USERPROFILE": {},
+	"TEMP":        {},
+}
+
+// scrubParentEnv applies envAllowlist to a parent env slice.
+// Preserves order of the allowed keys' first occurrence (Go's exec
+// honors LAST occurrence anyway, but a stable order makes test
+// output deterministic). Tokens / app config that need to flow to
+// children must go through BaseEnv where the operator can audit
+// what's set.
+func scrubParentEnv(parent []string) []string {
+	out := make([]string, 0, len(envAllowlist))
+	for _, kv := range parent {
+		i := indexOfEqual(kv)
+		if i < 0 {
+			continue
+		}
+		key := kv[:i]
+		if _, ok := envAllowlist[key]; ok {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// indexOfEqual returns the index of the first '=' in s, or -1.
+func indexOfEqual(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '=' {
+			return i
+		}
+	}
+	return -1
+}
+
 // childEnv builds the environment slice for an autospawned child:
-// parent env + BaseEnv, plus a per-aspect NEXUS_TOKEN appended last
-// when the resolver yields one. Go's os.Exec applies the LAST
-// occurrence of a duplicate key as the effective value, so the
-// per-aspect token overrides any NEXUS_TOKEN in BaseEnv. When the
-// resolver returns false, BaseEnv's NEXUS_TOKEN remains in effect —
-// the legacy graceful-degrade path for aspects not yet reconciled.
+// scrubbed parent env (per envAllowlist, #30) + BaseEnv, plus a
+// per-aspect NEXUS_TOKEN appended last when the resolver yields one.
+// Go's os.Exec applies the LAST occurrence of a duplicate key as the
+// effective value, so the per-aspect token overrides any NEXUS_TOKEN
+// in BaseEnv. When the resolver returns false, BaseEnv's NEXUS_TOKEN
+// remains in effect — the legacy graceful-degrade path for aspects
+// not yet reconciled.
 //
 // Pure helper for unit testing — no syscall side effects, takes the
 // "parent env" as a parameter so tests can pass their own.
 func childEnv(parent, base []string, tokens AspectTokenResolver, aspect string) []string {
-	out := make([]string, 0, len(parent)+len(base)+1)
-	out = append(out, parent...)
+	scrubbed := scrubParentEnv(parent)
+	out := make([]string, 0, len(scrubbed)+len(base)+1)
+	out = append(out, scrubbed...)
 	out = append(out, base...)
 	if tokens != nil {
 		if tok, ok := tokens.TokenFor(aspect); ok && tok != "" {

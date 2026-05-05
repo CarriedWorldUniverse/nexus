@@ -108,6 +108,21 @@ type Config struct {
 	// chats; Lock 6 replay still works on register).
 	RecipientPolicy *RecipientPolicy
 
+	// AspectHomes maps registered aspect-name → canonical filesystem
+	// home, populated at startup from the autospawn discovery scan
+	// over one or more aspect-dir roots. The broker uses this as the
+	// source of truth for "where does aspect X live" — payload.Home
+	// from the register frame is IGNORED in favour of this map (#21).
+	// Closes the cmd.Dir control vector: an attacker who steals an
+	// aspect token can't repoint the worker's working directory by
+	// register payload.
+	//
+	// When nil OR when an aspect's name isn't in the map, the broker
+	// falls back to payload.Home (legacy behaviour) but logs a
+	// warning. New deployments should configure --aspect-dir so the
+	// scan populates this map.
+	AspectHomes map[string]string
+
 	// MaxConnections caps the total number of concurrently-accepted
 	// /connect upgrades. Pre-#25 the broker accepted unbounded
 	// connections; an attacker (even unauthenticated, per the

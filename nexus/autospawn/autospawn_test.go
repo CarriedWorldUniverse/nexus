@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nexus-cw/nexus/shared/schemas"
@@ -198,6 +199,81 @@ func TestChildEnvNilResolver(t *testing.T) {
 	env := childEnv(parent, base, nil, "wren")
 	if got := lastNexusToken(env); got != "legacy" {
 		t.Errorf("effective NEXUS_TOKEN = %q, want legacy", got)
+	}
+}
+
+// Regression for issue #30: parent env outside the allowlist is
+// dropped before being passed to the child. Today autospawn forwards
+// os.Environ() wholesale; PR-F restricts to PATH/HOME/USERPROFILE/TEMP
+// plus per-aspect token injection.
+func TestChildEnvScrubsParentEnv(t *testing.T) {
+	parent := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/keel",
+		"USERPROFILE=C:\\Users\\keel",
+		"TEMP=/tmp",
+		"AWS_SECRET_ACCESS_KEY=should-not-leak",
+		"GITHUB_TOKEN=ghp_should-not-leak",
+		"NEXUS_TOKEN=parent-master",  // legacy fallback only via BaseEnv
+		"DATABASE_URL=postgres://...", // app config, not the child's business
+	}
+	base := []string{"NEXUS_UPSTREAM=ws://x"}
+	tr := AspectTokenResolverFunc(func(string) (string, bool) {
+		return "wren-tok", true
+	})
+
+	env := childEnv(parent, base, tr, "wren")
+
+	got := map[string]bool{}
+	for _, kv := range env {
+		i := indexOfEqual(kv)
+		if i >= 0 {
+			got[kv[:i]] = true
+		}
+	}
+	for _, want := range []string{"PATH", "HOME", "USERPROFILE", "TEMP"} {
+		if !got[want] {
+			t.Errorf("expected %s in scrubbed env, missing", want)
+		}
+	}
+	for _, leaked := range []string{"AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "DATABASE_URL"} {
+		if got[leaked] {
+			t.Errorf("%s leaked through scrub", leaked)
+		}
+	}
+	// The parent's NEXUS_TOKEN must NOT be forwarded — only BaseEnv
+	// or the resolver's per-aspect token may set NEXUS_TOKEN.
+	if lastNexusToken(env) != "wren-tok" {
+		t.Errorf("expected per-aspect token to win, got %q", lastNexusToken(env))
+	}
+}
+
+// Regression for issue #21: DiscoverRoots merges multiple aspect-dir
+// scans, deduping by aspect name (first root wins on conflict).
+func TestDiscoverRoots_MergesMultipleRoots(t *testing.T) {
+	root1 := t.TempDir()
+	root2 := t.TempDir()
+
+	writeAspect(t, root1, "wren", schemas.AspectConfig{Provider: "claude-api"})
+	writeAspect(t, root1, "harrow", schemas.AspectConfig{Provider: "claude-api"})
+	writeAspect(t, root2, "anvil", schemas.AspectConfig{Provider: "claude-api"})
+	// Duplicate name across roots — root1 wins per documented contract.
+	writeAspect(t, root2, "wren", schemas.AspectConfig{Provider: "different"})
+
+	got, err := DiscoverRoots(Config{}, []string{root1, root2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]string{}
+	for _, c := range got {
+		names[c.Name] = c.Path
+	}
+	if len(names) != 3 {
+		t.Errorf("expected 3 unique aspects, got %d: %v", len(names), names)
+	}
+	abs1, _ := filepath.Abs(root1)
+	if !strings.HasPrefix(names["wren"], abs1) {
+		t.Errorf("wren resolved to %q, expected root1 (%q) to win", names["wren"], abs1)
 	}
 }
 

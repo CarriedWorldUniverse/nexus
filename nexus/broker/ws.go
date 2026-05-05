@@ -596,6 +596,26 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 			"name", payload.Name, "via", payload.ViaOutpost)
 	}
 
+	// #21: derive home from broker discovery, not from the payload.
+	// payload.Home is informational only; if it disagrees with the
+	// discovered home, the discovered home wins and we log. If the
+	// aspect name isn't in the discovery map, fall back to payload
+	// (legacy deployments without --aspect-dir) but warn.
+	if c.broker.cfg.AspectHomes != nil {
+		if discovered, ok := c.broker.cfg.AspectHomes[payload.Name]; ok {
+			if payload.Home != "" && payload.Home != discovered {
+				c.log.Warn("register payload.home overridden by broker discovery",
+					"name", payload.Name,
+					"payload_home", payload.Home,
+					"discovered_home", discovered)
+			}
+			payload.Home = discovered
+		} else {
+			c.log.Warn("register: aspect not in discovery map; trusting payload.home (legacy path)",
+				"name", payload.Name, "payload_home", payload.Home)
+		}
+	}
+
 	state, displacedSession, err := c.broker.roster.Register(&payload.RegisterRequest)
 	if err != nil {
 		switch {
