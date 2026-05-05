@@ -359,7 +359,23 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return b.srv.Shutdown(shutdownCtx)
+		// Stop the HTTP listener AND drain the dispatch queue (#40).
+		// Note: srv.Shutdown does NOT track hijacked WS connections,
+		// so it returns fast for the WS handlers — they're invisible
+		// to the http.Server once the upgrade succeeds. The actual
+		// drain work happens in HandQueue.Shutdown, which signals
+		// in-flight workers to exit; their Submit callers (still
+		// running inside hijacked WS handler goroutines) get
+		// ErrQueueShutdown and propagate to clients. Pre-#40 fix the
+		// queue Shutdown was never called, so workers ran to
+		// completion regardless of broker shutdown.
+		shutdownErr := b.srv.Shutdown(shutdownCtx)
+		if b.cfg.HandQueue != nil {
+			if qerr := b.cfg.HandQueue.Shutdown(shutdownCtx); qerr != nil && shutdownErr == nil {
+				shutdownErr = qerr
+			}
+		}
+		return shutdownErr
 	case err := <-errCh:
 		return err
 	}

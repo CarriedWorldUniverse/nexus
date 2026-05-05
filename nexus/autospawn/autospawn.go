@@ -190,10 +190,28 @@ func Spawn(cfg Config, candidates []Candidate) error {
 		// Fan stdout and stderr through tagged log forwarders. Each
 		// child spawns two goroutines that run until the pipe closes
 		// (when the child exits).
-		go logPipe(stdout, c.Name, log, false)
-		go logPipe(stderr, c.Name, log, true)
+		pipeDone := make(chan struct{}, 2)
+		go func() { logPipe(stdout, c.Name, log, false); pipeDone <- struct{}{} }()
+		go func() { logPipe(stderr, c.Name, log, true); pipeDone <- struct{}{} }()
 
 		log.Info("autospawn: started", "aspect", c.Name, "home", c.Path, "pid", cmd.Process.Pid)
+
+		// Reap the child once both pipes drain. Without cmd.Wait, Unix
+		// leaves zombies and Windows leaks the OS process handle —
+		// long-running brokers across many aspect restarts hit
+		// fd/handle limits otherwise (#26).
+		go func(cmd *exec.Cmd, name string) {
+			<-pipeDone
+			<-pipeDone
+			err := cmd.Wait()
+			if err != nil {
+				log.Warn("autospawn: child exited",
+					"aspect", name, "pid", cmd.Process.Pid, "err", err)
+			} else {
+				log.Info("autospawn: child exited cleanly",
+					"aspect", name, "pid", cmd.Process.Pid)
+			}
+		}(cmd, c.Name)
 	}
 	return nil
 }

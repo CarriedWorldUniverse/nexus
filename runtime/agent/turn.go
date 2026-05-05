@@ -51,10 +51,16 @@ func (a *Agent) handleTurnFrame(env frames.Envelope) {
 		return
 	}
 
-	// Bound the whole turn with a generous timeout — model calls can
-	// run for a minute or two, but an unbounded tree-write + provider
-	// invoke is a liability.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	// Bound the whole turn with a generous timeout AND link to the
+	// agent's runCtx so an in-flight turn aborts when the agent is
+	// shutting down (#27). Pre-fix this used context.Background and
+	// in-flight provider calls + tree appends survived for up to 10
+	// minutes after Start returned.
+	parent := context.Background()
+	if p := a.runCtx.Load(); p != nil {
+		parent = *p
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
 	defer cancel()
 
 	result, err := a.dispatchTurn(ctx, req)
@@ -68,7 +74,7 @@ func (a *Agent) handleTurnFrame(env frames.Envelope) {
 		a.log.Error("build turn.result frame failed", "err", err)
 		return
 	}
-	sendCtx, sendCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	sendCtx, sendCancel := context.WithTimeout(parent, 30*time.Second)
 	defer sendCancel()
 	if err := a.ws.Send(sendCtx, resp); err != nil {
 		a.log.Error("send turn.result failed", "err", err)
@@ -83,7 +89,11 @@ func (a *Agent) respondTurnError(req frames.Envelope, msg string) {
 		a.log.Error("build turn.error frame failed", "err", err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	parent := context.Background()
+	if p := a.runCtx.Load(); p != nil {
+		parent = *p
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	if err := a.ws.Send(ctx, errEnv); err != nil {
 		a.log.Error("send turn.error failed", "err", err)
@@ -177,16 +187,41 @@ func (a *Agent) projectEntryUpward(entry tree.Entry) {
 		a.log.Warn("build session.entry.appended frame failed", "err", err)
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := a.ws.Send(ctx, env); err != nil {
-			// Best-effort only — don't retry, don't log at warn level
-			// for expected disconnect cases.
-			a.log.Debug("session.entry.appended send failed (will not retry)",
-				"entry", entry.ID, "err", err)
+	// Enqueue for the single projection consumer (#28). Drop on full
+	// rather than block the tree-Append caller — projection is best-
+	// effort observability per spec §5.2/§8 and the authoritative state
+	// is the local JSONL.
+	if a.projectCh == nil {
+		// Hook fired before Start (or after consumer exited). No-op.
+		return
+	}
+	select {
+	case a.projectCh <- env:
+	default:
+		a.log.Debug("projection channel full; dropping",
+			"entry", entry.ID)
+	}
+}
+
+// projectionLoop is the single consumer for a.projectCh. Drains
+// frames and Sends them upstream serially. Sends only run when the
+// wsclient is connected (Send blocks awaitConn ~5s otherwise); on
+// disconnect the channel buffers up to projectQueueSize then drops.
+func (a *Agent) projectionLoop(ctx context.Context, done chan struct{}) {
+	defer close(done)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case env := <-a.projectCh:
+			sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			if err := a.ws.Send(sendCtx, env); err != nil {
+				a.log.Debug("session.entry.appended send failed (will not retry)",
+					"err", err)
+			}
+			cancel()
 		}
-	}()
+	}
 }
 
 // convertToProviderEntries converts tree entries to the provider's
