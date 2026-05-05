@@ -63,6 +63,16 @@ type Config struct {
 	MaxReconnectDelay time.Duration
 }
 
+// ConnectEvent is delivered on the channel returned by Events() each
+// time the connection transitions. Connected=true means a fresh dial
+// succeeded; Connected=false means the active connection dropped.
+// Pre-#29 callers polled Connected() on a 50ms tick — wasteful and
+// missed mid-tick disconnects so a reconnect didn't trigger
+// re-register.
+type ConnectEvent struct {
+	Connected bool
+}
+
 // Client is a persistent WS connection that handles reconnection and
 // request/response correlation. Safe for concurrent use of Send and
 // Request after Run has started.
@@ -70,15 +80,21 @@ type Client struct {
 	cfg Config
 	log *slog.Logger
 
-	mu       sync.Mutex
-	conn     *websocket.Conn
-	pending  map[string]chan frames.Envelope
+	mu        sync.Mutex
+	conn      *websocket.Conn
+	pending   map[string]chan frames.Envelope
 	connected bool
 
 	// connCh broadcasts when a fresh connection becomes ready.
 	// Callers of Send/Request block on it while the client is
 	// reconnecting.
 	readyCh chan struct{}
+
+	// eventCh emits ConnectEvent on each connect/disconnect
+	// transition. Buffered (size 4) so a slow consumer doesn't block
+	// the dial loop; if it overflows we drop and log. Subscribe via
+	// Events().
+	eventCh chan ConnectEvent
 }
 
 // New constructs a Client.
@@ -105,8 +121,17 @@ func New(cfg Config) (*Client, error) {
 		log:     log,
 		pending: make(map[string]chan frames.Envelope),
 		readyCh: make(chan struct{}),
+		eventCh: make(chan ConnectEvent, 4),
 	}, nil
 }
+
+// Events returns the connect-event channel. Subscribers get a
+// ConnectEvent on every dial-success and every disconnect. The
+// channel is shared (single channel, not fan-out) — only one consumer
+// per Client; that consumer must read promptly or events get dropped.
+// Use this instead of polling Connected() for register-on-connect
+// flows (#29).
+func (c *Client) Events() <-chan ConnectEvent { return c.eventCh }
 
 // Run drives the dial+serve+reconnect loop. Blocks until ctx done.
 // Returns the first-connect error if FailFirstConnect is true and
@@ -169,6 +194,7 @@ func (c *Client) dialAndServe(ctx context.Context) error {
 	c.mu.Unlock()
 
 	c.log.Info("wsclient connected", "url", c.cfg.URL)
+	c.emitEvent(ConnectEvent{Connected: true})
 
 	defer func() {
 		c.mu.Lock()
@@ -183,6 +209,7 @@ func (c *Client) dialAndServe(ctx context.Context) error {
 		}
 		c.mu.Unlock()
 		_ = conn.Close(websocket.StatusNormalClosure, "client shutdown")
+		c.emitEvent(ConnectEvent{Connected: false})
 	}()
 
 	return c.readLoop(ctx, conn)
@@ -308,4 +335,17 @@ func (c *Client) Connected() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.connected
+}
+
+// emitEvent posts a connect/disconnect transition non-blocking. The
+// channel is buffered (size 4); under sustained burst the consumer
+// has missed transitions, so dropping is the correct shape — a slow
+// subscriber should re-check Connected() rather than rely on
+// in-order delivery of every transition.
+func (c *Client) emitEvent(e ConnectEvent) {
+	select {
+	case c.eventCh <- e:
+	default:
+		c.log.Warn("wsclient event dropped (consumer slow)", "connected", e.Connected)
+	}
 }
