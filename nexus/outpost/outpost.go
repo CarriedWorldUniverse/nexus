@@ -37,12 +37,21 @@ type Config struct {
 	// UpstreamURL is the Nexus (or parent-Outpost) /connect endpoint.
 	UpstreamURL string
 
-	// AuthToken is the bearer token used for BOTH directions:
-	//   - sent on the upward WS dial as Authorization: Bearer
-	//   - required from inbound aspect connections
-	// v1 uses one shared token across the whole network; per-
-	// component tokens are a v2 hardening step.
+	// AuthToken is the bearer token sent on the upward WS dial to
+	// Nexus / parent Outpost (Authorization: Bearer).
 	AuthToken string
+
+	// AspectTokens maps inbound aspect-name → per-aspect bearer token
+	// (#33). Each local aspect MUST authenticate with its own token,
+	// not the upstream AuthToken. Pre-fix the same shared token
+	// authenticated everything, so any aspect that reached the
+	// outpost could register under any Name on Nexus.
+	//
+	// Empty map (or nil) falls back to legacy shared-token mode,
+	// where AuthToken authenticates inbound aspects too — operators
+	// migrating from the old setup can leave this nil during the
+	// transition; new deployments should populate it.
+	AspectTokens map[string]string
 
 	// OutpostID identifies this Outpost to the Nexus. Usually the
 	// hostname; must be stable across reconnects.
@@ -82,6 +91,14 @@ type Outpost struct {
 	// connection + last seen register payload (for re-sync on
 	// upstream reconnect).
 	aspects map[string]*localAspect
+
+	// inFlight maps an envelope ID we forwarded upstream → the local
+	// aspect that originated it. When the broker's correlated
+	// response arrives (InReplyTo == that ID) we route it back to
+	// the originating aspect. Without this map the response would
+	// fall through to handleDownstreamFrame's default case and the
+	// aspect's Request would time out (#20).
+	inFlight map[string]string
 }
 
 // localAspect tracks a locally-connected aspect's state.
@@ -108,9 +125,10 @@ func New(cfg Config) (*Outpost, error) {
 	}
 
 	o := &Outpost{
-		cfg:     cfg,
-		log:     log,
-		aspects: make(map[string]*localAspect),
+		cfg:      cfg,
+		log:      log,
+		aspects:  make(map[string]*localAspect),
+		inFlight: make(map[string]string),
 	}
 
 	// Upstream WS client. Handler receives non-correlated inbound
@@ -281,28 +299,74 @@ func (o *Outpost) sendOutpostDeregister(ctx context.Context) error {
 	return o.upstream.Send(ctx, env)
 }
 
-// handleDownstreamFrame receives frames from upstream that are NOT
-// correlated responses (those go to wsclient's Request callers).
-// Forwards to the appropriate local aspect based on frame type.
+// handleDownstreamFrame receives frames from upstream that aren't
+// the outpost's own correlated responses (those go to wsclient's
+// Request callers via pending). Routes by InReplyTo (correlated
+// reply to a local aspect's request) or by Envelope.TargetAspect
+// (unsolicited turn/dispatch from broker). Closes #20.
 func (o *Outpost) handleDownstreamFrame(env frames.Envelope) {
-	// For now the only downward-flowing frames that identify a
-	// target aspect are turn + hand.invoke + shutdown. v1 implements
-	// turn routing; part 7 adds hand. Shutdown broadcasts.
-	switch env.Kind {
-	case frames.KindTurn:
-		// The Nexus router puts the target aspect name in the
-		// InReplyTo path — actually no, turn isn't a response, it's
-		// initiated. We'd route by extracting target from payload,
-		// but TurnPayload doesn't carry one (the agent handles the
-		// connection it's on). Without a name in the frame the
-		// Outpost can't route — this is a spec gap that'll be
-		// resolved when dispatch takes shape in part 7.
-		o.log.Info("turn frame received from upstream — routing not yet implemented", "id", env.ID)
-	case frames.KindShutdown:
+	// Correlated reply: look up the originating aspect via inFlight.
+	if env.InReplyTo != "" {
+		o.mu.Lock()
+		owner, ok := o.inFlight[env.InReplyTo]
+		if ok {
+			delete(o.inFlight, env.InReplyTo)
+		}
+		o.mu.Unlock()
+		if ok {
+			o.deliverToAspect(owner, env)
+			return
+		}
+		// Fell through — log but don't broadcast; an uncorrelated
+		// reply with no waiter is benign.
+		o.log.Info("downstream reply with no in-flight owner; dropping",
+			"in_reply_to", env.InReplyTo, "kind", env.Kind)
+		return
+	}
+
+	// Unsolicited downstream: broker sets Envelope.TargetAspect for
+	// turn / dispatch frames going to a specific aspect via outpost.
+	if env.TargetAspect != "" {
+		o.deliverToAspect(env.TargetAspect, env)
+		return
+	}
+
+	// Lifecycle: shutdown broadcasts to every local aspect.
+	if env.Kind == frames.KindShutdown {
 		o.log.Info("shutdown frame from upstream; broadcasting to local aspects")
 		o.broadcastShutdown(env)
-	default:
-		o.log.Info("downstream frame kind not handled", "kind", env.Kind)
+		return
+	}
+
+	o.log.Info("downstream frame with no target; dropping",
+		"kind", env.Kind, "id", env.ID)
+}
+
+// deliverToAspect writes a frame to the named local aspect's
+// connection. Logs and drops if the aspect isn't connected — the
+// broker's send semantics already cover absent aspects via
+// ErrAspectNotConnected on its side; this is best-effort delivery.
+func (o *Outpost) deliverToAspect(name string, env frames.Envelope) {
+	o.mu.Lock()
+	la, ok := o.aspects[name]
+	o.mu.Unlock()
+	if !ok {
+		o.log.Warn("downstream frame for unknown aspect; dropping",
+			"aspect", name, "kind", env.Kind, "id", env.ID)
+		return
+	}
+	raw, err := frames.Encode(env)
+	if err != nil {
+		o.log.Error("encode downstream frame failed", "err", err)
+		return
+	}
+	la.mu.Lock()
+	defer la.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := la.conn.Write(ctx, websocket.MessageText, raw); err != nil {
+		o.log.Warn("write to aspect failed",
+			"aspect", name, "kind", env.Kind, "err", err)
 	}
 }
 
@@ -333,9 +397,12 @@ func (o *Outpost) broadcastShutdown(env frames.Envelope) {
 // -------------------------------------------------------------------
 
 // handleConnect is the aspect-facing WS handler. Auth via Bearer
-// header, upgrade, serve frames.
+// header, upgrade, serve frames. Resolves the inbound identity
+// from AspectTokens (preferred) or falls back to the shared
+// AuthToken in legacy mode.
 func (o *Outpost) handleConnect(w http.ResponseWriter, r *http.Request) {
-	if !o.authCheckHeader(r) {
+	identity, ok := o.resolveInboundAuth(r)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -350,22 +417,57 @@ func (o *Outpost) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	wsc.SetReadLimit(1 << 20)
 
-	go o.serveAspect(wsc)
+	go o.serveAspect(wsc, identity)
 }
 
-func (o *Outpost) authCheckHeader(r *http.Request) bool {
+// resolveInboundAuth checks the bearer header against the
+// per-aspect AspectTokens map first, falling back to the shared
+// AuthToken (legacy mode). Returns the resolved aspect name (empty
+// in legacy mode) and whether auth succeeded. The constant-time
+// compare on the prefix prevents trivial timing leaks; the body
+// compares iterate the (small) per-aspect map identically to the
+// broker's TokenStore pattern so a hit/miss has the same shape.
+func (o *Outpost) resolveInboundAuth(r *http.Request) (string, bool) {
 	const prefix = "Bearer "
 	header := r.Header.Get("Authorization")
 	if len(header) <= len(prefix) || subtle.ConstantTimeCompare([]byte(header[:len(prefix)]), []byte(prefix)) != 1 {
-		return false
+		return "", false
 	}
 	given := header[len(prefix):]
-	return subtle.ConstantTimeCompare([]byte(given), []byte(o.cfg.AuthToken)) == 1
+	givenBytes := []byte(given)
+
+	// Per-aspect tokens (preferred path, #33).
+	var hitAspect string
+	var found int
+	for aspect, tok := range o.cfg.AspectTokens {
+		if subtle.ConstantTimeCompare(givenBytes, []byte(tok)) == 1 {
+			hitAspect = aspect
+			found = 1
+		}
+	}
+	if found == 1 {
+		return hitAspect, true
+	}
+
+	// Legacy shared-token fallback. Only honored when AspectTokens
+	// is unset, so operators that have migrated can't have an
+	// attacker reach back to legacy auth.
+	if len(o.cfg.AspectTokens) == 0 && o.cfg.AuthToken != "" &&
+		subtle.ConstantTimeCompare(givenBytes, []byte(o.cfg.AuthToken)) == 1 {
+		return "", true // empty identity = legacy mode, register payload trusted as before
+	}
+	return "", false
 }
 
 // serveAspect is the per-aspect read loop. Pulls frames, identifies
 // the aspect on first register, forwards everything upstream.
-func (o *Outpost) serveAspect(wsc *websocket.Conn) {
+//
+// `identity` is the resolved aspect name from AspectTokens auth
+// (empty in legacy shared-token mode). When non-empty, register
+// frames are rejected if payload.Name disagrees — closes #33 (an
+// aspect with a stolen / shared token can't register under another
+// aspect's name).
+func (o *Outpost) serveAspect(wsc *websocket.Conn, identity string) {
 	var aspectName string
 	ctx := context.Background()
 
@@ -373,6 +475,14 @@ func (o *Outpost) serveAspect(wsc *websocket.Conn) {
 		if aspectName != "" {
 			o.mu.Lock()
 			delete(o.aspects, aspectName)
+			// Drop any in-flight correlation entries that point at
+			// this aspect — the broker's response will arrive but
+			// we have nowhere to deliver it.
+			for id, owner := range o.inFlight {
+				if owner == aspectName {
+					delete(o.inFlight, id)
+				}
+			}
 			o.mu.Unlock()
 			o.log.Info("aspect disconnected from outpost", "aspect", aspectName)
 		}
@@ -404,6 +514,19 @@ func (o *Outpost) serveAspect(wsc *websocket.Conn) {
 				o.log.Warn("register payload parse failed", "err", err)
 				continue
 			}
+			// #33: when running with per-aspect tokens, the connection's
+			// resolved identity MUST match the register payload's name.
+			// In legacy shared-token mode (identity == ""), payload.Name
+			// is still trusted — same as before this PR — for
+			// back-compat with deployments that haven't migrated.
+			if identity != "" && payload.Name != identity {
+				o.log.Warn("outpost: identity mismatch on register",
+					"connection_identity", identity,
+					"payload_name", payload.Name)
+				_ = wsc.Close(websocket.StatusPolicyViolation,
+					"register payload name does not match auth identity")
+				return
+			}
 			aspectName = payload.Name
 			forwarded := frames.ForwardedRegisterPayload{
 				RegisterRequest: payload.RegisterRequest,
@@ -413,6 +536,14 @@ func (o *Outpost) serveAspect(wsc *websocket.Conn) {
 			o.aspects[aspectName] = &localAspect{
 				conn:            wsc,
 				registerPayload: forwarded,
+			}
+			// Track the register envelope so the broker's register.ack
+			// can be routed back to this aspect (#20). Also covers
+			// re-registers on reconnect. Guard on env.ID != "" — a
+			// malformed register with no ID would otherwise stomp on
+			// a phantom inFlight[""] entry.
+			if env.ID != "" {
+				o.inFlight[env.ID] = aspectName
 			}
 			o.mu.Unlock()
 
@@ -428,9 +559,21 @@ func (o *Outpost) serveAspect(wsc *websocket.Conn) {
 			continue
 		}
 
-		// All other frames forward verbatim. Nexus identifies the
-		// source aspect via the wsConn mapping on its side — that's
-		// the register-bind we just forwarded.
+		// Track inFlight only for kinds the broker actually responds
+		// to. Fire-and-forget frames (chat.send, knowledge.store,
+		// session.entry.appended, etc.) emit no correlated response,
+		// so tracking them would accumulate one entry per emitted
+		// frame for the lifetime of the connection. Reviewer-flagged
+		// (PR-H#3) unbounded-growth class.
+		if env.ID != "" && aspectName != "" && isRequestKind(env.Kind) {
+			o.mu.Lock()
+			o.inFlight[env.ID] = aspectName
+			o.mu.Unlock()
+		}
+
+		// Forward verbatim. Nexus identifies the source aspect via
+		// the wsConn mapping on its side (the register-bind we
+		// forwarded above).
 		sendCtx, sendCancel := context.WithTimeout(ctx, 10*time.Second)
 		if err := o.upstream.Send(sendCtx, env); err != nil {
 			o.log.Warn("forward aspect frame upstream failed",
@@ -438,4 +581,20 @@ func (o *Outpost) serveAspect(wsc *websocket.Conn) {
 		}
 		sendCancel()
 	}
+}
+
+// isRequestKind reports whether the broker is expected to send a
+// correlated response for an aspect-originated frame of this kind.
+// inFlight tracking is gated on this so fire-and-forget kinds (chat,
+// knowledge, session entries, activity pulses) don't accumulate
+// entries for the lifetime of the connection. Register frames take
+// the explicit branch above and are tracked separately.
+func isRequestKind(kind frames.Kind) bool {
+	switch kind {
+	case frames.KindTurn,
+		frames.KindDispatch,
+		frames.KindDeregister:
+		return true
+	}
+	return false
 }
