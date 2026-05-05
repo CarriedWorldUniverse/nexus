@@ -115,6 +115,10 @@ func (b *Broker) SendTurn(ctx context.Context, aspect string, req frames.TurnPay
 	if err != nil {
 		return frames.TurnResultPayload{}, fmt.Errorf("build turn frame: %w", err)
 	}
+	// Stamp the target so an outpost-routed connection can deliver
+	// to the right local aspect (#20). Direct-aspect connections
+	// ignore the field.
+	env.TargetAspect = aspect
 
 	// Register pending response channel before sending so a fast
 	// responder can't beat us to the map.

@@ -240,5 +240,247 @@ func TestAspectConnectIsForwardedWithViaStamp(t *testing.T) {
 	}
 }
 
+// Regression for issue #20: when an aspect registers via outpost,
+// the broker's correlated register.ack must route back to the
+// originating aspect's connection. Pre-fix the ack fell into
+// handleDownstreamFrame's default "kind not handled" branch and the
+// aspect's Request timed out.
+func TestRegisterAckRoutesBackToAspect(t *testing.T) {
+	nx := newFakeNexus(t, "tok")
+	certPath, keyPath := testcerts.Mint(t)
+
+	listenAddr := freePort(t)
+	o, err := New(Config{
+		ListenAddr:  listenAddr,
+		UpstreamURL: nx.URL(),
+		AuthToken:   "tok",
+		OutpostID:   "test-outpost-ack",
+		TLSCertFile: certPath,
+		TLSKeyFile:  keyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- o.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	for d := time.Now().Add(3 * time.Second); time.Now().Before(d) && nx.outpostRegistered.Load() == 0; {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if nx.outpostRegistered.Load() == 0 {
+		t.Fatal("outpost never registered upstream")
+	}
+
+	insecure := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dialCancel()
+	c, _, err := websocket.Dial(dialCtx, "wss://"+listenAddr+"/connect", &websocket.DialOptions{
+		HTTPClient: insecure,
+		HTTPHeader: http.Header{"Authorization": {"Bearer tok"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "done")
+
+	regEnv, _ := frames.NewRequest(frames.KindRegister, frames.RegisterPayload{
+		RegisterRequest: schemas.RegisterRequest{
+			Name: "ackaspect", ContextMode: schemas.ContextGlobal,
+			Provider: "claude-api", SessionID: "sess-1",
+			Home: "/tmp/x", StartedAt: time.Now().UTC(),
+		},
+	})
+	raw, _ := frames.Encode(regEnv)
+	wctx, wcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := c.Write(wctx, websocket.MessageText, raw); err != nil {
+		wcancel()
+		t.Fatal(err)
+	}
+	wcancel()
+
+	rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer rcancel()
+	_, data, err := c.Read(rctx)
+	if err != nil {
+		t.Fatalf("aspect never received register.ack: %v", err)
+	}
+	ack, err := frames.Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.Kind != frames.KindRegisterAck {
+		t.Errorf("kind = %q, want register.ack", ack.Kind)
+	}
+	if ack.InReplyTo != regEnv.ID {
+		t.Errorf("InReplyTo = %q, want %q", ack.InReplyTo, regEnv.ID)
+	}
+}
+
+// Regression for issue #33: with per-aspect tokens configured, the
+// outpost rejects register frames whose payload.Name doesn't match
+// the inbound connection's resolved identity.
+func TestOutpostRejectsRegisterWithMismatchedIdentity(t *testing.T) {
+	nx := newFakeNexus(t, "tok")
+	certPath, keyPath := testcerts.Mint(t)
+
+	listenAddr := freePort(t)
+	o, err := New(Config{
+		ListenAddr:  listenAddr,
+		UpstreamURL: nx.URL(),
+		AuthToken:   "tok",
+		OutpostID:   "test-outpost-id",
+		TLSCertFile: certPath,
+		TLSKeyFile:  keyPath,
+		AspectTokens: map[string]string{
+			"wren": "wren-token",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- o.Run(ctx) }()
+	defer func() { cancel(); <-doneCh }()
+
+	for d := time.Now().Add(3 * time.Second); time.Now().Before(d) && nx.outpostRegistered.Load() == 0; {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	insecure := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dialCancel()
+	// Authenticate as wren but try to register as harrow — pre-fix
+	// would have forwarded; post-fix outpost closes the connection.
+	c, _, err := websocket.Dial(dialCtx, "wss://"+listenAddr+"/connect", &websocket.DialOptions{
+		HTTPClient: insecure,
+		HTTPHeader: http.Header{"Authorization": {"Bearer wren-token"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close(websocket.StatusInternalError, "test cleanup")
+
+	regEnv, _ := frames.NewRequest(frames.KindRegister, frames.RegisterPayload{
+		RegisterRequest: schemas.RegisterRequest{
+			Name: "harrow", ContextMode: schemas.ContextGlobal,
+			Provider: "claude-api", SessionID: "evil",
+			Home: "/tmp/evil", StartedAt: time.Now().UTC(),
+		},
+	})
+	raw, _ := frames.Encode(regEnv)
+	wctx, wcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_ = c.Write(wctx, websocket.MessageText, raw)
+	wcancel()
+
+	rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer rcancel()
+	_, _, err = c.Read(rctx)
+	if err == nil {
+		t.Fatal("expected outpost to close connection on identity mismatch")
+	}
+	closeStatus := websocket.CloseStatus(err)
+	if closeStatus != websocket.StatusPolicyViolation {
+		t.Errorf("close status = %d, want StatusPolicyViolation (%d)",
+			closeStatus, websocket.StatusPolicyViolation)
+	}
+}
+
+// Regression for #20 routing: an unsolicited downstream turn frame
+// stamped with TargetAspect must be delivered to the matching local
+// aspect connection. This is the broker→outpost→aspect path for
+// turn dispatch (the path TODO'd as "not yet implemented" pre-fix).
+func TestUnsolicitedTurnRoutesToTargetAspect(t *testing.T) {
+	nx := newFakeNexus(t, "tok")
+	certPath, keyPath := testcerts.Mint(t)
+
+	listenAddr := freePort(t)
+	o, err := New(Config{
+		ListenAddr:  listenAddr,
+		UpstreamURL: nx.URL(),
+		AuthToken:   "tok",
+		OutpostID:   "test-outpost-turn",
+		TLSCertFile: certPath,
+		TLSKeyFile:  keyPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- o.Run(ctx) }()
+	defer func() { cancel(); <-doneCh }()
+
+	for d := time.Now().Add(3 * time.Second); time.Now().Before(d) && nx.outpostRegistered.Load() == 0; {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Connect aspect + register so o.aspects["wren"] is populated.
+	insecure := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dialCancel()
+	c, _, err := websocket.Dial(dialCtx, "wss://"+listenAddr+"/connect", &websocket.DialOptions{
+		HTTPClient: insecure,
+		HTTPHeader: http.Header{"Authorization": {"Bearer tok"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "done")
+
+	regEnv, _ := frames.NewRequest(frames.KindRegister, frames.RegisterPayload{
+		RegisterRequest: schemas.RegisterRequest{
+			Name: "wren", ContextMode: schemas.ContextGlobal,
+			Provider: "claude-api", SessionID: "sess",
+			Home: "/tmp/wren", StartedAt: time.Now().UTC(),
+		},
+	})
+	raw, _ := frames.Encode(regEnv)
+	wctx, wcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_ = c.Write(wctx, websocket.MessageText, raw)
+	wcancel()
+
+	// Drain register.ack.
+	rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if _, _, err := c.Read(rctx); err != nil {
+		rcancel()
+		t.Fatalf("aspect never received register.ack: %v", err)
+	}
+	rcancel()
+
+	// fakeNexus pushes an unsolicited turn frame stamped with
+	// TargetAspect=wren down to the outpost. Outpost should deliver
+	// to the wren conn.
+	turnEnv, _ := frames.NewRequest(frames.KindTurn, frames.TurnPayload{Prompt: "hi"})
+	turnEnv.TargetAspect = "wren"
+	turnRaw, _ := frames.Encode(turnEnv)
+	nx.mu.Lock()
+	upstreamConn := nx.conns[0]
+	nx.mu.Unlock()
+	if err := upstreamConn.Write(context.Background(), websocket.MessageText, turnRaw); err != nil {
+		t.Fatalf("fakeNexus write turn: %v", err)
+	}
+
+	// The aspect should receive the turn frame.
+	rctx, rcancel = context.WithTimeout(context.Background(), 3*time.Second)
+	defer rcancel()
+	_, data, err := c.Read(rctx)
+	if err != nil {
+		t.Fatalf("aspect never received unsolicited turn: %v", err)
+	}
+	got, err := frames.Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != frames.KindTurn {
+		t.Errorf("kind = %q, want turn", got.Kind)
+	}
+	if got.TargetAspect != "wren" {
+		t.Errorf("TargetAspect = %q, want wren", got.TargetAspect)
+	}
+}
+
 // Silence unused imports if slim build.
 var _ = json.Marshal

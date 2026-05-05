@@ -99,11 +99,19 @@ const (
 
 // Envelope is the shared shape of every frame.
 type Envelope struct {
-	Kind       Kind            `json:"kind"`
-	ID         string          `json:"id,omitempty"`
-	InReplyTo  string          `json:"in_reply_to,omitempty"`
-	TS         time.Time       `json:"ts"`
-	Payload    json.RawMessage `json:"payload,omitempty"`
+	Kind      Kind            `json:"kind"`
+	ID        string          `json:"id,omitempty"`
+	InReplyTo string          `json:"in_reply_to,omitempty"`
+	TS        time.Time       `json:"ts"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+
+	// TargetAspect names the aspect this frame is destined for, when
+	// the immediate WS connection isn't the aspect's own. Used by the
+	// broker → outpost path for unsolicited downstream frames (turn,
+	// shutdown) so the outpost can route to the right local aspect
+	// (#20). Empty when the frame's destination is the connection
+	// itself (the common case for direct aspects).
+	TargetAspect string `json:"target_aspect,omitempty"`
 }
 
 // New stamps a frame with the current time and serialises the payload.
