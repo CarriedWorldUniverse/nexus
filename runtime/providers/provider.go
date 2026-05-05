@@ -24,11 +24,12 @@ var (
 	ErrTimeout       = errors.New("provider: timeout")
 )
 
-// Provider is the contract every model backend adapter satisfies.
-// An adapter may implement only a subset (e.g. a pure-embeddings
-// adapter like ollama-local returns ErrUnsupported from Invoke); the
-// runtime reads Capabilities before dispatch.
-type Provider interface {
+// ChatProvider is the chat / dispatch surface — turn execution,
+// token counting, and compaction. Callers that only run turns
+// (broker dispatch, agent runtime) depend on this rather than the
+// full Provider umbrella so future chat-only adapters don't need
+// to stub embeddings.
+type ChatProvider interface {
 	// Invoke runs a single request/response turn.
 	Invoke(ctx context.Context, req InvokeRequest) (InvokeResult, error)
 
@@ -44,11 +45,21 @@ type Provider interface {
 	// Compact summarises prior context into a CompactionEntry. Called
 	// by the runtime when tokens exceed window - reserve.
 	Compact(ctx context.Context, entries []Entry, hint string) (CompactionResult, error)
+}
 
-	// Embed produces a fixed-length vector for a single text. Optional
-	// — adapters without an embeddings endpoint return ErrUnsupported.
+// EmbeddingProvider produces fixed-length vectors. Callers that only
+// run vector retrieval (knowledge store ANN path, future vector-only
+// indexers) depend on this. An adapter that can't embed simply
+// doesn't implement this interface — there's no ErrUnsupported stub
+// to type-assert past.
+type EmbeddingProvider interface {
+	// Embed produces a fixed-length vector for a single text.
 	Embed(ctx context.Context, req EmbedRequest) (EmbedResult, error)
+}
 
+// MetadataProvider exposes adapter introspection: capability flags,
+// available model list, triage-model name. Static or adapter-cached.
+type MetadataProvider interface {
 	// Capabilities advertises what this adapter supports. Static for
 	// the lifetime of the adapter instance.
 	Capabilities() Capabilities
@@ -60,6 +71,22 @@ type Provider interface {
 	// TriageModel is the cheap/fast model name for low-stakes turns.
 	// Empty string means triage is unsupported for this adapter.
 	TriageModel() string
+}
+
+// Provider is the umbrella interface every full backend adapter
+// satisfies. Composes ChatProvider + EmbeddingProvider + MetadataProvider.
+// Adapters that only implement a subset (a pure-embeddings adapter,
+// say) implement only the relevant interfaces and can be passed
+// directly to the matching caller — no umbrella stub required.
+//
+// Existing adapters (claude-api, ollama-local) implement the umbrella
+// for back-compat; ollama-local still returns ErrUnsupported from the
+// chat methods, but new chat-only callers can depend on ChatProvider
+// alone and reject ollama-local at the type-check seam.
+type Provider interface {
+	ChatProvider
+	EmbeddingProvider
+	MetadataProvider
 }
 
 // InvokeRequest is the normalised input (spec §3.1).
