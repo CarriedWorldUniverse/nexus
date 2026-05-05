@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/nexus-cw/nexus/nexus/frames"
 )
@@ -172,6 +171,3 @@ func (b *Broker) ConnectedAspects() []string {
 // ErrAspectNotConnected is returned by SendTurn (and future
 // SendHand / Send*) when the target aspect doesn't hold a live WS.
 var ErrAspectNotConnected = errors.New("aspect not connected")
-
-// Ensure import is used when no timeouts are set elsewhere.
-var _ = time.Second
