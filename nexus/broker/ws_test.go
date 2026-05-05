@@ -431,6 +431,52 @@ func TestBadFrameCapClosesConnection(t *testing.T) {
 	}
 }
 
+// Regression for issue #21: when AspectHomes is configured, the
+// broker derives the aspect's home from its own discovery scan and
+// overrides whatever payload.Home the aspect sends. Closes the
+// cmd.Dir control vector — a stolen aspect token can't repoint the
+// worker's working directory by register payload.
+func TestRegisterDerivesHomeFromBrokerDiscovery(t *testing.T) {
+	r := roster.New()
+	b := New(Config{
+		AuthToken:          "testtoken",
+		AllowLegacyMaster:  true,
+		HeartbeatIntervalS: 15,
+		StaleAfter:         30 * time.Second,
+		AspectHomes: map[string]string{
+			"smoketest": "/canonical/discovered/path",
+		},
+	}, r)
+	srv := httptest.NewServer(newMux(b))
+	t.Cleanup(srv.Close)
+
+	c := dialWS(t, srv, "testtoken")
+	regEnv, _ := frames.NewRequest(frames.KindRegister, frames.RegisterPayload{
+		RegisterRequest: schemas.RegisterRequest{
+			Name:        "smoketest",
+			ContextMode: schemas.ContextGlobal,
+			Provider:    "claude-api",
+			SessionID:   "sess-1",
+			Home:        "/attacker/controlled/path",
+			StartedAt:   time.Now().UTC(),
+		},
+	})
+	sendFrame(t, c, regEnv)
+	ack := recvFrame(t, c)
+	if ack.Kind == frames.Kind("register.error") {
+		t.Fatalf("register failed: %v", ack)
+	}
+
+	entries := r.List()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 roster entry, got %d", len(entries))
+	}
+	if entries[0].Home != "/canonical/discovered/path" {
+		t.Errorf("Home = %q, want broker-discovered path; payload was overridden",
+			entries[0].Home)
+	}
+}
+
 func TestDeregisterRejectsCrossAspectIdentity(t *testing.T) {
 	srv, r, b := newTestServer(t)
 

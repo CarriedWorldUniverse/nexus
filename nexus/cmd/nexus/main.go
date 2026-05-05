@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -48,7 +49,7 @@ func main() {
 	staleAfter := flag.Duration("stale-after", 30*time.Second, "aspect becomes stale after this gap without heartbeat")
 	reapEvery := flag.Duration("reap-every", 10*time.Second, "how often to sweep for stale aspects")
 	dataDir := flag.String("data-dir", "", "data directory holding nexus.db (falls back to NEXUS_DATA_DIR env, then ./data)")
-	aspectDir := flag.String("aspect-dir", "", "directory to scan for aspect homes to auto-spawn (falls back to NEXUS_ASPECT_DIR env; disabled if neither set)")
+	aspectDir := flag.String("aspect-dir", "", "comma-separated directories to scan for aspect homes (falls back to NEXUS_ASPECT_DIR env; disabled if neither set). The broker uses this as the source of truth for aspect homes (#21).")
 	harnessPath := flag.String("harness-path", "", "path to the harness binary used for auto-spawn (falls back to NEXUS_HARNESS env)")
 	// Defaults from env so explicit `--tls-cert=` (empty) is honored
 	// as the operator's intent (fail-fast at broker startup) rather
@@ -299,6 +300,11 @@ func main() {
 	// during migration. Default off.
 	allowLegacy := os.Getenv("NEXUS_ALLOW_LEGACY_MASTER") == "1"
 
+	// #21: derive canonical aspect homes from the discovery scan so
+	// the register handler can override payload.Home (closes the
+	// cmd.Dir control vector for stolen aspect tokens).
+	aspectHomes := discoverAspectHomes(*aspectDir, logger)
+
 	b := broker.New(broker.Config{
 		Addr:              *addr,
 		AuthToken:         token,
@@ -313,6 +319,7 @@ func main() {
 		Replayer:          replayer,
 		ChatStore:         chatStore,
 		RecipientPolicy:   recipientPolicy,
+		AspectHomes:       aspectHomes,
 		TLSCertFile:       *tlsCert,
 		TLSKeyFile:        *tlsKey,
 	}, r)
@@ -452,27 +459,70 @@ func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessP
 // until manually reconciled. Errors are logged and treated as
 // "no aspects to reconcile" to keep boot resilient.
 // resolveAspectDir picks the aspect directory from --aspect-dir, then
-// NEXUS_ASPECT_DIR. Returns "" when neither is set, in which case the
-// caller skips frame detection (and bootstrap mode is unreachable —
-// operator must point Nexus at an agents dir for first-boot to work).
+// NEXUS_ASPECT_DIR. Returns the FIRST root for callers that still
+// expect a single dir (Frame detection); resolveAspectDirRoots
+// returns the full list for the discovery scan. #21: comma-separated
+// values let aspects live in multiple paths (e.g. main repo +
+// external workspace).
 func resolveAspectDir(aspectDirFlag string) string {
-	if aspectDirFlag != "" {
-		return aspectDirFlag
+	roots := resolveAspectDirRoots(aspectDirFlag)
+	if len(roots) == 0 {
+		return ""
 	}
-	return os.Getenv("NEXUS_ASPECT_DIR")
+	return roots[0]
+}
+
+// resolveAspectDirRoots splits the comma-separated --aspect-dir /
+// NEXUS_ASPECT_DIR into one or more roots. Empty strings are dropped.
+// Returns nil when neither source is set.
+func resolveAspectDirRoots(aspectDirFlag string) []string {
+	raw := aspectDirFlag
+	if raw == "" {
+		raw = os.Getenv("NEXUS_ASPECT_DIR")
+	}
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// discoverAspectHomes scans every root and returns a name → absolute
+// home path map. Used by the broker to derive canonical aspect homes
+// for the register handler (#21). Returns an empty map (not nil) on
+// scan failure so the broker's lookup still works (and falls through
+// to the legacy payload.Home path with a warning).
+func discoverAspectHomes(aspectDirFlag string, log *slog.Logger) map[string]string {
+	roots := resolveAspectDirRoots(aspectDirFlag)
+	if len(roots) == 0 {
+		return nil
+	}
+	candidates, err := autospawn.DiscoverRoots(autospawn.Config{}, roots)
+	if err != nil {
+		log.Warn("discover aspect homes: scan failed", "roots", roots, "err", err)
+		return map[string]string{}
+	}
+	homes := make(map[string]string, len(candidates))
+	for _, c := range candidates {
+		homes[c.Name] = c.Path
+	}
+	return homes
 }
 
 func discoverAspectIDs(aspectDirFlag string, log *slog.Logger) []string {
-	dir := aspectDirFlag
-	if dir == "" {
-		dir = os.Getenv("NEXUS_ASPECT_DIR")
-	}
-	if dir == "" {
+	roots := resolveAspectDirRoots(aspectDirFlag)
+	if len(roots) == 0 {
 		return nil
 	}
-	candidates, err := autospawn.Discover(autospawn.Config{ScanDir: dir})
+	candidates, err := autospawn.DiscoverRoots(autospawn.Config{}, roots)
 	if err != nil {
-		log.Warn("discover aspect ids: scan failed; tokens not reconciled", "dir", dir, "err", err)
+		log.Warn("discover aspect ids: scan failed; tokens not reconciled", "roots", roots, "err", err)
 		return nil
 	}
 	ids := make([]string, 0, len(candidates))
