@@ -187,6 +187,81 @@ func TestAdminPersonalityEdit_MalformedBody(t *testing.T) {
 	}
 }
 
+// TestAdminPersonalityEdit_FiresOnPersonalityChange — Part 7c hook.
+// Successful edits invoke the OnPersonalityChange callback so the
+// embedded Frame can refresh in-process. Failed edits do NOT fire it.
+func TestAdminPersonalityEdit_FiresOnPersonalityChange(t *testing.T) {
+	dir := t.TempDir()
+	db, err := storage.Open(context.Background(), dir, nil)
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	store := aspects.NewSQLStore(db)
+	if err := store.Insert(context.Background(), aspects.Aspect{
+		Name: "plumb", AspectPubkey: fakePubkeyBytes(),
+		Provider: "p", Model: "m",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	tokens := NewTokenStore()
+	_ = tokens.mintInMemory("frame", true)
+
+	type fired struct {
+		name    string
+		version int64
+	}
+	calls := []fired{}
+	r := roster.New()
+	b := New(Config{
+		Tokens:           tokens,
+		Admin:            &AdminCallbacks{},
+		KeyfileValidator: &KeyfileValidator{Store: store},
+		OnPersonalityChange: func(name string, ver int64) {
+			calls = append(calls, fired{name, ver})
+		},
+	}, r)
+	mux := http.NewServeMux()
+	b.registerAdmin(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	// Successful edit: callback fires.
+	req, _ := http.NewRequest("PUT", srv.URL+"/api/admin/aspect/plumb/personality",
+		bytesReader(`{"nexus_md":"x","soul_md":"y","primer_md":"z"}`))
+	req.Header.Set("Authorization", "Bearer "+tokens.TokenForAgent("frame"))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d; want 200", resp.StatusCode)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("callback fired %d times; want 1", len(calls))
+	}
+	if calls[0].name != "plumb" || calls[0].version != 1 {
+		t.Errorf("callback args = %+v; want {plumb, 1}", calls[0])
+	}
+
+	// Failed edit (unknown aspect): callback must NOT fire.
+	req2, _ := http.NewRequest("PUT", srv.URL+"/api/admin/aspect/ghost/personality",
+		bytesReader(`{"nexus_md":"x","soul_md":"y","primer_md":"z"}`))
+	req2.Header.Set("Authorization", "Bearer "+tokens.TokenForAgent("frame"))
+	req2.Header.Set("Content-Type", "application/json")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("Do2: %v", err)
+	}
+	resp2.Body.Close()
+	if len(calls) != 1 {
+		t.Errorf("callback fired on failed edit; calls=%d", len(calls))
+	}
+}
+
 // TestAdminPersonalityEdit_NotRegisteredWithoutValidator — endpoint
 // is gated on KeyfileValidator presence. If a broker boots without
 // keyfile auth wired, the route returns 404.

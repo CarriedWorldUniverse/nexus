@@ -75,14 +75,21 @@ func (b *Broker) handleAdminPersonalityEdit(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Part 7c hook: broadcast personality.refresh to the live aspect
-	// here once the WS frame protocol lands. For v0.1, log so the
-	// operator knows the change is in DB and remote aspects pick up
-	// at next JWT re-validation (default 1h).
 	b.log.Info("admin personality edit",
 		"aspect", change.AspectName,
 		"old_version", change.OldVersion,
 		"new_version", change.NewVersion)
+
+	// Spec §11 in-process refresh callback. cmd/nexus wires this to
+	// EmbeddedFrame.RefreshPersonality so the Frame picks up the
+	// new prompt on its next deliberation turn (per Part 6's
+	// SystemPromptFn). For non-Frame aspects, this is a no-op today;
+	// remote agentfunnels pick up at next JWT re-validation (1h TTL).
+	// A future broadcast (`personality.refresh` WS frame) will land
+	// here too.
+	if b.cfg.OnPersonalityChange != nil {
+		b.cfg.OnPersonalityChange(change.AspectName, change.NewVersion)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(adminPersonalityResponse{

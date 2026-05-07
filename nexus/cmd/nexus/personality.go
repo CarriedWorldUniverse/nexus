@@ -133,9 +133,11 @@ func runPersonalityEdit(args []string) int {
 	fmt.Printf("aspect: %s\n", change.AspectName)
 	fmt.Printf("version: %d → %d\n", change.OldVersion, change.NewVersion)
 	fmt.Println()
-	fmt.Println("Embedded Frame picks up the new prompt on the next deliberation turn (Part 6 SystemPromptFn).")
+	fmt.Println("Note: this CLI writes directly to the DB. A running broker will NOT")
+	fmt.Println("see the change until it restarts (or until the running broker's REST")
+	fmt.Println("endpoint is hit — `PUT /api/admin/aspect/<name>/personality`, which")
+	fmt.Println("triggers an in-process refresh on the embedded Frame).")
 	fmt.Println("Remote aspects pick up at next JWT re-validation (default 1h, per spec §6).")
-	fmt.Println("(Part 7c will add immediate WS push for connected aspects.)")
 	return 0
 }
 
