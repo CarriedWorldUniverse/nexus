@@ -184,6 +184,21 @@ type Config struct {
 	// nil, the endpoints are not registered (legacy boot mode without
 	// keyfile auth — Part 5+ will tighten this).
 	KeyfileValidator *KeyfileValidator
+
+	// OnPersonalityChange is invoked after a successful personality
+	// edit (CLI Part 7a or REST Part 7b). cmd/nexus wires this to
+	// EmbeddedFrame.RefreshPersonality so the in-process Frame picks
+	// up the change on its next deliberation turn (per spec §11
+	// in-process refresh callback).
+	//
+	// Per spec §6: a separate WS frame `personality.refresh` should
+	// also broadcast to remote agentfunnels. Deferred — for v0.1,
+	// remote aspects pick up at next JWT re-validation (1h TTL).
+	// When a future broker grows the broadcast, it lands here too.
+	//
+	// nil callback is a no-op (legacy boot path, or Frame not yet
+	// embedded).
+	OnPersonalityChange func(aspectName string, newVersion int64)
 }
 
 // ChatRouterCallbacks wires the broker's chat.send handling to the

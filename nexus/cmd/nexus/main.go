@@ -394,7 +394,12 @@ func main() {
 		AspectHomes:       aspectHomes,
 		TLSCertFile:       *tlsCert,
 		TLSKeyFile:        *tlsKey,
-		KeyfileValidator:  keyfileValidator,
+		KeyfileValidator: keyfileValidator,
+		// Spec §11: REST/CLI personality edits trigger an in-process
+		// refresh on the embedded Frame so the new prompt takes effect
+		// on the next deliberation turn. Non-Frame aspects pick up at
+		// next JWT re-validation; broadcast frame is a future Part.
+		OnPersonalityChange: buildOnPersonalityChange(ctx, embeddedFrame, logger),
 	}, r)
 
 	// Wire the embedded Frame's chat gateway to broker.HandleChatSend so
@@ -658,6 +663,41 @@ func discoverAspectIDs(aspectDirFlag string, log *slog.Logger) []string {
 		ids = append(ids, c.Name)
 	}
 	return ids
+}
+
+// buildOnPersonalityChange returns the OnPersonalityChange callback
+// passed into broker.Config. When the edited aspect is the embedded
+// Frame, it calls EmbeddedFrame.RefreshPersonality so the next
+// deliberation turn sees the new prompt. For non-Frame aspects the
+// callback is a no-op today (remote agentfunnels pick up at next JWT
+// re-validation; future WS broadcast will land here too).
+//
+// Returns nil when no Frame is embedded — broker treats nil as
+// "no listener", same effective shape but cheaper.
+func buildOnPersonalityChange(ctx context.Context, ef *frame.EmbeddedFrame, log *slog.Logger) func(string, int64) {
+	if ef == nil {
+		return nil
+	}
+	frameName := ef.Aspect.Name
+	return func(aspectName string, newVersion int64) {
+		if aspectName != frameName {
+			// Remote aspect; nothing in-process to refresh.
+			return
+		}
+		// Use the broker's parent context, not the request's, so a
+		// short-lived HTTP handler cancel doesn't tear down the DB
+		// read mid-refresh. Bound the refresh itself by a small
+		// timeout so a stuck DB doesn't wedge the listener.
+		refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := ef.RefreshPersonality(refreshCtx); err != nil {
+			log.Warn("frame personality refresh failed",
+				"aspect", aspectName, "version", newVersion, "err", err)
+			return
+		}
+		log.Info("frame personality refreshed in-process",
+			"aspect", aspectName, "version", newVersion)
+	}
 }
 
 // buildChatRouter constructs the funnel and returns a ChatRouterCallbacks
