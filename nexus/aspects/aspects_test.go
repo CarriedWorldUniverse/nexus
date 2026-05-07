@@ -208,6 +208,78 @@ func TestSetStatus_ChecksConstraintEnforced(t *testing.T) {
 	}
 }
 
+// TestResurrect_AtomicTransition verifies the spec §9.3 invariant that
+// status flip + version bump + pubkey replacement are a single
+// atomic operation. A two-step implementation would have a window
+// where the old keyfile re-validates after status='active' but before
+// the version bump.
+func TestResurrect_AtomicTransition(t *testing.T) {
+	s := freshStore(t)
+	ctx := context.Background()
+	if err := s.Insert(ctx, Aspect{
+		Name: "plumb", AspectPubkey: fakePubkey(1),
+		Provider: "p", Model: "m",
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if err := s.SetStatus(ctx, "plumb", StatusRetired); err != nil {
+		t.Fatalf("SetStatus retired: %v", err)
+	}
+
+	newVer, err := s.Resurrect(ctx, "plumb", fakePubkey(2))
+	if err != nil {
+		t.Fatalf("Resurrect: %v", err)
+	}
+	if newVer != 2 {
+		t.Errorf("new version = %d; want 2", newVer)
+	}
+
+	got, _ := s.Get(ctx, "plumb")
+	if got.Status != StatusActive {
+		t.Errorf("status = %q; want active", got.Status)
+	}
+	if got.CurrentKeyfileVersion != 2 {
+		t.Errorf("version = %d; want 2", got.CurrentKeyfileVersion)
+	}
+	if string(got.AspectPubkey) != string(fakePubkey(2)) {
+		t.Error("pubkey not replaced with placeholder")
+	}
+}
+
+// TestResurrect_RefusesNonRetired — the WHERE clause guards against
+// resurrecting an active row. Returns ErrNotFound (zero rows
+// affected); caller's "is retired?" pre-check usually catches this,
+// but the store-level guard is defense-in-depth.
+func TestResurrect_RefusesNonRetired(t *testing.T) {
+	s := freshStore(t)
+	ctx := context.Background()
+	if err := s.Insert(ctx, Aspect{
+		Name: "plumb", AspectPubkey: fakePubkey(1),
+		Provider: "p", Model: "m",
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	// Aspect is active, not retired. Resurrect must refuse.
+	_, err := s.Resurrect(ctx, "plumb", fakePubkey(2))
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("Resurrect(active) = %v; want ErrNotFound", err)
+	}
+	// Confirm no state change.
+	got, _ := s.Get(ctx, "plumb")
+	if got.CurrentKeyfileVersion != 1 {
+		t.Errorf("version changed despite refused resurrect: %d", got.CurrentKeyfileVersion)
+	}
+}
+
+// TestResurrect_NotFound — missing aspect.
+func TestResurrect_NotFound(t *testing.T) {
+	s := freshStore(t)
+	_, err := s.Resurrect(context.Background(), "ghost", fakePubkey(1))
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("Resurrect(ghost) = %v; want ErrNotFound", err)
+	}
+}
+
 func TestPersonalityGet_NotFound(t *testing.T) {
 	s := freshStore(t)
 	_, err := s.PersonalityGet(context.Background(), "plumb")
