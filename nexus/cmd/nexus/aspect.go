@@ -51,14 +51,22 @@ import (
 // dispatches.
 func runAspectSubcommand(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: nexus aspect <mint>")
+		fmt.Fprintln(os.Stderr, "usage: nexus aspect <mint|retire|resurrect|list|status>")
 		return 2
 	}
 	switch args[0] {
 	case "mint":
 		return runAspectMint(args[1:])
+	case "retire":
+		return runAspectRetire(args[1:])
+	case "resurrect":
+		return runAspectResurrect(args[1:])
+	case "list":
+		return runAspectList(args[1:])
+	case "status":
+		return runAspectStatus(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown aspect subcommand %q (expected: mint)\n", args[0])
+		fmt.Fprintf(os.Stderr, "unknown aspect subcommand %q (expected: mint, retire, resurrect, list, status)\n", args[0])
 		return 2
 	}
 }
@@ -131,7 +139,7 @@ func runAspectMint(args []string) int {
 	default:
 		// Existing row — validate state.
 		if existing.Status == aspects.StatusRetired {
-			fmt.Fprintf(os.Stderr, "aspect mint: %q is retired; resurrect it first (deferred Part 8)\n", name)
+			fmt.Fprintf(os.Stderr, "aspect mint: %q is retired; run `nexus aspect resurrect %s` first\n", name, name)
 			return 1
 		}
 		// "currently connected" check is Part 4 territory (validation

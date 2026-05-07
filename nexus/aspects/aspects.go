@@ -97,10 +97,18 @@ type Store interface {
 	// for caller use.
 	BumpKeyfileVersion(ctx context.Context, name string, newPubkey []byte) (int64, error)
 
-	// SetStatus atomically updates status. Used by retire / resurrect.
-	// Resurrect should call SetStatus(active) then BumpKeyfileVersion
-	// in sequence so the prior keyfile (if it existed) is dead.
+	// SetStatus atomically updates status. Used by retire.
 	SetStatus(ctx context.Context, name string, status Status) error
+
+	// Resurrect atomically transitions status retired→active AND bumps
+	// current_keyfile_version with a fresh placeholder pubkey. Single
+	// transaction so an old keyfile can never momentarily re-validate
+	// between the two writes. Returns the new version. Returns
+	// ErrNotFound if the aspect doesn't exist.
+	//
+	// Caller is responsible for running `aspect mint` immediately
+	// afterwards to replace the placeholder with a real keypair.
+	Resurrect(ctx context.Context, name string, placeholderPubkey []byte) (int64, error)
 
 	// PersonalityGet returns the personality row for an aspect.
 	// Returns ErrNotFound if no row exists (note: a row with empty
@@ -269,6 +277,42 @@ func (s *SQLStore) SetStatus(ctx context.Context, name string, status Status) er
 		return ErrNotFound
 	}
 	return nil
+}
+
+// Resurrect implements Store. Atomic retired→active + version bump
+// + pubkey replacement in a single transaction. Returns ErrNotFound
+// if the row is missing or not retired (so resurrect-on-active is a
+// noop instead of a silent state-change).
+func (s *SQLStore) Resurrect(ctx context.Context, name string, placeholderPubkey []byte) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("aspects.Resurrect(%q): begin: %w", name, err)
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback is best-effort after commit
+
+	// Single UPDATE that touches status + version + pubkey. Guarded by
+	// status='retired' so resurrecting an already-active row is a noop
+	// (zero rows affected → ErrNotFound for the caller).
+	var newVersion int64
+	err = tx.QueryRowContext(ctx, `
+		UPDATE aspects
+		SET status = 'active',
+		    current_keyfile_version = current_keyfile_version + 1,
+		    aspect_pubkey = ?,
+		    updated_at = datetime('now')
+		WHERE name = ? AND status = 'retired'
+		RETURNING current_keyfile_version
+	`, placeholderPubkey, name).Scan(&newVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("aspects.Resurrect(%q): %w", name, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("aspects.Resurrect(%q): commit: %w", name, err)
+	}
+	return newVersion, nil
 }
 
 // PersonalityGet implements Store.
