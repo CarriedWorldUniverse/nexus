@@ -47,6 +47,23 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
+	bridle "github.com/CarriedWorldUniverse/bridle"
+	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
+	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
+	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/framecomms"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
+	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
+	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
 )
 
 // exitCodeBootstrapDone signals a successful first-boot setup. Supervisor
@@ -152,7 +169,18 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("nexus identity loaded", "nexus_id", nexusIdentity.NexusID)
-	_ = nexusIdentity // consumed by Parts 4+ (keyfile validation, JWT signing)
+
+	// Build the keyfile validator (Part 4b). When wired into
+	// broker.Config below, this enables GET /api/nexus_id and POST
+	// /api/aspect/validate per spec §5.
+	keyfileValidator := &broker.KeyfileValidator{
+		NexusID:              nexusIdentity.NexusID,
+		ServerEd25519Pubkey:  nexusIdentity.ServerPublicKey,
+		ServerEd25519Privkey: nexusIdentity.ServerPrivateKey,
+		SessionSigningSecret: nexusIdentity.SessionSigningSecret,
+		Store:                aspects.NewSQLStore(db),
+		JWTTTL:               time.Hour, // spec §6
+	}
 
 	r := roster.New()
 	proj := sessions.New(db)
@@ -362,6 +390,7 @@ func main() {
 		AspectHomes:       aspectHomes,
 		TLSCertFile:       *tlsCert,
 		TLSKeyFile:        *tlsKey,
+		KeyfileValidator:  keyfileValidator,
 	}, r)
 
 	// Wire the embedded Frame's chat gateway to broker.HandleChatSend so
