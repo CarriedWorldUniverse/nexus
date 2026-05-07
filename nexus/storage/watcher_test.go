@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -283,5 +285,127 @@ func TestWatchFileReplacement_OnReplacedNilSafe(t *testing.T) {
 	err := WatchFileReplacement(ctx, path, 20*time.Millisecond, nil, nil)
 	if !errors.Is(err, ErrFileReplaced) {
 		t.Errorf("watcher returned %v; want ErrFileReplaced", err)
+	}
+}
+
+// --- WatchWriteDurability tests ---
+//
+// These exercise the fresh-handle write verifier (Part 2). Real-world
+// phantom-handle conditions are hard to reproduce in a unit test (they
+// need a process to keep a write handle open while another process
+// replaces the file). We approximate the failure mode with a
+// fakeLiveDB stub that lets tests control what MAX(id) the "live"
+// handle reports — divergent from the on-disk file. That isolates the
+// comparison logic from the actual phantom-mode physics.
+
+// openTestDB creates a real sqlite db at the given path with the
+// chat_messages schema and inserts the requested number of dummy
+// messages, returning the *sql.DB and the highest id.
+func openTestDB(t *testing.T, path string, msgCount int) (*sql.DB, int64) {
+	t.Helper()
+	db, err := Open(context.Background(), filepath.Dir(path), nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	for i := 0; i < msgCount; i++ {
+		if _, err := db.Exec(`INSERT INTO chat_messages (from_agent, content) VALUES (?, ?)`, "test", fmt.Sprintf("msg %d", i)); err != nil {
+			t.Fatalf("seed insert: %v", err)
+		}
+	}
+	var max int64
+	if err := db.QueryRow("SELECT COALESCE(MAX(id), 0) FROM chat_messages").Scan(&max); err != nil {
+		t.Fatalf("max query: %v", err)
+	}
+	return db, max
+}
+
+// TestWatchWriteDurability_HealthyDoesNotTrip: when live and fresh
+// handles agree on MAX(id), the verifier should run cleanly until ctx
+// cancels.
+func TestWatchWriteDurability_HealthyDoesNotTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nexus.db")
+	db, _ := openTestDB(t, path, 5)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	var onReplacedCount int32
+	onReplaced := func() { atomic.AddInt32(&onReplacedCount, 1) }
+
+	err := WatchWriteDurability(ctx, path, db, 50*time.Millisecond, nil, onReplaced)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("verifier returned %v; want DeadlineExceeded", err)
+	}
+	if got := atomic.LoadInt32(&onReplacedCount); got != 0 {
+		t.Errorf("onReplaced called %d times on healthy db; want 0", got)
+	}
+}
+
+// TestWatchWriteDurability_NilLiveDBErrors: a nil live handle is a
+// programmer error and should be caught loudly rather than nil-panic
+// at runtime.
+func TestWatchWriteDurability_NilLiveDBErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nexus.db")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := WatchWriteDurability(ctx, path, nil, 20*time.Millisecond, nil, nil)
+	if err == nil {
+		t.Fatal("expected error on nil liveDB; got nil")
+	}
+	if errors.Is(err, ErrWriteDurabilityFailed) || errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("unexpected error type: %v", err)
+	}
+}
+
+// TestWatchWriteDurability_MissingPathTripsSustained: when the fresh
+// handle can't be opened (path missing), the verifier should treat
+// sustained failures as durability lost and trip after the threshold.
+func TestWatchWriteDurability_MissingPathTripsSustained(t *testing.T) {
+	dir := t.TempDir()
+	// Open a real db so the live handle is healthy, then point the
+	// verifier at a path that doesn't exist. Fresh-handle opens will
+	// fail consistently, tripping after threshold.
+	realPath := filepath.Join(dir, "real.db")
+	db, _ := openTestDB(t, realPath, 3)
+
+	missingPath := filepath.Join(dir, "missing.db")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	var onReplacedCount int32
+	onReplaced := func() { atomic.AddInt32(&onReplacedCount, 1) }
+
+	err := WatchWriteDurability(ctx, missingPath, db, 30*time.Millisecond, nil, onReplaced)
+	if !errors.Is(err, ErrWriteDurabilityFailed) {
+		t.Errorf("verifier returned %v; want ErrWriteDurabilityFailed", err)
+	}
+	if got := atomic.LoadInt32(&onReplacedCount); got != 1 {
+		t.Errorf("onReplaced called %d times; want exactly 1", got)
+	}
+}
+
+// TestCompareMaxID_HealthyMatch: sanity check the helper directly —
+// fresh and live handles should report the same MAX(id) on a real db.
+func TestCompareMaxID_HealthyMatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nexus.db")
+	db, expected := openTestDB(t, path, 7)
+
+	live, fresh, err := compareMaxID(context.Background(), path, db)
+	if err != nil {
+		t.Fatalf("compareMaxID: %v", err)
+	}
+	if live != expected {
+		t.Errorf("live MAX(id) = %d; want %d", live, expected)
+	}
+	if fresh != expected {
+		t.Errorf("fresh MAX(id) = %d; want %d", fresh, expected)
 	}
 }

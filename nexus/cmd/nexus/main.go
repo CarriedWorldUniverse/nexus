@@ -375,6 +375,25 @@ func main() {
 		}
 	}()
 
+	// Fresh-handle write verifier (Crossing Part 2) — defence-in-depth
+	// against write-loss modes that don't manifest as file replacement.
+	// Every DefaultVerifyInterval (60s) opens a fresh sql.DB, queries
+	// MAX(id) FROM chat_messages, and compares against the live broker
+	// handle. Live > fresh = phantom. Less frequent than the file-
+	// replacement watcher (which is the cheap fast path) and more
+	// expensive (fresh DB connection per tick), but catches WAL desync,
+	// partial-write rollback, and long-handle-with-FS-mismatch that
+	// stat-only detection misses.
+	go func() {
+		dbPath := storage.ResolvePath(*dataDir)
+		err := storage.WatchWriteDurability(ctx, dbPath, db, 0 /*default interval*/, logger, stop)
+		if errors.Is(err, storage.ErrWriteDurabilityFailed) {
+			logger.Error("storage verifier: write-durability failure detected — broker shutting down for supervisor restart", "path", dbPath)
+		} else if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			logger.Warn("storage verifier: stopped with non-fatal error", "err", err, "path", dbPath)
+		}
+	}()
+
 	// Embedded-frame heartbeat (#133). The in-process Frame has no WS
 	// connection of its own, so the reaper's WS-connected refresh
 	// doesn't see it. Tick its Heartbeat directly; the funnel is alive
