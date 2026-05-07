@@ -339,6 +339,42 @@ func main() {
 	// connection IS the heartbeat per Lock 2.
 	go reaper(ctx, r, b, *staleAfter, *reapEvery, logger)
 
+	// File-replacement watcher (Crossing pre-cutover hardening).
+	//
+	// On Windows in particular, if the on-disk nexus.db is replaced by
+	// another process while the broker holds it open, the broker keeps
+	// writing to an orphaned inode (a "phantom"). Same-process read-back
+	// stays consistent with the phantom; external readers see the
+	// pre-replacement state, frozen. This bit agent-network for ~5 days
+	// in 2026-05; ~400 chat messages were lost on broker restart.
+	//
+	// The watcher captures a FileInfo baseline at startup and re-stats
+	// every DefaultWatchInterval. On divergence (replacement OR deletion),
+	// it cancels the broker context — the broker exits, main returns,
+	// the supervisor restarts cleanly with a fresh handle to whatever's
+	// at the path. Cheap (stat-only, no SQL, no fresh DB open). Pairs
+	// with the §6.2 fresh-handle write verifier (Part 2) for
+	// defence-in-depth on subtler write-loss modes.
+	go func() {
+		dbPath := storage.ResolvePath(*dataDir)
+		err := storage.WatchFileReplacement(ctx, dbPath, 0 /*default interval*/, logger, stop)
+		// Three exit paths:
+		//   ErrFileReplaced — phantom detected. stop() was already
+		//     called via the onReplaced callback; broker is winding
+		//     down. Log CRIT-level so the supervisor's log scrape
+		//     surfaces this distinctly from a normal shutdown.
+		//   context.Canceled / DeadlineExceeded — clean shutdown,
+		//     watcher exiting alongside everything else. No-op.
+		//   Other (e.g. stat error at startup) — log loud but don't
+		//     panic; the broker can still run, the watcher just isn't
+		//     guarding it. Rare.
+		if errors.Is(err, storage.ErrFileReplaced) {
+			logger.Error("storage watcher: phantom-handle mode detected — broker shutting down for supervisor restart", "path", dbPath)
+		} else if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			logger.Warn("storage watcher: stopped with non-fatal error", "err", err, "path", dbPath)
+		}
+	}()
+
 	// Embedded-frame heartbeat (#133). The in-process Frame has no WS
 	// connection of its own, so the reaper's WS-connected refresh
 	// doesn't see it. Tick its Heartbeat directly; the funnel is alive
