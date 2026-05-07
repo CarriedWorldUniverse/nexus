@@ -216,11 +216,12 @@ func main() {
 	var embeddedFrame *frame.EmbeddedFrame
 	if detectedFrame != nil {
 		ef, err := frame.Embed(ctx, frame.EmbedConfig{
-			Detected:   detectedFrame,
-			Roster:     r,
-			TokenStore: tokenStore,
-			DB:         db,
-			Logger:     logger,
+			Detected:         detectedFrame,
+			Roster:           r,
+			TokenStore:       tokenStore,
+			DB:               db,
+			Logger:           logger,
+			PersonalityStore: aspects.NewSQLStore(db), // spec §11
 		})
 		if err != nil {
 			logger.Error("frame embed failed", "err", err)
@@ -739,11 +740,15 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 
 	threads := route.NewThreadIndex()
 	f, err := funnel.New(funnel.Config{
-		AspectID:      ef.Aspect.Name,
-		Harness:       bridle.NewHarness(p),
-		Provider:      bridle.ProviderID(provider),
-		Model:         model,
-		Tools:         funnel.CommsToolDefs(),
+		AspectID: ef.Aspect.Name,
+		Harness:  bridle.NewHarness(p),
+		Provider: bridle.ProviderID(provider),
+		Model:    model,
+		// SystemPromptFn (not SystemPrompt) so RefreshPersonality on
+		// the EmbeddedFrame is picked up by the next turn without
+		// rebuilding the funnel. Spec §11 in-process refresh path.
+		SystemPromptFn: ef.SystemPrompt,
+		Tools:          funnel.CommsToolDefs(),
 		Runner:        funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
 		ChatGateway:   gateway,
 		Threads:       threads,

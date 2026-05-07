@@ -20,8 +20,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
@@ -50,16 +56,104 @@ type EmbeddedFrame struct {
 	// consumers that want the heartbeat fields without re-querying the
 	// roster. Read-only post-Embed; the roster owns updates.
 	State *schemas.AspectState
+
+	// personality is the latest fetched personality bundle. Behind a
+	// mutex so RefreshPersonality can swap it from a goroutine while
+	// the funnel reader (via SystemPrompt) reads concurrently.
+	mu          sync.RWMutex
+	personality *aspects.Personality
+	store       aspects.Store // retained for RefreshPersonality
+}
+
+// SystemPrompt returns the composed personality prompt for the Frame's
+// funnel.Config.SystemPromptFn. Empty when no aspect_personalities row
+// exists yet (Frame still functions; operator runs `nexus personality
+// edit <frame>` to populate). Safe for concurrent reads with
+// RefreshPersonality.
+//
+// Per spec §11: keel reads its personality from
+// `aspect_personalities WHERE aspect_name='keel'` rather than from
+// CLAUDE.md/SOUL.md/PRIMER.md on disk.
+//
+// Resolution order:
+//
+//  1. If `composed` is non-empty (Part 7's renderer will populate it),
+//     return it directly. This is the canonical path once Part 7 ships.
+//  2. Otherwise — and this is the Part 6 → Part 7 gap — concatenate
+//     NexusMD + SoulMD + PrimerMD with section separators. Without
+//     this concat the Frame would run with operational scope (NexusMD)
+//     but no voice/values (SoulMD) or network primer (PrimerMD).
+//     Note that PersonalitySet invalidates `composed` on every write
+//     (Part 2), so this fallback is the active path until a renderer
+//     populates the cache.
+//  3. If everything is empty, return "" — Frame still boots, just
+//     prompt-less.
+func (e *EmbeddedFrame) SystemPrompt() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.personality == nil {
+		return ""
+	}
+	if e.personality.Composed != "" {
+		return e.personality.Composed
+	}
+	parts := make([]string, 0, 3)
+	if e.personality.NexusMD != "" {
+		parts = append(parts, e.personality.NexusMD)
+	}
+	if e.personality.SoulMD != "" {
+		parts = append(parts, e.personality.SoulMD)
+	}
+	if e.personality.PrimerMD != "" {
+		parts = append(parts, e.personality.PrimerMD)
+	}
+	return strings.Join(parts, "\n\n---\n\n")
+}
+
+// RefreshPersonality re-fetches the Frame's personality row and swaps
+// it atomically. Used by Part 7's in-process refresh path (operator
+// runs `nexus personality edit keel` → REST handler invokes this on
+// the EmbeddedFrame, the next deliberation cycle picks up the new
+// SystemPrompt). Returns ErrNoPersonality if no row exists for the
+// Frame's name (caller decides whether to ignore — Frame can run
+// without one).
+//
+// Per spec §11: "A way to receive personality refresh (in-process
+// callback, no WS frame)." This is that callback.
+func (e *EmbeddedFrame) RefreshPersonality(ctx context.Context) error {
+	if e.store == nil {
+		return errors.New("frame: RefreshPersonality requires PersonalityStore at Embed time")
+	}
+	p, err := e.store.PersonalityGet(ctx, e.Aspect.Name)
+	if err != nil {
+		return err
+	}
+	e.mu.Lock()
+	e.personality = p
+	e.mu.Unlock()
+	return nil
 }
 
 // EmbedConfig threads dependencies into Embed without growing a long
-// argument list. All fields required.
+// argument list. Roster, TokenStore, Detected required; DB, Logger,
+// PersonalityStore optional.
 type EmbedConfig struct {
 	Detected   *FrameAspect
 	Roster     *roster.Roster
 	TokenStore *broker.TokenStore
 	DB         *sql.DB
 	Logger     *slog.Logger
+
+	// PersonalityStore is the aspect_personalities backend (Part 2).
+	// When non-nil, Embed fetches the Frame's personality row and
+	// stashes it on the returned EmbeddedFrame so EmbeddedFrame.SystemPrompt
+	// can serve it to the funnel. When nil, SystemPrompt returns "" —
+	// callers can still set it explicitly via funnel.Config.SystemPrompt
+	// elsewhere (legacy path).
+	//
+	// Per spec §11: keel reads its personality from
+	// aspect_personalities, not from on-disk markdown.
+	PersonalityStore aspects.Store
 }
 
 // ErrEmbedRequiresFrame is returned when Embed is called with a nil
@@ -136,22 +230,55 @@ func Embed(ctx context.Context, cfg EmbedConfig) (*EmbeddedFrame, error) {
 			"name", name, "displaced_session", displaced, "new_session", sessionID)
 	}
 
+	// Spec §11: load personality from aspect_personalities WHERE
+	// aspect_name = <frame name>. Missing row is allowed — Frame still
+	// boots, just runs prompt-less until the operator populates one.
+	var personality *aspects.Personality
+	if cfg.PersonalityStore != nil {
+		p, perr := cfg.PersonalityStore.PersonalityGet(ctx, name)
+		switch {
+		case perr == nil:
+			personality = p
+		case errors.Is(perr, aspects.ErrNotFound):
+			cfg.Logger.Warn("frame: no personality row found — running with empty SystemPrompt until populated",
+				"name", name,
+				"hint", "run: nexus personality edit "+name)
+		default:
+			return nil, fmt.Errorf("frame: load personality: %w", perr)
+		}
+	}
+
 	cfg.Logger.Info("frame: embedded as in-process aspect",
 		"name", name, "session", sessionID, "pid", pid,
 		"home", cfg.Detected.Path, "context_mode", cfg.Detected.Config.ContextMode,
-		"provider", cfg.Detected.Config.Provider, "model", registerReq.Model)
+		"provider", cfg.Detected.Config.Provider, "model", registerReq.Model,
+		"personality_loaded", personality != nil,
+		"personality_version", personalityVersion(personality))
 
 	return &EmbeddedFrame{
-		Aspect:     *cfg.Detected,
-		AdminToken: token,
-		SessionID:  sessionID,
-		State:      state,
+		Aspect:      *cfg.Detected,
+		AdminToken:  token,
+		SessionID:   sessionID,
+		State:       state,
+		personality: personality,
+		store:       cfg.PersonalityStore,
 	}, nil
+}
+
+// personalityVersion is a small helper for the structured-log line —
+// avoids dereferencing a possibly-nil personality pointer at the call
+// site.
+func personalityVersion(p *aspects.Personality) int64 {
+	if p == nil {
+		return 0
+	}
+	return p.Version
 }
 
 // Heartbeat refreshes the Frame's last-seen so the roster's stale
 // reaper doesn't mark it down. Caller should run this on a ticker as
-// long as the Nexus process is alive.
+// long as the Nexus process is alive. Pointer receiver — EmbeddedFrame
+// holds a sync.RWMutex so it must never be copied.
 func (e *EmbeddedFrame) Heartbeat(r *roster.Roster, at time.Time) error {
 	return r.Heartbeat(e.Aspect.Name, e.SessionID, at)
 }
