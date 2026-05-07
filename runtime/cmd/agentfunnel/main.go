@@ -1,0 +1,294 @@
+// Command agentfunnel is the keyfile-auth aspect runtime — single
+// binary that any aspect host runs with `agentfunnel -k <keyfile>`.
+//
+// Per agent-network/docs/2026-05-08-nexus-resident-personality-spec.md §14
+// part 5: replaces the per-home aspect.exe model. Identity, personality,
+// provider, and model all come from the Nexus during the startup
+// validation handshake — there is no on-disk aspect.json on the host.
+//
+// Boot flow:
+//
+//	read keyfile from -k path (runtime/keyfile.Load)
+//	  → spec §4 envelope + encrypted_payload
+//	dial GET /api/nexus_id, verify against envelope
+//	  → spec §5: don't send the encrypted payload to the wrong Nexus
+//	POST /api/aspect/validate
+//	  → response carries: session_jwt, personality, provider, model
+//	wire JWT as wsasp.Config.AuthToken (replaces NEXUS_TOKEN env)
+//	wire personality.composed as funnel.Config.SystemPrompt
+//	build provider via bridle, run the standard funnel deliberation loop
+//
+// Differences from runtime/cmd/aspect (the per-home aspect.json model):
+//   - No -home flag; identity + personality + provider come from Nexus
+//   - No NEXUS_TOKEN env; the JWT from validation is the bearer
+//   - Personality SystemPrompt is the composed Nexus-side bundle, not
+//     hand-assembled on the aspect host
+//
+// What's deferred to later parts:
+//   - JWT refresh on expiry (spec §6) — Part 5 v0.1 exits ~5 minutes
+//     before expiry via jwtExpiryMonitor and relies on the supervisor
+//     restart loop to re-validate. Refresh-without-restart is Part 7.
+//     (Without the monitor, wsclient.Run would treat 401s as transient
+//     and reconnect forever, zombieing the process.)
+//   - personality.refresh push protocol — Part 7.
+
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/nexus-cw/bridle"
+	claudeprovider "github.com/nexus-cw/bridle/provider/claude"
+	claudecodeprovider "github.com/nexus-cw/bridle/provider/claudecode"
+	"github.com/nexus-cw/nexus/nexus/frame/funnel"
+	"github.com/nexus-cw/nexus/runtime/aspect/wsasp"
+	"github.com/nexus-cw/nexus/runtime/keyfile"
+	"github.com/nexus-cw/nexus/shared/schemas"
+)
+
+func main() {
+	keyfilePath := flag.String("k", "", "path to the aspect keyfile (required)")
+	cursorDir := flag.String("cursor-dir", "", "directory for the Lock 6 message-cursor file (defaults to <cwd>/cursor)")
+	contextMode := flag.String("context-mode", string(schemas.ContextThread), "context mode: global, thread, or stateless (Nexus does not yet ship context_mode in the validation response)")
+	flag.Parse()
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(log)
+
+	if *keyfilePath == "" {
+		fail(log, "missing -k flag (path to keyfile)", nil)
+	}
+	cm := schemas.ContextMode(*contextMode)
+	switch cm {
+	case schemas.ContextGlobal, schemas.ContextThread, schemas.ContextStateless:
+	default:
+		fail(log, fmt.Sprintf("invalid --context-mode %q (want global/thread/stateless)", *contextMode), nil)
+	}
+
+	// 1. Read keyfile.
+	kf, err := keyfile.Load(*keyfilePath)
+	if err != nil {
+		fail(log, "load keyfile", err)
+	}
+	log.Info("agentfunnel: keyfile loaded",
+		"path", *keyfilePath,
+		"nexus_url", kf.Envelope.NexusURL,
+		"nexus_id", kf.Envelope.NexusID)
+
+	// 2. Validation handshake. The keyfile.Client has its own 10s
+	// per-call HTTP timeout (covers the GET /api/nexus_id and POST
+	// /api/aspect/validate calls separately). The 30s outer ctx
+	// timeout is a backstop so a hung process between calls (e.g.
+	// stuck in TLS handshake setup) eventually surfaces as a startup
+	// error rather than dangling forever.
+	bootCtx, bootCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	client := keyfile.NewClient()
+	res, err := client.Validate(bootCtx, kf)
+	bootCancel()
+	if err != nil {
+		// Render the most actionable hint we can per the sentinel.
+		switch {
+		case errors.Is(err, keyfile.ErrNexusMismatch):
+			log.Error("agentfunnel: keyfile envelope nexus_id does not match the server",
+				"hint", "the keyfile may be stale (Nexus identity regenerated) or pointed at the wrong host",
+				"err", err)
+		case errors.Is(err, keyfile.ErrValidationRejected):
+			log.Error("agentfunnel: server rejected validation",
+				"hint", "check server response — likely revoked, retired, or unknown aspect",
+				"err", err)
+		case errors.Is(err, keyfile.ErrBadServerResponse):
+			log.Error("agentfunnel: server returned malformed response — likely a Nexus bug",
+				"err", err)
+		case errors.Is(err, keyfile.ErrBadKeyfile):
+			log.Error("agentfunnel: keyfile is malformed", "err", err)
+		default:
+			log.Error("agentfunnel: validation failed", "err", err)
+		}
+		os.Exit(1)
+	}
+	log.Info("agentfunnel: validated",
+		"aspect", res.AspectName,
+		"provider", res.Provider,
+		"model", res.Model,
+		"personality_version", res.Personality.Version,
+		"jwt_expires", res.SessionExpiresAt.Format(time.RFC3339))
+
+	// 3. Build provider.
+	provider, err := buildProvider(res.Provider)
+	if err != nil {
+		fail(log, "build provider", err)
+	}
+
+	// 4. Compose funnel + wsasp client.
+	sessionID := uuid.NewString()
+	cursorFile := wsasp.CursorFileForAspect(resolveCursorDir(*cursorDir))
+
+	var bridge *wsasp.Bridge
+	wsCfg := wsasp.Config{
+		URL:        res.NexusURL,
+		AuthToken:  res.SessionJWT, // <- the JWT replaces NEXUS_TOKEN
+		AspectName: res.AspectName,
+		CursorFile: cursorFile,
+		OnDeliver: func(msg wsasp.DeliveredMessage) {
+			if bridge != nil {
+				bridge.OnDeliver(msg)
+			}
+		},
+		Register: schemas.RegisterRequest{
+			Name:        res.AspectName,
+			ContextMode: cm,
+			Provider:    res.Provider,
+			PID:         os.Getpid(),
+			StartedAt:   time.Now().UTC(),
+			Model:       res.Model,
+			SessionID:   sessionID,
+		},
+	}
+	wsClient, err := wsasp.NewClient(wsCfg)
+	if err != nil {
+		fail(log, "wsasp.NewClient", err)
+	}
+
+	gateway := wsasp.NewGateway(wsClient)
+	commsRunner := funnel.CommsRunner{Gateway: gateway}
+
+	f, err := funnel.New(funnel.Config{
+		AspectID:     res.AspectName,
+		Harness:      bridle.NewHarness(provider),
+		Provider:     bridle.ProviderID(res.Provider),
+		Model:        res.Model,
+		SystemPrompt: res.Personality.Composed,
+		Tools:        funnel.CommsToolDefs(),
+		Runner:       funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		Logger:       log,
+	})
+	if err != nil {
+		fail(log, "funnel.New", err)
+	}
+	bridge = wsasp.NewBridge(f)
+
+	log.Info("agentfunnel: starting deliberation loop",
+		"aspect", res.AspectName,
+		"session", sessionID,
+		"system_prompt_bytes", len(res.Personality.Composed))
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// JWT pre-expiry monitor (v0.1 supervisor-restart model).
+	//
+	// Without this, the process zombies on JWT expiry: wsclient.Run
+	// treats every dial error (including 401 after the bearer goes
+	// stale) as transient and reconnects forever. The supervisor sees
+	// a live process and never restarts. Until Part 7 lands proper
+	// re-validate-without-restart, the only working strategy is to
+	// exit cleanly before expiry so the supervisor cycles us.
+	//
+	// 5-minute lead time: tight enough to keep using the JWT for most
+	// of its hour, generous enough that we don't hit "expired in
+	// flight" mid-handshake on a slow network.
+	go jwtExpiryMonitor(ctx, res.SessionExpiresAt, 5*time.Minute, stop, log)
+
+	go deliberateLoop(ctx, f, log)
+
+	if err := wsClient.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		log.Error("agentfunnel: wsClient.Run", "err", err)
+		os.Exit(1)
+	}
+	log.Info("agentfunnel: stopped")
+}
+
+// jwtExpiryMonitor cancels ctx (via stop) shortly before the JWT
+// expires so the supervisor's restart loop can re-validate. wsclient
+// otherwise reconnects on every dial error including 401-after-stale-
+// bearer, which would zombie the process indefinitely.
+//
+// `lead` is how far before expiry to fire. If we're already past
+// (expiry - lead) at startup (e.g. supervisor handed us a near-
+// expired JWT during a flap), cancel immediately so we restart fast.
+func jwtExpiryMonitor(ctx context.Context, expiry time.Time, lead time.Duration, stop context.CancelFunc, log *slog.Logger) {
+	wakeAt := expiry.Add(-lead)
+	d := time.Until(wakeAt)
+	if d > 0 {
+		select {
+		case <-time.After(d):
+		case <-ctx.Done():
+			return
+		}
+	}
+	log.Info("agentfunnel: JWT nearing expiry — exiting for supervisor restart",
+		"jwt_expires", expiry.Format(time.RFC3339),
+		"lead", lead.String())
+	stop()
+}
+
+// deliberateLoop drives funnel.Deliberate at a fixed cadence so any
+// inbox items from chat.deliver get processed. Mirrors the rate from
+// runtime/cmd/aspect (250ms — fast enough for mid-turn comms, slow
+// enough not to busy-loop the LLM when idle).
+func deliberateLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger) {
+	t := time.NewTicker(250 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := f.Deliberate(ctx, ""); err != nil && !errors.Is(err, context.Canceled) {
+				log.Warn("agentfunnel: deliberate", "err", err)
+			}
+		}
+	}
+}
+
+// buildProvider maps the validation-response Provider string to a
+// bridle backend. Unlike the per-home aspect.exe, agentfunnel does NOT
+// fall back to a default on empty: the provider is Nexus-authoritative
+// (set at `nexus aspect mint` time, NOT NULL on the aspects row), so
+// an empty string here means the Nexus returned garbage or the row is
+// corrupt — fail loudly rather than silently picking a default.
+func buildProvider(provider string) (bridle.Provider, error) {
+	switch provider {
+	case "":
+		return nil, errors.New("buildProvider: validation response carried empty provider — Nexus DB row is corrupt; re-mint the aspect with --provider")
+	case "claude-api", "claude":
+		return claudeprovider.New(""), nil
+	case "claude-code", "claudecode":
+		return claudecodeprovider.New(), nil
+	default:
+		return nil, fmt.Errorf("unsupported provider %q (claude-api and claude-code supported in v1)", provider)
+	}
+}
+
+// resolveCursorDir returns the dir for wsasp's Lock 6 cursor file.
+// agentfunnel doesn't have an aspect home (deliberate — no on-disk
+// state on the host); operator-supplied --cursor-dir or the working
+// directory's "cursor" subdir.
+func resolveCursorDir(flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "cursor"
+	}
+	return cwd
+}
+
+func fail(log *slog.Logger, msg string, err error) {
+	if err != nil {
+		log.Error(msg, "err", err)
+	} else {
+		log.Error(msg)
+	}
+	os.Exit(2)
+}
