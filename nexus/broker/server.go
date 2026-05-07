@@ -177,6 +177,13 @@ type Config struct {
 	// matches (e.g. "https://localhost:7888") or wildcard subdomain
 	// patterns. See websocket.AcceptOptions.OriginPatterns.
 	OriginPatterns []string
+
+	// KeyfileValidator wires the spec §5 keyfile-auth endpoints
+	// (GET /api/nexus_id + POST /api/aspect/validate). cmd/nexus
+	// builds this from the loaded identity + an aspects.SQLStore. When
+	// nil, the endpoints are not registered (legacy boot mode without
+	// keyfile auth — Part 5+ will tighten this).
+	KeyfileValidator *KeyfileValidator
 }
 
 // ChatRouterCallbacks wires the broker's chat.send handling to the
@@ -349,6 +356,12 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 		w.Header().Set("Cache-Control", "no-cache")
 		_, _ = w.Write(chatHTML)
 	})
+
+	// Keyfile auth endpoints (spec §5 — Part 4b). Registered only
+	// when KeyfileValidator is configured. Both routes deliberately
+	// bypass auth(): the keyfile is its own credential and the
+	// nexus_id endpoint is meant to be queried before any.
+	b.registerKeyfileEndpoints(mux)
 
 	// Admin REST surface (#79 lock). Registered only when a Frame is
 	// embedded and supplies AdminCallbacks. Per spec §3.3, admin ops
