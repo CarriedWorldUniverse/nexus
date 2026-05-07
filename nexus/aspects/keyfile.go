@@ -25,6 +25,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -185,6 +186,43 @@ func mintWithRand(in MintInput, r io.Reader) (*Keyfile, string, error) {
 	sum := sha256.Sum256(sealed)
 	fingerprint := hex.EncodeToString(sum[:])
 	return kf, fingerprint, nil
+}
+
+// EdPrivkeyToX25519 converts an Ed25519 private key to its X25519
+// scalar form for crypto_box decryption.
+//
+// Recipe (libsodium crypto_sign_ed25519_sk_to_curve25519):
+//
+//   1. Take the 32-byte Ed25519 seed (priv.Seed()).
+//   2. SHA-512 the seed.
+//   3. Take the first 32 bytes of the digest.
+//   4. Clamp: clear bits 0,1,2 of byte 0; clear bit 7 of byte 31; set bit 6 of byte 31.
+//
+// The returned [32]byte is the X25519 private scalar suitable for
+// crypto/nacl/box.OpenAnonymous as the recipient privkey. Pairs with
+// edPubkeyToX25519 — Mint converts the server pubkey, Validate
+// converts the server privkey, and the seal/open round-trips.
+//
+// FOOTGUN: do NOT pass priv[:32] as an X25519 scalar. That's the seed,
+// not the clamped scalar; using it directly will silently produce a
+// different X25519 keypair than the one paired with the converted
+// pubkey, and decryption will fail or (worse, in some weak setups)
+// succeed against an unintended recipient.
+func EdPrivkeyToX25519(priv ed25519.PrivateKey) [32]byte {
+	var out [32]byte
+	digest := sha512.Sum512(priv.Seed())
+	copy(out[:], digest[:32])
+	out[0] &= 248
+	out[31] &= 127
+	out[31] |= 64
+	return out
+}
+
+// EdPubkeyToX25519 is the exported counterpart to EdPrivkeyToX25519,
+// converting an Ed25519 public key to its X25519 (Montgomery) form.
+// Wraps the package-internal helper.
+func EdPubkeyToX25519(pub ed25519.PublicKey) ([32]byte, error) {
+	return edPubkeyToX25519(pub)
 }
 
 // edPubkeyToX25519 converts an Ed25519 public key to its X25519

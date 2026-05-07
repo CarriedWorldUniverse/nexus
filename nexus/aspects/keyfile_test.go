@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
 	"strings"
@@ -13,31 +12,6 @@ import (
 
 	"golang.org/x/crypto/nacl/box"
 )
-
-// edPrivkeyToX25519 converts an Ed25519 private key to its X25519
-// scalar form, suitable for crypto_box decryption.
-//
-// Spec recipe (libsodium crypto_sign_ed25519_sk_to_curve25519):
-//
-//   1. Take the 32-byte Ed25519 seed (first half of the 64-byte priv).
-//   2. SHA-512 the seed.
-//   3. Take the first 32 bytes of the digest.
-//   4. Clamp: clear bits 0,1,2 of byte 0; clear bit 7 of byte 31; set bit 6 of byte 31.
-//
-// This lives in the test file rather than keyfile.go because mint
-// doesn't need it — only decryption does, and that's Part 4's territory.
-// We need it here to round-trip-verify a minted keyfile is decryptable
-// by the matching server private key. Without this we'd be writing the
-// crypto blind.
-func edPrivkeyToX25519(priv ed25519.PrivateKey) [32]byte {
-	var out [32]byte
-	digest := sha512.Sum512(priv.Seed())
-	copy(out[:], digest[:32])
-	out[0] &= 248
-	out[31] &= 127
-	out[31] |= 64
-	return out
-}
 
 // TestMint_RoundTrip — primary load-bearing test. Mint a keyfile against
 // a fresh server keypair, then decrypt the payload using the matching
@@ -93,8 +67,8 @@ func TestMint_RoundTrip(t *testing.T) {
 	}
 
 	// Decrypt the sealed payload using the matching server priv.
-	xPriv := edPrivkeyToX25519(serverPriv)
-	xPub, err := edPubkeyToX25519(serverPub)
+	xPriv := EdPrivkeyToX25519(serverPriv)
+	xPub, err := EdPubkeyToX25519(serverPub)
 	if err != nil {
 		t.Fatalf("edPubkeyToX25519: %v", err)
 	}
@@ -224,7 +198,7 @@ func TestMint_RejectsInvalidInputs(t *testing.T) {
 // than e.g. all-zero output from a misnamed function).
 func TestEdPubkeyToX25519_RoundTrip(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	xpub, err := edPubkeyToX25519(pub)
+	xpub, err := EdPubkeyToX25519(pub)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
