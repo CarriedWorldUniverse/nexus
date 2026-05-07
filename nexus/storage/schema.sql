@@ -240,6 +240,73 @@ CREATE TABLE IF NOT EXISTS agent_tokens (
 CREATE INDEX IF NOT EXISTS idx_agent_tokens_token ON agent_tokens(token);
 
 -- -------------------------------------------------------------------
+-- Aspects — keyfile-auth spec §3.1
+-- -------------------------------------------------------------------
+-- Per agent-network/docs/2026-05-08-nexus-resident-personality-spec.md.
+-- Replaces the on-disk `aspect.json` model: aspects + their personalities
+-- are nexus.db-resident, runtime-pushed to agentfunnel hosts at startup.
+--
+-- `name` is the unique aspect identity within this Nexus instance. There
+-- is no global registry across Nexuses; (nexus_id, name) is the cross-
+-- Nexus key, but within a single Nexus the name alone is the PK.
+--
+-- `status`:
+--   'active'  — aspect can be minted, validated, and connected
+--   'retired' — keyfiles permanently dead; mint refused; resurrect to revive
+--
+-- `current_keyfile_version` — incremented on every mint. Validation
+-- rejects keyfile blobs whose embedded version is less than this. This
+-- is the auto-revoke mechanism: re-mint = bump version = old keyfile
+-- dead.
+--
+-- `aspect_pubkey` — 32-byte Ed25519 public key matching the privkey
+-- inside the encrypted keyfile blob. Validation derives the pubkey
+-- from the blob's privkey and compares to this column as a sanity
+-- check.
+--
+-- `provider` / `model` / `capabilities` / `metadata` — runtime config
+-- pushed to agentfunnel alongside the personality. Replaces aspect.json.
+CREATE TABLE IF NOT EXISTS aspects (
+  name                    TEXT PRIMARY KEY,
+  status                  TEXT NOT NULL DEFAULT 'active'
+                            CHECK (status IN ('active', 'retired')),
+  current_keyfile_version INTEGER NOT NULL DEFAULT 1,
+  aspect_pubkey           BLOB NOT NULL,
+  provider                TEXT NOT NULL,
+  model                   TEXT NOT NULL,
+  capabilities            TEXT,
+  metadata                TEXT,
+  created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at              TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_aspects_status ON aspects(status);
+
+-- -------------------------------------------------------------------
+-- Aspect personalities — keyfile-auth spec §3.2
+-- -------------------------------------------------------------------
+-- One row per aspect; CASCADE on delete with the parent aspects row.
+-- The three Markdown columns mirror the historical file layout
+-- (NEXUS.md / SOUL.md / PRIMER.md). Per task #68 (NEXUS.md naming
+-- replaces CLAUDE.md), the column is named `nexus_md` — vendor-neutral.
+--
+-- `composed` is a cache of the assembled SystemPrompt. Writers MUST
+-- invalidate (set to '' or recompute) on any change to nexus_md/soul_md/
+-- primer_md so reads always see fresh state. `version` increments on
+-- any column edit so connected aspects can detect drift via the
+-- personality.refresh push protocol (spec §6).
+CREATE TABLE IF NOT EXISTS aspect_personalities (
+  aspect_name TEXT PRIMARY KEY
+                REFERENCES aspects(name) ON DELETE CASCADE,
+  nexus_md    TEXT NOT NULL DEFAULT '',
+  soul_md     TEXT NOT NULL DEFAULT '',
+  primer_md   TEXT NOT NULL DEFAULT '',
+  composed    TEXT NOT NULL DEFAULT '',
+  version     INTEGER NOT NULL DEFAULT 1,
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- -------------------------------------------------------------------
 -- Nexus identity (single row) — keyfile-auth spec §3.3
 -- -------------------------------------------------------------------
 -- Per agent-network/docs/2026-05-08-nexus-resident-personality-spec.md.
