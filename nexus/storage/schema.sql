@@ -240,6 +240,33 @@ CREATE TABLE IF NOT EXISTS agent_tokens (
 CREATE INDEX IF NOT EXISTS idx_agent_tokens_token ON agent_tokens(token);
 
 -- -------------------------------------------------------------------
+-- Nexus identity (single row) — keyfile-auth spec §3.3
+-- -------------------------------------------------------------------
+-- Per agent-network/docs/2026-05-08-nexus-resident-personality-spec.md.
+-- Each Nexus instance has its own application-layer identity (separate
+-- from TLS cert): a stable nexus_id (UUID), an Ed25519 server keypair
+-- used for keyfile decryption (NaCl crypto_box_seal targets the X25519
+-- equivalent of server_pubkey), and an HMAC secret for signing
+-- session JWTs.
+--
+-- Single-row constraint: id MUST be 1. The `nexus identity init`
+-- subcommand populates this row at first run; subsequent boots fail
+-- loudly if the row is absent (don't silently regenerate — the
+-- nexus_id must be stable across restarts so keyfiles minted by this
+-- Nexus continue to validate).
+--
+-- This is application-layer identity. TLS cert (PR-A2 nexus cert init)
+-- is transport-layer and separate.
+CREATE TABLE IF NOT EXISTS nexus_identity (
+  id                     INTEGER PRIMARY KEY CHECK (id = 1),
+  nexus_id               TEXT NOT NULL,
+  server_pubkey          BLOB NOT NULL,
+  server_privkey         BLOB NOT NULL,
+  session_signing_secret BLOB NOT NULL,
+  created_at             TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- -------------------------------------------------------------------
 -- Schema metadata — marker only. Real migrations defer until first
 -- backwards-incompatible change (per §10 of registration spec).
 -- -------------------------------------------------------------------

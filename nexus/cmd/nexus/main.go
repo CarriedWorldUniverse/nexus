@@ -31,6 +31,22 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
+	bridle "github.com/CarriedWorldUniverse/bridle"
+	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
+	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
+	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
+	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/framecomms"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
+	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
+	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
 )
 
 // exitCodeBootstrapDone signals a successful first-boot setup. Supervisor
@@ -39,10 +55,14 @@ import (
 const exitCodeBootstrapDone = 64
 
 func main() {
-	// Subcommand dispatch — `nexus cert <verb>` peels off here before
-	// the broker flagset is parsed. Other subcommands land beside it.
+	// Subcommand dispatch — `nexus cert <verb>` and `nexus identity <verb>`
+	// peel off here before the broker flagset is parsed. Other subcommands
+	// land beside them.
 	if len(os.Args) >= 2 && os.Args[1] == "cert" {
 		os.Exit(runCertSubcommand(os.Args[2:]))
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "identity" {
+		os.Exit(runIdentitySubcommand(os.Args[2:]))
 	}
 	addr := flag.String("addr", ":7888", "broker listen address")
 	tokenEnv := flag.String("token-env", "NEXUS_TOKEN", "env var holding the shared bearer token")
@@ -113,6 +133,23 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+
+	// Application-layer identity — required for keyfile decryption +
+	// JWT signing. Operator runs `nexus identity init` once per Nexus;
+	// boot fails loud if missing (don't auto-init: nexus_id must be
+	// stable across restarts so existing keyfiles continue to validate).
+	// Per agent-network/docs/2026-05-08-nexus-resident-personality-spec.md.
+	nexusIdentity, err := identity.Load(ctx, db)
+	if err != nil {
+		if errors.Is(err, identity.ErrNotInitialized) {
+			logger.Error("nexus identity not initialised — run `nexus identity init` to populate the application-layer identity row before starting the broker")
+			os.Exit(2)
+		}
+		logger.Error("identity load failed", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("nexus identity loaded", "nexus_id", nexusIdentity.NexusID)
+	_ = nexusIdentity // consumed by Parts 4+ (keyfile validation, JWT signing)
 
 	r := roster.New()
 	proj := sessions.New(db)
