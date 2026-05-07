@@ -79,6 +79,13 @@ type Config struct {
 	AspectID     string // the Frame's name (operator-chosen)
 	SystemPrompt string // composed from NEXUS.md/SOUL.md/PRIMER.md by the caller
 
+	// SystemPromptFn, when non-nil, is consulted on every turn instead
+	// of SystemPrompt. Lets the caller swap the prompt at runtime
+	// (e.g., Frame personality refresh per spec §11) without rebuilding
+	// the funnel. SystemPrompt remains as a static fallback for callers
+	// who don't need refresh.
+	SystemPromptFn func() string
+
 	// bridle — the one-turn driver
 	Harness *bridle.Harness
 
@@ -322,9 +329,13 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		}
 	}
 
+	systemPrompt := f.cfg.SystemPrompt
+	if f.cfg.SystemPromptFn != nil {
+		systemPrompt = f.cfg.SystemPromptFn()
+	}
 	req := bridle.TurnRequest{
 		AspectID:     f.cfg.AspectID,
-		SystemPrompt: f.cfg.SystemPrompt,
+		SystemPrompt: systemPrompt,
 		Session:      session,
 		SessionTail:  tail,
 		UserMessage:  userMessage,
