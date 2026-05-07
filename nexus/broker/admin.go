@@ -169,6 +169,15 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 	mux.Handle("GET /api/admin/dispatch-status", b.requireAdmin(http.HandlerFunc(b.handleAdminDispatchStatus)))
 	mux.Handle("GET /api/admin/roster", b.requireAdmin(http.HandlerFunc(b.handleAdminRoster)))
 	mux.Handle("GET /api/admin/op/{id}", b.requireAdmin(http.HandlerFunc(b.handleAdminOp)))
+
+	// Personality edit (Part 7b). Wires via KeyfileValidator.Store
+	// since that's where the aspects backend already lives. When no
+	// validator is configured, the route is skipped — keyfile auth
+	// and personality editing share a config gate.
+	if b.cfg.KeyfileValidator != nil && b.cfg.KeyfileValidator.Store != nil {
+		mux.Handle("PUT /api/admin/aspect/{name}/personality",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminPersonalityEdit)))
+	}
 }
 
 // handleAdminShutdown kicks off a graceful shutdown. Long-running by
