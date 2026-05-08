@@ -210,7 +210,8 @@ func main() {
 		ServerEd25519Privkey: nexusIdentity.ServerPrivateKey,
 		SessionSigningSecret: nexusIdentity.SessionSigningSecret,
 		Store:                aspects.NewSQLStore(db),
-		JWTTTL:               time.Hour, // spec §6
+		Settings:             aspects.NewSQLSettingsStore(db), // Part 9
+		JWTTTL:               time.Hour,                       // spec §6
 	}
 
 	r := roster.New()
@@ -252,7 +253,8 @@ func main() {
 			TokenStore:       tokenStore,
 			DB:               db,
 			Logger:           logger,
-			PersonalityStore: aspects.NewSQLStore(db), // spec §11
+			PersonalityStore: aspects.NewSQLStore(db),         // spec §11
+			SettingsStore:    aspects.NewSQLSettingsStore(db), // Part 9
 		})
 		if err != nil {
 			logger.Error("frame embed failed", "err", err)
@@ -702,6 +704,13 @@ func discoverAspectIDs(aspectDirFlag string, log *slog.Logger) []string {
 //
 // Returns nil when no Frame is embedded — broker treats nil as
 // "no listener", same effective shape but cheaper.
+//
+// TODO(Part 9d): central nexus_md changes (via the future Part 9c
+// admin endpoint `PUT /api/admin/nexus-md`) need their own listener
+// that calls EmbeddedFrame.RefreshCentral. The hook lives on the
+// EmbeddedFrame (Part 9b); the trigger wiring is 9d's job. Without
+// it, the Frame will keep serving stale central content until
+// process restart, even though the DB has the new value.
 func buildOnPersonalityChange(ctx context.Context, ef *frame.EmbeddedFrame, log *slog.Logger) func(string, int64) {
 	if ef == nil {
 		return nil

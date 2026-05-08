@@ -112,6 +112,47 @@ func TestValidate_HappyPath(t *testing.T) {
 	}
 }
 
+// TestValidate_DeliversCentralNexusMD — Part 9b: when a SettingsStore
+// is wired and nexus_settings.nexus_md is populated, Validate
+// surfaces the central content + version on the response so
+// agentfunnel can layer it above the per-aspect bundle.
+func TestValidate_DeliversCentralNexusMD(t *testing.T) {
+	f := newValidateFixture(t)
+	settings := NewSQLSettingsStore(f.store.DBForTest())
+	if _, err := settings.SetNexusMD(context.Background(), "## central"); err != nil {
+		t.Fatalf("SetNexusMD: %v", err)
+	}
+	f.cfg.Settings = settings
+
+	sess, err := Validate(context.Background(), f.cfg, f.sealed)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if sess.CentralNexusMD != "## central" {
+		t.Errorf("CentralNexusMD = %q; want ## central", sess.CentralNexusMD)
+	}
+	if sess.CentralVersion != 1 {
+		t.Errorf("CentralVersion = %d; want 1", sess.CentralVersion)
+	}
+}
+
+// TestValidate_NoSettingsStore_LegacyShape — when SettingsStore is
+// absent (legacy callers, tests), Central fields are zero-valued and
+// the response shape stays Part 5 / spec §5 compatible.
+func TestValidate_NoSettingsStore_LegacyShape(t *testing.T) {
+	f := newValidateFixture(t)
+	// f.cfg.Settings is nil by default.
+
+	sess, err := Validate(context.Background(), f.cfg, f.sealed)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if sess.CentralNexusMD != "" || sess.CentralVersion != 0 {
+		t.Errorf("legacy shape: central populated unexpectedly: %q / %d",
+			sess.CentralNexusMD, sess.CentralVersion)
+	}
+}
+
 // TestValidate_DeliversPersonalityWhenSet — the bundle-fetch path. If
 // a personality row exists, Validate must pass it through.
 func TestValidate_DeliversPersonalityWhenSet(t *testing.T) {

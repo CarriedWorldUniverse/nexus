@@ -123,6 +123,18 @@ type ValidatedSession struct {
 	// strings + Version=0 if no personality row exists yet (this is
 	// allowed; agentfunnel can run without one).
 	Personality *Personality
+
+	// CentralNexusMD is the network-wide central nexus_md from
+	// nexus_settings (Part 9). Layered ABOVE Personality.NexusMD in
+	// the composed prompt: central holds the operational scope shared
+	// by every aspect; per-aspect nexus_md is a short delta. Empty
+	// when Part 9 isn't wired (legacy callers without SettingsStore).
+	CentralNexusMD string
+
+	// CentralVersion lets agentfunnel detect when central content
+	// changes between re-validations, independent of the per-aspect
+	// Personality.Version.
+	CentralVersion int64
 }
 
 // ValidateConfig packages the dependencies Validate needs. Pulled out
@@ -131,6 +143,11 @@ type ValidatedSession struct {
 type ValidateConfig struct {
 	// Store is the aspects backend.
 	Store Store
+
+	// Settings is the nexus_settings backend (Part 9). Optional —
+	// when nil, ValidatedSession.CentralNexusMD is left empty and the
+	// agent composes from per-aspect content alone (legacy behaviour).
+	Settings SettingsStore
 
 	// NexusID is the stable UUID. Goes into the JWT Iss claim.
 	NexusID string
@@ -281,6 +298,34 @@ func Validate(ctx context.Context, cfg ValidateConfig, encryptedPayloadB64 strin
 		return nil, fmt.Errorf("aspects.Validate: personality lookup: %w", err)
 	}
 
+	// Step 8 (Part 9): central nexus_md from nexus_settings. Layered
+	// above the per-aspect bundle in the composed prompt. Optional —
+	// nil SettingsStore means "no central content", which is the
+	// legacy shape (Part 9 callers always wire it; only test paths
+	// might leave it nil).
+	//
+	// Read failures degrade gracefully to the legacy shape. Identity
+	// is already fully verified by this point; central is supplemental
+	// context, not auth material, and a transient settings read
+	// shouldn't reject a valid handshake. Mirrors frame.Embed's
+	// warn-and-continue path.
+	var centralContent string
+	var centralVersion int64
+	if cfg.Settings != nil {
+		ns, sErr := cfg.Settings.Get(ctx)
+		if sErr != nil {
+			// Soft fail — caller still gets a working session, just
+			// without the central section. Surface to the HTTP layer
+			// log via the broker, not the wire.
+			centralContent = ""
+			centralVersion = 0
+			_ = sErr // intentional: graceful degrade on transient read
+		} else {
+			centralContent = ns.NexusMD
+			centralVersion = ns.Version
+		}
+	}
+
 	return &ValidatedSession{
 		AspectName:     p.AspectName,
 		KeyfileVersion: p.KeyfileVersion,
@@ -290,5 +335,7 @@ func Validate(ctx context.Context, cfg ValidateConfig, encryptedPayloadB64 strin
 		Provider:       a.Provider,
 		Model:          a.Model,
 		Personality:    personality,
+		CentralNexusMD: centralContent,
+		CentralVersion: centralVersion,
 	}, nil
 }

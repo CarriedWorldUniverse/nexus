@@ -48,6 +48,13 @@ type KeyfileValidator struct {
 	// Store is the aspects backend.
 	Store aspects.Store
 
+	// Settings is the nexus_settings backend (Part 9). Validate uses
+	// it to populate ValidatedSession.CentralNexusMD/CentralVersion in
+	// the response, so agentfunnel can layer the central content
+	// above the per-aspect bundle. Optional; nil = legacy shape with
+	// per-aspect content only.
+	Settings aspects.SettingsStore
+
 	// JWTTTL is the issued JWT lifetime. Default 1h per spec §6.
 	JWTTTL time.Duration
 }
@@ -63,12 +70,21 @@ type validateRequest struct {
 // always emitted (substituting an empty bundle when no row exists) so
 // the wire shape is stable for agentfunnel's JSON decoder.
 type validateResponse struct {
-	OK                bool                `json:"ok"`
-	SessionJWT        string              `json:"session_jwt"`
-	SessionExpiresAt  string              `json:"session_expires_at"`
-	Personality       personalityWire     `json:"personality"`
-	Provider          string              `json:"provider"`
-	Model             string              `json:"model"`
+	OK               bool            `json:"ok"`
+	SessionJWT       string          `json:"session_jwt"`
+	SessionExpiresAt string          `json:"session_expires_at"`
+	Personality      personalityWire `json:"personality"`
+	Provider         string          `json:"provider"`
+	Model            string          `json:"model"`
+
+	// CentralNexusMD is the network-wide nexus_settings.nexus_md
+	// (Part 9). agentfunnel layers it ABOVE Personality.NexusMD in
+	// the composed prompt. CentralVersion lets the agent detect
+	// changes between re-validations independent of the personality
+	// version. Both are zero-valued when Part 9 isn't wired (legacy
+	// shape — Personality alone is the prompt).
+	CentralNexusMD string `json:"central_nexus_md"`
+	CentralVersion int64  `json:"central_version"`
 }
 
 // personalityWire is the on-the-wire shape of the personality bundle.
@@ -159,6 +175,7 @@ func (b *Broker) handleAspectValidate(w http.ResponseWriter, r *http.Request) {
 
 	cfg := aspects.ValidateConfig{
 		Store:                v.Store,
+		Settings:             v.Settings,
 		NexusID:              v.NexusID,
 		ServerEd25519Privkey: v.ServerEd25519Privkey,
 		ServerEd25519Pubkey:  v.ServerEd25519Pubkey,
@@ -199,6 +216,8 @@ func (b *Broker) handleAspectValidate(w http.ResponseWriter, r *http.Request) {
 		Provider:         sess.Provider,
 		Model:            sess.Model,
 		Personality:      personalityWireFrom(sess.Personality),
+		CentralNexusMD:   sess.CentralNexusMD,
+		CentralVersion:   sess.CentralVersion,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
