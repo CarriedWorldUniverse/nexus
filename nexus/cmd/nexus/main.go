@@ -433,6 +433,12 @@ func main() {
 		// on the next deliberation turn. Non-Frame aspects pick up at
 		// next JWT re-validation; broadcast frame is a future Part.
 		OnPersonalityChange: buildOnPersonalityChange(ctx, embeddedFrame, logger),
+		// Spec §5: nexus_md changes are network-wide (every aspect's
+		// composed prompt includes central content). The in-process
+		// Frame's cached central is refreshed via the callback below;
+		// remote aspects pick up at next JWT re-validation. Future
+		// broadcast frame (`personality.refresh`) will hook in here too.
+		OnNexusMDChange: buildOnNexusMDChange(ctx, embeddedFrame, logger),
 	}, r)
 
 	// Wire the embedded Frame's chat gateway to broker.HandleChatSend so
@@ -707,13 +713,6 @@ func discoverAspectIDs(aspectDirFlag string, log *slog.Logger) []string {
 //
 // Returns nil when no Frame is embedded — broker treats nil as
 // "no listener", same effective shape but cheaper.
-//
-// TODO(Part 9d): central nexus_md changes (via the future Part 9c
-// admin endpoint `PUT /api/admin/nexus-md`) need their own listener
-// that calls EmbeddedFrame.RefreshCentral. The hook lives on the
-// EmbeddedFrame (Part 9b); the trigger wiring is 9d's job. Without
-// it, the Frame will keep serving stale central content until
-// process restart, even though the DB has the new value.
 func buildOnPersonalityChange(ctx context.Context, ef *frame.EmbeddedFrame, log *slog.Logger) func(string, int64) {
 	if ef == nil {
 		return nil
@@ -737,6 +736,39 @@ func buildOnPersonalityChange(ctx context.Context, ef *frame.EmbeddedFrame, log 
 		}
 		log.Info("frame personality refreshed in-process",
 			"aspect", aspectName, "version", newVersion)
+	}
+}
+
+// buildOnNexusMDChange returns the OnNexusMDChange callback for
+// broker.Config (Part 9d). Fires after a successful PUT
+// /api/admin/nexus-md edit; calls EmbeddedFrame.RefreshCentral so the
+// Frame picks up the new central content on its next deliberation
+// turn (Part 9b's SystemPromptFn callback path reads the updated
+// cache).
+//
+// Network-wide change: every aspect's composed prompt includes the
+// central section, so a future broadcast frame would also fire from
+// here. v0.1: in-process Frame refreshes immediately; remote
+// agentfunnels pick up at next JWT re-validation (1h TTL).
+//
+// Returns nil when no Frame is embedded — broker treats nil as
+// "no listener", same effective shape but cheaper.
+func buildOnNexusMDChange(ctx context.Context, ef *frame.EmbeddedFrame, log *slog.Logger) func(int64) {
+	if ef == nil {
+		return nil
+	}
+	return func(newVersion int64) {
+		// Same context discipline as OnPersonalityChange — broker
+		// parent context, bounded refresh timeout.
+		refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := ef.RefreshCentral(refreshCtx); err != nil {
+			log.Warn("frame central refresh failed",
+				"version", newVersion, "err", err)
+			return
+		}
+		log.Info("frame central nexus_md refreshed in-process",
+			"version", newVersion)
 	}
 }
 
