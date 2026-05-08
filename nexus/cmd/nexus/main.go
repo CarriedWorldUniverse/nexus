@@ -176,6 +176,31 @@ func main() {
 	}
 	logger.Info("nexus identity loaded", "nexus_id", nexusIdentity.NexusID)
 
+	// Personality decomposition Part 9a: seed the central
+	// nexus_settings.nexus_md from existing aspect content if it
+	// hasn't been initialised yet. Idempotent — skips when populated.
+	// Per spec §6 (revised) this is a soft migration: per-aspect rows
+	// are left untouched; operator manually prunes duplicates.
+	preferredFrame := ""
+	if detectedFrame != nil {
+		preferredFrame = detectedFrame.Name
+	}
+	if mres, merr := aspects.MigrateCentralFromAspect(ctx, db, preferredFrame); merr != nil {
+		logger.Warn("nexus_settings migration: failed (continuing)", "err", merr)
+	} else if mres.Skipped {
+		logger.Debug("nexus_settings migration: skipped", "reason", mres.Reason)
+	} else {
+		logger.Info("nexus_settings migration: seeded central nexus_md",
+			"from", mres.SeededFrom,
+			"bytes", mres.ContentBytes,
+			"divergent_aspects", mres.DivergentAspects)
+		if len(mres.DivergentAspects) > 0 {
+			logger.Warn("nexus_settings migration: aspects with divergent nexus_md content",
+				"aspects", mres.DivergentAspects,
+				"hint", "manually prune via `nexus personality edit <name>` to keep only aspect-specific deltas")
+		}
+	}
+
 	// Build the keyfile validator (Part 4b). When wired into
 	// broker.Config below, this enables GET /api/nexus_id and POST
 	// /api/aspect/validate per spec §5.
