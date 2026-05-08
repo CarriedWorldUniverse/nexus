@@ -42,6 +42,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -161,12 +162,13 @@ func main() {
 	gateway := wsasp.NewGateway(wsClient)
 	commsRunner := funnel.CommsRunner{Gateway: gateway}
 
+	systemPrompt := composeSystemPrompt(res)
 	f, err := funnel.New(funnel.Config{
 		AspectID:     res.AspectName,
 		Harness:      bridle.NewHarness(provider),
 		Provider:     bridle.ProviderID(res.Provider),
 		Model:        res.Model,
-		SystemPrompt: res.Personality.Composed,
+		SystemPrompt: systemPrompt,
 		Tools:        funnel.CommsToolDefs(),
 		Runner:       funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
 		Logger:       log,
@@ -179,7 +181,9 @@ func main() {
 	log.Info("agentfunnel: starting deliberation loop",
 		"aspect", res.AspectName,
 		"session", sessionID,
-		"system_prompt_bytes", len(res.Personality.Composed))
+		"system_prompt_bytes", len(systemPrompt),
+		"central_version", res.CentralVersion,
+		"personality_version", res.Personality.Version)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -205,6 +209,44 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("agentfunnel: stopped")
+}
+
+// composeSystemPrompt layers the validation result into the four-
+// section concat per spec §3 (personality decomposition):
+//
+//	central.nexus_md ⊕ aspect.nexus_md ⊕ aspect.soul_md ⊕ aspect.primer_md
+//
+// When personality.composed is non-empty (Part 7 renderer populated it),
+// uses central + composed instead — but the renderer must NOT bake
+// central into composed (the no-double-bake invariant pinned in
+// nexus/frame/embed_personality_test.go's
+// TestEmbed_ComposedDoesNotDoubleBakeCentral).
+//
+// Empty sections are dropped from the join. Returns "" only when
+// every section is empty (legacy / pre-Part-9 Nexus + unprovisioned
+// aspect).
+func composeSystemPrompt(res *keyfile.ValidationResult) string {
+	if res == nil {
+		return ""
+	}
+	parts := make([]string, 0, 4)
+	if res.CentralNexusMD != "" {
+		parts = append(parts, res.CentralNexusMD)
+	}
+	if res.Personality.Composed != "" {
+		parts = append(parts, res.Personality.Composed)
+	} else {
+		if res.Personality.NexusMD != "" {
+			parts = append(parts, res.Personality.NexusMD)
+		}
+		if res.Personality.SoulMD != "" {
+			parts = append(parts, res.Personality.SoulMD)
+		}
+		if res.Personality.PrimerMD != "" {
+			parts = append(parts, res.Personality.PrimerMD)
+		}
+	}
+	return strings.Join(parts, "\n\n---\n\n")
 }
 
 // jwtExpiryMonitor cancels ctx (via stop) shortly before the JWT

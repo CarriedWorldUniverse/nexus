@@ -125,6 +125,13 @@ func (b *Broker) registerKeyfileEndpoints(mux *http.ServeMux) {
 	}
 	mux.HandleFunc("GET /api/nexus_id", b.handleNexusID)
 	mux.HandleFunc("POST /api/aspect/validate", b.handleAspectValidate)
+
+	// Part 9c: aspect self-edit personality. Uses session JWT (sub
+	// claim) for auth, NOT admin bearer. Gated on Store being wired
+	// since the aspect row is the write target.
+	if v.Store != nil {
+		mux.HandleFunc("PUT /api/aspect/personality", b.handleAspectSelfEdit)
+	}
 }
 
 func (b *Broker) handleNexusID(w http.ResponseWriter, r *http.Request) {

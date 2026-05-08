@@ -121,10 +121,23 @@ type ValidationResult struct {
 	// re-validates before this point to refresh.
 	SessionExpiresAt time.Time
 
-	// Personality is the bundle straight from the response. Composed
-	// is the canonical SystemPrompt; agentfunnel's caller is expected
-	// to use that field unless explicitly overriding.
+	// Personality is the per-aspect bundle straight from the response.
+	// Composed is the canonical per-aspect prompt; agentfunnel's
+	// caller layers CentralNexusMD ABOVE it (per Part 9 decomposition
+	// spec) — the per-aspect Composed must NOT include central
+	// content.
 	Personality PersonalityBundle
+
+	// CentralNexusMD is nexus_settings.nexus_md from the Nexus —
+	// network-wide operational scope shared by every aspect (Part 9).
+	// Empty when the Nexus isn't running Part 9 (legacy validators).
+	// agentfunnel layers it above Personality.NexusMD in the composed
+	// prompt; see runtime/cmd/agentfunnel for the concat logic.
+	CentralNexusMD string
+
+	// CentralVersion lets agentfunnel detect when central content
+	// changes between re-validations, independent of personality.Version.
+	CentralVersion int64
 
 	// Provider/Model identify the bridle backend.
 	Provider string
@@ -235,6 +248,8 @@ func (c *Client) Validate(ctx context.Context, kf *Keyfile) (*ValidationResult, 
 		SessionJWT:       resp.SessionJWT,
 		SessionExpiresAt: expiresAt,
 		Personality:      resp.Personality,
+		CentralNexusMD:   resp.CentralNexusMD,
+		CentralVersion:   resp.CentralVersion,
 		Provider:         resp.Provider,
 		Model:            resp.Model,
 		NexusURL:         kf.Envelope.NexusURL,
@@ -276,7 +291,7 @@ func (c *Client) checkNexusID(ctx context.Context, base, expected string) error 
 }
 
 // validateResponse is the wire shape POST /api/aspect/validate returns
-// on success. Mirrors broker.validateResponse.
+// on success. Mirrors broker.validateResponse — must stay in sync.
 type validateResponse struct {
 	OK               bool              `json:"ok"`
 	SessionJWT       string            `json:"session_jwt"`
@@ -284,6 +299,12 @@ type validateResponse struct {
 	Personality      PersonalityBundle `json:"personality"`
 	Provider         string            `json:"provider"`
 	Model            string            `json:"model"`
+
+	// Part 9 fields. Older Nexus instances (pre-Part-9) won't emit
+	// these; JSON decoding leaves them zero-valued, agentfunnel
+	// composes from per-aspect content alone (legacy shape).
+	CentralNexusMD string `json:"central_nexus_md"`
+	CentralVersion int64  `json:"central_version"`
 }
 
 // postValidate POSTs the encrypted_payload and decodes the response.

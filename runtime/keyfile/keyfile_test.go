@@ -121,7 +121,10 @@ func fakeNexusServer(t *testing.T, opts fakeServerOpts) *httptest.Server {
 				"nexus_md": "## plumb", "soul_md": "soul", "primer_md": "primer",
 				"composed": "## plumb\n\nsoul\n\nprimer", "version": 1, "updated_at": "2026-05-08T10:00:00Z",
 			},
-			"provider": "claude-api", "model": "claude-opus-4-7",
+			"provider":         "claude-api",
+			"model":            "claude-opus-4-7",
+			"central_nexus_md": opts.centralNexusMD,
+			"central_version":  opts.centralVersion,
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -136,6 +139,8 @@ type fakeServerOpts struct {
 	validateBody   string // override body for non-2xx
 	jwt            string // session_jwt to return
 	expiresAt      string // session_expires_at to return (RFC3339)
+	centralNexusMD string // Part 9 central content (zero-valued = legacy shape)
+	centralVersion int64  // Part 9 central version
 }
 
 // TestValidate_HappyPath — end-to-end against a fake Nexus that mirrors
@@ -172,6 +177,62 @@ func TestValidate_HappyPath(t *testing.T) {
 	}
 	if res.SessionExpiresAt.IsZero() {
 		t.Error("SessionExpiresAt zero")
+	}
+}
+
+// TestValidate_DecodesCentralFields — Part 9: when the Nexus emits
+// central_nexus_md + central_version on the wire, ValidationResult
+// surfaces them. Older Nexuses without Part 9 emit zero-valued fields
+// and the agent composes from per-aspect content alone (legacy shape).
+func TestValidate_DecodesCentralFields(t *testing.T) {
+	srv := fakeNexusServer(t, fakeServerOpts{
+		nexusID:        "matching-id",
+		jwt:            fakeJWT(t, "plumb"),
+		expiresAt:      "2026-05-08T11:00:00Z",
+		centralNexusMD: "## central network scope",
+		centralVersion: 7,
+	})
+	kf := &Keyfile{
+		Version: 1, Format: expectedFormat,
+		Envelope:         Envelope{NexusURL: srv.URL + "/connect", NexusID: "matching-id"},
+		EncryptedPayload: "AAAA",
+	}
+	c := &Client{HTTP: srv.Client()}
+	res, err := c.Validate(context.Background(), kf)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.CentralNexusMD != "## central network scope" {
+		t.Errorf("CentralNexusMD = %q; want '## central network scope'", res.CentralNexusMD)
+	}
+	if res.CentralVersion != 7 {
+		t.Errorf("CentralVersion = %d; want 7", res.CentralVersion)
+	}
+}
+
+// TestValidate_LegacyNexusOmitsCentralFields — when central fields
+// are absent (pre-Part-9 Nexus), the result has zero values. Agent
+// composes legacy-style.
+func TestValidate_LegacyNexusOmitsCentralFields(t *testing.T) {
+	srv := fakeNexusServer(t, fakeServerOpts{
+		nexusID:   "matching-id",
+		jwt:       fakeJWT(t, "plumb"),
+		expiresAt: "2026-05-08T11:00:00Z",
+		// centralNexusMD + centralVersion zero-valued
+	})
+	kf := &Keyfile{
+		Version: 1, Format: expectedFormat,
+		Envelope:         Envelope{NexusURL: srv.URL + "/connect", NexusID: "matching-id"},
+		EncryptedPayload: "AAAA",
+	}
+	c := &Client{HTTP: srv.Client()}
+	res, err := c.Validate(context.Background(), kf)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.CentralNexusMD != "" || res.CentralVersion != 0 {
+		t.Errorf("legacy shape: central populated unexpectedly: %q / %d",
+			res.CentralNexusMD, res.CentralVersion)
 	}
 }
 

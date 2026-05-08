@@ -199,6 +199,17 @@ type Config struct {
 	// nil callback is a no-op (legacy boot path, or Frame not yet
 	// embedded).
 	OnPersonalityChange func(aspectName string, newVersion int64)
+
+	// OnNexusMDChange is invoked after a successful central nexus_md
+	// edit (REST Part 9c via PUT /api/admin/nexus-md). cmd/nexus wires
+	// this to EmbeddedFrame.RefreshCentral so the in-process Frame
+	// picks up the change on the next turn (Part 9b's SystemPromptFn
+	// callback path).
+	//
+	// Network-wide change: every live aspect's composed prompt
+	// includes central content, so the future WS broadcast will land
+	// here too (Part 9d). nil callback is a no-op.
+	OnNexusMDChange func(newVersion int64)
 }
 
 // ChatRouterCallbacks wires the broker's chat.send handling to the
