@@ -178,6 +178,14 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 		mux.Handle("PUT /api/admin/aspect/{name}/personality",
 			b.requireAdmin(http.HandlerFunc(b.handleAdminPersonalityEdit)))
 	}
+
+	// Central nexus_md edit (Part 9c). Gated on Settings being wired
+	// alongside the aspects Store. nil = legacy / pre-Part-9 boot;
+	// the route returns 404 from the mux.
+	if b.cfg.KeyfileValidator != nil && b.cfg.KeyfileValidator.Settings != nil {
+		mux.Handle("PUT /api/admin/nexus-md",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminNexusMDEdit)))
+	}
 }
 
 // handleAdminShutdown kicks off a graceful shutdown. Long-running by
