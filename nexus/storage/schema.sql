@@ -334,6 +334,31 @@ CREATE TABLE IF NOT EXISTS nexus_identity (
 );
 
 -- -------------------------------------------------------------------
+-- Nexus settings (single row) — personality decomposition Part 9a
+-- -------------------------------------------------------------------
+-- Per agent-network/docs/2026-05-08-personality-decomposition-spec.md.
+-- Holds the central, network-wide nexus_md content — operational scope
+-- shared by every aspect on this Nexus. Per-aspect aspect_personalities
+-- .nexus_md remains as a short delta (≤ ~1 paragraph) layered on top.
+--
+-- Composed prompt = nexus_settings.nexus_md ⊕ aspect.nexus_md ⊕
+-- aspect.soul_md ⊕ aspect.primer_md.
+--
+-- Single-row constraint mirrors nexus_identity. Admin-edited only;
+-- aspects have no agent-side write path to this row.
+CREATE TABLE IF NOT EXISTS nexus_settings (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  nexus_md   TEXT NOT NULL DEFAULT '',
+  -- version starts at 0 so the first SetNexusMD always lands at >=1.
+  -- Lets refresh-callback subscribers (Part 9d) reliably detect the
+  -- first write — without this, a fresh-table SetNexusMD would land
+  -- at version=1 (same as default), and version-equality readers
+  -- couldn't distinguish "uninitialised" from "first content."
+  version    INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- -------------------------------------------------------------------
 -- Schema metadata — marker only. Real migrations defer until first
 -- backwards-incompatible change (per §10 of registration spec).
 -- -------------------------------------------------------------------
