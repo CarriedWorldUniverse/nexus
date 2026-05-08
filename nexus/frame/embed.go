@@ -62,50 +62,60 @@ type EmbeddedFrame struct {
 	// the funnel reader (via SystemPrompt) reads concurrently.
 	mu          sync.RWMutex
 	personality *aspects.Personality
-	store       aspects.Store // retained for RefreshPersonality
+
+	// centralNexusMD caches nexus_settings.nexus_md (Part 9). Layered
+	// above per-aspect personality content in the composed prompt.
+	// RefreshCentral re-reads it; the read goes through the same mu
+	// as personality so the funnel sees a coherent snapshot.
+	centralNexusMD string
+	centralVersion int64
+
+	store         aspects.Store         // retained for RefreshPersonality
+	settingsStore aspects.SettingsStore // retained for RefreshCentral (Part 9)
 }
 
 // SystemPrompt returns the composed personality prompt for the Frame's
-// funnel.Config.SystemPromptFn. Empty when no aspect_personalities row
-// exists yet (Frame still functions; operator runs `nexus personality
-// edit <frame>` to populate). Safe for concurrent reads with
-// RefreshPersonality.
+// funnel.Config.SystemPromptFn. Safe for concurrent reads with
+// RefreshPersonality / RefreshCentral.
 //
-// Per spec §11: keel reads its personality from
-// `aspect_personalities WHERE aspect_name='keel'` rather than from
-// CLAUDE.md/SOUL.md/PRIMER.md on disk.
+// Per spec §11 (keyfile spec) + Part 9 (decomposition): the Frame
+// reads BOTH the central nexus_settings.nexus_md AND the per-aspect
+// aspect_personalities row, layered:
 //
-// Resolution order:
+//	central.nexus_md      ← network-wide operational scope
+//	aspect.nexus_md       ← per-aspect delta (short)
+//	aspect.soul_md        ← voice/values
+//	aspect.primer_md      ← network primer
 //
-//  1. If `composed` is non-empty (Part 7's renderer will populate it),
-//     return it directly. This is the canonical path once Part 7 ships.
-//  2. Otherwise — and this is the Part 6 → Part 7 gap — concatenate
-//     NexusMD + SoulMD + PrimerMD with section separators. Without
-//     this concat the Frame would run with operational scope (NexusMD)
-//     but no voice/values (SoulMD) or network primer (PrimerMD).
-//     Note that PersonalitySet invalidates `composed` on every write
-//     (Part 2), so this fallback is the active path until a renderer
-//     populates the cache.
-//  3. If everything is empty, return "" — Frame still boots, just
-//     prompt-less.
+// Empty sections are omitted from the join. If the per-aspect row's
+// `composed` cache is non-empty (Part 7+ renderer populated it), the
+// central+composed pair is concatenated instead of the four-section
+// fallback — so the renderer doesn't have to know about central.
+//
+// Returns "" only when central + per-aspect are all empty (Frame
+// boots prompt-less; operator populates via `nexus personality edit`
+// or `nexus admin nexus-md edit` Part 9c).
 func (e *EmbeddedFrame) SystemPrompt() string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	if e.personality == nil {
-		return ""
+	parts := make([]string, 0, 4)
+	if e.centralNexusMD != "" {
+		parts = append(parts, e.centralNexusMD)
 	}
-	if e.personality.Composed != "" {
-		return e.personality.Composed
-	}
-	parts := make([]string, 0, 3)
-	if e.personality.NexusMD != "" {
-		parts = append(parts, e.personality.NexusMD)
-	}
-	if e.personality.SoulMD != "" {
-		parts = append(parts, e.personality.SoulMD)
-	}
-	if e.personality.PrimerMD != "" {
-		parts = append(parts, e.personality.PrimerMD)
+	if e.personality != nil {
+		if e.personality.Composed != "" {
+			parts = append(parts, e.personality.Composed)
+		} else {
+			if e.personality.NexusMD != "" {
+				parts = append(parts, e.personality.NexusMD)
+			}
+			if e.personality.SoulMD != "" {
+				parts = append(parts, e.personality.SoulMD)
+			}
+			if e.personality.PrimerMD != "" {
+				parts = append(parts, e.personality.PrimerMD)
+			}
+		}
 	}
 	return strings.Join(parts, "\n\n---\n\n")
 }
@@ -134,6 +144,39 @@ func (e *EmbeddedFrame) RefreshPersonality(ctx context.Context) error {
 	return nil
 }
 
+// RefreshCentral re-reads nexus_settings.nexus_md and swaps the cached
+// central content. Part 9d will fire this when the operator edits the
+// central content via the admin endpoint, so every aspect's composed
+// prompt picks up the change on its next deliberation turn (via the
+// SystemPromptFn callback wired in Part 6).
+//
+// Returns nil-error and a no-op silently if no SettingsStore was
+// wired at Embed time (legacy Part 6/7 callers without Part 9). When
+// wired, returns the underlying error on read failure.
+func (e *EmbeddedFrame) RefreshCentral(ctx context.Context) error {
+	if e.settingsStore == nil {
+		return nil
+	}
+	ns, err := e.settingsStore.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("frame: RefreshCentral: %w", err)
+	}
+	e.mu.Lock()
+	e.centralNexusMD = ns.NexusMD
+	e.centralVersion = ns.Version
+	e.mu.Unlock()
+	return nil
+}
+
+// CentralVersion exposes the cached central nexus_settings version
+// for callers that want to detect changes without reading content.
+// 0 means "never loaded" or "Settings store not wired."
+func (e *EmbeddedFrame) CentralVersion() int64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.centralVersion
+}
+
 // EmbedConfig threads dependencies into Embed without growing a long
 // argument list. Roster, TokenStore, Detected required; DB, Logger,
 // PersonalityStore optional.
@@ -154,6 +197,13 @@ type EmbedConfig struct {
 	// Per spec §11: keel reads its personality from
 	// aspect_personalities, not from on-disk markdown.
 	PersonalityStore aspects.Store
+
+	// SettingsStore is the nexus_settings backend (Part 9). When
+	// non-nil, Embed loads the central nexus_md content at boot;
+	// SystemPrompt layers it above the per-aspect bundle.
+	// RefreshCentral re-reads it on demand. nil = legacy Part 6/7
+	// behaviour (per-aspect content only).
+	SettingsStore aspects.SettingsStore
 }
 
 // ErrEmbedRequiresFrame is returned when Embed is called with a nil
@@ -248,20 +298,45 @@ func Embed(ctx context.Context, cfg EmbedConfig) (*EmbeddedFrame, error) {
 		}
 	}
 
+	// Part 9: load central nexus_md from nexus_settings if wired.
+	// Cached on the EmbeddedFrame; SystemPrompt layers it above the
+	// per-aspect bundle. Failure is non-fatal — Frame still boots
+	// with whatever per-aspect content it has, just without the
+	// network-wide central section.
+	var (
+		centralContent string
+		centralVersion int64
+	)
+	if cfg.SettingsStore != nil {
+		ns, sErr := cfg.SettingsStore.Get(ctx)
+		if sErr != nil {
+			cfg.Logger.Warn("frame: load central nexus_md failed — running without central section",
+				"err", sErr)
+		} else {
+			centralContent = ns.NexusMD
+			centralVersion = ns.Version
+		}
+	}
+
 	cfg.Logger.Info("frame: embedded as in-process aspect",
 		"name", name, "session", sessionID, "pid", pid,
 		"home", cfg.Detected.Path, "context_mode", cfg.Detected.Config.ContextMode,
 		"provider", cfg.Detected.Config.Provider, "model", registerReq.Model,
 		"personality_loaded", personality != nil,
-		"personality_version", personalityVersion(personality))
+		"personality_version", personalityVersion(personality),
+		"central_loaded", centralContent != "",
+		"central_version", centralVersion)
 
 	return &EmbeddedFrame{
-		Aspect:      *cfg.Detected,
-		AdminToken:  token,
-		SessionID:   sessionID,
-		State:       state,
-		personality: personality,
-		store:       cfg.PersonalityStore,
+		Aspect:         *cfg.Detected,
+		AdminToken:     token,
+		SessionID:      sessionID,
+		State:          state,
+		personality:    personality,
+		centralNexusMD: centralContent,
+		centralVersion: centralVersion,
+		store:          cfg.PersonalityStore,
+		settingsStore:  cfg.SettingsStore,
 	}, nil
 }
 

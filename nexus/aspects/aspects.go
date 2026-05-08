@@ -131,6 +131,13 @@ func NewSQLStore(db *sql.DB) *SQLStore {
 	return &SQLStore{db: db}
 }
 
+// DBForTest exposes the underlying *sql.DB for tests in other packages
+// that need to construct a sibling store sharing the same connection
+// (e.g. SQLSettingsStore in Part 9 frame tests). Not for production use.
+func (s *SQLStore) DBForTest() *sql.DB {
+	return s.db
+}
+
 // scanAspect populates an Aspect from a *sql.Row or *sql.Rows.
 func scanAspect(scan func(...any) error) (*Aspect, error) {
 	var a Aspect

@@ -212,6 +212,159 @@ func TestEmbed_RefreshPersonality(t *testing.T) {
 	}
 }
 
+// TestEmbed_ComposedDoesNotDoubleBakeCentral — pins the seam for the
+// future Part 7 renderer that will populate aspect_personalities.composed.
+//
+// Invariant: when SystemPrompt is called with both centralNexusMD set
+// AND personality.Composed set, the result is `central + composed`,
+// NOT `central + (central + per-aspect)`. This means the renderer
+// must NOT bake central content into Composed — central is layered
+// at read time.
+//
+// This test passes today against the current code (one concat layer).
+// Its job is to fail loudly if Part 7's renderer author bakes central
+// into Composed without realising SystemPrompt also adds it.
+func TestEmbed_ComposedDoesNotDoubleBakeCentral(t *testing.T) {
+	e := &EmbeddedFrame{
+		centralNexusMD: "## central network scope",
+		personality: &aspects.Personality{
+			Composed: "per-aspect rendered prompt",
+		},
+	}
+	want := "## central network scope\n\n---\n\nper-aspect rendered prompt"
+	if got := e.SystemPrompt(); got != want {
+		t.Errorf("SystemPrompt = %q\nwant %q", got, want)
+	}
+}
+
+// TestEmbed_LayersCentralAbovePerAspect — Part 9b: when both
+// nexus_settings.nexus_md AND aspect_personalities content exist,
+// SystemPrompt concatenates them with the central chunk first.
+func TestEmbed_LayersCentralAbovePerAspect(t *testing.T) {
+	store := freshAspectsStore(t)
+	settings := aspects.NewSQLSettingsStore(store.DBForTest())
+	ctx := context.Background()
+
+	if err := store.Insert(ctx, aspects.Aspect{
+		Name: "frame", AspectPubkey: fakePubkey(),
+		Provider: "claude-api", Model: "claude-opus-4-7",
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if err := store.PersonalitySet(ctx, aspects.Personality{
+		AspectName: "frame",
+		NexusMD:    "frame-specific delta",
+		SoulMD:     "frame voice",
+		PrimerMD:   "frame primer",
+	}); err != nil {
+		t.Fatalf("PersonalitySet: %v", err)
+	}
+	if _, err := settings.SetNexusMD(ctx, "## central network scope"); err != nil {
+		t.Fatalf("SetNexusMD: %v", err)
+	}
+
+	r := roster.New()
+	ts := broker.NewTokenStore()
+	e, err := Embed(ctx, EmbedConfig{
+		Detected:         newFrameAspect(t, "frame"),
+		Roster:           r,
+		TokenStore:       ts,
+		PersonalityStore: store,
+		SettingsStore:    settings,
+	})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+
+	want := "## central network scope\n\n---\n\n" +
+		"frame-specific delta\n\n---\n\n" +
+		"frame voice\n\n---\n\n" +
+		"frame primer"
+	if got := e.SystemPrompt(); got != want {
+		t.Errorf("SystemPrompt = %q\nwant %q", got, want)
+	}
+}
+
+// TestEmbed_RefreshCentral — Part 9b: RefreshCentral re-reads
+// nexus_settings and updates the cached central content.
+func TestEmbed_RefreshCentral(t *testing.T) {
+	store := freshAspectsStore(t)
+	settings := aspects.NewSQLSettingsStore(store.DBForTest())
+	ctx := context.Background()
+
+	if err := store.Insert(ctx, aspects.Aspect{
+		Name: "frame", AspectPubkey: fakePubkey(),
+		Provider: "claude-api", Model: "claude-opus-4-7",
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if _, err := settings.SetNexusMD(ctx, "v1"); err != nil {
+		t.Fatalf("SetNexusMD v1: %v", err)
+	}
+
+	r := roster.New()
+	ts := broker.NewTokenStore()
+	e, err := Embed(ctx, EmbedConfig{
+		Detected:         newFrameAspect(t, "frame"),
+		Roster:           r,
+		TokenStore:       ts,
+		PersonalityStore: store,
+		SettingsStore:    settings,
+	})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if got := e.SystemPrompt(); got != "v1" {
+		t.Errorf("initial SystemPrompt = %q; want v1", got)
+	}
+	if e.CentralVersion() != 1 {
+		t.Errorf("initial CentralVersion = %d; want 1", e.CentralVersion())
+	}
+
+	// Operator updates central via the future Part 9c admin endpoint
+	// (here simulated by calling SetNexusMD directly).
+	if _, err := settings.SetNexusMD(ctx, "v2"); err != nil {
+		t.Fatalf("SetNexusMD v2: %v", err)
+	}
+
+	// Pre-refresh: cached value still v1.
+	if got := e.SystemPrompt(); got != "v1" {
+		t.Errorf("pre-refresh = %q; want v1 (no refresh called)", got)
+	}
+
+	// Post-refresh: new value.
+	if err := e.RefreshCentral(ctx); err != nil {
+		t.Fatalf("RefreshCentral: %v", err)
+	}
+	if got := e.SystemPrompt(); got != "v2" {
+		t.Errorf("post-refresh = %q; want v2", got)
+	}
+	if e.CentralVersion() != 2 {
+		t.Errorf("post-refresh CentralVersion = %d; want 2", e.CentralVersion())
+	}
+}
+
+// TestEmbed_RefreshCentral_NoStore — legacy mode (no SettingsStore)
+// returns nil silently rather than erroring.
+func TestEmbed_RefreshCentral_NoStore(t *testing.T) {
+	r := roster.New()
+	ts := broker.NewTokenStore()
+	e, err := Embed(context.Background(), EmbedConfig{
+		Detected:   newFrameAspect(t, "frame"),
+		Roster:     r,
+		TokenStore: ts,
+	})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if err := e.RefreshCentral(context.Background()); err != nil {
+		t.Errorf("RefreshCentral with nil settings: want silent no-op; got %v", err)
+	}
+	if got := e.CentralVersion(); got != 0 {
+		t.Errorf("CentralVersion legacy = %d; want 0", got)
+	}
+}
+
 // TestEmbed_RefreshPersonality_NoStore — RefreshPersonality on a
 // legacy-mode EmbeddedFrame (no store at Embed time) returns an error
 // rather than silently no-oping.
