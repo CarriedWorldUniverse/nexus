@@ -20,6 +20,7 @@ package wsasp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
@@ -80,6 +81,24 @@ func (g *Gateway) AnnounceFile(ctx context.Context, path, description string) (i
 // ShareFile delegates to the Client.
 func (g *Gateway) ShareFile(ctx context.Context, path string, recipients []string) (int64, error) {
 	return g.client.ShareFile(ctx, path, recipients)
+}
+
+// ReadMessage / ListShared / GetShared are not yet wired on the
+// wsasp wire — out-of-process aspects can't reach the chat store
+// directly, and the wire frames for these reads aren't part of the
+// transport spec yet. Returning an error keeps the interface
+// satisfied while making the gap visible to callers.
+
+func (g *Gateway) ReadMessage(ctx context.Context, msgID int64) (funnel.ChatMessage, error) {
+	return funnel.ChatMessage{}, fmt.Errorf("wsasp.Gateway: ReadMessage not implemented on wire")
+}
+
+func (g *Gateway) ListShared(ctx context.Context, limit int) ([]funnel.SharedFileRef, error) {
+	return nil, fmt.Errorf("wsasp.Gateway: ListShared not implemented on wire")
+}
+
+func (g *Gateway) GetShared(ctx context.Context, shareID int64) (funnel.SharedFileRef, error) {
+	return funnel.SharedFileRef{}, fmt.Errorf("wsasp.Gateway: GetShared not implemented on wire")
 }
 
 // Bridge connects wsasp's inbound stream to a funnel. Wire it as:
