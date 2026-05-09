@@ -26,8 +26,9 @@ const (
 type Role string
 
 const (
-	RoleAspect Role = "aspect"
-	RoleFrame  Role = "frame"
+	RoleAspect   Role = "aspect"
+	RoleFrame    Role = "frame"
+	RoleOperator Role = "operator" // human principal driving the dashboard SPA
 )
 
 // AspectConfig is the on-disk shape of aspect.json. See spec §3.
@@ -61,13 +62,31 @@ func (c AspectConfig) EffectiveRole() Role {
 	return c.Role
 }
 
-// Known reports whether r is one of the recognized role values. False
-// means the on-disk role string was not the empty string AND not in the
-// known set — likely a typo. Callers should surface this loudly rather
-// than coerce.
+// Known reports whether r is one of the recognized role values for an
+// on-disk aspect.json. False means the role string was not the empty
+// string AND not in the known set — likely a typo. Callers should
+// surface this loudly rather than coerce.
+//
+// RoleOperator is intentionally NOT included here: operators are never
+// instantiated from disk — they're minted at login from a passkey-
+// unlocked keyfile (dashboard-ws-port spec §2.2). If an aspect.json
+// declares role: "operator" the broker treats it as unknown so the
+// operator boundary stays uncrossable from the filesystem.
 func (r Role) Known() bool {
 	switch r {
 	case RoleAspect, RoleFrame:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsRuntimeIdentity reports whether r is a recognized identity at
+// runtime — including identities like RoleOperator that exist only on
+// live connections. Use this when validating tokens/JWTs/registers.
+func (r Role) IsRuntimeIdentity() bool {
+	switch r {
+	case RoleAspect, RoleFrame, RoleOperator:
 		return true
 	default:
 		return false
