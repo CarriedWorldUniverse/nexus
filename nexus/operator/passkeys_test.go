@@ -31,7 +31,7 @@ func TestRegisterAndGetByCredentialID(t *testing.T) {
 	ctx := context.Background()
 	cred, pub := fakeCred("alpha")
 
-	id, err := s.Register(ctx, cred, pub, "<operator-host>")
+	id, err := s.Register(ctx, cred, pub, "<operator-host>", "")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestRegisterRejectsEmptyArgs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := s.Register(ctx, tc.cred, tc.pub, tc.label)
+			_, err := s.Register(ctx, tc.cred, tc.pub, tc.label, "")
 			if err == nil {
 				t.Fatalf("expected error for %s", tc.name)
 			}
@@ -97,10 +97,10 @@ func TestRegisterRejectsDuplicateCredentialID(t *testing.T) {
 	ctx := context.Background()
 	cred, pub := fakeCred("dup")
 
-	if _, err := s.Register(ctx, cred, pub, "device-a"); err != nil {
+	if _, err := s.Register(ctx, cred, pub, "device-a", ""); err != nil {
 		t.Fatalf("first Register: %v", err)
 	}
-	_, err := s.Register(ctx, cred, pub, "device-b")
+	_, err := s.Register(ctx, cred, pub, "device-b", "")
 	if !errors.Is(err, ErrCredentialIDInUse) {
 		t.Fatalf("expected ErrCredentialIDInUse, got %v", err)
 	}
@@ -128,7 +128,7 @@ func TestSaveSignCountStrictGreater(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	cred, pub := fakeCred("counter")
-	id, err := s.Register(ctx, cred, pub, "device")
+	id, err := s.Register(ctx, cred, pub, "device", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestSaveSignCountZeroAuthenticator(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	cred, pub := fakeCred("zero")
-	id, err := s.Register(ctx, cred, pub, "platform-auth")
+	id, err := s.Register(ctx, cred, pub, "platform-auth", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestSaveSignCountDowngradeIsReplay(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	cred, pub := fakeCred("downgrade")
-	id, err := s.Register(ctx, cred, pub, "device")
+	id, err := s.Register(ctx, cred, pub, "device", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestSaveSignCountRejectsNegative(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	cred, pub := fakeCred("neg")
-	id, _ := s.Register(ctx, cred, pub, "device")
+	id, _ := s.Register(ctx, cred, pub, "device", "")
 	err := s.SaveSignCount(ctx, id, -1)
 	if err == nil {
 		t.Fatal("expected error for negative next sign_count")
@@ -250,9 +250,9 @@ func TestListNewestFirst(t *testing.T) {
 	cred1, pub1 := fakeCred("first")
 	cred2, pub2 := fakeCred("second")
 	cred3, pub3 := fakeCred("third")
-	_, _ = s.Register(ctx, cred1, pub1, "first")
-	_, _ = s.Register(ctx, cred2, pub2, "second")
-	_, _ = s.Register(ctx, cred3, pub3, "third")
+	_, _ = s.Register(ctx, cred1, pub1, "first", "")
+	_, _ = s.Register(ctx, cred2, pub2, "second", "")
+	_, _ = s.Register(ctx, cred3, pub3, "third", "")
 
 	all, err := s.List(ctx)
 	if err != nil {
@@ -281,7 +281,7 @@ func TestDeleteByID(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	cred, pub := fakeCred("del")
-	id, _ := s.Register(ctx, cred, pub, "device")
+	id, _ := s.Register(ctx, cred, pub, "device", "")
 
 	n, err := s.Delete(ctx, id)
 	if err != nil {
@@ -310,8 +310,8 @@ func TestDeleteAll(t *testing.T) {
 
 	cred1, pub1 := fakeCred("a")
 	cred2, pub2 := fakeCred("b")
-	_, _ = s.Register(ctx, cred1, pub1, "a")
-	_, _ = s.Register(ctx, cred2, pub2, "b")
+	_, _ = s.Register(ctx, cred1, pub1, "a", "")
+	_, _ = s.Register(ctx, cred2, pub2, "b", "")
 
 	n, err := s.DeleteAll(ctx)
 	if err != nil {

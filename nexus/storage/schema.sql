@@ -376,9 +376,23 @@ CREATE TABLE IF NOT EXISTS nexus_settings (
 CREATE TABLE IF NOT EXISTS operator_passkeys (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   credential_id   BLOB NOT NULL UNIQUE,
+  -- COSE-encoded public key, kept as a top-level column so callers
+  -- that don't decode the credential JSON (e.g. tooling/audit) can
+  -- still observe the key material without parsing.
   public_key      BLOB NOT NULL,
+  -- Sign count is replicated outside credential_json for the same
+  -- reason: the SaveSignCount UPDATE must be atomic against this
+  -- column without round-tripping the JSON. credential_json is
+  -- read for FinishLogin verification; sign_count is the source of
+  -- truth for replay detection.
   sign_count      INTEGER NOT NULL DEFAULT 0,
   label           TEXT NOT NULL,
+  -- Full webauthn.Credential record as JSON (transport, flags,
+  -- authenticator config, attestation, etc.). Persisted so
+  -- FinishLogin can hand the lib back the full record; the inner
+  -- sign_count IS the source the lib mutates and we re-marshal on
+  -- every successful login.
+  credential_json TEXT NOT NULL DEFAULT '',
   registered_at   TEXT NOT NULL DEFAULT (datetime('now')),
   last_used_at    TEXT
 );

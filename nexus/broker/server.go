@@ -200,6 +200,11 @@ type Config struct {
 	// embedded).
 	OnPersonalityChange func(aspectName string, newVersion int64)
 
+	// OperatorLogin wires the dashboard-ws-port login + register
+	// endpoints (POST /api/operator/{register,login}/{begin,finish}).
+	// nil → endpoints not registered (legacy boot, no dashboard SPA).
+	OperatorLogin *OperatorLogin
+
 	// OnNexusMDChange is invoked after a successful central nexus_md
 	// edit (REST Part 9c via PUT /api/admin/nexus-md). cmd/nexus wires
 	// this to EmbeddedFrame.RefreshCentral so the in-process Frame
@@ -388,6 +393,14 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	// bypass auth(): the keyfile is its own credential and the
 	// nexus_id endpoint is meant to be queried before any.
 	b.registerKeyfileEndpoints(mux)
+
+	// Operator login (dashboard-ws-port spec §2.2). Bypasses auth()
+	// the same way the keyfile endpoints do — the passkey ceremony
+	// is the credential. Registered only when the embedding caller
+	// (cmd/nexus) supplies an OperatorLogin.
+	if b.cfg.OperatorLogin != nil {
+		b.cfg.OperatorLogin.register(mux)
+	}
 
 	// Admin REST surface (#79 lock). Registered only when a Frame is
 	// embedded and supplies AdminCallbacks. Per spec §3.3, admin ops
