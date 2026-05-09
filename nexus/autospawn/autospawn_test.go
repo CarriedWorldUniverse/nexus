@@ -214,7 +214,7 @@ func TestChildEnvScrubsParentEnv(t *testing.T) {
 		"TEMP=/tmp",
 		"AWS_SECRET_ACCESS_KEY=should-not-leak",
 		"GITHUB_TOKEN=ghp_should-not-leak",
-		"NEXUS_TOKEN=parent-master",  // legacy fallback only via BaseEnv
+		"NEXUS_TOKEN=parent-master",   // legacy fallback only via BaseEnv
 		"DATABASE_URL=postgres://...", // app config, not the child's business
 	}
 	base := []string{"NEXUS_UPSTREAM=ws://x"}

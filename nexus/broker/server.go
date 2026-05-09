@@ -24,11 +24,6 @@ import (
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
-	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
-	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
-	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
-	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
-	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
@@ -549,7 +544,6 @@ func AuthUserFromContext(ctx context.Context) (TokenInfo, bool) {
 	v, ok := ctx.Value(authUserCtxKey{}).(TokenInfo)
 	return v, ok
 }
-
 
 func (b *Broker) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{

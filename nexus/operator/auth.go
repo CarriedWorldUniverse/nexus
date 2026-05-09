@@ -87,10 +87,10 @@ type operatorUser struct {
 	credentials []wa.Credential
 }
 
-func (u *operatorUser) WebAuthnID() []byte                         { return OperatorWebAuthnID }
-func (u *operatorUser) WebAuthnName() string                       { return "operator" }
-func (u *operatorUser) WebAuthnDisplayName() string                { return "Operator" }
-func (u *operatorUser) WebAuthnCredentials() []wa.Credential       { return u.credentials }
+func (u *operatorUser) WebAuthnID() []byte                   { return OperatorWebAuthnID }
+func (u *operatorUser) WebAuthnName() string                 { return "operator" }
+func (u *operatorUser) WebAuthnDisplayName() string          { return "Operator" }
+func (u *operatorUser) WebAuthnCredentials() []wa.Credential { return u.credentials }
 
 // loadUser materializes the operator's User snapshot from the store.
 // Each registered passkey (with non-empty credential_json) becomes a

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nexus-cw/nexus/nexus/aspects"
-	"github.com/nexus-cw/nexus/nexus/roster"
-	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
 
 func bytesReader(s string) io.Reader { return strings.NewReader(s) }

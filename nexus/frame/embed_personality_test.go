@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/nexus-cw/nexus/nexus/aspects"
-	"github.com/nexus-cw/nexus/nexus/broker"
-	"github.com/nexus-cw/nexus/nexus/roster"
-	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
 
 // freshAspectsStore opens a fresh test DB with the bootstrapped schema
@@ -383,4 +383,3 @@ func TestEmbed_RefreshPersonality_NoStore(t *testing.T) {
 		t.Error("RefreshPersonality with nil store: want error; got nil")
 	}
 }
-

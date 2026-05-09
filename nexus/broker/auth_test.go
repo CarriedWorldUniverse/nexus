@@ -226,14 +226,14 @@ func TestResolveToken_HandlesAllPaths(t *testing.T) {
 // "is this a bearer header" via early-return timing.
 func TestExtractBearer_ConstantTime(t *testing.T) {
 	cases := map[string]string{
-		"Bearer abc123":   "abc123",
-		"bearer abc123":   "", // case-sensitive; the lib expects exactly "Bearer "
-		"Basic abc123":    "",
-		"":                "",
-		"Bearer":          "", // no space, too short
-		"Bearer ":         "", // no token after space
-		"Token abc":       "",
-		"   ":             "",
+		"Bearer abc123": "abc123",
+		"bearer abc123": "", // case-sensitive; the lib expects exactly "Bearer "
+		"Basic abc123":  "",
+		"":              "",
+		"Bearer":        "", // no space, too short
+		"Bearer ":       "", // no token after space
+		"Token abc":     "",
+		"   ":           "",
 	}
 	for in, want := range cases {
 		if got := ExtractBearer(in); got != want {
@@ -257,8 +257,8 @@ func TestLegacyMaster_GatedByAllowFlag(t *testing.T) {
 
 	// Opt-in: AllowLegacyMaster true → token resolves with ViaLegacy=true.
 	bOn := New(Config{
-		AuthToken:         "legacytok",
-		AllowLegacyMaster: true,
+		AuthToken:          "legacytok",
+		AllowLegacyMaster:  true,
 		HeartbeatIntervalS: 15,
 	}, nil)
 	info, ok := bOn.cfg.Tokens.ResolveToken("legacytok")

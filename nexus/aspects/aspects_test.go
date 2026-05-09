@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
 
 // freshStore opens a fresh DB with the bootstrapped schema and

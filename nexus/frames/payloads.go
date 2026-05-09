@@ -199,9 +199,9 @@ type ChatDeliverPayload struct {
 	Content    string `json:"content"`
 	ReplyTo    int    `json:"reply_to,omitempty"`
 	Thread     string `json:"thread,omitempty"`
-	ReceivedAt string `json:"received_at"`        // RFC 3339 UTC; server-stamped at Nexus DB insert
-	Reason     string `json:"reason"`              // mention | reply | thread | all
-	Replay     bool   `json:"replay,omitempty"`    // true iff this frame was emitted as part of a since_msg_id replay
+	ReceivedAt string `json:"received_at"`      // RFC 3339 UTC; server-stamped at Nexus DB insert
+	Reason     string `json:"reason"`           // mention | reply | thread | all
+	Replay     bool   `json:"replay,omitempty"` // true iff this frame was emitted as part of a since_msg_id replay
 }
 
 // ChatReactionPayload toggles an emoji reaction.
@@ -289,12 +289,12 @@ type KnowledgeStorePayload struct {
 
 // KnowledgeSearchPayload is an aspect querying the knowledge store.
 type KnowledgeSearchPayload struct {
-	Text         string   `json:"text"`
-	OwnAgent     bool     `json:"own_agent,omitempty"`
-	Shared       bool     `json:"shared,omitempty"`
-	Peers        []string `json:"peers,omitempty"`
-	TopK         int      `json:"top_k,omitempty"`
-	MaxRank      float64  `json:"max_rank,omitempty"`
+	Text     string   `json:"text"`
+	OwnAgent bool     `json:"own_agent,omitempty"`
+	Shared   bool     `json:"shared,omitempty"`
+	Peers    []string `json:"peers,omitempty"`
+	TopK     int      `json:"top_k,omitempty"`
+	MaxRank  float64  `json:"max_rank,omitempty"`
 }
 
 // KnowledgeSearchResultPayload is the response.
@@ -509,18 +509,18 @@ type SessionEntryAppendedPayload struct {
 // SessionRewindPayload signals that the aspect moved its active head
 // to an earlier entry.
 type SessionRewindPayload struct {
-	Aspect      string `json:"aspect"`
-	SessionID   string `json:"session_id"`
-	NewHeadID   string `json:"new_head_id"`
-	PreviousID  string `json:"previous_id"`
+	Aspect     string `json:"aspect"`
+	SessionID  string `json:"session_id"`
+	NewHeadID  string `json:"new_head_id"`
+	PreviousID string `json:"previous_id"`
 }
 
 // SessionForkPayload signals that the aspect forked to a new branch.
 type SessionForkPayload struct {
-	Aspect     string `json:"aspect"`
-	SessionID  string `json:"session_id"`
-	ForkPoint  string `json:"fork_point"`
-	NewHeadID  string `json:"new_head_id"`
+	Aspect    string `json:"aspect"`
+	SessionID string `json:"session_id"`
+	ForkPoint string `json:"fork_point"`
+	NewHeadID string `json:"new_head_id"`
 }
 
 // -------------------------------------------------------------------
@@ -530,8 +530,8 @@ type SessionForkPayload struct {
 // ShutdownPayload is sent upstream → aspect (or Outpost → aspects, or
 // Nexus → Outposts) to request a graceful wind-down.
 type ShutdownPayload struct {
-	Reason        string `json:"reason"`
-	GracePeriodS  int    `json:"grace_period_s,omitempty"`
+	Reason       string `json:"reason"`
+	GracePeriodS int    `json:"grace_period_s,omitempty"`
 }
 
 // -------------------------------------------------------------------
@@ -633,7 +633,7 @@ type TicketNoteAddPayload struct {
 // public URL (https://, gs://, s3://); Nexus stores only the reference.
 type FileAnnouncePayload struct {
 	Name        string `json:"name"`
-	URL         string `json:"url"`               // ws://<aspect>/file/<path> or public URL
+	URL         string `json:"url"` // ws://<aspect>/file/<path> or public URL
 	MimeType    string `json:"mime_type,omitempty"`
 	Description string `json:"description,omitempty"`
 }
@@ -703,8 +703,8 @@ type FileFetchPayload struct {
 // error if the file is unreadable / not found / outside the home dir).
 type FileDeliverPayload struct {
 	RequestID string `json:"request_id"`
-	Content   string `json:"content,omitempty"`   // base64-encoded bytes
-	Encoding  string `json:"encoding,omitempty"`  // "base64"
+	Content   string `json:"content,omitempty"`  // base64-encoded bytes
+	Encoding  string `json:"encoding,omitempty"` // "base64"
 	MimeType  string `json:"mime_type,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
@@ -722,7 +722,7 @@ type DocsListPayload struct {
 
 // DocEntry is a single doc file's metadata.
 type DocEntry struct {
-	Path     string `json:"path"`     // relative to docs root
+	Path     string `json:"path"` // relative to docs root
 	Size     int64  `json:"size"`
 	Modified string `json:"modified"` // RFC 3339 UTC
 }

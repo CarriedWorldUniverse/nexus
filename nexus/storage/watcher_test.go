@@ -71,8 +71,8 @@ func TestWatchFileReplacement_NoReplacementHonorsCtxCancel(t *testing.T) {
 // TestWatchFileReplacement_DetectsReplacement is the load-bearing test:
 // recreate the file under the watcher (simulating Windows file
 // replacement / POSIX rename + recreate) and confirm:
-//   1. watcher returns ErrFileReplaced
-//   2. onReplaced is called exactly once before return
+//  1. watcher returns ErrFileReplaced
+//  2. onReplaced is called exactly once before return
 func TestWatchFileReplacement_DetectsReplacement(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")

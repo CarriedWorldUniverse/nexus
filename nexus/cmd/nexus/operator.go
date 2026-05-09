@@ -29,8 +29,8 @@ import (
 	"strconv"
 	"text/tabwriter"
 
-	"github.com/nexus-cw/nexus/nexus/operator"
-	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/operator"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
 
 // runOperatorSubcommand parses `operator <verb> ...`.

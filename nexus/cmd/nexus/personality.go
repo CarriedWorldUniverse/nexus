@@ -25,8 +25,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/aspects"
-	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
 
 // runPersonalitySubcommand parses `personality <verb> ...`.
@@ -224,4 +224,3 @@ func sanitizeName(name string) string {
 	}
 	return b.String()
 }
-

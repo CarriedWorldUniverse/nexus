@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
 
 func openTestStore(t *testing.T) *PasskeyStore {
@@ -69,10 +69,10 @@ func TestRegisterRejectsEmptyArgs(t *testing.T) {
 	cred, pub := fakeCred("x")
 
 	cases := []struct {
-		name           string
-		cred, pub      []byte
-		label          string
-		wantSubstr     string
+		name       string
+		cred, pub  []byte
+		label      string
+		wantSubstr string
 	}{
 		{"empty cred", nil, pub, "x", "credential_id"},
 		{"empty pub", cred, nil, "x", "public_key"},

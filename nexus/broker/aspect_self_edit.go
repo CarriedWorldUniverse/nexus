@@ -23,8 +23,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/aspects"
-	"github.com/nexus-cw/nexus/nexus/jwt"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
 )
 
 // aspectSelfEditRequest is the PUT body shape. Same three columns as

@@ -10,12 +10,12 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/nexus-cw/nexus/nexus/chat"
-	"github.com/nexus-cw/nexus/nexus/frames"
-	"github.com/nexus-cw/nexus/nexus/jwt"
-	"github.com/nexus-cw/nexus/nexus/knowledge"
-	"github.com/nexus-cw/nexus/nexus/roster"
-	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
+	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
 
 // newOperatorTestServer spins up a broker with the stores +

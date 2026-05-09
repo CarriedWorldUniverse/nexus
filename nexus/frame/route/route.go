@@ -14,7 +14,7 @@
 //     c. ReplyTo refers to a message the Frame previously authored, OR
 //     d. Topic matches a topic the Frame has previously posted in, OR
 //     e. ThreadRoot matches a message the Frame has previously authored or
-//        replied within (best-effort transitive — see ThreadIndex).
+//     replied within (best-effort transitive — see ThreadIndex).
 //
 // What this package is NOT:
 //   - A chat bus. The Nexus broker doesn't yet host a chat surface; this

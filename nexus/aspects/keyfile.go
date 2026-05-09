@@ -193,10 +193,10 @@ func mintWithRand(in MintInput, r io.Reader) (*Keyfile, string, error) {
 //
 // Recipe (libsodium crypto_sign_ed25519_sk_to_curve25519):
 //
-//   1. Take the 32-byte Ed25519 seed (priv.Seed()).
-//   2. SHA-512 the seed.
-//   3. Take the first 32 bytes of the digest.
-//   4. Clamp: clear bits 0,1,2 of byte 0; clear bit 7 of byte 31; set bit 6 of byte 31.
+//  1. Take the 32-byte Ed25519 seed (priv.Seed()).
+//  2. SHA-512 the seed.
+//  3. Take the first 32 bytes of the digest.
+//  4. Clamp: clear bits 0,1,2 of byte 0; clear bit 7 of byte 31; set bit 6 of byte 31.
 //
 // The returned [32]byte is the X25519 private scalar suitable for
 // crypto/nacl/box.OpenAnonymous as the recipient privkey. Pairs with

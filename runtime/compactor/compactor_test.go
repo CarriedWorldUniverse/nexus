@@ -56,10 +56,10 @@ func openTestTree(t *testing.T) *tree.Tree {
 
 func TestShouldCompactFormula(t *testing.T) {
 	cases := []struct {
-		name      string
-		tokens    int
-		policy    Policy
-		want      bool
+		name   string
+		tokens int
+		policy Policy
+		want   bool
 	}{
 		{"under threshold", 100, Policy{Window: 1000, Reserve: 100}, false},
 		{"at threshold", 900, Policy{Window: 1000, Reserve: 100}, false},

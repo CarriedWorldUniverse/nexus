@@ -76,10 +76,10 @@ type FilterDecision struct {
 // use these where they fit and only invent new strings for genuinely
 // novel cases.
 const (
-	FilterReasonEmpty       = "empty_output"
+	FilterReasonEmpty        = "empty_output"
 	FilterReasonSelfSuppress = "self_suppress" // model said "I don't have anything to add"
-	FilterReasonScratch      = "scratch"        // looks like internal thinking, not a reply
-	FilterReasonRamble       = "ramble"         // long, no actual content
+	FilterReasonScratch      = "scratch"       // looks like internal thinking, not a reply
+	FilterReasonRamble       = "ramble"        // long, no actual content
 )
 
 // AlwaysPostFilter posts every non-empty reply unmodified. Default

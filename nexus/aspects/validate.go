@@ -50,7 +50,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/crypto/nacl/box"
 
-	"github.com/nexus-cw/nexus/nexus/jwt"
+	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
 )
 
 // Sentinels surface specific failure shapes so the HTTP layer can

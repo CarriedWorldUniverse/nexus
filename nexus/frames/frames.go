@@ -50,9 +50,9 @@ const (
 	// the speaker. Aspects send `register`; Outposts send
 	// `outpost.register`. Server acks with `register.ack` or
 	// `outpost.register.ack`.
-	KindRegister        Kind = "register"
-	KindRegisterAck     Kind = "register.ack"
-	KindDeregister      Kind = "deregister"
+	KindRegister           Kind = "register"
+	KindRegisterAck        Kind = "register.ack"
+	KindDeregister         Kind = "deregister"
 	KindOutpostRegister    Kind = "outpost.register"
 	KindOutpostRegisterAck Kind = "outpost.register.ack"
 	KindOutpostDeregister  Kind = "outpost.deregister"
@@ -101,40 +101,40 @@ const (
 	// a correlation_id (the envelope's ID) and the broker echoes it on
 	// the result. Authoritative consumers: the dashboard SPA today;
 	// future operator-tooling clients can reuse the same surface.
-	KindRosterList         Kind = "roster.list"
-	KindRosterListResult   Kind = "roster.list.result"
+	KindRosterList       Kind = "roster.list"
+	KindRosterListResult Kind = "roster.list.result"
 	// chat.list is operator-only: all chat messages, paginated by id.
 	// Distinct from chat.read (which is thread-scoped and aspect-
 	// available). Used by the dashboard's main chat feed; topics
 	// view + topic-scoped reads are a follow-up part — chat_messages
 	// today has no persisted topic column, so topics work needs a
 	// schema migration that's out of 5c scope.
-	KindChatList           Kind = "chat.list"
-	KindChatListResult     Kind = "chat.list.result"
-	KindChatReplies        Kind = "chat.replies"
-	KindChatRepliesResult  Kind = "chat.replies.result"
-	KindReactionsFetch     Kind = "chat.reactions.fetch"
+	KindChatList             Kind = "chat.list"
+	KindChatListResult       Kind = "chat.list.result"
+	KindChatReplies          Kind = "chat.replies"
+	KindChatRepliesResult    Kind = "chat.replies.result"
+	KindReactionsFetch       Kind = "chat.reactions.fetch"
 	KindReactionsFetchResult Kind = "chat.reactions.fetch.result"
-	KindKnowledgeList         Kind = "knowledge.list"
-	KindKnowledgeListResult   Kind = "knowledge.list.result"
-	KindKnowledgeStoreResult  Kind = "knowledge.store.result"
-	KindAspectSay         Kind = "aspect.say"
-	KindAspectSayResult   Kind = "aspect.say.result"
+	KindKnowledgeList        Kind = "knowledge.list"
+	KindKnowledgeListResult  Kind = "knowledge.list.result"
+	KindKnowledgeStoreResult Kind = "knowledge.store.result"
+	KindAspectSay            Kind = "aspect.say"
+	KindAspectSayResult      Kind = "aspect.say.result"
 
 	// Subscription frames (5d). Each "subscribe.X" enrolls the
 	// operator's connection in the corresponding push stream; the
 	// matching "unsubscribe.X" turns it off. Subscriptions are
 	// per-connection state, not persisted — WS close drops them.
 	// Idempotent: re-subscribing is a no-op.
-	KindSubscribeRoster        Kind = "subscribe.roster"
-	KindSubscribeChat          Kind = "subscribe.chat"
-	KindSubscribeAspectStatus  Kind = "subscribe.aspect_status"
-	KindUnsubscribeRoster      Kind = "unsubscribe.roster"
-	KindUnsubscribeChat        Kind = "unsubscribe.chat"
+	KindSubscribeRoster         Kind = "subscribe.roster"
+	KindSubscribeChat           Kind = "subscribe.chat"
+	KindSubscribeAspectStatus   Kind = "subscribe.aspect_status"
+	KindUnsubscribeRoster       Kind = "unsubscribe.roster"
+	KindUnsubscribeChat         Kind = "unsubscribe.chat"
 	KindUnsubscribeAspectStatus Kind = "unsubscribe.aspect_status"
-	KindSubscribeAck           Kind = "subscribe.ack"
+	KindSubscribeAck            Kind = "subscribe.ack"
 	// Push frames the broker emits to subscribed operators.
-	KindRosterUpdate    Kind = "roster.update"
+	KindRosterUpdate      Kind = "roster.update"
 	KindAspectStatusPulse Kind = "aspect.status_pulse"
 )
 

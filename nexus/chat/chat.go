@@ -150,13 +150,13 @@ type Reaction struct {
 // json-decode if it needs the recipient list, otherwise the
 // announce/share split is signalled by AnnounceMsgID being non-zero.
 type SharedFile struct {
-	ID             int64   `json:"id"`
-	Path           string  `json:"path"`
-	Description    string  `json:"description,omitempty"`
-	SharedBy       string  `json:"shared_by"`
-	AnnounceMsgID  int64   `json:"announce_msg_id,omitempty"`
-	RecipientsJSON string  `json:"recipients_json,omitempty"`
-	CreatedAt      string  `json:"created_at"`
+	ID             int64  `json:"id"`
+	Path           string `json:"path"`
+	Description    string `json:"description,omitempty"`
+	SharedBy       string `json:"shared_by"`
+	AnnounceMsgID  int64  `json:"announce_msg_id,omitempty"`
+	RecipientsJSON string `json:"recipients_json,omitempty"`
+	CreatedAt      string `json:"created_at"`
 }
 
 // SQLStore is the sqlite-backed Store. Holds a *sql.DB; safe for

@@ -37,8 +37,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/identity"
-	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
 
 // runIdentitySubcommand parses `identity <verb> [...]` from

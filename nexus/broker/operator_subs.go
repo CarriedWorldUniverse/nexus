@@ -23,7 +23,7 @@
 package broker
 
 import (
-	"github.com/nexus-cw/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 )
 
 // dispatchOperatorSubFrame routes operator-only subscription frames.

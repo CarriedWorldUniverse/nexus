@@ -78,10 +78,10 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 		reason = "reply"
 	}
 	deliverEnv, deliverErr := frames.New(frames.KindChatDeliver, frames.ChatDeliverPayload{
-		ID:         int(msg.ID),
-		From:       from,
-		Content:    content,
-		ReplyTo:    int(replyTo),
+		ID:      int(msg.ID),
+		From:    from,
+		Content: content,
+		ReplyTo: int(replyTo),
 		// RFC3339Nano matches replay (ws.go replayAddressedSince) and
 		// chat.read so cursor-equality comparisons across the three
 		// surfaces don't break on sub-second precision.

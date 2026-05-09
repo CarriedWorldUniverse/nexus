@@ -393,8 +393,8 @@ func TestBootstrap_RejectsBadName(t *testing.T) {
 		{"has\\backslash", http.StatusBadRequest},
 		{"..", http.StatusBadRequest},
 		{"../escape", http.StatusBadRequest},
-		{"operator", http.StatusBadRequest}, // reserved
-		{"system", http.StatusBadRequest},   // reserved
+		{"operator", http.StatusBadRequest},              // reserved
+		{"system", http.StatusBadRequest},                // reserved
 		{strings.Repeat("a", 33), http.StatusBadRequest}, // too long
 	}
 	for _, tc := range cases {

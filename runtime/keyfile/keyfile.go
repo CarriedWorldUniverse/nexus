@@ -197,11 +197,11 @@ func NewClient() *Client {
 
 // Validate runs the spec §5 startup handshake:
 //
-//   1. GET <nexus_url>/api/nexus_id, compare to envelope.
-//   2. POST <nexus_url>/api/aspect/validate with the encrypted_payload.
-//   3. Decode response, extract aspect_name from the JWT sub claim
-//      (parse-only, no signature check — we trust the JWT because we
-//      trust the TLS cert + the nexus_id match).
+//  1. GET <nexus_url>/api/nexus_id, compare to envelope.
+//  2. POST <nexus_url>/api/aspect/validate with the encrypted_payload.
+//  3. Decode response, extract aspect_name from the JWT sub claim
+//     (parse-only, no signature check — we trust the JWT because we
+//     trust the TLS cert + the nexus_id match).
 //
 // Returns ValidationResult on success; sentinel-wrapped errors on
 // failure so the caller can render hints (ErrNexusMismatch suggests

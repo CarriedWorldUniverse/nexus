@@ -259,10 +259,10 @@ func Spawn(cfg Config, candidates []Candidate) error {
 // dropped. Per operator decision (chat #9686) we ship a minimal list
 // and adjust later if a provider needs more:
 //
-//   PATH         — required for the harness binary to find tools
-//   HOME         — Unix home directory; provider configs read from here
-//   USERPROFILE  — Windows equivalent of HOME
-//   TEMP         — used by some providers for scratch files
+//	PATH         — required for the harness binary to find tools
+//	HOME         — Unix home directory; provider configs read from here
+//	USERPROFILE  — Windows equivalent of HOME
+//	TEMP         — used by some providers for scratch files
 //
 // Per-aspect NEXUS_TOKEN is added separately by the token resolver;
 // any NEXUS_TOKEN in BaseEnv (the legacy graceful-degrade path) is

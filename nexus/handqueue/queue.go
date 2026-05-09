@@ -12,15 +12,15 @@
 //   - One in-process FIFO list of pending dispatches.
 //   - Per-aspect set of active worker IDs (map[aspect]map[workerID]struct{}).
 //   - On arrival:
-//     - if total active workers < SoftCap N → spawn immediately.
-//     - else if calling aspect has zero active workers → spillover spawn
-//       (still bounded by HardCeiling H).
-//     - else → enqueue at FIFO tail.
-//     - if at H regardless → reject ErrHardCeiling.
+//   - if total active workers < SoftCap N → spawn immediately.
+//   - else if calling aspect has zero active workers → spillover spawn
+//     (still bounded by HardCeiling H).
+//   - else → enqueue at FIFO tail.
+//   - if at H regardless → reject ErrHardCeiling.
 //   - On worker release:
-//     - if queue empty → nothing.
-//     - else scan queue head-first preferring an item from an idle
-//       aspect (no active workers); else FIFO head. Spawn for picked.
+//   - if queue empty → nothing.
+//   - else scan queue head-first preferring an item from an idle
+//     aspect (no active workers); else FIFO head. Spawn for picked.
 //
 // v1 scope: single-host execution.
 package handqueue
@@ -473,10 +473,10 @@ func (q *Queue) pickQueueIndexLocked() int {
 // Stats returns a snapshot of dispatcher state. Used by Frame and
 // tests to inspect the pool without poking internals.
 type Stats struct {
-	ActiveTotal   int
-	SoftCap       int
-	HardCeiling   int
-	QueueDepth    int
+	ActiveTotal    int
+	SoftCap        int
+	HardCeiling    int
+	QueueDepth     int
 	ActiveByAspect map[string]int
 }
 

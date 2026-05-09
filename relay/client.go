@@ -282,10 +282,10 @@ func (c *Client) Ack(ctx context.Context, paired *casket.PairedChannel, pathID s
 
 // PairResult is the outcome of a completed pair flow.
 type PairResult struct {
-	RequestID    string
-	Status       string           // "approved" | "denied" | "expired"
-	PathID       string           // populated when Status == "approved"
-	OwnerHalf    *PairHalfPayload // populated when Status == "approved" (requester-side poll)
+	RequestID     string
+	Status        string           // "approved" | "denied" | "expired"
+	PathID        string           // populated when Status == "approved"
+	OwnerHalf     *PairHalfPayload // populated when Status == "approved" (requester-side poll)
 	RequesterHalf *PairHalfPayload // populated when Status == "approved" (owner-side approve response)
 }
 

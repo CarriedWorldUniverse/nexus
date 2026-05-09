@@ -182,8 +182,8 @@ type ToolCall struct {
 // Entry is a session tree entry (spec §2.6). Runtime owns the tree;
 // adapters only see a replayed active branch.
 type Entry struct {
-	ID       string         // ULID
-	ParentID string         // empty for root
+	ID       string // ULID
+	ParentID string // empty for root
 	Kind     EntryKind
 	TS       time.Time
 	Payload  map[string]any
