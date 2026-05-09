@@ -125,6 +125,19 @@ func (b *Broker) unbindOperator(c *wsConn) {
 // pred returns true when this conn should receive the frame.
 // Typical predicates check the matching subscribed* flag.
 //
+// WS-safety invariant: coder/websocket v1.8.x permits concurrent
+// writes — multiple goroutines may call c.Write simultaneously, and
+// Write is independent of Read. The caller's read loop in serve()
+// can run concurrently with this fan-out's writes. c.mu inside
+// c.send serializes multiple concurrent writers (this fan-out vs.
+// any direct send from a frame handler) so a partial-frame
+// interleave is impossible.
+//
+// Lock order: opMu → c.subMu → c.mu (inside c.send). This is the
+// only order in the codebase; subscribe handlers take c.subMu →
+// c.mu (no opMu involved); aspect handlers don't touch opMu or
+// subMu. No inversion path exists.
+//
 // Send failures (closed conn, slow consumer) are silently dropped:
 // the conn's read loop will surface the close on its next Read,
 // triggering cleanup which unbinds. Letting one slow operator
