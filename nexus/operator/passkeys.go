@@ -52,8 +52,13 @@ type Passkey struct {
 	PublicKey     []byte
 	SignCount     int64
 	Label         string
-	RegisteredAt  string
-	LastUsedAt    string // empty until first successful login
+	// CredentialJSON is the full webauthn.Credential record marshaled
+	// as JSON. Empty string for rows registered before the credential-
+	// json column was added (5b extension); login handlers should
+	// reject those rows and require re-registration.
+	CredentialJSON string
+	RegisteredAt   string
+	LastUsedAt     string // empty until first successful login
 }
 
 // Errors callers can branch on.
@@ -76,13 +81,17 @@ var (
 
 // Register inserts a new passkey row. credentialID + publicKey come
 // from the WebAuthn registration ceremony. label is operator-given
-// ("little-blue", "dMon"). Returns the new row id.
+// ("little-blue", "dMon"). credentialJSON carries the full
+// webauthn.Credential record (transport, flags, authenticator,
+// attestation) — required for FinishLogin to round-trip the
+// library's expected record shape. Pass empty string only from
+// pre-5b code paths (tests of the bare PasskeyStore); login
+// handlers reject empty credential_json as a re-registration prompt.
 //
 // Empty credentialID, publicKey, or label are rejected — these are
-// always required. Future: a duplicate credential id surfaces as
-// ErrCredentialIDInUse for clean caller branching, instead of a
-// raw sqlite UNIQUE-constraint error string.
-func (s *PasskeyStore) Register(ctx context.Context, credentialID, publicKey []byte, label string) (int64, error) {
+// always required. A duplicate credential id surfaces as
+// ErrCredentialIDInUse.
+func (s *PasskeyStore) Register(ctx context.Context, credentialID, publicKey []byte, label, credentialJSON string) (int64, error) {
 	if len(credentialID) == 0 {
 		return 0, errors.New("operator.Register: empty credential_id")
 	}
@@ -94,12 +103,12 @@ func (s *PasskeyStore) Register(ctx context.Context, credentialID, publicKey []b
 	}
 
 	const q = `
-	INSERT INTO operator_passkeys(credential_id, public_key, label)
-	VALUES (?, ?, ?)
+	INSERT INTO operator_passkeys(credential_id, public_key, label, credential_json)
+	VALUES (?, ?, ?, ?)
 	RETURNING id`
 
 	var id int64
-	err := s.db.QueryRowContext(ctx, q, credentialID, publicKey, label).Scan(&id)
+	err := s.db.QueryRowContext(ctx, q, credentialID, publicKey, label, credentialJSON).Scan(&id)
 	if err != nil {
 		// Map sqlite UNIQUE-constraint violation to a typed error.
 		// We don't import the sqlite driver here for the constant —
@@ -130,7 +139,8 @@ func (s *PasskeyStore) GetByCredentialID(ctx context.Context, credentialID []byt
 		return Passkey{}, errors.New("operator.GetByCredentialID: empty credential_id")
 	}
 	const q = `
-	SELECT id, credential_id, public_key, sign_count, label, registered_at,
+	SELECT id, credential_id, public_key, sign_count, label,
+	       COALESCE(credential_json, ''), registered_at,
 	       COALESCE(last_used_at, '')
 	FROM operator_passkeys
 	WHERE credential_id = ?`
@@ -138,7 +148,7 @@ func (s *PasskeyStore) GetByCredentialID(ctx context.Context, credentialID []byt
 	var p Passkey
 	err := s.db.QueryRowContext(ctx, q, credentialID).Scan(
 		&p.ID, &p.CredentialID, &p.PublicKey, &p.SignCount,
-		&p.Label, &p.RegisteredAt, &p.LastUsedAt,
+		&p.Label, &p.CredentialJSON, &p.RegisteredAt, &p.LastUsedAt,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -230,12 +240,90 @@ func (s *PasskeyStore) SaveSignCount(ctx context.Context, id int64, next int64) 
 	return ErrSignCountReplay
 }
 
+// UpdateAfterLogin records a successful login: writes the new
+// sign_count (with the strict-greater / zero-counter rules from
+// SaveSignCount), persists the refreshed webauthn.Credential JSON,
+// and stamps last_used_at. Callers MUST pass the full Credential
+// JSON the library produces from FinishLogin so the next login
+// observes the latest authenticator state.
+//
+// Atomic via the WHERE predicate: the sign_count rule is enforced
+// in SQL and the JSON field updates only when the row updates. If
+// SaveSignCount would have rejected, this function returns
+// ErrSignCountReplay and credential_json is unchanged.
+//
+// Implemented as two statements within an immediate transaction so
+// the strict-greater branch + zero-counter branch from SaveSignCount
+// can be reused without duplicating the predicate logic.
+func (s *PasskeyStore) UpdateAfterLogin(ctx context.Context, id int64, nextSignCount int64, credentialJSON string) error {
+	if credentialJSON == "" {
+		return errors.New("operator.UpdateAfterLogin: empty credential_json")
+	}
+	if nextSignCount < 0 {
+		return errors.New("operator.UpdateAfterLogin: negative sign_count")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("operator.UpdateAfterLogin: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Branch 1: strict-greater. Includes credential_json refresh in
+	// the same UPDATE so the row mutates atomically.
+	const qStrict = `
+	UPDATE operator_passkeys
+	SET sign_count = ?, credential_json = ?, last_used_at = datetime('now')
+	WHERE id = ? AND sign_count < ?`
+	res, err := tx.ExecContext(ctx, qStrict, nextSignCount, credentialJSON, id, nextSignCount)
+	if err != nil {
+		return fmt.Errorf("operator.UpdateAfterLogin strict: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("operator.UpdateAfterLogin strict rows: %w", err)
+	}
+	if n == 1 {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("operator.UpdateAfterLogin commit: %w", err)
+		}
+		return nil
+	}
+
+	// Branch 2: zero-counter authenticator (WebAuthn §6.1.1). Only
+	// fires when both stored and presented are 0. Refreshes
+	// credential_json + last_used_at; sign_count stays 0.
+	if nextSignCount == 0 {
+		const qZero = `
+		UPDATE operator_passkeys
+		SET credential_json = ?, last_used_at = datetime('now')
+		WHERE id = ? AND sign_count = 0`
+		res, err := tx.ExecContext(ctx, qZero, credentialJSON, id)
+		if err != nil {
+			return fmt.Errorf("operator.UpdateAfterLogin zero: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("operator.UpdateAfterLogin zero rows: %w", err)
+		}
+		if n == 1 {
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("operator.UpdateAfterLogin commit: %w", err)
+			}
+			return nil
+		}
+	}
+
+	return ErrSignCountReplay
+}
+
 // List returns all registered passkeys, newest registration first.
 // Used by the operator-side "manage devices" view (sub-part 5e) and
 // by the registration CLI to confirm a successful enrol.
 func (s *PasskeyStore) List(ctx context.Context) ([]Passkey, error) {
 	const q = `
-	SELECT id, credential_id, public_key, sign_count, label, registered_at,
+	SELECT id, credential_id, public_key, sign_count, label,
+	       COALESCE(credential_json, ''), registered_at,
 	       COALESCE(last_used_at, '')
 	FROM operator_passkeys
 	ORDER BY id DESC`
@@ -251,7 +339,7 @@ func (s *PasskeyStore) List(ctx context.Context) ([]Passkey, error) {
 		var p Passkey
 		if err := rows.Scan(
 			&p.ID, &p.CredentialID, &p.PublicKey, &p.SignCount,
-			&p.Label, &p.RegisteredAt, &p.LastUsedAt,
+			&p.Label, &p.CredentialJSON, &p.RegisteredAt, &p.LastUsedAt,
 		); err != nil {
 			return nil, fmt.Errorf("operator.List scan: %w", err)
 		}
