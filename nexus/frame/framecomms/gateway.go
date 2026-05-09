@@ -13,6 +13,8 @@ package framecomms
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
@@ -177,6 +179,9 @@ func (g *Gateway) ReadMessage(ctx context.Context, msgID int64) (funnel.ChatMess
 	}
 	r, err := g.Store.GetByID(ctx, msgID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return funnel.ChatMessage{}, fmt.Errorf("message %d: not found", msgID)
+		}
 		return funnel.ChatMessage{}, err
 	}
 	return funnel.ChatMessage{
@@ -212,6 +217,9 @@ func (g *Gateway) GetShared(ctx context.Context, shareID int64) (funnel.SharedFi
 	}
 	r, err := g.Store.GetShared(ctx, shareID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return funnel.SharedFileRef{}, fmt.Errorf("shared %d: not found", shareID)
+		}
 		return funnel.SharedFileRef{}, err
 	}
 	return sharedFileRefFromRow(r), nil
