@@ -86,6 +86,11 @@ class ChatWS {
   on(eventName, handler) {
     if (!this.handlers[eventName]) this.handlers[eventName] = [];
     this.handlers[eventName].push(handler);
+    // Views call `const off = on(...)` and use off() inside useEffect
+    // cleanup. Returning the unsubscribe matches the agent-network
+    // contract; without it, calling off() throws "not a function" on
+    // every component unmount.
+    return () => this.off(eventName, handler);
   }
 
   off(eventName, handler) {

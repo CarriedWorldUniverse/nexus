@@ -221,6 +221,19 @@ function handleFrame(env) {
   // Server may emit other untracked broadcast kinds in future; drop.
 }
 
+// send is fire-and-forget: emits a frame with no Promise + no timeout.
+// Use for kinds where the broker's response is observed via a separate
+// subscription (chat.send → chat.deliver fan-out) rather than a
+// matching .result frame. Calling rpc() on those kinds wedges the
+// promise for 30s and rejects with a timeout, which is what made
+// chat.send look broken in the SPA even though the server happily
+// persisted the message.
+export function send(kind, payload = {}) {
+  const id = correlationID();
+  sendFrame({ kind, id, ts: nowISO(), payload });
+  return id;
+}
+
 // rpc sends a request frame and awaits the matching .result. Rejects
 // with the server's error string on .error, with a timeout error if
 // the response doesn't arrive within RPC_TIMEOUT_MS, and with a

@@ -15,7 +15,15 @@ function escapeHtml(str) {
 }
 
 function formatTime(dateStr) {
-  const d = new Date(dateStr + 'Z');
+  if (!dateStr) return '';
+  // agent-network sent naive UTC like "2024-01-01 12:00:00" — needed
+  // a 'Z' suffix to parse as UTC. nexus emits RFC 3339 like
+  // "2024-01-01T12:00:00Z" — already terminated. Append only when
+  // missing so both sources round-trip cleanly; otherwise the double-Z
+  // produces an Invalid Date.
+  const isISO = /Z$|[+-]\d\d:?\d\d$/.test(dateStr);
+  const d = new Date(isISO ? dateStr : dateStr + 'Z');
+  if (isNaN(d.getTime())) return '';
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 

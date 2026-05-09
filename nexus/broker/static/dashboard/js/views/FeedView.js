@@ -15,8 +15,15 @@ const msgCache = {};
 
 async function loadMessages() {
   try {
-    const rows = await fetchMessages('general', lastMessageId.value);
-    if (!rows || !rows.length) return;
+    // fetchMessages returns {messages, has_more}; agent-network's
+    // version returned the array directly. Unwrap so the rest of this
+    // function (which iterates `rows`) works against the new shape.
+    // Without this unwrap the early-return on `!rows.length` always
+    // fired (length undefined on the object) and the SPA showed an
+    // empty chat history on every load.
+    const result = await fetchMessages('general', lastMessageId.value);
+    const rows = Array.isArray(result) ? result : (result && result.messages) || [];
+    if (!rows.length) return;
     rows.forEach(m => { msgCache[m.id] = m; });
 
     // Deduplicate — only add messages we haven't seen

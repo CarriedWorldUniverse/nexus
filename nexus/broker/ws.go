@@ -194,15 +194,29 @@ func (b *Broker) resolveUpgradeAuth(r *http.Request) (TokenInfo, bool) {
 	if token == "" {
 		token = r.URL.Query().Get("token")
 	}
-	if token == "" {
-		return TokenInfo{}, false
+	if token != "" {
+		if info, ok := b.cfg.Tokens.ResolveToken(token); ok {
+			return info, true
+		}
+		// JWT fallback for operator tokens.
+		if info, ok := b.tryVerifyOperatorJWT(token); ok {
+			return info, true
+		}
 	}
-	if info, ok := b.cfg.Tokens.ResolveToken(token); ok {
-		return info, true
-	}
-	// JWT fallback for operator tokens.
-	if info, ok := b.tryVerifyOperatorJWT(token); ok {
-		return info, true
+	// Operator auth bypass (dev-only knob). Token-presenting paths above
+	// already covered aspect-token connections; if we got here without
+	// a token (or with one that didn't resolve), accept as operator
+	// when the bypass is on. Logged at INFO so the trail is visible.
+	if b.cfg.OperatorAuthBypass {
+		if b.cfg.Logger != nil {
+			b.cfg.Logger.Info("operator auth bypass: accepting connection without verified token",
+				"remote", r.RemoteAddr, "had_token", token != "")
+		}
+		return TokenInfo{
+			AgentID:  "operator",
+			Admin:    true,
+			Operator: true,
+		}, true
 	}
 	return TokenInfo{}, false
 }
