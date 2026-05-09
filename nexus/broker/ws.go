@@ -18,6 +18,11 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
+	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 )
 
 // wsConn tracks per-connection state on the broker side: who's
@@ -140,12 +145,31 @@ func (b *Broker) handleConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveUpgradeAuth extracts the bearer from the upgrade request and
-// resolves it to a TokenInfo via the broker's TokenStore. Returns
-// (info, true) on a successful resolve; (zero, false) on missing or
-// unknown token. Per-aspect tokens (minted via ReconcileAgentTokens)
-// resolve to the aspect's identity; the legacy shared AuthToken — if
-// configured — resolves to the Frame identity (admin=true) for
-// back-compat with pre-drift-C callers.
+// resolves it to a TokenInfo. Two paths in order:
+//
+//  1. TokenStore lookup. Per-aspect tokens (minted via
+//     ReconcileAgentTokens) resolve to the aspect's identity; the
+//     legacy shared AuthToken — if configured — resolves to the
+//     Frame identity (admin=true) for back-compat with pre-drift-C
+//     callers.
+//
+//  2. Operator JWT verification (5b2). When the TokenStore misses
+//     and OperatorLogin is configured, try jwt.Verify against the
+//     SessionSigningSecret. On valid signature + sub:"operator",
+//     return a TokenInfo with AgentID:"operator", Admin:true,
+//     Operator:true. This is the path the dashboard SPA uses after
+//     a passkey login — the JWT is short-lived (1h TTL) and signed
+//     by the same secret as aspect JWTs.
+//
+//     Per the Kfv forward-risk invariant in operator_login.go:
+//     operator JWTs carry Kfv:0. This code path does NOT enforce
+//     any Kfv check. Adding Kfv enforcement here in the future MUST
+//     guard the check with `claims.Sub != "operator"` — operators
+//     have no keyfile rotation, the passkey IS the long-term
+//     credential.
+//
+// Returns (info, true) on success; (zero, false) on missing, unknown,
+// or unverifiable token.
 func (b *Broker) resolveUpgradeAuth(r *http.Request) (TokenInfo, bool) {
 	// Authorization header is the primary source. Browser WebSocket API
 	// can't set custom headers on the upgrade, so fall back to a `token`
@@ -158,7 +182,42 @@ func (b *Broker) resolveUpgradeAuth(r *http.Request) (TokenInfo, bool) {
 	if token == "" {
 		return TokenInfo{}, false
 	}
-	return b.cfg.Tokens.ResolveToken(token)
+	if info, ok := b.cfg.Tokens.ResolveToken(token); ok {
+		return info, true
+	}
+	// JWT fallback for operator tokens.
+	if info, ok := b.tryVerifyOperatorJWT(token); ok {
+		return info, true
+	}
+	return TokenInfo{}, false
+}
+
+// tryVerifyOperatorJWT attempts to verify the bearer as an operator
+// JWT. Returns (info, true) on a valid operator JWT; (zero, false)
+// on any failure (no secret configured, bad signature, expired,
+// non-operator sub). Failures are silent — the WS handler treats
+// the result the same as a TokenStore miss and returns 401.
+func (b *Broker) tryVerifyOperatorJWT(token string) (TokenInfo, bool) {
+	ol := b.cfg.OperatorLogin
+	if ol == nil || len(ol.SessionSigningSecret) == 0 {
+		return TokenInfo{}, false
+	}
+	now := time.Now()
+	if ol.Now != nil {
+		now = ol.Now()
+	}
+	claims, err := jwt.Verify(ol.SessionSigningSecret, token, now)
+	if err != nil {
+		return TokenInfo{}, false
+	}
+	if claims.Sub != "operator" {
+		return TokenInfo{}, false
+	}
+	return TokenInfo{
+		AgentID:  "operator",
+		Admin:    true,
+		Operator: true,
+	}, true
 }
 
 // serve runs the per-connection read loop. Exits when the connection

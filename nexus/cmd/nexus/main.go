@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"log/slog"
@@ -82,6 +83,25 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
+	bridle "github.com/CarriedWorldUniverse/bridle"
+	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
+	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
+	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/framecomms"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
+	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
+	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
+	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
+	"github.com/CarriedWorldUniverse/nexus/nexus/operator"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
 )
 
 // exitCodeBootstrapDone signals a successful first-boot setup. Supervisor
@@ -110,6 +130,9 @@ func main() {
 	}
 	if len(os.Args) >= 2 && os.Args[1] == "admin" {
 		os.Exit(runAdminSubcommand(os.Args[2:]))
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "operator" {
+		os.Exit(runOperatorSubcommand(os.Args[2:]))
 	}
 	addr := flag.String("addr", ":7888", "broker listen address")
 	tokenEnv := flag.String("token-env", "NEXUS_TOKEN", "env var holding the shared bearer token")
@@ -458,6 +481,13 @@ func main() {
 		// remote aspects pick up at next JWT re-validation. Future
 		// broadcast frame (`personality.refresh`) will hook in here too.
 		OnNexusMDChange: buildOnNexusMDChange(ctx, embeddedFrame, logger),
+		// Operator login (dashboard-ws-port spec §2.2 / 5b1).
+		// Constructed only when the Nexus has identity (signing
+		// secret available) AND the operator endpoints are wanted.
+		// We build it unconditionally when KeyfileValidator is
+		// present — same prerequisite — so the dashboard SPA can
+		// reach /api/operator/* once the broker is up.
+		OperatorLogin: buildOperatorLogin(db, nexusIdentity.NexusID, nexusIdentity.SessionSigningSecret, *addr, logger),
 	}, r)
 
 	// Wire the embedded Frame's chat gateway to broker.HandleChatSend so
@@ -788,6 +818,57 @@ func buildOnNexusMDChange(ctx context.Context, ef *frame.EmbeddedFrame, log *slo
 		}
 		log.Info("frame central nexus_md refreshed in-process",
 			"version", newVersion)
+	}
+}
+
+// buildOperatorLogin assembles the broker's operator login wiring
+// (dashboard-ws-port spec, sub-part 5b1). Returns nil when the
+// configuration to make WebAuthn meaningful is missing — empty
+// signing secret (no Nexus identity), or no NEXUS_OPERATOR_RPID set.
+//
+// Why an env var for RPID/origins instead of deriving from --addr:
+// the broker may listen on :7888 but the dashboard URL the browser
+// uses depends on TLS certs, tailnet hostname, possible front
+// proxy. WebAuthn rejects any RPID the browser doesn't see in its
+// own origin, so deriving it server-side is fragile. Operator
+// supplies via env so deployment topology doesn't require a code
+// change. Defaults: RPID empty → returns nil (no operator endpoints
+// registered); RPID set without origins → derive a single origin
+// from "https://" + RPID (the common case for tailnet hosts on
+// the default 443).
+func buildOperatorLogin(db *sql.DB, nexusID string, secret []byte, addr string, log *slog.Logger) *broker.OperatorLogin {
+	rpID := os.Getenv("NEXUS_OPERATOR_RPID")
+	if rpID == "" {
+		log.Info("operator login disabled — set NEXUS_OPERATOR_RPID to enable (typically the tailnet hostname)")
+		return nil
+	}
+	if len(secret) == 0 {
+		log.Warn("operator login disabled — Nexus identity has no session signing secret")
+		return nil
+	}
+
+	// Origins: NEXUS_OPERATOR_ORIGINS is comma-separated; default
+	// is the single "https://<rpID>" guess.
+	origins := []string{"https://" + rpID}
+	if env := os.Getenv("NEXUS_OPERATOR_ORIGINS"); env != "" {
+		origins = strings.Split(env, ",")
+		for i := range origins {
+			origins[i] = strings.TrimSpace(origins[i])
+		}
+	}
+
+	auth, err := operator.NewAuth(rpID, "The Nexus", origins, operator.NewPasskeyStore(db))
+	if err != nil {
+		log.Error("operator login disabled — webauthn config rejected", "err", err)
+		return nil
+	}
+
+	log.Info("operator login enabled", "rp_id", rpID, "origins", origins)
+	return &broker.OperatorLogin{
+		Auth:                 auth,
+		SessionSigningSecret: secret,
+		JWTTTL:               time.Hour,
+		NexusID:              nexusID,
 	}
 }
 

@@ -51,6 +51,12 @@ type TokenInfo struct {
 	// aspects rotate to per-aspect tokens, AllowLegacyMaster gets
 	// flipped off and ViaLegacy becomes unreachable.
 	ViaLegacy bool
+	// Operator is true when the bearer was a successfully-verified
+	// operator JWT (sub:"operator", signed by SessionSigningSecret).
+	// Distinct from AgentID == "operator" so downstream handlers can
+	// branch on the path that produced the identity (TokenStore vs
+	// JWT) without re-parsing.
+	Operator bool
 }
 
 // TokenStore holds the in-memory token map and provides the resolve /
