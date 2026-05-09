@@ -1,0 +1,21 @@
+{
+  "name": "harrow",
+  "context_mode": "thread",
+  "provider": "claude-api",
+  "provider_config": {
+    "model": "claude-opus-4-7"
+  },
+  "port": 0,
+  "capabilities": [
+    "research",
+    "web-fetch",
+    "synthesis",
+    "broad-input-distillation"
+  ],
+  "metadata": {
+    "auto_spawn": true,
+    "domain": "Disclosure",
+    "title": "Harrow — Aspect of Disclosure",
+    "note": "Clarity under breadth. Distills web + chat + operator input into something actionable."
+  }
+}
