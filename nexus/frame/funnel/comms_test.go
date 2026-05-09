@@ -638,6 +638,31 @@ type fakeKnowledgeGateway struct {
 	searchCalls   []KnowledgeQuery
 	searchResults []KnowledgeHit
 	searchErr     error
+
+	// Pre-seeded prior shared flags keyed by from_agent + "/" + topic.
+	// Nil map means no prior entries (GetKnowledgeShared returns ok=false).
+	priorShared    map[string]bool
+	getSharedCalls []getSharedKnowledgeCall
+	getSharedErr   error
+}
+
+type getSharedKnowledgeCall struct {
+	FromAgent string
+	Topic     string
+}
+
+func (g *fakeKnowledgeGateway) GetKnowledgeShared(_ context.Context, fromAgent, topic string) (bool, bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.getSharedCalls = append(g.getSharedCalls, getSharedKnowledgeCall{FromAgent: fromAgent, Topic: topic})
+	if g.getSharedErr != nil {
+		return false, false, g.getSharedErr
+	}
+	if g.priorShared == nil {
+		return false, false, nil
+	}
+	v, ok := g.priorShared[fromAgent+"/"+topic]
+	return v, ok, nil
 }
 
 type storeKnowledgeCall struct {
@@ -822,5 +847,68 @@ func TestCommsRunner_SearchKnowledgeNilHitsBecomeEmptyArray(t *testing.T) {
 	}
 	if !strings.Contains(string(res), "[]") {
 		t.Errorf("nil hits must surface as []: %s", res)
+	}
+}
+
+func TestCommsRunner_StoreKnowledgePreservesPriorSharedWhenOmitted(t *testing.T) {
+	// Operator-curated entry exists. Aspect calls store_knowledge to
+	// refresh content, omitting `shared`. The runner must inherit the
+	// prior shared=true rather than silently clearing it.
+	kg := &fakeKnowledgeGateway{
+		priorShared: map[string]bool{"verity/lore": true},
+	}
+	r := CommsRunner{Gateway: &fakeGateway{}, Knowledge: kg, AspectID: "verity"}
+	_, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameStoreKnowledge,
+		Args: mustJSON(map[string]any{"topic": "lore", "content": "updated body"}),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(kg.storeCalls) != 1 {
+		t.Fatalf("expected 1 store call, got %d", len(kg.storeCalls))
+	}
+	if !kg.storeCalls[0].Shared {
+		t.Errorf("prior shared=true must be preserved when args omit shared; got Shared=false")
+	}
+	if len(kg.getSharedCalls) != 1 {
+		t.Errorf("expected 1 GetKnowledgeShared lookup, got %d", len(kg.getSharedCalls))
+	}
+}
+
+func TestCommsRunner_StoreKnowledgeExplicitFalseRevokesShared(t *testing.T) {
+	// Explicit shared=false should clear an existing shared=true.
+	kg := &fakeKnowledgeGateway{
+		priorShared: map[string]bool{"verity/lore": true},
+	}
+	r := CommsRunner{Gateway: &fakeGateway{}, Knowledge: kg, AspectID: "verity"}
+	_, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameStoreKnowledge,
+		Args: mustJSON(map[string]any{"topic": "lore", "content": "x", "shared": false}),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if kg.storeCalls[0].Shared {
+		t.Error("explicit shared=false must reach the gateway as false")
+	}
+	if len(kg.getSharedCalls) != 0 {
+		t.Error("explicit shared in args must skip the GetKnowledgeShared probe")
+	}
+}
+
+func TestCommsRunner_StoreKnowledgeNoPriorEntryDefaultsToFalse(t *testing.T) {
+	// Fresh entry, no prior. Omitting shared → false.
+	kg := &fakeKnowledgeGateway{}
+	r := CommsRunner{Gateway: &fakeGateway{}, Knowledge: kg, AspectID: "keel"}
+	_, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameStoreKnowledge,
+		Args: mustJSON(map[string]any{"topic": "fresh", "content": "x"}),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if kg.storeCalls[0].Shared {
+		t.Error("no prior entry + omitted shared must default to false")
 	}
 }
