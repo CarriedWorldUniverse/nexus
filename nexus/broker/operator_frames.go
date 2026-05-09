@@ -22,7 +22,6 @@ package broker
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -389,16 +388,19 @@ func (c *wsConn) handleOperatorAspectSay(env frames.Envelope) {
 	}
 	ctx, cancel := c.opCtx()
 	defer cancel()
+	// reply_to is hardcoded to 0 here — AspectSayPayload doesn't
+	// carry a reply_to field today (per dashboard-ws-port spec §3.2,
+	// aspect.say is a top-level "talk to this aspect" affordance).
+	// If the dashboard ever needs threaded replies into a specific
+	// message, add the field to the payload and forward it here.
 	msgID, err := c.broker.HandleChatSend(ctx, "operator", content, 0, "")
 	if err != nil {
-		// Translate context-cancellation cleanly so the SPA can
-		// distinguish transient retry-worthy errors from permanent
-		// validation rejections (which would never throw a context
-		// error from the store layer).
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			c.operatorError(env, "send: "+err.Error())
-			return
-		}
+		// Failures here include both transient (context cancellation)
+		// and permanent (validation rejections). The SPA's comms.js
+		// rejects the matching Promise on any ".error" kind; we don't
+		// distinguish further today. If the dashboard grows
+		// retry-worthy classification, encode it in the payload.error
+		// field rather than splitting the kind.
 		c.operatorError(env, "send: "+err.Error())
 		return
 	}
