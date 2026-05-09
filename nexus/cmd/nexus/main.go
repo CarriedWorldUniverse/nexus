@@ -36,6 +36,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // exitCodeBootstrapDone signals a successful first-boot setup. Supervisor
@@ -257,7 +258,7 @@ func main() {
 	// stays nil and the broker logs + drops chat.send frames.
 	chatStore := chat.NewSQLStore(db)
 	knowledgeStore := knowledge.New(db, logger)
-	chatRouter, frameGateway := buildChatRouter(ctx, embeddedFrame, chatStore, usage.NewSQLStore(db), knowledgeStore, logger)
+	chatRouter, frameGateway := buildChatRouter(ctx, embeddedFrame, r, chatStore, usage.NewSQLStore(db), knowledgeStore, logger)
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
@@ -840,12 +841,153 @@ func (a *usageRecorderAdapter) Record(ctx context.Context, msgID int64, turnID, 
 	return err
 }
 
+// buildOutputFilter resolves the post-hoc filter from aspect.json:
+//
+//	"filter":                "cheap" | "hard" | "always" | "off" (default "cheap")
+//	"filter_provider":       optional override; falls back to the Frame's provider
+//	"filter_provider_config.model": optional; falls back to "claude-haiku-4-5" for
+//	                          Claude flavors, otherwise the Frame's main model
+//
+// Empty filter → "cheap" (full triage). "hard" skips the model call.
+// "always" / "off" only catch empty replies.
+//
+// The cheap-tier judge is operator-configurable so non-Claude deployments
+// can wire their own (ollama, openai, anthropic-api with haiku). Default
+// haiku rather than the Frame's main model so per-turn cost stays bounded.
+func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, frameProviderID bridle.ProviderID, frameModel string, log *slog.Logger) funnel.OutputFilter {
+	aspectName := cfg.Name
+	choice := strings.ToLower(strings.TrimSpace(cfg.Filter))
+	if choice == "" {
+		choice = "cheap"
+	}
+	switch choice {
+	case "off", "always":
+		log.Info("frame funnel: filter=always (post every non-empty reply)", "aspect", aspectName)
+		return funnel.AlwaysPostFilter{}
+	case "hard":
+		log.Info("frame funnel: filter=hard (substring/prefix self-suppress only)", "aspect", aspectName)
+		return funnel.HardRulesFilter{}
+	case "cheap":
+		judgeProvider, judgeProviderID, judgeModel := resolveJudgeProviderAndModel(cfg, frameProvider, frameProviderID, frameModel, log)
+		if judgeProvider == nil {
+			log.Warn("frame funnel: filter=cheap requested but no usable judge provider; downgrading to hard",
+				"aspect", aspectName, "filter_provider", cfg.FilterProvider)
+			return funnel.HardRulesFilter{}
+		}
+		log.Info("frame funnel: filter=cheap (hard rules + cheap-model judge)",
+			"aspect", aspectName, "judge_provider", judgeProviderID, "judge_model", judgeModel)
+		return funnel.HardRulesFilter{
+			Inner: funnel.CheapModelFilter{
+				Harness:  bridle.NewHarness(judgeProvider),
+				Provider: judgeProviderID,
+				Model:    judgeModel,
+			},
+		}
+	default:
+		log.Warn("frame funnel: unrecognised filter setting; falling back to cheap",
+			"aspect", aspectName, "setting", cfg.Filter)
+		judgeProvider, judgeProviderID, judgeModel := resolveJudgeProviderAndModel(cfg, frameProvider, frameProviderID, frameModel, log)
+		if judgeProvider == nil {
+			return funnel.HardRulesFilter{}
+		}
+		return funnel.HardRulesFilter{
+			Inner: funnel.CheapModelFilter{
+				Harness:  bridle.NewHarness(judgeProvider),
+				Provider: judgeProviderID,
+				Model:    judgeModel,
+			},
+		}
+	}
+}
+
+// resolveJudgeProviderAndModel picks the cheap-tier provider+model for
+// the CheapModelFilter, separate from the Frame's main provider:
+//
+//   - If aspect.json sets "filter_provider", instantiate that provider
+//     (claude-api / claude-code / future: ollama, openai). Model comes
+//     from filter_provider_config.model, falling back to a sensible
+//     default per provider family.
+//   - Otherwise inherit the Frame's provider, with the Frame's model as
+//     the absolute floor and "claude-haiku-4-5" as the preferred default
+//     when the provider is a Claude flavor.
+//
+// Returns (nil, "", "") when the configured provider can't be built —
+// caller must downgrade to "hard" rather than crash the Frame.
+func resolveJudgeProviderAndModel(cfg schemas.AspectConfig, frameProvider bridle.Provider, frameProviderID bridle.ProviderID, frameModel string, log *slog.Logger) (bridle.Provider, bridle.ProviderID, string) {
+	overrideProvider := strings.TrimSpace(cfg.FilterProvider)
+	overrideModel := ""
+	if cfg.FilterProviderConfig != nil {
+		if m, ok := cfg.FilterProviderConfig["model"].(string); ok {
+			overrideModel = strings.TrimSpace(m)
+		}
+	}
+
+	if overrideProvider == "" {
+		// Inherit Frame's provider. Default model preference:
+		// haiku for Claude flavors, otherwise the Frame's own model.
+		model := overrideModel
+		if model == "" {
+			if isClaudeFlavor(frameProviderID) {
+				model = "claude-haiku-4-5"
+			} else {
+				model = frameModel
+			}
+		}
+		return frameProvider, frameProviderID, model
+	}
+
+	// Build a fresh provider from filter_provider.
+	p, id, ok := buildProviderByName(overrideProvider, log)
+	if !ok {
+		return nil, "", ""
+	}
+	model := overrideModel
+	if model == "" {
+		if isClaudeFlavor(id) {
+			model = "claude-haiku-4-5"
+		} else {
+			model = frameModel // last-resort fallback; operator should set the model explicitly for non-Claude
+		}
+	}
+	return p, id, model
+}
+
+// buildProviderByName mirrors the Frame's own provider switch in
+// buildChatRouter. Kept narrow — adds providers as the rest of the
+// runtime gains them. Returns ok=false on unrecognised names so the
+// caller can downgrade gracefully rather than crash.
+func buildProviderByName(name string, log *slog.Logger) (bridle.Provider, bridle.ProviderID, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claude-api", "claude":
+		return claudeprovider.New(""), bridle.ProviderID("claude-api"), true
+	case "claude-code", "claudecode":
+		return claudecodeprovider.New(), bridle.ProviderID("claude-code"), true
+	default:
+		log.Warn("frame funnel: filter_provider unrecognised", "filter_provider", name)
+		return nil, "", false
+	}
+}
+
+// isClaudeFlavor reports whether providerID is one of the Claude
+// providers. Used for picking the haiku default model.
+//
+// Accepts both the canonical IDs ("claude-api", "claude-code") and the
+// aspect.json aliases ("claude", "claudecode") because callers pass
+// either depending on whether the provider has been instantiated yet.
+func isClaudeFlavor(id bridle.ProviderID) bool {
+	switch id {
+	case "claude-api", "claude-code", "claude", "claudecode":
+		return true
+	}
+	return false
+}
+
 // buildChatRouter returns the chat-router callbacks plus the gateway it
 // wired the funnel to. The caller is expected to assign gateway.Sender
 // to the broker after broker.New so in-process Frame posts go through
 // Broker.HandleChatSend (the unified chat-send path). When ef is nil
 // both returns are nil.
-func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.Store, usageStore *usage.SQLStore, knowledgeStore *knowledge.Store, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway) {
+func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.Roster, store chat.Store, usageStore *usage.SQLStore, knowledgeStore *knowledge.Store, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway) {
 	if ef == nil {
 		return nil, nil
 	}
@@ -899,6 +1041,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 	recorder := &usageRecorderAdapter{store: usageStore}
 
 	threads := route.NewThreadIndex()
+	outputFilter := buildOutputFilter(ef.Aspect.Config, p, bridle.ProviderID(provider), model, log)
 	f, err := funnel.New(funnel.Config{
 		AspectID: ef.Aspect.Name,
 		Harness:  bridle.NewHarness(p),
@@ -910,6 +1053,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 		SystemPromptFn: ef.SystemPrompt,
 		Tools:          funnel.CommsToolDefs(),
 		Runner:         funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		Filter:         outputFilter,
 		ChatGateway:    gateway,
 		Threads:        threads,
 		Pulser:         pulser,
@@ -947,7 +1091,19 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 				ReplyTo: replyTo,
 				Topic:   topic,
 			}
-			if !route.ShouldRouteToFrame(routeMsg, frameName, threads) {
+			// Build the roster-of-known-aspects for the addressing
+			// check. Includes the Frame itself plus every live aspect
+			// per the in-memory Roster. Snapshotted per-message so
+			// roster churn between turns is reflected immediately.
+			rosterNames := []string{frameName}
+			if ros != nil {
+				for _, n := range ros.AspectNames() {
+					if n != frameName {
+						rosterNames = append(rosterNames, n)
+					}
+				}
+			}
+			if !route.ShouldRouteToFrame(routeMsg, frameName, rosterNames, threads) {
 				return
 			}
 			f.ReceiveWithMsgID(bridle.InboxItem{From: from, Content: content}, msgID)

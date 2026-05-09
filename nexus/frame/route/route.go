@@ -30,6 +30,7 @@ package route
 
 import (
 	"regexp"
+	"strings"
 	"sync"
 )
 
@@ -51,14 +52,27 @@ type Message struct {
 	// surfaces a richer reply-graph.
 }
 
-// mentionRE matches @<word> tokens. Aspect ids are alphanumeric +
-// underscore (frame.validateName regex). Email-style fragments are not
-// expected in chat messages; if they appear, they'll match the regex
-// but won't equal any registered aspect name and will fall through.
-var mentionRE = regexp.MustCompile(`@([A-Za-z0-9_]+)`)
+// mentionRE is the legacy regex-based mention matcher. Kept for the
+// deprecated Mentions/IsAddressed entry points (no longer used by
+// routing). Do NOT add new callers; use MentionsForRoster /
+// IsAddressedToAny instead, which take an explicit aspect list.
+//
+// Why deprecate: a regex doesn't know which aspects exist. It happily
+// returns "@anyword-with-hyphens" whether or not it's a real aspect, and
+// any character not in the class silently truncates the match — that's
+// the substrate-grade bug that hid for hours when test-keel wasn't
+// receiving messages. Roster-aware matching searches for known aspect
+// names with word-boundary checks, so identity drives the parse, not
+// the parser's guesses about what an identifier looks like.
+var mentionRE = regexp.MustCompile(`@([A-Za-z0-9_-]+)`)
 
-// Mentions returns the set of aspect ids @-mentioned in the content.
-// Useful for both routing decisions and observability.
+// Mentions is DEPRECATED. Use MentionsForRoster with the live aspect
+// list. Retained because tests in other packages still call it; new
+// code MUST go through the roster-aware path.
+//
+// Returns @-tokens the regex finds in content. Validity against the
+// real aspect set is the caller's problem — exactly the property
+// that caused the test-keel routing bug, so prefer MentionsForRoster.
 func Mentions(content string) []string {
 	matches := mentionRE.FindAllStringSubmatch(content, -1)
 	if len(matches) == 0 {
@@ -77,35 +91,153 @@ func Mentions(content string) []string {
 	return out
 }
 
-// IsAddressed reports whether the content contains at least one
-// @<aspect> mention. The inverse — un-addressed traffic — flows to the
-// Frame regardless of sender per the routing-awareness rule.
+// IsAddressed is DEPRECATED. Use IsAddressedToAny. The regex-based
+// "is anything addressed" check is conservative — any @-token returns
+// true even when the token isn't a real aspect, which can flip the
+// "un-addressed → route to Frame" rule incorrectly.
 func IsAddressed(content string) bool {
 	return mentionRE.MatchString(content)
 }
 
-// ShouldRouteToFrame applies the §6.5 P8 / #80 routing rules.
+// MentionsForRoster returns the subset of `roster` that the content
+// addresses via `@<name>`. Identity-driven match: we look for each
+// known aspect name in the content with word-boundary checks rather
+// than parsing arbitrary `@`-tokens and hoping they match.
+//
+// Match rules:
+//   - Case-INsensitive — `@Test-Keel` matches an aspect named test-keel.
+//   - Word-boundary — `@test` does NOT match aspect "test-keel"; `@test-keel`
+//     does. The match must be followed by end-of-string OR a non-word
+//     character (anything not [A-Za-z0-9_-]).
+//   - Order-preserving, deduplicated — each aspect appears at most once
+//     in the result, in the order they first appear in the roster slice.
+//
+// Special tokens "@all" and "@operator" are NOT included in the roster
+// for routing — those are SPA mention-autocomplete affordances, not
+// aspect identities. Handle them in the caller's policy layer if needed.
+func MentionsForRoster(content string, roster []string) []string {
+	if len(roster) == 0 || content == "" {
+		return nil
+	}
+	lc := strings.ToLower(content)
+	seen := make(map[string]struct{}, len(roster))
+	out := make([]string, 0, len(roster))
+	for _, name := range roster {
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[strings.ToLower(name)]; dup {
+			continue
+		}
+		if mentionContains(lc, "@"+strings.ToLower(name)) {
+			seen[strings.ToLower(name)] = struct{}{}
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// IsAddressedToAny reports whether the content explicitly addresses
+// any aspect in the roster (or @all). Used by the Frame's routing rule
+// 1: when content is NOT addressed to any known aspect, route to the
+// Frame as the network's catch-all.
+//
+// "@all" counts as addressed — broadcast traffic is intentional, not
+// un-addressed. Aspects in the roster count by name match. Anything
+// else (random `@words`, no @-tokens at all) returns false → routes
+// to Frame.
+func IsAddressedToAny(content string, roster []string) bool {
+	if content == "" {
+		return false
+	}
+	lc := strings.ToLower(content)
+	if mentionContains(lc, "@all") {
+		return true
+	}
+	for _, name := range roster {
+		if name == "" {
+			continue
+		}
+		if mentionContains(lc, "@"+strings.ToLower(name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// mentionContains reports whether lcContent contains lcToken at a
+// word boundary — the token must either end the string OR be followed
+// by a non-name character (anything not [A-Za-z0-9_-]). Without the
+// boundary check, "@test" would falsely match "@test-keel" and
+// vice-versa. Both inputs are pre-lowercased by the caller.
+func mentionContains(lcContent, lcToken string) bool {
+	for i := 0; i <= len(lcContent)-len(lcToken); i++ {
+		if lcContent[i:i+len(lcToken)] != lcToken {
+			continue
+		}
+		// Token found. Check the trailing boundary.
+		end := i + len(lcToken)
+		if end == len(lcContent) {
+			return true
+		}
+		next := lcContent[end]
+		if !isNameByte(next) {
+			return true
+		}
+		// Token is a prefix of a longer @-id (e.g. "@test" inside
+		// "@test-keel"); keep scanning for a proper match later in the
+		// string.
+	}
+	return false
+}
+
+// isNameByte reports whether b is in the aspect-name byte class
+// [A-Za-z0-9_-]. ASCII-only — aspect names are ASCII per the
+// frame.validateName regex.
+func isNameByte(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z':
+		return true
+	case b >= 'A' && b <= 'Z':
+		return true
+	case b >= '0' && b <= '9':
+		return true
+	case b == '_' || b == '-':
+		return true
+	}
+	return false
+}
+
+// ShouldRouteToFrame applies the §6.5 P8 / #80 routing rules using the
+// roster-aware addressing check.
 //
 // frameName is the operator-chosen Frame identity (from EmbeddedFrame.Name).
+// roster is the set of OTHER addressable aspect names — used to decide
+// whether the message is "addressed to someone" so rule 1 can fire.
 // idx may be nil — a nil index treats the Frame as having no participation
 // history, so only rules 1 and 2a–2b can match.
+//
+// The roster MUST include the Frame's own name plus every other live
+// aspect. Without the Frame in the roster, rule 1 ("addressed to nobody")
+// would fire for messages addressed only to the Frame.
 //
 // Pure: does NOT mutate idx. Callers integrating with a chat bus are
 // responsible for calling idx.RecordPost(msgID, topic) after the Frame
 // posts a message, so subsequent routing decisions see the new
 // participation. Likewise idx.RecordParticipation is the caller's call,
 // not this function's.
-func ShouldRouteToFrame(msg Message, frameName string, idx *ThreadIndex) bool {
-	// Rule 1: un-addressed traffic always routes to the Frame.
-	if !IsAddressed(msg.Content) {
+func ShouldRouteToFrame(msg Message, frameName string, roster []string, idx *ThreadIndex) bool {
+	// Rule 1: un-addressed traffic always routes to the Frame. "Addressed"
+	// means addressing a known aspect or @all — random @-tokens that
+	// don't match an aspect aren't real addressing.
+	if !IsAddressedToAny(msg.Content, roster) {
 		return true
 	}
 
-	// Rule 2a: Frame is the addressee.
-	for _, m := range Mentions(msg.Content) {
-		if m == frameName {
-			return true
-		}
+	// Rule 2a: Frame is the addressee. Roster-aware match handles
+	// hyphens, case, punctuation correctly.
+	if mentionsName(msg.Content, frameName) {
+		return true
 	}
 
 	// Rule 2b: Frame is the addressor. Delivery is a no-op (the Frame
@@ -139,6 +271,16 @@ func ShouldRouteToFrame(msg Message, frameName string, idx *ThreadIndex) bool {
 	}
 
 	return false
+}
+
+// mentionsName reports whether content addresses the named aspect via
+// `@<name>` with word-boundary checks. Case-insensitive. Convenience
+// over MentionsForRoster for the single-name check.
+func mentionsName(content, name string) bool {
+	if content == "" || name == "" {
+		return false
+	}
+	return mentionContains(strings.ToLower(content), "@"+strings.ToLower(name))
 }
 
 // ThreadIndex tracks the Frame's participation footprint: messages it

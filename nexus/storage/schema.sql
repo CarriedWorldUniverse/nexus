@@ -398,6 +398,35 @@ CREATE TABLE IF NOT EXISTS operator_passkeys (
 );
 
 -- -------------------------------------------------------------------
+-- Inbox triage — every chat.send the funnel ingests must produce a
+-- structured outcome (reply or skip-with-reason) before the turn ends.
+-- This table is the audit trail. Per `2026-05-10-funnel-triage-contract.md`.
+--
+-- Skip events are NOT broadcast as chat (would create noise); they
+-- live here for the operator's 1:1 view to render. Replies live in
+-- chat_messages and link back via reply_msg_id.
+-- -------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS inbox_triage (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  aspect_name  TEXT NOT NULL,
+  msg_id       INTEGER NOT NULL,
+  turn_id      TEXT NOT NULL,
+  decision     TEXT NOT NULL CHECK (decision IN ('reply','skip')),
+  reason       TEXT NOT NULL DEFAULT '',
+  reply_msg_id INTEGER,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (msg_id)       REFERENCES chat_messages(id) ON DELETE CASCADE,
+  FOREIGN KEY (reply_msg_id) REFERENCES chat_messages(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_inbox_triage_aspect_time
+  ON inbox_triage(aspect_name, created_at);
+CREATE INDEX IF NOT EXISTS idx_inbox_triage_msg
+  ON inbox_triage(msg_id);
+CREATE INDEX IF NOT EXISTS idx_inbox_triage_turn
+  ON inbox_triage(turn_id);
+
+-- -------------------------------------------------------------------
 -- Schema metadata — marker only. Real migrations defer until first
 -- backwards-incompatible change (per §10 of registration spec).
 -- -------------------------------------------------------------------

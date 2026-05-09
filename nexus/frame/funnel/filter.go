@@ -212,7 +212,7 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 	req := bridle.TurnRequest{
 		AspectID:     in.AspectID,
 		SystemPrompt: filterJudgePrompt,
-		Session:      bridle.SessionHandle{ID: "filter-" + in.TurnID},
+		Session:      bridle.SessionHandle{ID: "filter-" + in.TurnID, New: true},
 		UserMessage:  in.FinalText,
 		Provider:     f.Provider,
 		Model:        f.Model,
