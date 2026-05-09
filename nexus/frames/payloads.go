@@ -316,6 +316,127 @@ type KnowledgeHit struct {
 }
 
 // -------------------------------------------------------------------
+// Operator dashboard request/response (dashboard-ws-port spec §3.2)
+//
+// All operator frames carry a correlation_id (Envelope.ID); the
+// broker echoes it on the matching .result so the SPA can route
+// responses back to pending Promises in js/comms.js.
+// -------------------------------------------------------------------
+
+// RosterListPayload is the (intentionally empty) request body.
+// Operator's dashboard pulls the current aspect roster on view-load
+// and on subscribe.roster reconnect; the request carries no scope —
+// operator sees everything.
+type RosterListPayload struct{}
+
+// RosterAspect is one row in roster.list.result. Subset of the
+// internal roster + extra metadata the dashboard's Status/Agents
+// views render.
+type RosterAspect struct {
+	Name         string   `json:"name"`
+	Status       string   `json:"status"`
+	LastSeen     string   `json:"last_seen,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	Provider     string   `json:"provider,omitempty"`
+	ContextMode  string   `json:"context_mode,omitempty"`
+	Role         string   `json:"role,omitempty"`
+}
+
+// RosterListResultPayload — newest first, all aspects, with status
+// from the in-memory Roster.
+type RosterListResultPayload struct {
+	Aspects []RosterAspect `json:"aspects"`
+}
+
+// ChatListPayload is the operator-scoped chat feed read. id-based
+// pagination: AfterID returns messages with id > AfterID; BeforeID
+// returns id < BeforeID. Both zero = newest page (uses a default-
+// limit's worth of newest rows).
+//
+// Distinct from ChatReadPayload, which is thread-scoped and
+// available to aspects. Operator dashboard uses this for the main
+// "all chat" feed; the topic-scoped variant is deferred (chat_messages
+// has no persisted topic column today — schema migration required).
+type ChatListPayload struct {
+	AfterID  int64 `json:"after_id,omitempty"`
+	BeforeID int64 `json:"before_id,omitempty"`
+	Limit    int   `json:"limit,omitempty"`
+}
+
+// ChatListResultPayload — messages oldest-first, plus has_more for
+// "load older" affordance at the page boundary.
+type ChatListResultPayload struct {
+	Messages []ChatDeliverPayload `json:"messages"`
+	HasMore  bool                 `json:"has_more"`
+}
+
+// ChatRepliesPayload requests every message whose reply_to ==
+// parent_id. Dashboard renders a thread view from one message.
+type ChatRepliesPayload struct {
+	ParentID int64 `json:"parent_id"`
+}
+
+// ChatRepliesResultPayload — direct replies only (one level deep);
+// the dashboard recurses if needed.
+type ChatRepliesResultPayload struct {
+	ParentID int64                `json:"parent_id"`
+	Messages []ChatDeliverPayload `json:"messages"`
+}
+
+// ReactionsFetchPayload requests reactions for a batch of msg_ids.
+// Used by the chat view when rendering a page so it can show
+// reaction counts inline.
+type ReactionsFetchPayload struct {
+	MsgIDs []int64 `json:"msg_ids"`
+}
+
+// ReactionRow is one (aspect, emoji) reaction on a message.
+type ReactionRow struct {
+	Aspect string `json:"aspect"`
+	Emoji  string `json:"emoji"`
+}
+
+// ReactionsFetchResultPayload — keyed by msg_id (string in JSON
+// because JSON object keys must be strings). Empty array when no
+// reactions exist; missing key when msg_id wasn't in the input.
+type ReactionsFetchResultPayload struct {
+	Reactions map[string][]ReactionRow `json:"reactions"`
+}
+
+// KnowledgeListPayload mirrors the knowledge.Store.List shape:
+// scope by from_agent (omit for the operator's own entries via the
+// caller-identity convention; explicit name for peer reads).
+type KnowledgeListPayload struct {
+	Agent string `json:"agent,omitempty"`
+	Limit int    `json:"limit,omitempty"`
+}
+
+// KnowledgeListResultPayload — entries newest-updated first.
+type KnowledgeListResultPayload struct {
+	Entries []KnowledgeHit `json:"entries"`
+}
+
+// KnowledgeStoreResultPayload echoes the row id back to the SPA.
+type KnowledgeStoreResultPayload struct {
+	ID int64 `json:"id"`
+}
+
+// AspectSayPayload posts a chat message addressed to the named
+// aspect. Sugar over chat.send with auto-prepended "@<aspect>"; the
+// SPA's Aspects view renders a "talk to" affordance that uses this.
+type AspectSayPayload struct {
+	Aspect  string `json:"aspect"`
+	Content string `json:"content"`
+}
+
+// AspectSayResultPayload — the new chat msg_id, so the SPA can
+// follow up on its own message in the chat stream.
+type AspectSayResultPayload struct {
+	MsgID int64 `json:"msg_id"`
+}
+
+// -------------------------------------------------------------------
 // Session projection
 // -------------------------------------------------------------------
 

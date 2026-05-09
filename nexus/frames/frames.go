@@ -95,6 +95,31 @@ const (
 
 	// Lifecycle.
 	KindShutdown Kind = "shutdown"
+
+	// Operator dashboard (dashboard-ws-port spec §3.2). Request/response
+	// frames the SPA sends from the browser's WS connection. All carry
+	// a correlation_id (the envelope's ID) and the broker echoes it on
+	// the result. Authoritative consumers: the dashboard SPA today;
+	// future operator-tooling clients can reuse the same surface.
+	KindRosterList         Kind = "roster.list"
+	KindRosterListResult   Kind = "roster.list.result"
+	// chat.list is operator-only: all chat messages, paginated by id.
+	// Distinct from chat.read (which is thread-scoped and aspect-
+	// available). Used by the dashboard's main chat feed; topics
+	// view + topic-scoped reads are a follow-up part — chat_messages
+	// today has no persisted topic column, so topics work needs a
+	// schema migration that's out of 5c scope.
+	KindChatList           Kind = "chat.list"
+	KindChatListResult     Kind = "chat.list.result"
+	KindChatReplies        Kind = "chat.replies"
+	KindChatRepliesResult  Kind = "chat.replies.result"
+	KindReactionsFetch     Kind = "chat.reactions.fetch"
+	KindReactionsFetchResult Kind = "chat.reactions.fetch.result"
+	KindKnowledgeList         Kind = "knowledge.list"
+	KindKnowledgeListResult   Kind = "knowledge.list.result"
+	KindKnowledgeStoreResult  Kind = "knowledge.store.result"
+	KindAspectSay         Kind = "aspect.say"
+	KindAspectSayResult   Kind = "aspect.say.result"
 )
 
 // Envelope is the shared shape of every frame.
@@ -206,7 +231,15 @@ func IsKnown(k Kind) bool {
 		KindAspectActivity,
 		KindKnowledgeStore, KindKnowledgeSearch, KindKnowledgeSearchResult,
 		KindSessionEntryAppended, KindSessionRewind, KindSessionFork,
-		KindShutdown:
+		KindShutdown,
+		// Operator dashboard (dashboard-ws-port 5c)
+		KindRosterList, KindRosterListResult,
+		KindChatList, KindChatListResult,
+		KindChatReplies, KindChatRepliesResult,
+		KindReactionsFetch, KindReactionsFetchResult,
+		KindKnowledgeList, KindKnowledgeListResult,
+		KindKnowledgeStoreResult,
+		KindAspectSay, KindAspectSayResult:
 		return true
 	}
 	return false

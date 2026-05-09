@@ -326,6 +326,12 @@ func (c *wsConn) serve(parentCtx context.Context) {
 // handler by kind. Response frames are routed to the dispatcher in
 // the read loop before we ever get here.
 func (c *wsConn) dispatch(env frames.Envelope) {
+	// Dashboard SPA frames first — fires only when the connection
+	// resolved as an operator (c.auth.Operator true). Aspects fall
+	// through to the existing switch below.
+	if c.dispatchOperatorFrame(env) {
+		return
+	}
 	switch env.Kind {
 	case frames.KindRegister:
 		c.handleRegisterFrame(env)

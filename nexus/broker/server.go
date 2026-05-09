@@ -24,6 +24,12 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
+	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // chatHTML is the operator-aspect smoke-test page (chat.html). Served
@@ -204,6 +210,13 @@ type Config struct {
 	// endpoints (POST /api/operator/{register,login}/{begin,finish}).
 	// nil → endpoints not registered (legacy boot, no dashboard SPA).
 	OperatorLogin *OperatorLogin
+
+	// KnowledgeStore powers operator-facing knowledge frames
+	// (knowledge.list / knowledge.search / knowledge.store) on the WS
+	// surface. nil → those frames return an "<kind>.error"
+	// "knowledge store not configured" so the SPA renders a clean
+	// "feature not available" instead of a hung Promise.
+	KnowledgeStore *knowledge.Store
 
 	// OnNexusMDChange is invoked after a successful central nexus_md
 	// edit (REST Part 9c via PUT /api/admin/nexus-md). cmd/nexus wires
