@@ -1,0 +1,135 @@
+/* Box-sizing reset */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100dvh;
+  overflow: hidden;
+  background-color: var(--bg-abyss);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#app {
+  height: 100dvh;
+  display: flex;
+  overflow: hidden;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}
+
+/* Firefox scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-default) transparent;
+}
+
+/* Links */
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* Utilities */
+.mono {
+  font-family: var(--font-mono);
+}
+
+.display {
+  font-family: var(--font-display);
+}
+
+.text-dim {
+  color: var(--text-secondary);
+}
+
+.text-muted {
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   Mobile triage — global floor for touch usability
+   Per-view layouts land separately. This block does NOT change
+   how things flow at narrow viewports — it only fixes the bits
+   that hurt regardless: tap target size, horizontal scroll,
+   minimum readable font.
+   ============================================================ */
+
+@media (max-width: 768px) and (pointer: coarse) {
+  /* Touch targets — Apple HIG 44px / Material 48dp.
+     Floor every actionable element so nothing's smaller than
+     finger-pad-friendly. Doesn't widen things horizontally;
+     only ensures vertical reach. Inputs included so form
+     fields don't reject taps off-center. */
+  button,
+  [role="button"],
+  a.tab,
+  .bottom-bar-tab,
+  input[type="text"],
+  input[type="search"],
+  input[type="email"],
+  input[type="password"],
+  select,
+  textarea {
+    min-height: 44px;
+  }
+
+  /* Anchor-as-button cases need both dimensions checked. */
+  a.button,
+  .btn {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Kill accidental horizontal scroll. Per-view layouts may
+     opt back in (e.g. terminal output) but the default for a
+     phone is "no surprise sideways scrolling." */
+  html, body {
+    overflow-x: hidden;
+  }
+
+  /* Prevent iOS auto-zoom on input focus — happens when the
+     input's font-size is < 16px. Keeps the layout stable. */
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+
+  /* Hide tabs that don't render usefully on mobile.
+     Terminal: xterm + on-screen keyboard is unusable on phones
+     (operator #8610). The view is desk-territory; hiding the tab
+     prevents users from landing on a broken screen. */
+  .bottom-bar-tab[href="#/terminal"] {
+    display: none;
+  }
+}
+

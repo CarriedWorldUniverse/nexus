@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>The Nexus</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/login.css" />
+  <link rel="stylesheet" href="css/layout.css" />
+  <link rel="stylesheet" href="css/chat.css" />
+  <link rel="stylesheet" href="css/knowledge.css" />
+  <link rel="stylesheet" href="css/files.css" />
+  <link rel="stylesheet" href="css/tickets.css" />
+  <link rel="stylesheet" href="css/status.css" />
+  <link rel="stylesheet" href="css/docs.css" />
+  <link rel="stylesheet" href="css/split.css" />
+  <link rel="stylesheet" href="/js/vendor/xterm.css" />
+  <link rel="stylesheet" href="css/terminal.css" />
+  <script>
+    // Restore font-mono choice before first paint to avoid FOUC
+    try {
+      const saved = localStorage.getItem('font_mono');
+      if (saved) document.documentElement.dataset.fontMono = saved;
+    } catch {}
+    window.__setFontMono = function(name) {
+      if (name) {
+        document.documentElement.dataset.fontMono = name;
+        localStorage.setItem('font_mono', name);
+      } else {
+        delete document.documentElement.dataset.fontMono;
+        localStorage.removeItem('font_mono');
+      }
+    };
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+
+  <script type="module">
+    import { h, render } from '/js/vendor/preact.js';
+    import { useEffect, useState, useRef } from '/js/vendor/preact-hooks.js';
+    import { signal } from '/js/vendor/preact-signals.js';
+    import htm from '/js/vendor/htm.js';
+
+    const html = htm.bind(h);
+
+    window.__preact = { h, render, signal, html, useEffect, useState, useRef };
+
+    const { App } = await import('./js/app.js');
+    render(h(App, null), document.getElementById('app'));
+  </script>
+</body>
+</html>

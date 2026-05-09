@@ -1,0 +1,104 @@
+/* Login overlay — rendered before the SPA shell mounts. Covers
+ * the viewport, dims, centers a single card with the WebAuthn
+ * prompt or device-registration form. Uses the same tokens as
+ * the rest of the SPA (tokens.css) so the visual language matches.
+ */
+
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--bg, #0d1117);
+  color: var(--fg, #c9d1d9);
+  z-index: 1000;
+  /* Reduced-motion respected — no fade on prefers-reduced-motion. */
+  animation: login-fade-in 200ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-overlay { animation: none; }
+}
+
+@keyframes login-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.login-card {
+  background: var(--surface, #161b22);
+  border: 1px solid var(--border, #30363d);
+  border-radius: 8px;
+  padding: 32px;
+  min-width: 320px;
+  max-width: 480px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.login-card h1 {
+  margin: 0 0 8px 0;
+  font-size: 24px;
+  letter-spacing: 0.04em;
+}
+
+.login-card p {
+  margin: 0 0 16px 0;
+  color: var(--fg-muted, #8b949e);
+}
+
+.login-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.login-card label {
+  font-size: 14px;
+  color: var(--fg-muted, #8b949e);
+}
+
+.login-card input {
+  background: var(--bg, #0d1117);
+  color: var(--fg, #c9d1d9);
+  border: 1px solid var(--border, #30363d);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 16px;
+  font-family: inherit;
+}
+
+.login-card input:focus {
+  outline: 2px solid var(--accent, #58a6ff);
+  outline-offset: 1px;
+}
+
+.login-card button {
+  background: var(--accent, #58a6ff);
+  color: var(--bg, #0d1117);
+  border: none;
+  border-radius: 6px;
+  padding: 10px 16px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.login-card button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.login-card-error {
+  border-color: var(--danger, #f85149);
+}
+
+.login-err {
+  background: var(--bg, #0d1117);
+  color: var(--danger, #f85149);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

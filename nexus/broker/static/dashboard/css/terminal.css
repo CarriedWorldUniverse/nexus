@@ -1,0 +1,240 @@
+.terminal-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.terminal-header {
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.terminal-header h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.terminal-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 var(--space-md);
+  background: var(--bg-deep);
+  border-bottom: 1px solid var(--border-subtle);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.terminal-tabs::-webkit-scrollbar {
+  height: 3px;
+}
+
+.terminal-tabs::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 2px;
+}
+
+.terminal-tab {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: color 0.15s;
+}
+
+.terminal-tab:hover {
+  color: var(--text-secondary);
+}
+
+.terminal-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+.terminal-container {
+  flex: 1;
+  overflow: hidden;
+  padding: var(--space-xs);
+  background: var(--bg-deep);
+  position: relative;
+}
+
+.terminal-container .xterm {
+  height: 100% !important;
+}
+
+.terminal-container .xterm-viewport {
+  overflow-y: auto !important;
+}
+
+.terminal-input-row {
+  display: flex;
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--bg-deep);
+  border-top: 1px solid var(--border-subtle);
+  gap: var(--space-xs);
+  flex-shrink: 0;
+}
+
+.terminal-input-row input {
+  flex: 1;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 8px;
+  border-radius: 4px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.terminal-input-row input:focus {
+  border-color: var(--accent);
+}
+
+.terminal-input-row input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.terminal-input-row button {
+  background: var(--accent);
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  white-space: nowrap;
+}
+
+.terminal-input-row button:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.terminal-input-row button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.terminal-lock-btn {
+  margin-left: auto;
+  padding: 3px 10px;
+  font-size: 11px;
+  border-radius: 3px;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  align-self: center;
+  transition: all 0.15s;
+}
+
+.terminal-lock-btn.unlocked {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.terminal-lock-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* Harness activity pane — shown instead of xterm for runtime:"harness" agents. */
+.harness-activity {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #0c1220;
+  color: #d8dfe8;
+  font-family: Menlo, Monaco, "Courier New", monospace;
+  font-size: 12.5px;
+}
+.harness-activity-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.harness-activity-dot { width: 7px; height: 7px; border-radius: 50%; background: #555; }
+.harness-activity-dot.connected { background: #4caf50; box-shadow: 0 0 4px #4caf50; }
+.harness-activity-dot.disconnected { background: #e94560; }
+.harness-activity-label { color: var(--text-primary); }
+.harness-activity-error { margin-left: auto; color: #ff9800; font-size: 10.5px; }
+.harness-activity-feed {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  line-height: 1.5;
+}
+.harness-activity-empty {
+  color: #555;
+  font-style: italic;
+  padding: 20px 0;
+  text-align: center;
+}
+.harness-activity-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 3px 0;
+  word-break: break-word;
+}
+.harness-activity-row.turn-start,
+.harness-activity-row.turn-end {
+  color: var(--accent);
+  padding: 8px 0 4px;
+  gap: 10px;
+  border-top: 1px dashed #1a2744;
+  margin-top: 6px;
+}
+.harness-activity-row .har-sep { color: var(--accent-dim); }
+.harness-activity-row .har-label { font-weight: 600; }
+.harness-activity-row .har-meta { color: var(--text-muted); margin-left: auto; font-size: 11px; }
+.harness-activity-row .har-icon { flex-shrink: 0; width: 18px; text-align: center; }
+.harness-activity-row .har-tool-name { color: #81d4fa; font-weight: 600; }
+.harness-activity-row .har-tool-input {
+  color: var(--text-muted);
+  background: transparent;
+  font-family: inherit;
+  font-size: 11.5px;
+}
+.harness-activity-row.tool-result.is-error .har-tool-preview { color: #e94560; }
+.harness-activity-row .har-tool-preview { color: var(--text-muted); font-size: 11.5px; }
+.harness-activity-row.text .har-text { color: #d8dfe8; }
+
+/* Seeded (history) rows are dimmed so live events pop against them. */
+.harness-activity-row[data-seeded="1"] { opacity: 0.55; }
+.harness-activity-row.live-divider {
+  color: #ffab91;
+  gap: 10px;
+  padding: 6px 0 4px;
+  border-top: 1px dotted #2a3a5a;
+  margin-top: 4px;
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}

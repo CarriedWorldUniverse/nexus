@@ -1,0 +1,50 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400;1,600&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+:root {
+  /* Background depths */
+  --bg-abyss:   #0a0b0e;
+  --bg-deep:    #0f1115;
+  --bg-surface: #161920;
+  --bg-raised:  #1d2029;
+  --bg-hover:   #242733;
+
+  /* Borders */
+  --border-subtle:  rgba(255, 255, 255, 0.05);
+  --border-default: rgba(255, 255, 255, 0.10);
+  --border-strong:  rgba(255, 255, 255, 0.20);
+
+  /* Text */
+  --text-primary:   rgba(255, 255, 255, 0.92);
+  --text-secondary: rgba(255, 255, 255, 0.65);
+  --text-muted:     rgba(255, 255, 255, 0.38);
+
+  /* Accent */
+  --accent:      #e94560;
+  --accent-dim:  rgba(233, 69, 96, 0.35);
+  --accent-glow: rgba(233, 69, 96, 0.15);
+
+  /* World colors */
+  --color-gold:   #c9a84c;
+  --color-silver: #8fa3b1;
+  --color-ember:  #d4622a;
+  --color-moss:   #5a7a4a;
+
+  /* Typography */
+  --font-display: 'Playfair Display', Georgia, serif;
+  --font-body:    'DM Sans', system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', 'Fira Code', monospace;
+
+  /* Spacing scale */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 40px;
+
+  /* Layout */
+  --nav-width:  56px;
+  --tab-height: 52px;
+
+  /* Easing */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+}
