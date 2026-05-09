@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -118,6 +119,30 @@ type Store interface {
 	// GetShared fetches a single shared_files row by id. Used by the
 	// get_shared comms tool. Returns sql.ErrNoRows when absent.
 	GetShared(ctx context.Context, id int64) (SharedFile, error)
+
+	// ListReplies returns direct replies (one level deep) to
+	// parentID, oldest first. Powers chat.replies.
+	ListReplies(ctx context.Context, parentID int64) ([]Message, error)
+
+	// ListPage returns chat messages for the operator dashboard's
+	// main feed. id-based pagination: afterID returns id > afterID
+	// in ASC order; beforeID returns id < beforeID in DESC order
+	// then reversed to ASC; both zero = newest page (DESC LIMIT
+	// then reversed). Returns hasMore=true when more rows existed
+	// past the requested limit.
+	ListPage(ctx context.Context, beforeID, afterID int64, limit int) (msgs []Message, hasMore bool, err error)
+
+	// GetReactions returns the reactions for a batch of msg_ids,
+	// keyed by msg_id. Missing keys mean no reactions found.
+	GetReactions(ctx context.Context, msgIDs []int64) (map[int64][]Reaction, error)
+}
+
+// Reaction is one (aspect, emoji) row from chat_reactions, exposed
+// for GetReactions. Returned by value; mirrors the schema.
+type Reaction struct {
+	MsgID  int64
+	Aspect string
+	Emoji  string
 }
 
 // SharedFile is the gateway-level representation of a shared_files
@@ -577,4 +602,185 @@ func scanSharedFile(scan func(...any) error) (SharedFile, error) {
 		f.AnnounceMsgID = announce.Int64
 	}
 	return f, nil
+}
+
+// ListReplies returns direct replies to parentID, oldest first.
+// "Direct" means one level: messages whose reply_to == parentID.
+// Powers the dashboard chat.replies frame; the SPA recurses if it
+// needs the full subtree.
+func (s *SQLStore) ListReplies(ctx context.Context, parentID int64) ([]Message, error) {
+	if parentID <= 0 {
+		return nil, fmt.Errorf("chat.ListReplies: parent_id must be positive")
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at
+		FROM chat_messages
+		WHERE reply_to = ?
+		ORDER BY id ASC
+	`, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("chat.ListReplies: query: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Message
+	for rows.Next() {
+		var msg Message
+		var replyToCol sql.NullInt64
+		var topicCol sql.NullString
+		var createdAtRaw string
+		if err := rows.Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw); err != nil {
+			return nil, fmt.Errorf("chat.ListReplies: scan: %w", err)
+		}
+		if replyToCol.Valid {
+			msg.ReplyTo = replyToCol.Int64
+		}
+		if topicCol.Valid {
+			msg.Topic = topicCol.String
+		}
+		t, err := parseSQLiteTime(createdAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("chat.ListReplies: time parse: %w", err)
+		}
+		msg.CreatedAt = t
+		out = append(out, msg)
+	}
+	return out, rows.Err()
+}
+
+// ListPage powers the dashboard's main chat feed with id-based
+// pagination. Three modes:
+//
+//   - afterID > 0, beforeID == 0: rows with id > afterID, ASC,
+//     limited. Used for "load newer than what I have."
+//   - beforeID > 0, afterID == 0: rows with id < beforeID, DESC
+//     limit then reversed to ASC. Used for "load older than what
+//     I have."
+//   - both zero: newest page — same as beforeID = MaxInt64.
+//
+// Both modes set together is rejected (caller bug). limit defaults
+// to 100 when zero, capped at 500.
+func (s *SQLStore) ListPage(ctx context.Context, beforeID, afterID int64, limit int) ([]Message, bool, error) {
+	if beforeID > 0 && afterID > 0 {
+		return nil, false, fmt.Errorf("chat.ListPage: pass one of before_id or after_id, not both")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	// Probe with limit+1 so we can report has_more without a second
+	// COUNT query.
+	probe := limit + 1
+
+	var (
+		q    string
+		args []any
+	)
+	switch {
+	case afterID > 0:
+		q = `SELECT id, from_agent, content, reply_to, thread_id, kind, created_at
+		     FROM chat_messages WHERE id > ? ORDER BY id ASC LIMIT ?`
+		args = []any{afterID, probe}
+	default:
+		// before_id > 0 OR both zero (newest page).
+		anchor := beforeID
+		if anchor <= 0 {
+			anchor = 1<<63 - 1 // MaxInt64
+		}
+		q = `SELECT id, from_agent, content, reply_to, thread_id, kind, created_at
+		     FROM chat_messages WHERE id < ? ORDER BY id DESC LIMIT ?`
+		args = []any{anchor, probe}
+	}
+
+	rows, err := s.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("chat.ListPage: query: %w", err)
+	}
+	defer rows.Close()
+
+	var msgs []Message
+	for rows.Next() {
+		var msg Message
+		var replyToCol sql.NullInt64
+		var topicCol sql.NullString
+		var createdAtRaw string
+		if err := rows.Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw); err != nil {
+			return nil, false, fmt.Errorf("chat.ListPage: scan: %w", err)
+		}
+		if replyToCol.Valid {
+			msg.ReplyTo = replyToCol.Int64
+		}
+		if topicCol.Valid {
+			msg.Topic = topicCol.String
+		}
+		t, err := parseSQLiteTime(createdAtRaw)
+		if err != nil {
+			return nil, false, fmt.Errorf("chat.ListPage: time parse: %w", err)
+		}
+		msg.CreatedAt = t
+		msgs = append(msgs, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+
+	hasMore := false
+	if len(msgs) > limit {
+		msgs = msgs[:limit]
+		hasMore = true
+	}
+
+	// before/newest paths queried DESC; reverse to oldest-first.
+	if afterID == 0 {
+		for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+			msgs[i], msgs[j] = msgs[j], msgs[i]
+		}
+	}
+	return msgs, hasMore, nil
+}
+
+// GetReactions returns reactions for a batch of msg_ids, keyed by
+// msg_id. Empty input → empty map. Missing msg_ids in the result
+// mean the message had no reactions (callers don't need to
+// distinguish "no reactions" from "msg doesn't exist" — both render
+// as "no reactions" in the dashboard UI).
+//
+// The IN-list expansion is unbounded by design: callers pass the
+// page they've already paged from chat_messages, so the size is
+// already capped at the page limit (≤500). A 500-element IN list
+// is tolerable on SQLite.
+func (s *SQLStore) GetReactions(ctx context.Context, msgIDs []int64) (map[int64][]Reaction, error) {
+	if len(msgIDs) == 0 {
+		return map[int64][]Reaction{}, nil
+	}
+	// Build "?, ?, ?, ..." placeholder string + arg slice.
+	placeholders := strings.Repeat("?,", len(msgIDs))
+	placeholders = placeholders[:len(placeholders)-1] // trim trailing comma
+	args := make([]any, len(msgIDs))
+	for i, id := range msgIDs {
+		args[i] = id
+	}
+
+	q := `SELECT msg_id, reactor, emoji
+	      FROM chat_reactions
+	      WHERE msg_id IN (` + placeholders + `)
+	      ORDER BY msg_id ASC, id ASC`
+
+	rows, err := s.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("chat.GetReactions: query: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[int64][]Reaction)
+	for rows.Next() {
+		var r Reaction
+		if err := rows.Scan(&r.MsgID, &r.Aspect, &r.Emoji); err != nil {
+			return nil, fmt.Errorf("chat.GetReactions: scan: %w", err)
+		}
+		out[r.MsgID] = append(out[r.MsgID], r)
+	}
+	return out, rows.Err()
 }

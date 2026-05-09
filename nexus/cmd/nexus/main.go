@@ -470,6 +470,12 @@ func main() {
 		TLSCertFile:       *tlsCert,
 		TLSKeyFile:        *tlsKey,
 		KeyfileValidator: keyfileValidator,
+		// Knowledge store powers operator-facing knowledge frames
+		// (knowledge.list / knowledge.search / knowledge.store) on the
+		// dashboard's WS surface. Same store the bridle tool runner
+		// uses for aspects (Crossing Part 4); operator reads the same
+		// rows via a different transport.
+		KnowledgeStore: knowledgeStore,
 		// Spec §11: REST/CLI personality edits trigger an in-process
 		// refresh on the embedded Frame so the new prompt takes effect
 		// on the next deliberation turn. Non-Frame aspects pick up at
