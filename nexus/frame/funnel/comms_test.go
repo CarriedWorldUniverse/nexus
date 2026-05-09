@@ -31,6 +31,18 @@ type fakeGateway struct {
 	readErr     error
 	announceErr error
 	shareErr    error
+
+	readMessages       []int64
+	readMessageResults map[int64]ChatMessage
+	readMessageErr     error
+
+	listSharedCalls  []int
+	listSharedResult []SharedFileRef
+	listSharedErr    error
+
+	getSharedCalls  []int64
+	getSharedResult map[int64]SharedFileRef
+	getSharedErr    error
 }
 
 type sentMessage struct {
@@ -111,14 +123,38 @@ func (g *fakeGateway) ShareFile(_ context.Context, path string, recipients []str
 }
 
 func (g *fakeGateway) ReadMessage(_ context.Context, msgID int64) (ChatMessage, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.readMessages = append(g.readMessages, msgID)
+	if g.readMessageErr != nil {
+		return ChatMessage{}, g.readMessageErr
+	}
+	if m, ok := g.readMessageResults[msgID]; ok {
+		return m, nil
+	}
 	return ChatMessage{ID: msgID, From: "fake", Content: "fake"}, nil
 }
 
 func (g *fakeGateway) ListShared(_ context.Context, limit int) ([]SharedFileRef, error) {
-	return nil, nil
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.listSharedCalls = append(g.listSharedCalls, limit)
+	if g.listSharedErr != nil {
+		return nil, g.listSharedErr
+	}
+	return g.listSharedResult, nil
 }
 
 func (g *fakeGateway) GetShared(_ context.Context, shareID int64) (SharedFileRef, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.getSharedCalls = append(g.getSharedCalls, shareID)
+	if g.getSharedErr != nil {
+		return SharedFileRef{}, g.getSharedErr
+	}
+	if f, ok := g.getSharedResult[shareID]; ok {
+		return f, nil
+	}
 	return SharedFileRef{ID: shareID}, nil
 }
 
@@ -466,4 +502,126 @@ type stubToolRunner func(ctx context.Context, call bridle.ToolCall) (json.RawMes
 
 func (s stubToolRunner) Run(ctx context.Context, call bridle.ToolCall) (json.RawMessage, error) {
 	return s(ctx, call)
+}
+
+func TestCommsRunner_ReadMessageRequiresID(t *testing.T) {
+	g := &fakeGateway{}
+	r := CommsRunner{Gateway: g}
+	res, _ := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameReadChatMessage,
+		Args: mustJSON(map[string]any{}),
+	})
+	if !strings.Contains(string(res), "error") {
+		t.Errorf("missing id should error: got %s", res)
+	}
+	if len(g.readMessages) != 0 {
+		t.Error("gateway should not be called when id is missing")
+	}
+}
+
+func TestCommsRunner_ReadMessageReturnsMessage(t *testing.T) {
+	g := &fakeGateway{
+		readMessageResults: map[int64]ChatMessage{
+			42: {ID: 42, From: "anvil", Content: "hello"},
+		},
+	}
+	r := CommsRunner{Gateway: g}
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameReadChatMessage,
+		Args: mustJSON(map[string]any{"id": 42}),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out struct {
+		Message ChatMessage `json:"message"`
+	}
+	if err := json.Unmarshal(res, &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Message.ID != 42 || out.Message.From != "anvil" {
+		t.Errorf("unexpected message: %+v", out.Message)
+	}
+}
+
+func TestCommsRunner_ReadMessageGatewayErrorSurfacesToModel(t *testing.T) {
+	g := &fakeGateway{readMessageErr: errors.New("message 99: not found")}
+	r := CommsRunner{Gateway: g}
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameReadChatMessage,
+		Args: mustJSON(map[string]any{"id": 99}),
+	})
+	if err != nil {
+		t.Fatalf("non-fatal gateway error must not bubble as Go err: %v", err)
+	}
+	if !strings.Contains(string(res), "not found") {
+		t.Errorf("expected 'not found' in tool result, got %s", res)
+	}
+}
+
+func TestCommsRunner_ListSharedClampsLimit(t *testing.T) {
+	g := &fakeGateway{listSharedResult: []SharedFileRef{}}
+	r := CommsRunner{Gateway: g}
+	_, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameListShared,
+		Args: mustJSON(map[string]any{"limit": 10000}),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(g.listSharedCalls) != 1 {
+		t.Fatalf("expected 1 list call, got %d", len(g.listSharedCalls))
+	}
+	if g.listSharedCalls[0] != 200 {
+		t.Errorf("limit should be clamped to 200, got %d", g.listSharedCalls[0])
+	}
+}
+
+func TestCommsRunner_ListSharedAcceptsZeroAsDefault(t *testing.T) {
+	g := &fakeGateway{listSharedResult: nil}
+	r := CommsRunner{Gateway: g}
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameListShared,
+		Args: mustJSON(map[string]any{}),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(g.listSharedCalls) != 1 || g.listSharedCalls[0] != 0 {
+		t.Errorf("zero limit must pass through to gateway: calls=%v", g.listSharedCalls)
+	}
+	// nil slice must marshal as [], never null
+	if !strings.Contains(string(res), "[]") {
+		t.Errorf("nil shared result must surface as []: %s", res)
+	}
+}
+
+func TestCommsRunner_GetSharedRequiresID(t *testing.T) {
+	g := &fakeGateway{}
+	r := CommsRunner{Gateway: g}
+	res, _ := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameGetShared,
+		Args: mustJSON(map[string]any{}),
+	})
+	if !strings.Contains(string(res), "error") {
+		t.Errorf("missing id should error: got %s", res)
+	}
+	if len(g.getSharedCalls) != 0 {
+		t.Error("gateway should not be called when id is missing")
+	}
+}
+
+func TestCommsRunner_GetSharedNotFoundFlowsAsToolResult(t *testing.T) {
+	g := &fakeGateway{getSharedErr: errors.New("shared 7: not found")}
+	r := CommsRunner{Gateway: g}
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameGetShared,
+		Args: mustJSON(map[string]any{"id": 7}),
+	})
+	if err != nil {
+		t.Fatalf("non-fatal gateway error must not bubble: %v", err)
+	}
+	if !strings.Contains(string(res), "not found") {
+		t.Errorf("expected 'not found' in tool result, got %s", res)
+	}
 }

@@ -406,10 +406,12 @@ func (r CommsRunner) runListShared(ctx context.Context, raw json.RawMessage) (js
 	var args struct {
 		Limit int `json:"limit"`
 	}
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &args); err != nil {
-			return errorResult(err), nil
-		}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return errorResult(err), nil
+	}
+	const maxListShared = 200
+	if args.Limit > maxListShared {
+		args.Limit = maxListShared
 	}
 	files, err := r.Gateway.ListShared(ctx, args.Limit)
 	if err != nil {
