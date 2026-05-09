@@ -162,6 +162,13 @@ func Discover(cfg Config) ([]Candidate, error) {
 		if aspectCfg.EffectiveRole() == schemas.RoleFrame {
 			continue
 		}
+		// Anything other than RoleAspect at this point (operator,
+		// typos) must not be spawned. Skip silently — frame/detect
+		// already warns on the same input, no need for two warnings
+		// per scan.
+		if !aspectCfg.EffectiveRole().Known() {
+			continue
+		}
 		// auto_spawn: false opt-out lives under metadata for
 		// forward-compat without having to extend the canonical
 		// schema.

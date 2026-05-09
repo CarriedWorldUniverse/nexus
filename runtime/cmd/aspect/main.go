@@ -246,6 +246,13 @@ func loadAspectConfig(home string) (schemas.AspectConfig, error) {
 		return schemas.AspectConfig{}, errors.New("aspect.json: missing name")
 	}
 	if cfg.EffectiveRole() != schemas.RoleAspect && cfg.EffectiveRole() != schemas.RoleFrame {
+		// RoleOperator is a recognized runtime identity (login flow)
+		// but is intentionally not loadable from disk — the operator
+		// boundary is mint-at-login-only. Distinguish that case so the
+		// operator doesn't go hunting for a typo.
+		if cfg.EffectiveRole() == schemas.RoleOperator {
+			return schemas.AspectConfig{}, fmt.Errorf("aspect.json: role %q is runtime-only (operators are minted at login, not loaded from disk)", cfg.Role)
+		}
 		return schemas.AspectConfig{}, fmt.Errorf("aspect.json: unknown role %q", cfg.Role)
 	}
 	// Pre-flight context_mode check: the broker rejects empty / unknown

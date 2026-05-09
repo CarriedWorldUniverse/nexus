@@ -167,6 +167,82 @@ func TestSaveSignCountStrictGreater(t *testing.T) {
 	}
 }
 
+// TestSaveSignCountZeroAuthenticator pins the WebAuthn §6.1.1
+// zero-counter rule: platform authenticators (Touch ID, Face ID,
+// Windows Hello) commonly always emit sign_count=0. The store must
+// accept 0→0 as "no counter support" rather than rejecting it as a
+// replay. Without this, operators on platform authenticators can
+// register but never log in.
+func TestSaveSignCountZeroAuthenticator(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cred, pub := fakeCred("zero")
+	id, err := s.Register(ctx, cred, pub, "platform-auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 0 → 0 must succeed and stamp last_used_at.
+	if err := s.SaveSignCount(ctx, id, 0); err != nil {
+		t.Fatalf("0→0 must be accepted (no-counter authenticator): %v", err)
+	}
+	got, _ := s.GetByCredentialID(ctx, cred)
+	if got.SignCount != 0 {
+		t.Errorf("0→0 must keep sign_count at 0, got %d", got.SignCount)
+	}
+	if got.LastUsedAt == "" {
+		t.Error("0→0 must still stamp last_used_at")
+	}
+
+	// 0 → 0 again is still fine — repeated logins from the same
+	// no-counter authenticator should keep working.
+	if err := s.SaveSignCount(ctx, id, 0); err != nil {
+		t.Errorf("repeated 0→0 must keep working: %v", err)
+	}
+}
+
+// TestSaveSignCountDowngradeIsReplay pins the security shape: an
+// authenticator that previously implemented the counter and now
+// emits 0 is a clone/downgrade signal, not a no-counter device.
+func TestSaveSignCountDowngradeIsReplay(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cred, pub := fakeCred("downgrade")
+	id, err := s.Register(ctx, cred, pub, "device")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Establish a non-zero counter.
+	if err := s.SaveSignCount(ctx, id, 7); err != nil {
+		t.Fatalf("0→7: %v", err)
+	}
+
+	// 7 → 0 must reject.
+	if err := s.SaveSignCount(ctx, id, 0); !errors.Is(err, ErrSignCountReplay) {
+		t.Errorf("7→0 must be ErrSignCountReplay (downgrade attack), got %v", err)
+	}
+	got, _ := s.GetByCredentialID(ctx, cred)
+	if got.SignCount != 7 {
+		t.Errorf("rejected downgrade must not mutate state: got %d, want 7", got.SignCount)
+	}
+}
+
+// TestSaveSignCountRejectsNegative pins guard against caller bugs.
+func TestSaveSignCountRejectsNegative(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cred, pub := fakeCred("neg")
+	id, _ := s.Register(ctx, cred, pub, "device")
+	err := s.SaveSignCount(ctx, id, -1)
+	if err == nil {
+		t.Fatal("expected error for negative next sign_count")
+	}
+	if errors.Is(err, ErrSignCountReplay) {
+		t.Error("negative next must surface as a hard error, not a replay")
+	}
+}
+
 func TestListNewestFirst(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
