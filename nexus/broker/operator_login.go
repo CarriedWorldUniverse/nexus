@@ -61,6 +61,11 @@ type OperatorAuth interface {
 	ListPasskeys(ctx context.Context) ([]operator.Passkey, error)
 }
 
+// Compile-time check that *operator.Auth satisfies OperatorAuth.
+// Catches method-set drift the moment Auth grows or renames a
+// method without the interface being updated to match.
+var _ OperatorAuth = (*operator.Auth)(nil)
+
 // OperatorLogin wires the operator endpoints. Carries the auth
 // wrapper, a clock, and the in-memory ceremony-session store.
 type OperatorLogin struct {
@@ -68,9 +73,15 @@ type OperatorLogin struct {
 
 	// SessionSigningSecret + JWTTTL + NexusID share semantics with
 	// KeyfileValidator — inject the same values at construction so
-	// operator JWTs and aspect JWTs are interchangeable from the
-	// broker's perspective (both signed with the same secret, both
-	// verifiable via jwt.Verify).
+	// operator JWTs use the same signing secret as aspect JWTs.
+	//
+	// CAVEAT: today the WS upgrade path (resolveUpgradeAuth in ws.go)
+	// resolves bearer tokens via TokenStore — a static map of opaque
+	// per-aspect tokens. It does NOT call jwt.Verify. An operator JWT
+	// minted here will be REJECTED by /connect until 5c lands JWT-
+	// aware WS auth. The JWT works for HTTP endpoints that already
+	// call jwt.Verify (e.g. aspect_self_edit), and for the gating
+	// check in registrationGated below.
 	SessionSigningSecret []byte
 	JWTTTL               time.Duration
 	NexusID              string
@@ -190,6 +201,19 @@ func (l *OperatorLogin) take(token string) *ceremonySession {
 // allowed. The first registration is always permitted (bootstrap);
 // subsequent registrations require a valid operator JWT in the
 // Authorization header.
+//
+// BOOTSTRAP TOCTOU: two concurrent requests both observing
+// len(rows)==0 will both pass. Each ceremony produces a distinct
+// credential so both could land — the table ends up with two
+// "first" devices instead of one. Acceptable in v1 given:
+//
+//   - tight race window (browser-driven ceremonies, single human),
+//   - tailnet-only deployment surface (not exposed to attackers),
+//   - operator can delete the extra row via the manage-devices view.
+//
+// The localhost-binding follow-up will close this structurally —
+// only one local terminal session can race itself, and the
+// follow-up makes that the only path.
 func (l *OperatorLogin) registrationGated(ctx context.Context, r *http.Request) error {
 	rows, err := l.Auth.ListPasskeys(ctx)
 	if err != nil {
@@ -350,8 +374,16 @@ func (l *OperatorLogin) handleLoginFinish(w http.ResponseWriter, r *http.Request
 		Iat: now.Unix(),
 		Exp: exp.Unix(),
 		// Kfv = 0 for operators — no keyfile rotation, the passkey
-		// IS the long-term credential. Rev-keyfile semantics don't
-		// apply to operators today.
+		// IS the long-term credential. No consumer reads Kfv today
+		// for enforcement (validate.go uses it for aspect-specific
+		// revocation; aspect_self_edit + ws auth ignore it).
+		//
+		// FORWARD-RISK INVARIANT: any future Kfv-based revocation
+		// gate added to a shared JWT-verify path (e.g. 5c WS auth)
+		// MUST explicitly exclude tokens where sub == "operator", or
+		// route operator tokens through a separate verification
+		// path. Otherwise Kfv:0 will trip a `claims.Kfv < current`
+		// check the moment current_keyfile_version is non-zero.
 		Kfv: 0,
 		Ses: l.newSessionID(),
 	}
