@@ -437,6 +437,58 @@ type AspectSayResultPayload struct {
 }
 
 // -------------------------------------------------------------------
+// Subscription frames (5d)
+// -------------------------------------------------------------------
+
+// SubscribePayload is the body of subscribe.* frames. Currently no
+// fields are used (subscribe.chat scoping by topics is deferred —
+// chat_messages has no persisted topic column today). Reserved
+// shape for forward-compat: when topic-scoping lands, add Topics
+// here without changing the kind.
+type SubscribePayload struct {
+	// Topics is reserved for future topic-scoped chat subscription.
+	// Empty means "all" (the only behavior in v1).
+	Topics []string `json:"topics,omitempty"`
+}
+
+// SubscribeAckPayload echoes the subscription kind so the SPA can
+// confirm which channel the ack relates to. Idempotent re-subscribes
+// also produce an ack so the SPA's RPC layer can resolve the Promise.
+type SubscribeAckPayload struct {
+	Kind string `json:"kind"` // the subscribe kind that was acked
+}
+
+// RosterUpdatePayload is pushed when an aspect connects, disconnects,
+// or status-changes. The dashboard's Status / Agents views replace
+// the row with this delta. Status mirrors AspectState.Status —
+// "live" | "stale" | "down" — and is the broker's authoritative
+// roster state at fan-out time.
+type RosterUpdatePayload struct {
+	Aspect       string   `json:"aspect"`
+	Status       string   `json:"status"`
+	LastSeen     string   `json:"last_seen,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	Provider     string   `json:"provider,omitempty"`
+	ContextMode  string   `json:"context_mode,omitempty"`
+	// Reason names the trigger ("connect" | "disconnect" |
+	// "status_change") so the SPA can render a brief notification
+	// without inferring from prior state.
+	Reason string `json:"reason"`
+}
+
+// AspectStatusPulsePayload is pushed when an aspect emits a
+// mid-work status pulse (#118 — currently aspirational; the
+// payload shape lands here so 5e can render UI for it once the
+// pulse origin lights up).
+type AspectStatusPulsePayload struct {
+	Aspect string `json:"aspect"`
+	Phase  string `json:"phase"`
+	Detail string `json:"detail,omitempty"`
+	TS     string `json:"ts"`
+}
+
+// -------------------------------------------------------------------
 // Session projection
 // -------------------------------------------------------------------
 
