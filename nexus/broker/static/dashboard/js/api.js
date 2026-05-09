@@ -1,0 +1,194 @@
+// api.js — compatibility shim mapping the agent-network REST API
+// surface onto the nexus WS RPC surface (comms.js). Every exported
+// function below preserves the agent-network signature so views
+// don't need bulk changes; they import the same names and get
+// WS-backed implementations.
+//
+// Two non-trivial differences from the agent-network original:
+//
+//   1. AUTH STORAGE. agent-network kept the bearer token in
+//      localStorage and reused it across page loads. Nexus uses an
+//      operator JWT that is mint-on-login from a passkey
+//      (dashboard-ws-port spec §2.2). For v1 we keep the JWT
+//      in-memory only (refresh = re-login); the get/set/clear shims
+//      below operate on a module-level holder so existing call sites
+//      keep working without touching localStorage.
+//
+//   2. DEFERRED ENDPOINTS. /api/usage, /api/files, /api/tickets,
+//      /api/topics aren't yet wired (chat_messages has no topic
+//      column; tickets schema deferred per Crossing Part 2; usage
+//      and files frames are spec-deferred per §3.5). The shims
+//      reject with a "not yet wired" error so views render a clean
+//      placeholder rather than hanging on a Promise.
+
+import { rpc } from './comms.js';
+
+// In-memory auth-token holder. Exposed so Login.js can stash the
+// JWT after a successful WebAuthn login and the shim functions can
+// surface it for any UI affordance that wanted the bearer string.
+let authToken = null;
+
+export const BASE = window.location.origin;
+
+// Page-size constants — kept at the agent-network values so views
+// that import INITIAL_PAGE / etc continue to render the same
+// initial slice.
+export const INITIAL_PAGE = 50;
+
+export function getAuthToken() {
+  return authToken;
+}
+
+export function setAuthToken(t) {
+  authToken = t;
+}
+
+export function clearAuthToken() {
+  authToken = null;
+}
+
+// fetchAgents → roster.list
+export function fetchAgents() {
+  return rpc('roster.list', {}).then((p) => p.aspects || []);
+}
+
+// fetchMessages — agent-network paginated by ?after=lastId; nexus
+// chat.list takes the same shape. Channel routing collapses for v1
+// since topics aren't persisted: 'general' is the global feed and
+// 'topic:X' would need topic.messages which is deferred — same
+// global feed for now (the SPA will see the merged stream until
+// topics land).
+export function fetchMessages(channel, afterId = 0) {
+  const limit = afterId > 0 ? 100 : INITIAL_PAGE;
+  return rpc('chat.list', {
+    after_id: afterId,
+    limit,
+  }).then((p) => ({
+    messages: p.messages || [],
+    has_more: p.has_more || false,
+  }));
+}
+
+// fetchOlderMessages — paginate backward via before_id.
+export function fetchOlderMessages(channel, beforeId, limit = INITIAL_PAGE) {
+  return rpc('chat.list', {
+    before_id: beforeId,
+    limit,
+  }).then((p) => ({
+    messages: p.messages || [],
+    has_more: p.has_more || false,
+  }));
+}
+
+// sendMessage routes through aspect.say when an explicit @aspect
+// recipient is implied, otherwise straight chat.send. The agent-
+// network `to` parameter is gone — the SPA uses an explicit @-mention
+// in the content. For v1 we delegate to chat.send always; the
+// recipient policy on the broker side handles @-mention routing.
+//
+// imageUrl is dropped: image upload (POST /api/images) is deferred
+// (no nexus equivalent in 5e). Views that pass imageUrl will see
+// it ignored.
+export function sendMessage({ from, content, replyTo = 0, topic = '', imageUrl = '' }) {
+  // imageUrl is not yet supported on the WS path; surface it as a
+  // text suffix so the operator can see what they tried to send.
+  // Drops cleanly when imageUrl is empty.
+  let body = content;
+  if (imageUrl) body = body ? `${body}\n${imageUrl}` : imageUrl;
+  return rpc('chat.send', {
+    from: from || 'operator',
+    content: body,
+    reply_to: replyTo || 0,
+    topic: topic || '',
+  });
+}
+
+// sendToAgent → aspect.say (the broker prepends @<aspect>).
+export function sendToAgent(agentId, text) {
+  return rpc('aspect.say', {
+    aspect: agentId,
+    content: text,
+  });
+}
+
+// fetchTopics: deferred. chat_messages has no topic column today;
+// topics.list lands in a follow-up part. Returns an empty array so
+// the dashboard renders "no topics" without breaking.
+export function fetchTopics(_limit = 15) {
+  return Promise.resolve([]);
+}
+
+// fetchStatusAll → roster.list (same data, different agent-network
+// route). Maps to the same payload as fetchAgents.
+export function fetchStatusAll() {
+  return fetchAgents();
+}
+
+// uploadImage: deferred. No image-upload frame today.
+export function uploadImage(_file) {
+  return Promise.reject(new Error('image upload not yet wired in nexus dashboard'));
+}
+
+// fetchKnowledge — Crossing Part 4 wired knowledge.list /
+// knowledge.search at the funnel layer; 5c surfaced them on the WS.
+export function fetchKnowledge({ agent, search, limit = 100 } = {}) {
+  if (search) {
+    return rpc('knowledge.search', {
+      text: search,
+      top_k: limit,
+    }).then((p) => p.hits || []);
+  }
+  return rpc('knowledge.list', {
+    agent: agent || '',
+    limit,
+  }).then((p) => p.entries || []);
+}
+
+// fetchFiles: deferred. shared-files frames not wired for operators
+// yet (only available via the bridle tool surface for aspects, per
+// Crossing Part 3).
+export function fetchFiles(_owner) {
+  return Promise.resolve([]);
+}
+
+// fetchUsage: deferred. No usage frame today.
+export function fetchUsage(_period = '7d') {
+  return Promise.resolve({ totals: {}, periods: [] });
+}
+
+// fetchTickets / fetchTicket: tickets schema deferred (Crossing
+// Part 2). Empty list keeps the view rendering.
+export function fetchTickets() {
+  return Promise.resolve([]);
+}
+
+export function fetchTicket(_id) {
+  return Promise.reject(new Error('tickets not yet wired in nexus dashboard'));
+}
+
+// fetchReplies → chat.replies
+export function fetchReplies(parentId) {
+  return rpc('chat.replies', { parent_id: Number(parentId) }).then((p) => p.messages || []);
+}
+
+// fetchReactionsForIds → chat.reactions.fetch.
+// Result shape matches agent-network: { msgIdString: [{aspect, emoji}] }
+export function fetchReactionsForIds(ids) {
+  if (!ids || ids.length === 0) return Promise.resolve({});
+  return rpc('chat.reactions.fetch', {
+    msg_ids: ids.map((n) => Number(n)),
+  }).then((p) => p.reactions || {});
+}
+
+// toggleReaction → existing react_to frame (Crossing Part 3 chat
+// substrate). Available on the operator WS by virtue of being an
+// aspect-side frame the broker accepts; the operator path uses the
+// same kind.
+export function toggleReaction(msgId, from, emoji) {
+  return rpc('react_to', {
+    msg_id: Number(msgId),
+    emoji,
+    // from is dropped — the broker stamps reactions with the
+    // connecting identity (operator).
+  });
+}

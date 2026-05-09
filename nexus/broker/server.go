@@ -10,12 +10,15 @@ package broker
 
 import (
 	"context"
+	"embed"
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +42,20 @@ import (
 //
 //go:embed static/chat.html
 var chatHTML []byte
+
+// dashboardFS holds the operator dashboard SPA — copied from
+// agent-network/code/dashboard/ in Crossing 5e. Served at
+// /dashboard/* via http.FileServer. The SPA opens a WS to /connect
+// after passkey login per dashboard-ws-port spec §2.2.
+//
+// The all: prefix on the embed pattern includes dot-prefixed and
+// underscore-prefixed files — vendor libraries occasionally ship
+// files Go's default embed rules drop. Without it, go-webauthn-
+// adjacent packages or any future vendor with such names go missing
+// at runtime.
+//
+//go:embed all:static/dashboard
+var dashboardFS embed.FS
 
 // Config configures a Broker.
 type Config struct {
@@ -416,6 +433,25 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 		_, _ = w.Write(chatHTML)
 	})
 
+	// Operator dashboard SPA (Crossing 5e). Embedded at build time;
+	// served at /dashboard/* with no auth at the file-serve layer —
+	// the SPA itself drives operator login via /api/operator/login,
+	// and every data path (WS /connect) gates on the resulting JWT.
+	// Static assets carry no secrets.
+	//
+	// /dashboard (no trailing slash) and /dashboard/ both land on
+	// index.html so the operator can copy-paste the bare URL.
+	dashboardSub, dashErr := fs.Sub(dashboardFS, "static/dashboard")
+	if dashErr == nil {
+		fileSrv := http.FileServer(http.FS(dashboardSub))
+		mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
+		})
+		mux.Handle("GET /dashboard/", http.StripPrefix("/dashboard/", dashboardCacheHandler(fileSrv)))
+	} else {
+		b.log.Warn("dashboard: embed sub failed; SPA not served", "err", dashErr)
+	}
+
 	// Keyfile auth endpoints (spec §5 — Part 4b). Registered only
 	// when KeyfileValidator is configured. Both routes deliberately
 	// bypass auth(): the keyfile is its own credential and the
@@ -558,4 +594,23 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// dashboardCacheHandler wraps the embedded-FS file server with cache
+// headers. index.html and the SPA's entry-point JS get no-cache so
+// the operator never picks up a stale shell after a deploy; vendor
+// files (preact, htm, xterm, webauthn helpers, fonts) get a long
+// max-age because they're versioned by content-hash via embed.
+func dashboardCacheHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if path == "" || strings.HasSuffix(path, "/") || path == "index.html" || path == "js/app.js" {
+			w.Header().Set("Cache-Control", "no-cache")
+		} else if strings.HasPrefix(path, "js/vendor/") || strings.HasPrefix(path, "fonts/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		next.ServeHTTP(w, r)
+	})
 }

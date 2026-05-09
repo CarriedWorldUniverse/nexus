@@ -1,0 +1,247 @@
+/* ── Tickets View ── */
+
+.tickets-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.tickets-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-deep);
+  flex-shrink: 0;
+}
+
+.tickets-header h2 {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+/* Board */
+.tickets-board {
+  display: flex;
+  flex: 1;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-height: 0;
+}
+
+/* Column */
+.tickets-column {
+  flex: 1;
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  min-height: 0;
+}
+
+.column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  border-bottom: 2px solid var(--border-strong);
+  flex-shrink: 0;
+}
+
+.column-count {
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+}
+
+/* Cards list */
+.column-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  overflow-y: auto;
+  flex: 1;
+  padding-bottom: var(--space-sm);
+}
+
+.column-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: var(--space-md) 0;
+}
+
+/* Card */
+.ticket-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: var(--space-md);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.1s;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ticket-card:hover {
+  border-color: var(--border-default);
+  background: var(--bg-hover);
+}
+
+.ticket-card.expanded {
+  border-color: var(--border-default);
+}
+
+.card-id {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+.card-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+/* Meta row */
+.card-meta {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: 11px;
+}
+
+.card-assignee {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-raised);
+  border-radius: 999px;
+  padding: 1px 7px 1px 5px;
+  color: var(--text-secondary);
+}
+
+.assignee-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.card-priority {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.card-age {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.card-source-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 10px;
+  font-family: var(--font-mono);
+}
+
+.card-source-link:hover {
+  text-decoration: underline;
+}
+
+/* Expanded content */
+.card-description {
+  display: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 2px;
+}
+
+.card-notes {
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 2px;
+}
+
+.ticket-card.expanded .card-description {
+  display: block;
+}
+
+.ticket-card.expanded .card-notes {
+  display: flex;
+}
+
+.card-note {
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.note-author {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.note-content {
+  color: var(--text-primary);
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+/* ── Mobile ── */
+@media (max-width: 768px) {
+  .tickets-board {
+    flex-direction: column;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .tickets-column {
+    min-width: unset;
+    flex: none;
+  }
+
+  .column-cards {
+    max-height: 400px;
+  }
+}
