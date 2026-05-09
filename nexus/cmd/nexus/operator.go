@@ -104,6 +104,13 @@ func runOperatorList(args []string) int {
 // CLI subcommand is the confirmation. Use after `nexus operator list`
 // to identify the id of the device to revoke (lost phone, retired
 // laptop, etc.).
+//
+// IN-FLIGHT JWT CAVEAT: deleting a passkey row stops it from being
+// usable in *future* logins. Any operator JWT minted before this
+// deletion remains valid until its `exp` (1h max). To kill an active
+// session, restart the broker — that drops every connection and
+// invalidates any in-memory state. v1 limitation; tighter
+// session-revocation lands later.
 func runOperatorDelete(args []string) int {
 	fs := flag.NewFlagSet("operator delete", flag.ContinueOnError)
 	dataDir := fs.String("data-dir", "", "data directory holding nexus.db (falls back to NEXUS_DATA_DIR env, then ./data)")
@@ -136,6 +143,8 @@ func runOperatorDelete(args []string) int {
 		return 1
 	}
 	fmt.Printf("deleted passkey id=%d\n", id)
+	fmt.Println("note: any operator JWT minted before this deletion remains valid until exp (1h max).")
+	fmt.Println("      restart the broker to drop active sessions immediately.")
 	return 0
 }
 
@@ -147,6 +156,14 @@ func runOperatorDelete(args []string) int {
 // Requires --confirm to fire — the implicit-confirmation rule we use
 // for delete-by-id doesn't extend here; clearing every passkey
 // shouldn't be a typo away.
+//
+// IN-FLIGHT JWT CAVEAT: same as runOperatorDelete. Wiping the
+// passkey table stops *future* logins immediately, but any operator
+// JWT issued before reset remains valid until its exp (1h max). If
+// reset-passkey is being run as a security response (suspected
+// compromise), restart the broker to drop active sessions —
+// otherwise an attacker holding an unexpired JWT keeps their
+// connection.
 func runOperatorResetPasskey(args []string) int {
 	fs := flag.NewFlagSet("operator reset-passkey", flag.ContinueOnError)
 	dataDir := fs.String("data-dir", "", "data directory holding nexus.db (falls back to NEXUS_DATA_DIR env, then ./data)")
@@ -173,6 +190,10 @@ func runOperatorResetPasskey(args []string) int {
 	}
 	fmt.Printf("removed %d passkey(s)\n", n)
 	fmt.Println("first-device registration is unlocked again — open the dashboard register page to enrol a passkey")
+	fmt.Println()
+	fmt.Println("⚠ note: any operator JWT minted BEFORE this reset remains valid until its exp (1h max).")
+	fmt.Println("        if you are running reset-passkey as a security response (suspected compromise),")
+	fmt.Println("        restart the broker to drop active sessions immediately.")
 	return 0
 }
 

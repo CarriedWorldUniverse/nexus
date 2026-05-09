@@ -75,13 +75,13 @@ type OperatorLogin struct {
 	// KeyfileValidator — inject the same values at construction so
 	// operator JWTs use the same signing secret as aspect JWTs.
 	//
-	// CAVEAT: today the WS upgrade path (resolveUpgradeAuth in ws.go)
-	// resolves bearer tokens via TokenStore — a static map of opaque
-	// per-aspect tokens. It does NOT call jwt.Verify. An operator JWT
-	// minted here will be REJECTED by /connect until 5c lands JWT-
-	// aware WS auth. The JWT works for HTTP endpoints that already
-	// call jwt.Verify (e.g. aspect_self_edit), and for the gating
-	// check in registrationGated below.
+	// 5b2 wired the matching JWT fallback in resolveUpgradeAuth, so
+	// operator JWTs minted here ARE accepted at /connect (in addition
+	// to the HTTP endpoints that already call jwt.Verify, like
+	// aspect_self_edit and registrationGated below). Per the Kfv:0
+	// invariant comment on Kfv in handleLoginFinish: any future
+	// Kfv-based revocation in a shared JWT-verify path must guard
+	// with claims.Sub != "operator".
 	SessionSigningSecret []byte
 	JWTTTL               time.Duration
 	NexusID              string
