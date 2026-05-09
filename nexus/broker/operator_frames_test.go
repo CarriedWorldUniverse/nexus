@@ -23,6 +23,15 @@ import (
 // server, the chat store (so tests can seed messages directly), the
 // knowledge store, and a freshly-minted operator JWT.
 func newOperatorTestServer(t *testing.T) (*httptest.Server, *chat.SQLStore, *knowledge.Store, string) {
+	srv, _, store, kstore, tok := newOperatorTestServerFull(t)
+	return srv, store, kstore, tok
+}
+
+// newOperatorTestServerFull returns the broker handle in addition
+// to the bits newOperatorTestServer exposes — needed by the
+// subscription tests that drive HandleChatSend directly + reach
+// into b.opMu / b.operators for assertions.
+func newOperatorTestServerFull(t *testing.T) (*httptest.Server, *Broker, *chat.SQLStore, *knowledge.Store, string) {
 	t.Helper()
 	ctx := context.Background()
 	db, err := storage.Open(ctx, t.TempDir(), nil)
@@ -64,7 +73,7 @@ func newOperatorTestServer(t *testing.T) (*httptest.Server, *chat.SQLStore, *kno
 	if err != nil {
 		t.Fatalf("jwt sign: %v", err)
 	}
-	return srv, chatStore, knowledgeStore, tok
+	return srv, b, chatStore, knowledgeStore, tok
 }
 
 // mustResponse sends a request envelope and waits for a response,

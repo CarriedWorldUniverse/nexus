@@ -120,6 +120,22 @@ const (
 	KindKnowledgeStoreResult  Kind = "knowledge.store.result"
 	KindAspectSay         Kind = "aspect.say"
 	KindAspectSayResult   Kind = "aspect.say.result"
+
+	// Subscription frames (5d). Each "subscribe.X" enrolls the
+	// operator's connection in the corresponding push stream; the
+	// matching "unsubscribe.X" turns it off. Subscriptions are
+	// per-connection state, not persisted — WS close drops them.
+	// Idempotent: re-subscribing is a no-op.
+	KindSubscribeRoster        Kind = "subscribe.roster"
+	KindSubscribeChat          Kind = "subscribe.chat"
+	KindSubscribeAspectStatus  Kind = "subscribe.aspect_status"
+	KindUnsubscribeRoster      Kind = "unsubscribe.roster"
+	KindUnsubscribeChat        Kind = "unsubscribe.chat"
+	KindUnsubscribeAspectStatus Kind = "unsubscribe.aspect_status"
+	KindSubscribeAck           Kind = "subscribe.ack"
+	// Push frames the broker emits to subscribed operators.
+	KindRosterUpdate    Kind = "roster.update"
+	KindAspectStatusPulse Kind = "aspect.status_pulse"
 )
 
 // Envelope is the shared shape of every frame.
@@ -239,7 +255,12 @@ func IsKnown(k Kind) bool {
 		KindReactionsFetch, KindReactionsFetchResult,
 		KindKnowledgeList, KindKnowledgeListResult,
 		KindKnowledgeStoreResult,
-		KindAspectSay, KindAspectSayResult:
+		KindAspectSay, KindAspectSayResult,
+		// Subscription frames (5d)
+		KindSubscribeRoster, KindSubscribeChat, KindSubscribeAspectStatus,
+		KindUnsubscribeRoster, KindUnsubscribeChat, KindUnsubscribeAspectStatus,
+		KindSubscribeAck,
+		KindRosterUpdate, KindAspectStatusPulse:
 		return true
 	}
 	return false

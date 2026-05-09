@@ -272,6 +272,20 @@ type Broker struct {
 	ctx       context.Context
 	ctxCancel context.CancelFunc
 
+	// operators tracks live operator WS connections (dashboard SPA
+	// sessions). Distinct from `dispatcher` (per-aspect-name → conn);
+	// operator conns aren't named in the roster — they're registered
+	// here at handleConnect time when c.auth.Operator is true and
+	// removed in cleanup. Used by 5d's subscription fan-out to push
+	// chat.deliver / roster.update / aspect.status_pulse frames to
+	// every subscribing operator without naming them individually.
+	//
+	// opMu guards operators. Range under read-lock during fan-out
+	// (write paths run in WS-handler goroutines and bind/unbind on
+	// connect/cleanup; both rare relative to fan-out).
+	opMu      sync.RWMutex
+	operators map[*wsConn]struct{}
+
 	// dispatcher is the server-side request/response API: tracks
 	// which wsConn holds each aspect name, and delivers correlated
 	// response frames. Used by SendTurn (and later SendHand etc).
@@ -323,6 +337,7 @@ func New(cfg Config, r *roster.Roster) *Broker {
 		log:        cfg.Logger,
 		dispatcher: newDispatcher(),
 		connPerIP:  make(map[string]int),
+		operators:  make(map[*wsConn]struct{}),
 	}
 }
 

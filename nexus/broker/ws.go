@@ -46,6 +46,19 @@ type wsConn struct {
 	// hand-dispatch v0.1 §5.3 and §5.4.
 	auth TokenInfo
 
+	// subs guards the operator subscription flags below. Only meaningful
+	// on operator connections (auth.Operator true); on aspect conns the
+	// flags stay false and the fields are unread. Subscription state is
+	// pure in-memory: WS close = subs gone, reconnect = SPA replays its
+	// subscribes (per dashboard-ws-port spec §6.2). subMu protects the
+	// flags + topic filter; readers under RLock are the fan-out loops in
+	// chat_send.go / register/cleanup; writers under Lock are the
+	// subscribe/unsubscribe handlers in operator_subs.go.
+	subMu             sync.RWMutex
+	subscribedChat    bool
+	subscribedRoster  bool
+	subscribedAspectStatus bool
+
 	// host is the source IP (without port) extracted from RemoteAddr
 	// at accept time. Used to release the per-IP connection slot in
 	// cleanup; immutable after construction.
@@ -140,6 +153,12 @@ func (b *Broker) handleConnect(w http.ResponseWriter, r *http.Request) {
 	parentCtx := b.ctx
 	if parentCtx == nil {
 		parentCtx = context.Background()
+	}
+	// Operator connections register here (not via the register frame
+	// — operators don't go through that path, they have no aspect
+	// identity to bind into the dispatcher). Cleanup unbinds.
+	if c.auth.Operator {
+		b.bindOperator(c)
 	}
 	go c.serve(parentCtx)
 }
@@ -712,6 +731,19 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 	c.sessionID = state.SessionID
 	c.broker.dispatcher.bind(state.Name, c)
 
+	// Push a roster.update to subscribed operators. The dashboard's
+	// Status / Agents views render the row from this delta without
+	// having to re-fetch the full roster on every aspect connect.
+	c.broker.broadcastRosterUpdate(frames.RosterUpdatePayload{
+		Aspect:       state.Name,
+		Status:       state.Status,
+		Capabilities: state.Capabilities,
+		Model:        state.Model,
+		Provider:     state.Provider,
+		ContextMode:  string(state.ContextMode),
+		Reason:       "connect",
+	})
+
 	if displacedSession != "" {
 		c.log.Warn("aspect re-registered, displacing prior session",
 			"name", state.Name,
@@ -861,14 +893,29 @@ func (c *wsConn) send(env frames.Envelope) {
 // registered on this socket, deregister it so the roster reflects the
 // disconnect, and unbind from the dispatcher.
 func (c *wsConn) cleanup() {
+	// Operator unbind first — independent of aspect-side roster
+	// bookkeeping. unbindOperator is a no-op when c was never
+	// bound (non-operator conn).
+	if c.auth.Operator {
+		c.broker.unbindOperator(c)
+	}
 	if c.registeredAs != "" && c.sessionID != "" {
 		c.broker.dispatcher.unbind(c.registeredAs, c)
-		if err := c.broker.roster.Deregister(c.registeredAs, c.sessionID); err != nil && !errors.Is(err, roster.ErrNotRegistered) {
+		deregErr := c.broker.roster.Deregister(c.registeredAs, c.sessionID)
+		if deregErr != nil && !errors.Is(deregErr, roster.ErrNotRegistered) {
 			c.log.Warn("deregister on disconnect failed",
-				"name", c.registeredAs, "err", err)
+				"name", c.registeredAs, "err", deregErr)
 		} else {
 			c.log.Info("aspect deregistered on disconnect", "name", c.registeredAs)
 		}
+		// Push roster.update reason="disconnect" to subscribed
+		// operators so the dashboard removes the row from Status /
+		// Agents without polling the roster.
+		c.broker.broadcastRosterUpdate(frames.RosterUpdatePayload{
+			Aspect: c.registeredAs,
+			Status: "down",
+			Reason: "disconnect",
+		})
 	}
 	_ = c.conn.Close(websocket.StatusNormalClosure, "connection ended")
 	// Release the connection-cap slots reserved at handleConnect.

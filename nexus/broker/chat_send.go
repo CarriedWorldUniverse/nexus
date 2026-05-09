@@ -69,37 +69,46 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 	// 3. Fan out chat.deliver to each recipient's live WS connection.
 	// Aspects not currently connected miss the live frame; they pick
 	// it up on next register via Lock 6 since_msg_id replay.
-	for _, rec := range recipients {
-		c := b.dispatcher.connFor(rec)
-		if c == nil {
-			// Not connected. Replay covers reconnect; skip silently.
-			continue
+	// Build the chat.deliver envelope once, reuse it for both the
+	// per-aspect fan-out below and the operator broadcast at the
+	// tail. Reason is the per-aspect best-fit; operators see the
+	// same reason but render the chat feed regardless of policy.
+	reason := "mention"
+	if replyTo > 0 {
+		reason = "reply"
+	}
+	deliverEnv, deliverErr := frames.New(frames.KindChatDeliver, frames.ChatDeliverPayload{
+		ID:         int(msg.ID),
+		From:       from,
+		Content:    content,
+		ReplyTo:    int(replyTo),
+		// RFC3339Nano matches replay (ws.go replayAddressedSince) and
+		// chat.read so cursor-equality comparisons across the three
+		// surfaces don't break on sub-second precision.
+		ReceivedAt: msg.CreatedAt.UTC().Format(time.RFC3339Nano),
+		Reason:     reason,
+		Replay:     false,
+	})
+	if deliverErr != nil {
+		// Build failure means the per-aspect AND operator paths
+		// both miss this delivery. Replay covers aspects on
+		// reconnect; operators refresh-on-load. Log and continue.
+		b.log.Warn("chat.deliver: build frame", "err", deliverErr, "msg_id", msg.ID)
+	} else {
+		for _, rec := range recipients {
+			c := b.dispatcher.connFor(rec)
+			if c == nil {
+				// Not connected. Replay covers reconnect; skip silently.
+				continue
+			}
+			c.send(deliverEnv)
 		}
-		// The frame's reason field tracks why this aspect was
-		// included (mention | reply | thread | all). For v1 we
-		// recompute a single best-fit reason; refining the policy
-		// to surface per-recipient reason is a follow-up.
-		reason := "mention"
-		if replyTo > 0 {
-			reason = "reply"
-		}
-		env, err := frames.New(frames.KindChatDeliver, frames.ChatDeliverPayload{
-			ID:         int(msg.ID),
-			From:       from,
-			Content:    content,
-			ReplyTo:    int(replyTo),
-			// RFC3339Nano matches replay (ws.go replayAddressedSince) and
-			// chat.read so cursor-equality comparisons across the three
-			// surfaces don't break on sub-second precision.
-			ReceivedAt: msg.CreatedAt.UTC().Format(time.RFC3339Nano),
-			Reason:     reason,
-			Replay:     false,
-		})
-		if err != nil {
-			b.log.Warn("chat.deliver: build frame", "err", err, "to", rec)
-			continue
-		}
-		c.send(env)
+
+		// Operator broadcast (5d). Distinct from the per-aspect
+		// loop: the operator's view is "everything," not policy-
+		// scoped. Subscribers gated via c.subscribedChat in the
+		// fan-out predicate.
+		b.broadcastChatDeliverToOperators(deliverEnv)
 	}
 
 	// 4. Frame's funnel trigger (legacy ChatRouter callback). The

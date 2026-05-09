@@ -40,6 +40,12 @@ func (c *wsConn) dispatchOperatorFrame(env frames.Envelope) bool {
 	if !c.auth.Operator {
 		return false
 	}
+	// Subscription frames first — they're stateful flips with no
+	// store dependency and the ack must land regardless of whether
+	// stores are configured.
+	if c.dispatchOperatorSubFrame(env) {
+		return true
+	}
 	switch env.Kind {
 	case frames.KindRosterList:
 		c.handleOperatorRosterList(env)
