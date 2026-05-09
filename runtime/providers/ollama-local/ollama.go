@@ -20,7 +20,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/nexus-cw/nexus/runtime/providers"
+	"github.com/CarriedWorldUniverse/nexus/runtime/providers"
 )
 
 // ProviderName is the adapter identifier used in aspect.json and in

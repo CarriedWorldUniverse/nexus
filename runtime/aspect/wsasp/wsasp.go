@@ -23,10 +23,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/frame/funnel"
-	"github.com/nexus-cw/nexus/nexus/frames"
-	"github.com/nexus-cw/nexus/runtime/wsclient"
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/runtime/wsclient"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // Config wires an aspect-side WS client.

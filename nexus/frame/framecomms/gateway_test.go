@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nexus-cw/nexus/nexus/chat"
-	"github.com/nexus-cw/nexus/nexus/frame/funnel"
-	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
 
 func openTestGateway(t *testing.T) *Gateway {

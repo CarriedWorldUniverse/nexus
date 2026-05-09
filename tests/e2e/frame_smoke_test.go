@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/frame"
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // TestFrameSmoke_BootstrapToDetected runs the §6.5 happy path:

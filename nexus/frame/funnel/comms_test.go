@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/nexus-cw/bridle"
+	"github.com/CarriedWorldUniverse/bridle"
 )
 
 // fakeGateway is the test double for ChatGateway. Records every call

@@ -20,7 +20,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/shared"
 
-	"github.com/nexus-cw/nexus/runtime/providers"
+	"github.com/CarriedWorldUniverse/nexus/runtime/providers"
 )
 
 // ProviderName is the adapter identifier used in aspect.json.

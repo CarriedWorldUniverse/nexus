@@ -13,9 +13,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
-	"github.com/nexus-cw/nexus/runtime/providers"
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/runtime/providers"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // mockProvider is a minimal Provider for agent turn tests.

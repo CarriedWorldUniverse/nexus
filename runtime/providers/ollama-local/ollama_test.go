@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nexus-cw/nexus/runtime/providers"
+	"github.com/CarriedWorldUniverse/nexus/runtime/providers"
 )
 
 func TestNewDefaults(t *testing.T) {

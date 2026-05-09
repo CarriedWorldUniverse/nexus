@@ -18,7 +18,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/nexus-cw/bridle"
+	"github.com/CarriedWorldUniverse/bridle"
 )
 
 // EventType is the canonical identifier for a lifecycle event. Sinks

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nexus-cw/bridle"
+	"github.com/CarriedWorldUniverse/bridle"
 )
 
 func TestAlwaysPostFilter_PassesNonEmpty(t *testing.T) {

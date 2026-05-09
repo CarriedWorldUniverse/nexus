@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 func writeAspect(t *testing.T, dir, name string, cfg schemas.AspectConfig) {

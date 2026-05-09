@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/broker"
-	"github.com/nexus-cw/nexus/nexus/roster"
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 func newFrameAspect(t *testing.T, name string) *FrameAspect {

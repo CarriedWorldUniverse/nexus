@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/nexus-cw/nexus/runtime/providers"
+	"github.com/CarriedWorldUniverse/nexus/runtime/providers"
 )
 
 // Regression for issue #35: provider error strings must not round-trip

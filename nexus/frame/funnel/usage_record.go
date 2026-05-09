@@ -10,7 +10,7 @@ package funnel
 import (
 	"context"
 
-	"github.com/nexus-cw/bridle"
+	"github.com/CarriedWorldUniverse/bridle"
 )
 
 // UsageRecorder persists per-turn token attribution. Implementations

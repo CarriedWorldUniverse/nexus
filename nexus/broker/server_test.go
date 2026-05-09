@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/internal/testcerts"
-	"github.com/nexus-cw/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/internal/testcerts"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 )
 
 // freeAddr returns a 127.0.0.1:PORT string with a known-free port.

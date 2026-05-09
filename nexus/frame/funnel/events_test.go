@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nexus-cw/bridle"
+	"github.com/CarriedWorldUniverse/bridle"
 )
 
 // recordingSink captures every emission for assertion. Goroutine-safe:

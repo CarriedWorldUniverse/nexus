@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nexus-cw/bridle"
+	"github.com/CarriedWorldUniverse/bridle"
 )
 
 // OutputFilter judges a turn's natural final reply. Returns shouldPost

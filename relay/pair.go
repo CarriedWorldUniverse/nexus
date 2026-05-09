@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"time"
 
-	casket "github.com/nexus-cw/casket-go"
+	casket "github.com/CarriedWorldUniverse/casket-go"
 )
 
 // BuildSignedPairHalf assembles a PairHalfPayload for the given

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	casket "github.com/nexus-cw/casket-go"
+	casket "github.com/CarriedWorldUniverse/casket-go"
 )
 
 // Test-only msg_ids with valid UUIDv7 shape. Sequence-ordered so GET

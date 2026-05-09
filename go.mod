@@ -1,4 +1,4 @@
-module github.com/nexus-cw/nexus
+module github.com/CarriedWorldUniverse/nexus
 
 go 1.25.5
 
@@ -12,7 +12,7 @@ require (
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mark3labs/mcp-go v0.50.0 // indirect
-	github.com/nexus-cw/bridle v0.0.0-20260430193716-e7ba88231791 // indirect
+	github.com/CarriedWorldUniverse/bridle v0.0.0-20260430193716-e7ba88231791 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	github.com/spf13/cast v1.7.1 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
@@ -28,7 +28,7 @@ require (
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/ncruces/go-sqlite3-wasm/v2 v2.1.35300 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect
-	github.com/nexus-cw/casket-go v0.0.0
+	github.com/CarriedWorldUniverse/casket-go v0.0.0
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
@@ -39,6 +39,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/nexus-cw/casket-go => ../casket-go
+replace github.com/CarriedWorldUniverse/casket-go => ../casket-go
 
-replace github.com/nexus-cw/bridle => ../bridle
+replace github.com/CarriedWorldUniverse/bridle => ../bridle

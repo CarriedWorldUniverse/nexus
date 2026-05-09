@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
 
 func openTestStore(t *testing.T) (*SQLStore, *sql.DB) {

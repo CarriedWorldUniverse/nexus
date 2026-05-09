@@ -50,12 +50,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nexus-cw/bridle"
-	claudeprovider "github.com/nexus-cw/bridle/provider/claude"
-	claudecodeprovider "github.com/nexus-cw/bridle/provider/claudecode"
-	"github.com/nexus-cw/nexus/nexus/frame/funnel"
-	"github.com/nexus-cw/nexus/runtime/aspect/wsasp"
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/bridle"
+	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
+	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 func main() {

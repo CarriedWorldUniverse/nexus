@@ -15,9 +15,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
-	"github.com/nexus-cw/nexus/nexus/internal/testcerts"
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/nexus/internal/testcerts"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // fakeNexus is a tiny WS server that records incoming frames and

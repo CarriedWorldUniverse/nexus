@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 )
 
 func TestSubmitRunsExecutor(t *testing.T) {

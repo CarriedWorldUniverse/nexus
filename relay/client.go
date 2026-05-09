@@ -30,7 +30,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nexus-cw/casket-go"
+	"github.com/CarriedWorldUniverse/casket-go"
 )
 
 // Errors surfaced to callers. These map to interchange HTTP statuses.

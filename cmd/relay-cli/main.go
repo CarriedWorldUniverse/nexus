@@ -37,8 +37,8 @@ import (
 	"strings"
 	"time"
 
-	casket "github.com/nexus-cw/casket-go"
-	"github.com/nexus-cw/nexus/relay"
+	casket "github.com/CarriedWorldUniverse/casket-go"
+	"github.com/CarriedWorldUniverse/nexus/relay"
 )
 
 func main() {

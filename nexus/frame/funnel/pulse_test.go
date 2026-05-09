@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nexus-cw/bridle"
+	"github.com/CarriedWorldUniverse/bridle"
 )
 
 // recordingPulser captures every Fire call. Goroutine-safe: pulses

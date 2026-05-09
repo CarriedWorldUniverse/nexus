@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/nexus-cw/bridle"
+	"github.com/CarriedWorldUniverse/bridle"
 )
 
 // recordingTarget captures ReceiveWithMsgID calls so the bridge's

@@ -33,7 +33,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 )
 
 // Executor runs a single dispatch and returns the result payload.

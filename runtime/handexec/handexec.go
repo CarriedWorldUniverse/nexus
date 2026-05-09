@@ -34,9 +34,9 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
-	"github.com/nexus-cw/nexus/runtime/providers"
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/runtime/providers"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // Request is the JSON shape the harness dispatch-mode reads from

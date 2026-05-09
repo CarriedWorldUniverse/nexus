@@ -14,10 +14,10 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
-	"github.com/nexus-cw/nexus/nexus/handqueue"
-	"github.com/nexus-cw/nexus/nexus/roster"
-	"github.com/nexus-cw/nexus/nexus/sessions"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 )
 
 // wsConn tracks per-connection state on the broker side: who's

@@ -28,7 +28,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/nexus-cw/bridle"
+	"github.com/CarriedWorldUniverse/bridle"
 )
 
 // ChatGateway is the funnel's seam onto the actual chat surface. The

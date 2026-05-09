@@ -15,8 +15,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/nexus-cw/nexus/nexus/chat"
-	"github.com/nexus-cw/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 )
 
 // Gateway is the in-process funnel.ChatGateway. It writes via a

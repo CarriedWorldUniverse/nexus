@@ -29,7 +29,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/frame/templates"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/templates"
 )
 
 //go:embed bootstrap_static

@@ -20,11 +20,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
-	"github.com/nexus-cw/nexus/runtime/context/tree"
-	"github.com/nexus-cw/nexus/runtime/providers"
-	"github.com/nexus-cw/nexus/runtime/wsclient"
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/runtime/context/tree"
+	"github.com/CarriedWorldUniverse/nexus/runtime/providers"
+	"github.com/CarriedWorldUniverse/nexus/runtime/wsclient"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // Config bundles the runtime dependencies. All fields except Logger
