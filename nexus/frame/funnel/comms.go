@@ -79,6 +79,46 @@ type ChatGateway interface {
 	GetShared(ctx context.Context, shareID int64) (SharedFileRef, error)
 }
 
+// KnowledgeGateway is the funnel's seam onto the cross-session
+// knowledge store (registration spec §2.8). The in-process Frame
+// implements this against *knowledge.Store. Out-of-process aspects
+// don't have direct DB access — wsasp returns "not implemented" for
+// these methods until a wire surface is specified.
+type KnowledgeGateway interface {
+	// StoreKnowledge upserts a knowledge entry under (fromAgent,
+	// topic). Returns the row id. Empty topic or content → error.
+	StoreKnowledge(ctx context.Context, fromAgent, topic, content string, shared bool) (id int64, err error)
+
+	// SearchKnowledge runs FTS5 keyword retrieval. The caller's own
+	// agent id is implied by Scope.Agent; OwnAgent and Shared toggle
+	// whether to include the caller's own and operator-curated
+	// entries. TopK caps results (default 5 if zero).
+	SearchKnowledge(ctx context.Context, q KnowledgeQuery) ([]KnowledgeHit, error)
+}
+
+// KnowledgeQuery mirrors knowledge.Query without forcing the funnel
+// to import the storage package.
+type KnowledgeQuery struct {
+	Text     string   `json:"text"`
+	Agent    string   `json:"agent"`     // caller — populates scope.Agent
+	OwnAgent bool     `json:"own_agent"` // include caller's own entries
+	Shared   bool     `json:"shared"`    // include operator-curated entries
+	Peers    []string `json:"peers,omitempty"`
+	TopK     int      `json:"top_k,omitempty"`
+}
+
+// KnowledgeHit is the gateway-level search result.
+type KnowledgeHit struct {
+	ID        int64   `json:"id"`
+	FromAgent string  `json:"from_agent"`
+	Topic     string  `json:"topic"`
+	Content   string  `json:"content"`
+	Shared    bool    `json:"shared"`
+	UpdatedAt string  `json:"updated_at"`
+	Score     float64 `json:"score"`
+	Matched   string  `json:"matched"`
+}
+
 // SharedFileRef is the gateway-level shape of a shared_files row.
 // Mirrors chat.SharedFile but the funnel doesn't import chat to keep
 // the layering clean.
@@ -118,6 +158,8 @@ const (
 	ToolNameShareFile       = "share_file"
 	ToolNameListShared      = "list_shared"
 	ToolNameGetShared       = "get_shared"
+	ToolNameStoreKnowledge  = "store_knowledge"
+	ToolNameSearchKnowledge = "search_knowledge"
 )
 
 // CommsToolDefs returns the set of bridle.ToolDef registrations for
@@ -231,6 +273,34 @@ func CommsToolDefs() []bridle.ToolDef {
 				"required": []string{"id"},
 			}),
 		},
+		{
+			Name:        ToolNameStoreKnowledge,
+			Description: "Save a knowledge entry under (your aspect id, topic). Re-saving the same topic replaces the previous content. Use for cross-session context — pinned facts, runbooks, decision rationale. Set shared=true only when the operator has explicitly curated the entry as canon.",
+			InputSchema: mustJSON(map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"topic":   map[string]any{"type": "string", "description": "Short slug — the entry key. Re-using replaces the prior entry."},
+					"content": map[string]any{"type": "string", "description": "Body. Free-form text."},
+					"shared":  map[string]any{"type": "boolean", "description": "Operator-curated flag. Defaults to false; only set true when explicitly approved."},
+				},
+				"required": []string{"topic", "content"},
+			}),
+		},
+		{
+			Name:        ToolNameSearchKnowledge,
+			Description: "Search the knowledge store via FTS5 keyword retrieval. Defaults to your own entries plus operator-curated shared ones. Use when you remember a fact landed earlier but you don't know which session/topic.",
+			InputSchema: mustJSON(map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"text":      map[string]any{"type": "string", "description": "Query text. FTS5 syntax — bare words match either topic or content."},
+					"own_agent": map[string]any{"type": "boolean", "description": "Include your own entries (default true)."},
+					"shared":    map[string]any{"type": "boolean", "description": "Include operator-curated shared entries (default true)."},
+					"peers":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Additional aspect ids whose entries to include."},
+					"top_k":     map[string]any{"type": "integer", "description": "Max hits (default 5, hard cap 50)."},
+				},
+				"required": []string{"text"},
+			}),
+		},
 	}
 }
 
@@ -247,6 +317,15 @@ func CommsToolDefs() []bridle.ToolDef {
 // model should see the error and decide what to do.
 type CommsRunner struct {
 	Gateway ChatGateway
+
+	// Knowledge is optional. When nil, store_knowledge and
+	// search_knowledge return a "not configured" tool-result error
+	// (aspects without knowledge access still work for chat surface).
+	Knowledge KnowledgeGateway
+
+	// AspectID identifies the caller for knowledge writes and
+	// scoped reads. Required when Knowledge is set; ignored otherwise.
+	AspectID string
 }
 
 // Run dispatches a tool call by name. Unknown tool names return an
@@ -280,6 +359,10 @@ func (r CommsRunner) Run(ctx context.Context, call bridle.ToolCall) (json.RawMes
 		return r.runListShared(ctx, call.Args)
 	case ToolNameGetShared:
 		return r.runGetShared(ctx, call.Args)
+	case ToolNameStoreKnowledge:
+		return r.runStoreKnowledge(ctx, call.Args)
+	case ToolNameSearchKnowledge:
+		return r.runSearchKnowledge(ctx, call.Args)
 	default:
 		return nil, fmt.Errorf("CommsRunner: unknown tool %q", call.Name)
 	}
@@ -440,6 +523,78 @@ func (r CommsRunner) runGetShared(ctx context.Context, raw json.RawMessage) (jso
 	return mustJSON(map[string]any{"shared": f}), nil
 }
 
+func (r CommsRunner) runStoreKnowledge(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	if r.Knowledge == nil {
+		return errorResult(fmt.Errorf("knowledge gateway not configured")), nil
+	}
+	if r.AspectID == "" {
+		return errorResult(fmt.Errorf("aspect id not configured for knowledge writes")), nil
+	}
+	var args struct {
+		Topic   string `json:"topic"`
+		Content string `json:"content"`
+		Shared  bool   `json:"shared"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return errorResult(err), nil
+	}
+	if args.Topic == "" || args.Content == "" {
+		return errorResult(fmt.Errorf("topic and content are required")), nil
+	}
+	id, err := r.Knowledge.StoreKnowledge(ctx, r.AspectID, args.Topic, args.Content, args.Shared)
+	if err != nil {
+		return gatewayErrorResult(err)
+	}
+	return mustJSON(map[string]any{"id": id}), nil
+}
+
+func (r CommsRunner) runSearchKnowledge(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	if r.Knowledge == nil {
+		return errorResult(fmt.Errorf("knowledge gateway not configured")), nil
+	}
+	// Default scope: own + shared. Caller can override with explicit
+	// false; that's why we parse into pointers.
+	var args struct {
+		Text     string   `json:"text"`
+		OwnAgent *bool    `json:"own_agent"`
+		Shared   *bool    `json:"shared"`
+		Peers    []string `json:"peers"`
+		TopK     int      `json:"top_k"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return errorResult(err), nil
+	}
+	if args.Text == "" {
+		return errorResult(fmt.Errorf("text is required")), nil
+	}
+	const maxTopK = 50
+	if args.TopK > maxTopK {
+		args.TopK = maxTopK
+	}
+	q := KnowledgeQuery{
+		Text:     args.Text,
+		Agent:    r.AspectID,
+		OwnAgent: true,
+		Shared:   true,
+		Peers:    args.Peers,
+		TopK:     args.TopK,
+	}
+	if args.OwnAgent != nil {
+		q.OwnAgent = *args.OwnAgent
+	}
+	if args.Shared != nil {
+		q.Shared = *args.Shared
+	}
+	hits, err := r.Knowledge.SearchKnowledge(ctx, q)
+	if err != nil {
+		return gatewayErrorResult(err)
+	}
+	if hits == nil {
+		hits = []KnowledgeHit{}
+	}
+	return mustJSON(map[string]any{"hits": hits}), nil
+}
+
 // errorResult renders an error into the standard tool-result shape
 // so the model can read and respond to it. Returning errors as JSON
 // rather than Go errors prevents bridle from aborting the turn —
@@ -480,7 +635,8 @@ func (r composedRunner) Run(ctx context.Context, call bridle.ToolCall) (json.Raw
 	case ToolNameSendChat, ToolNameReactTo, ToolNameReactToMessage,
 		ToolNameChatRead, ToolNameReadChatThread, ToolNameReadChatMessage,
 		ToolNameAnnounceFile, ToolNameShareFile,
-		ToolNameListShared, ToolNameGetShared:
+		ToolNameListShared, ToolNameGetShared,
+		ToolNameStoreKnowledge, ToolNameSearchKnowledge:
 		return r.comms.Run(ctx, call)
 	}
 	if r.next == nil {
