@@ -228,9 +228,13 @@ func New(cfg Config) (*Funnel, error) {
 	}
 
 	return &Funnel{
-		cfg:           cfg,
-		log:           cfg.Logger,
-		sessionHandle: bridle.SessionHandle{ID: newSessionID()},
+		cfg: cfg,
+		log: cfg.Logger,
+		// New=true so the first deliberation tells the provider this is
+		// a fresh session for this ID. Flipped to false after the first
+		// turn returns successfully (and again on every compaction-driven
+		// session rotation).
+		sessionHandle: bridle.SessionHandle{ID: newSessionID(), New: true},
 	}, nil
 }
 
@@ -258,6 +262,11 @@ func (f *Funnel) Receive(item bridle.InboxItem) {
 func (f *Funnel) ReceiveWithMsgID(item bridle.InboxItem, msgID int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// Stamp MsgID onto the item so the deliberation prompt + the
+	// triage tool can reference it. Zero means the caller didn't
+	// supply one (e.g. synthetic injection); triage contract treats
+	// MsgID==0 as not-applicable per bridle.InboxItem docs.
+	item.MsgID = msgID
 	f.inbox = append(f.inbox, item)
 	if msgID > 0 {
 		f.triggeringMsgID = msgID
@@ -394,14 +403,29 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		// cumulativeTokens being precise across error retries — this
 		// is the right place to look if attribution numbers ever
 		// disagree with the provider's billing.
+		//
+		// Flip sessionHandle.New=false even on error. The provider may
+		// have written the underlying session jsonl (claudecode does
+		// this once `--session-id` is accepted, even if a later step
+		// fails), so the next turn MUST resume rather than try to
+		// create the same id again. Without this flip, every error
+		// pins the session in the "new" state and subsequent turns
+		// fail with "Session ID already in use" forever.
+		f.mu.Lock()
+		f.sessionHandle.New = false
+		f.mu.Unlock()
 		return DeliberateResult{TurnResult: result}, err
 	}
 
 	// Append the turn's session delta + update cumulative tokens. If
 	// the v2 log-decision turn lands, this is where it'd gate the append.
+	// Also flip sessionHandle.New to false: the provider has now created
+	// the underlying session (e.g. claudecode wrote the jsonl), so future
+	// turns should resume rather than re-create.
 	f.mu.Lock()
 	f.sessionTail = append(f.sessionTail, result.SessionDelta...)
 	f.cumulativeTokens += result.Usage.InputTokens + result.Usage.OutputTokens
+	f.sessionHandle.New = false
 	f.mu.Unlock()
 
 	// Post-hoc filter judges the natural reply. Lock 5's
@@ -518,7 +542,7 @@ func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error 
 		SystemPrompt: summarizePrompt,
 		// Fresh session for the summarize turn so it doesn't pollute
 		// the main session JSONL.
-		Session:     bridle.SessionHandle{ID: newSessionID()},
+		Session:     bridle.SessionHandle{ID: newSessionID(), New: true},
 		SessionTail: tail,
 		UserMessage: "Summarize this session into a compact briefing the model can use to continue.",
 		Provider:    f.cfg.Provider,
@@ -547,7 +571,10 @@ func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error 
 	f.mu.Lock()
 	f.sessionTail = []bridle.SessionEvent{summary}
 	f.cumulativeTokens = result.Usage.OutputTokens // the summary itself counts toward the next budget
-	f.sessionHandle = bridle.SessionHandle{ID: newSessionID()}
+	// New session minted by compaction — flag as fresh so the provider
+	// creates the underlying session rather than trying to resume an id
+	// it has never seen.
+	f.sessionHandle = bridle.SessionHandle{ID: newSessionID(), New: true}
 	f.mu.Unlock()
 
 	f.emit(ctx, Event{

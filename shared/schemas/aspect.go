@@ -48,7 +48,35 @@ type AspectConfig struct {
 	NexusURLEnv    string         `json:"nexus_url_env"`
 	AuthTokenEnv   string         `json:"auth_token_env"`
 	CommsPerms     []string       `json:"commsPerms,omitempty"`
-	Metadata       map[string]any `json:"metadata,omitempty"`
+	// Filter selects the post-hoc output triage that decides whether the
+	// model's natural reply gets posted to chat. Values:
+	//
+	//   "cheap"  — hard rules + cheap-model judgment (default; full triage)
+	//   "hard"   — substring/prefix self-suppress only (no extra model call)
+	//   "always" — only suppress empty replies (today's pre-triage default)
+	//   "off"    — post every non-empty reply unmodified (alias of "always")
+	//
+	// Empty string falls back to "cheap". Per-aspect because some aspects
+	// (e.g. forge training reports) legitimately produce content the cheap
+	// model misjudges and need a looser filter.
+	Filter string `json:"filter,omitempty"`
+
+	// FilterProvider lets the operator pick a separate (typically cheaper)
+	// provider for the CheapModelFilter judgment call. Empty falls back
+	// to the aspect's main Provider — which is the right default when
+	// the Frame is subscription-auth claudecode (no extra creds needed).
+	// Set this to e.g. "claude-api" with FilterProviderConfig.model =
+	// "claude-haiku-4-5" for a cheap-tier judge, or to an entirely
+	// different stack (ollama, openai) for non-Claude deployments.
+	FilterProvider string `json:"filter_provider,omitempty"`
+
+	// FilterProviderConfig mirrors ProviderConfig but for the filter
+	// judge — typically just {"model": "..."}. Empty model falls back
+	// to "claude-haiku-4-5" when FilterProvider is a Claude flavor,
+	// otherwise to the aspect's main Model.
+	FilterProviderConfig map[string]any `json:"filter_provider_config,omitempty"`
+
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // EffectiveRole returns the role with empty-string normalized to RoleAspect.

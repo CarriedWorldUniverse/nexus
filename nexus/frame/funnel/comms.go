@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/CarriedWorldUniverse/bridle"
 )
@@ -167,6 +168,13 @@ const (
 	ToolNameGetShared       = "get_shared"
 	ToolNameStoreKnowledge  = "store_knowledge"
 	ToolNameSearchKnowledge = "search_knowledge"
+	// ToolNameTriage — every chat msg the funnel receives must be
+	// triaged before the turn ends (per inbox-triage contract,
+	// 2026-05-10-funnel-triage-contract.md). The model calls this
+	// once per inbox msg_id with decision=reply or skip+reason.
+	// Failure to triage triggers synthetic skip rows so the operator
+	// audit trail stays complete; that's a model-compliance signal.
+	ToolNameTriage = "triage"
 )
 
 // CommsToolDefs returns the set of bridle.ToolDef registrations for
@@ -308,6 +316,22 @@ func CommsToolDefs() []bridle.ToolDef {
 				"required": []string{"text"},
 			}),
 		},
+		{
+			Name: ToolNameTriage,
+			Description: "Mark how this turn handled an inbox message. MUST be called exactly once for every chat msg_id listed in the 'Triage requirement' section of the inbox before the turn ends. " +
+				"Use decision='reply' when you used send_chat to address that msg_id (the funnel correlates by recency). " +
+				"Use decision='skip' with a reason when you intentionally do not reply — broadcast acks, noise, addressed-to-other, etc. " +
+				"Skip events are visible to the operator in their 1:1 view but suppressed from the collab thread, so peers don't see your non-decisions. Failing to triage every inbox msg results in synthetic skip rows tagged 'no_triage_emitted' — observable as a compliance signal.",
+			InputSchema: mustJSON(map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"msg_id":   map[string]any{"type": "integer", "description": "Chat msg_id from the Triage requirement list."},
+					"decision": map[string]any{"type": "string", "enum": []string{"reply", "skip"}, "description": "reply | skip"},
+					"reason":   map[string]any{"type": "string", "description": "For skip: addressed_to_other | acknowledgement_only | out_of_scope | duplicate | noise | freeform sentence. Empty for reply."},
+				},
+				"required": []string{"msg_id", "decision"},
+			}),
+		},
 	}
 }
 
@@ -370,9 +394,42 @@ func (r CommsRunner) Run(ctx context.Context, call bridle.ToolCall) (json.RawMes
 		return r.runStoreKnowledge(ctx, call.Args)
 	case ToolNameSearchKnowledge:
 		return r.runSearchKnowledge(ctx, call.Args)
+	case ToolNameTriage:
+		return r.runTriage(ctx, call.Args)
 	default:
 		return nil, fmt.Errorf("CommsRunner: unknown tool %q", call.Name)
 	}
+}
+
+// runTriage records a per-msg-id triage decision. v1 stub: logs to
+// stderr and returns a success result so the model gets a clean ack
+// and can continue its turn. Persistence to the inbox_triage table
+// lands in Phase 1's storage layer; this stub closes the "unknown
+// tool" loop so the prompt's triage requirement behaves predictably.
+func (r CommsRunner) runTriage(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var args struct {
+		MsgID    int64  `json:"msg_id"`
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mustJSON(map[string]any{"error": "triage: malformed args: " + err.Error()}), nil
+	}
+	if args.MsgID == 0 || args.Decision == "" {
+		return mustJSON(map[string]any{"error": "triage: msg_id and decision required"}), nil
+	}
+	if args.Decision != "reply" && args.Decision != "skip" {
+		return mustJSON(map[string]any{"error": "triage: decision must be 'reply' or 'skip'"}), nil
+	}
+	// v1 stub: stderr log. Phase 1 hardening adds a TriageStore for
+	// SQL-backed persistence + an enforcer that emits synthetic skips
+	// for inbox items the model failed to triage.
+	log.Printf("triage: aspect=%s msg_id=%d decision=%s reason=%q",
+		r.AspectID, args.MsgID, args.Decision, args.Reason)
+	return mustJSON(map[string]any{"ok": true, "msg_id": args.MsgID, "decision": args.Decision}), nil
 }
 
 // gatewayErrorResult turns a gateway error into either a Go error

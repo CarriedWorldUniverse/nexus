@@ -7,6 +7,11 @@ import (
 
 const frameName = "anchor" // operator-chosen Frame name in tests; non-default to catch hardcoding
 
+// testRoster covers the aspects mentioned across this file's cases.
+// Pass to ShouldRouteToFrame in every call so the addressing check
+// has a non-empty truth set. Order doesn't matter for correctness.
+var testRoster = []string{frameName, "wren", "maren", "anvil_v2", "test-keel"}
+
 func TestMentions(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -58,7 +63,7 @@ func TestShouldRoute_UnAddressedFromAnyone(t *testing.T) {
 	}
 	for _, tc := range cases {
 		msg := Message{From: tc.from, Content: tc.content}
-		if !ShouldRouteToFrame(msg, frameName, NewThreadIndex()) {
+		if !ShouldRouteToFrame(msg, frameName, testRoster, NewThreadIndex()) {
 			t.Errorf("from=%q content=%q: expected route to frame", tc.from, tc.content)
 		}
 	}
@@ -67,7 +72,7 @@ func TestShouldRoute_UnAddressedFromAnyone(t *testing.T) {
 // Rule 2a — Frame is the addressee.
 func TestShouldRoute_AddressedToFrame(t *testing.T) {
 	msg := Message{From: "operator", Content: "@anchor please ack"}
-	if !ShouldRouteToFrame(msg, frameName, NewThreadIndex()) {
+	if !ShouldRouteToFrame(msg, frameName, testRoster, NewThreadIndex()) {
 		t.Error("expected route to frame when @-mentioned")
 	}
 }
@@ -75,7 +80,7 @@ func TestShouldRoute_AddressedToFrame(t *testing.T) {
 // Rule 2b — Frame is the sender. Symmetric, no-op delivery.
 func TestShouldRoute_FromFrame(t *testing.T) {
 	msg := Message{From: frameName, Content: "@wren thanks"}
-	if !ShouldRouteToFrame(msg, frameName, NewThreadIndex()) {
+	if !ShouldRouteToFrame(msg, frameName, testRoster, NewThreadIndex()) {
 		t.Error("expected route to frame when frame is sender")
 	}
 }
@@ -85,7 +90,7 @@ func TestShouldRoute_FromFrame(t *testing.T) {
 // to other aspects shouldn't reach the Frame unless it's already in the thread.
 func TestShouldRoute_AddressedToOtherAspect_NotInThread(t *testing.T) {
 	msg := Message{From: "operator", Content: "@wren can you check"}
-	if ShouldRouteToFrame(msg, frameName, NewThreadIndex()) {
+	if ShouldRouteToFrame(msg, frameName, testRoster, NewThreadIndex()) {
 		t.Error("expected NO route — addressed to wren, frame not in thread")
 	}
 }
@@ -95,7 +100,7 @@ func TestShouldRoute_ReplyToFrameAuthoredMessage(t *testing.T) {
 	idx := NewThreadIndex()
 	idx.RecordPost(42, "")
 	msg := Message{From: "wren", Content: "@maren take this", ReplyTo: 42}
-	if !ShouldRouteToFrame(msg, frameName, idx) {
+	if !ShouldRouteToFrame(msg, frameName, testRoster, idx) {
 		t.Error("expected route — replying to a frame-authored message")
 	}
 }
@@ -106,7 +111,7 @@ func TestShouldRoute_ReplyToParticipatedNotAuthored(t *testing.T) {
 	idx := NewThreadIndex()
 	idx.RecordParticipation(50, "")
 	msg := Message{From: "wren", Content: "@maren take this", ReplyTo: 50}
-	if ShouldRouteToFrame(msg, frameName, idx) {
+	if ShouldRouteToFrame(msg, frameName, testRoster, idx) {
 		t.Error("rule 2c should NOT fire — frame only participated, didn't author 50")
 	}
 }
@@ -117,7 +122,7 @@ func TestShouldRoute_ThreadRootParticipated(t *testing.T) {
 	idx := NewThreadIndex()
 	idx.RecordParticipation(50, "")
 	msg := Message{From: "wren", Content: "@maren follow-up", ThreadRoot: 50}
-	if !ShouldRouteToFrame(msg, frameName, idx) {
+	if !ShouldRouteToFrame(msg, frameName, testRoster, idx) {
 		t.Error("rule 2e should fire — frame is in thread 50 (via participation)")
 	}
 }
@@ -127,7 +132,7 @@ func TestShouldRoute_TopicMatch(t *testing.T) {
 	idx := NewThreadIndex()
 	idx.RecordPost(0, "harness-naming") // topic-only post
 	msg := Message{From: "wren", Content: "@maren one more thought", Topic: "harness-naming"}
-	if !ShouldRouteToFrame(msg, frameName, idx) {
+	if !ShouldRouteToFrame(msg, frameName, testRoster, idx) {
 		t.Error("expected route — topic the frame participated in")
 	}
 }
@@ -137,7 +142,7 @@ func TestShouldRoute_ThreadRootMatch(t *testing.T) {
 	idx := NewThreadIndex()
 	idx.RecordPost(100, "") // root authored by frame
 	msg := Message{From: "wren", Content: "@maren follow-up", ThreadRoot: 100}
-	if !ShouldRouteToFrame(msg, frameName, idx) {
+	if !ShouldRouteToFrame(msg, frameName, testRoster, idx) {
 		t.Error("expected route — thread root authored by frame")
 	}
 }
@@ -146,7 +151,7 @@ func TestShouldRoute_ThreadRootMatch(t *testing.T) {
 func TestShouldRoute_AspectToAspect_NoFrameMembership(t *testing.T) {
 	idx := NewThreadIndex()
 	msg := Message{From: "wren", Content: "@maren agreed", ReplyTo: 5, Topic: "voice-cleanup"}
-	if ShouldRouteToFrame(msg, frameName, idx) {
+	if ShouldRouteToFrame(msg, frameName, testRoster, idx) {
 		t.Error("expected NO route — aspect-to-aspect, frame not participant")
 	}
 }
@@ -154,16 +159,16 @@ func TestShouldRoute_AspectToAspect_NoFrameMembership(t *testing.T) {
 // Nil ThreadIndex behaves as empty index.
 func TestShouldRoute_NilIndex(t *testing.T) {
 	// Un-addressed still routes (rule 1 doesn't need an index).
-	if !ShouldRouteToFrame(Message{From: "operator", Content: "hi"}, frameName, nil) {
+	if !ShouldRouteToFrame(Message{From: "operator", Content: "hi"}, frameName, testRoster, nil) {
 		t.Error("nil-idx + un-addressed: expected route")
 	}
 	// Addressed-to-frame still routes (rule 2a doesn't need an index).
-	if !ShouldRouteToFrame(Message{From: "operator", Content: "@anchor hi"}, frameName, nil) {
+	if !ShouldRouteToFrame(Message{From: "operator", Content: "@anchor hi"}, frameName, testRoster, nil) {
 		t.Error("nil-idx + @-frame: expected route")
 	}
 	// Addressed-to-other with reply-to: nil-idx means we can't check
 	// participation, so should NOT route.
-	if ShouldRouteToFrame(Message{From: "operator", Content: "@wren hi", ReplyTo: 1}, frameName, nil) {
+	if ShouldRouteToFrame(Message{From: "operator", Content: "@wren hi", ReplyTo: 1}, frameName, testRoster, nil) {
 		t.Error("nil-idx + addressed-to-other + reply-to: expected NO route (idx unknown)")
 	}
 }
@@ -253,7 +258,7 @@ func TestThreadIndex_ConcurrentSafe(t *testing.T) {
 func TestShouldRoute_FrameMentionedAlongsideOthers(t *testing.T) {
 	// Multi-mention: @frame + @other. Frame is mentioned, so route.
 	msg := Message{From: "operator", Content: "@anchor @wren can you both look"}
-	if !ShouldRouteToFrame(msg, frameName, NewThreadIndex()) {
+	if !ShouldRouteToFrame(msg, frameName, testRoster, NewThreadIndex()) {
 		t.Error("expected route — frame is one of multiple mentions")
 	}
 }
@@ -273,7 +278,7 @@ func TestShouldRoute_ContentEdgeCases(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ShouldRouteToFrame(Message{From: "wren", Content: tc.content}, frameName, idx)
+			got := ShouldRouteToFrame(Message{From: "wren", Content: tc.content}, frameName, testRoster, idx)
 			if got != tc.want {
 				t.Errorf("got %v want %v for %q", got, tc.want, tc.content)
 			}
