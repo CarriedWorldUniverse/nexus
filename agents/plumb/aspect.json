@@ -1,0 +1,22 @@
+{
+  "name": "plumb",
+  "context_mode": "thread",
+  "provider": "claude-api",
+  "provider_config": {
+    "model": "claude-opus-4-7"
+  },
+  "port": 0,
+  "capabilities": [
+    "design-throw-things-at-walls",
+    "rapid-iteration",
+    "build-team",
+    "ad-hoc-prototyping"
+  ],
+  "metadata": {
+    "auto_spawn": true,
+    "host": "little-blue",
+    "domain": "Convergence",
+    "title": "Plumb — Aspect of Convergence",
+    "note": "Operator's portable thinking partner. Lives on little-blue. Build-team partner with keel + anvil for non-Unity work. Throw-it-at-the-wall design phase before specs harden."
+  }
+}

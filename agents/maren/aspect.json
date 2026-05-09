@@ -1,0 +1,21 @@
+{
+  "name": "maren",
+  "context_mode": "thread",
+  "provider": "claude-api",
+  "provider_config": {
+    "model": "claude-opus-4-7"
+  },
+  "port": 0,
+  "capabilities": [
+    "art-direction",
+    "asset-pipeline",
+    "material-palette",
+    "blender-pipeline"
+  ],
+  "metadata": {
+    "auto_spawn": true,
+    "domain": "Rendering",
+    "title": "Maren — Aspect of Rendering",
+    "note": "Pipeline pragmatist. Materials, constraints, structure. Ship the rough thing that feels right."
+  }
+}

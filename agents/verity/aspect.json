@@ -1,0 +1,21 @@
+{
+  "name": "verity",
+  "context_mode": "thread",
+  "provider": "claude-api",
+  "provider_config": {
+    "model": "claude-opus-4-7"
+  },
+  "port": 0,
+  "capabilities": [
+    "canon-coherence",
+    "spec-fidelity",
+    "file-of-record",
+    "consistency-check"
+  ],
+  "metadata": {
+    "auto_spawn": true,
+    "domain": "Coherence",
+    "title": "Verity — Aspect of Coherence",
+    "note": "Holds the canon. Reads the files completely. Answers from what's there, not what should be there."
+  }
+}

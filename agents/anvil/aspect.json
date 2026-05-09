@@ -1,0 +1,23 @@
+{
+  "name": "anvil",
+  "context_mode": "thread",
+  "provider": "claude-api",
+  "provider_config": {
+    "model": "claude-opus-4-7"
+  },
+  "port": 0,
+  "capabilities": [
+    "cross-stack-build",
+    "oss-replacement",
+    "credential-crypto",
+    "general-purpose-tooling",
+    "go-build",
+    "rust-build"
+  ],
+  "metadata": {
+    "auto_spawn": true,
+    "domain": "Versatility",
+    "title": "Anvil — Aspect of Versatility",
+    "note": "Fills gaps outside other remits. Empirical: claims are hypotheses until tested. Drop-in OSS replacements + general tooling."
+  }
+}

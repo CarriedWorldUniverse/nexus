@@ -1,0 +1,11 @@
+{
+  "name": "keel",
+  "role": "frame",
+  "context_mode": "global",
+  "provider": "claude-api",
+  "provider_config": {
+    "model": "claude-opus-4-7"
+  },
+  "port": 0,
+  "capabilities": ["bootstrap", "broadcast", "admin"]
+}
