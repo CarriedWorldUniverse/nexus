@@ -359,6 +359,31 @@ CREATE TABLE IF NOT EXISTS nexus_settings (
 );
 
 -- -------------------------------------------------------------------
+-- Operator passkeys — WebAuthn credentials registered for the
+-- operator identity (dashboard-ws-port spec §6.1). The operator's
+-- passkey unlocks an in-memory keyfile at login; this table holds
+-- the public side. Multiple rows = multiple registered devices for
+-- the same operator (<operator-host>, dMon, etc).
+--
+-- credential_id is the WebAuthn credential id (raw bytes, base64url-
+-- encoded on the wire); UNIQUE so the same passkey can't double-
+-- register. public_key is the COSE-encoded public key returned by
+-- the authenticator at registration. sign_count is the
+-- authenticator's monotonic replay counter — every successful login
+-- must observe a strictly greater value than the stored one, or the
+-- assertion is rejected as a replay/clone signal.
+-- -------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS operator_passkeys (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  credential_id   BLOB NOT NULL UNIQUE,
+  public_key      BLOB NOT NULL,
+  sign_count      INTEGER NOT NULL DEFAULT 0,
+  label           TEXT NOT NULL,
+  registered_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  last_used_at    TEXT
+);
+
+-- -------------------------------------------------------------------
 -- Schema metadata — marker only. Real migrations defer until first
 -- backwards-incompatible change (per §10 of registration spec).
 -- -------------------------------------------------------------------
