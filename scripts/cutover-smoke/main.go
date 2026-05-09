@@ -141,6 +141,7 @@ func run() error {
 	fmt.Println("[6/8] chat.send → chat.deliver")
 	probeContent := fmt.Sprintf("cutover-smoke probe %d", now.UnixMicro())
 	if _, err := sendNoWait(c, frames.KindChatSend, frames.ChatSendPayload{
+		From:    "operator",
 		Content: probeContent,
 	}); err != nil {
 		return fmt.Errorf("chat.send: %w", err)
