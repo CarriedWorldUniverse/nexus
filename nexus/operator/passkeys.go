@@ -157,21 +157,40 @@ func (s *PasskeyStore) GetByCredentialID(ctx context.Context, credentialID []byt
 }
 
 // SaveSignCount records the new sign_count from a successful login
-// and stamps last_used_at to now. Enforces strict-greater-than: if
-// `next` is not greater than the stored value, returns
-// ErrSignCountReplay and leaves the row unchanged.
+// and stamps last_used_at to now. Enforces the WebAuthn §6.1.1
+// replay rule:
 //
-// The check + update is a single SQL statement with the comparison
-// in the WHERE clause so concurrent logins can't both observe the
-// same prior value and race past each other. RowsAffected==0 means
-// the predicate failed (replay) — translated to the typed error.
+//   - If `next` is strictly greater than the stored value: accept,
+//     update both columns.
+//   - If both stored and `next` are 0: accept, update last_used_at
+//     only. Per WebAuthn §6.1.1, a sign_count that stays at 0
+//     means the authenticator does not implement the counter
+//     (typical for platform authenticators — Touch ID, Face ID,
+//     Windows Hello). Treating 0→0 as a replay would lock
+//     operators out of their own dashboards.
+//   - Otherwise (stored > 0 and next <= stored, or stored > 0 and
+//     next == 0 which is a downgrade): reject as ErrSignCountReplay.
+//
+// The strict-greater branch uses a single SQL statement with the
+// comparison in the WHERE clause so concurrent logins can't both
+// observe the same prior value and race past each other —
+// RowsAffected==0 means the predicate failed (replay or no row).
+//
+// The 0→0 branch is its own UPDATE that only fires when both the
+// stored and presented counters are zero. The two UPDATEs have
+// disjoint WHERE clauses, so at most one will land.
 func (s *PasskeyStore) SaveSignCount(ctx context.Context, id int64, next int64) error {
-	const q = `
+	if next < 0 {
+		return fmt.Errorf("operator.SaveSignCount: negative next sign_count")
+	}
+
+	// Branch 1: strict-greater-than. Atomic via WHERE predicate.
+	const qStrict = `
 	UPDATE operator_passkeys
 	SET sign_count = ?, last_used_at = datetime('now')
 	WHERE id = ? AND sign_count < ?`
 
-	res, err := s.db.ExecContext(ctx, q, next, id, next)
+	res, err := s.db.ExecContext(ctx, qStrict, next, id, next)
 	if err != nil {
 		return fmt.Errorf("operator.SaveSignCount: %w", err)
 	}
@@ -179,10 +198,36 @@ func (s *PasskeyStore) SaveSignCount(ctx context.Context, id int64, next int64) 
 	if err != nil {
 		return fmt.Errorf("operator.SaveSignCount rows: %w", err)
 	}
-	if n == 0 {
-		return ErrSignCountReplay
+	if n == 1 {
+		return nil
 	}
-	return nil
+
+	// Branch 2: zero-counter authenticator. Only fires when both
+	// stored and presented are 0. WebAuthn §6.1.1 says treat as
+	// "authenticator does not support counter" — accept and just
+	// stamp last_used_at. The WHERE clause guards against accepting
+	// a downgrade (stored > 0, next == 0) — that path falls through
+	// to the replay return below.
+	if next == 0 {
+		const qZero = `
+		UPDATE operator_passkeys
+		SET last_used_at = datetime('now')
+		WHERE id = ? AND sign_count = 0`
+
+		res, err := s.db.ExecContext(ctx, qZero, id)
+		if err != nil {
+			return fmt.Errorf("operator.SaveSignCount zero: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("operator.SaveSignCount zero rows: %w", err)
+		}
+		if n == 1 {
+			return nil
+		}
+	}
+
+	return ErrSignCountReplay
 }
 
 // List returns all registered passkeys, newest registration first.

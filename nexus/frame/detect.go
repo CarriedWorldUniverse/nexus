@@ -93,12 +93,18 @@ func Detect(agentsDir string) (Detected, error) {
 		}
 		role := cfg.EffectiveRole()
 		if !role.Known() {
-			// Likely typo (e.g. role: "fraem"). Surface so the operator sees
-			// it instead of silently treating as RoleAspect. Don't fail
-			// startup — they may have *meant* the typo and we want the rest
-			// of the network to come up.
-			slog.Warn("frame: unknown role on aspect — treating as non-frame; check for typo",
-				"aspect", cfg.Name, "path", homePath, "role", string(role))
+			// Likely typo (e.g. role: "fraem") OR an attempt to declare
+			// a runtime-only role (RoleOperator) on disk. Surface either
+			// case so the operator sees it instead of silently treating
+			// as RoleAspect. Don't fail startup — let the rest of the
+			// network come up regardless.
+			if role == schemas.RoleOperator {
+				slog.Warn("frame: aspect.json declares role:operator — operators are runtime-only and cannot be loaded from disk; ignoring this aspect home",
+					"aspect", cfg.Name, "path", homePath)
+			} else {
+				slog.Warn("frame: unknown role on aspect — treating as non-frame; check for typo",
+					"aspect", cfg.Name, "path", homePath, "role", string(role))
+			}
 			continue
 		}
 		if role != schemas.RoleFrame {
