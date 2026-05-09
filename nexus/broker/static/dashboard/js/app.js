@@ -4,6 +4,7 @@ import { setAgents, currentChannel } from './state.js';
 import { fetchAgents } from './api.js';
 import { Shell } from './components/Shell.js';
 import { Login } from './Login.js';
+import { open as commsOpen } from './comms.js';
 import { initNotifications } from './notifications.js';
 import { FeedView } from './views/FeedView.js';
 import { AgentsView } from './views/AgentsView.js';
@@ -89,7 +90,37 @@ export function App() {
   // Authed flips true when the WS opens after a successful passkey
   // login. JWT-in-memory means a page refresh always lands here in
   // the unauthed state — comms re-opens via Login on demand.
+  //
+  // bypassChecked guards a one-shot probe of /api/auth/mode. When the
+  // broker reports {bypass:true}, the SPA skips the Login overlay
+  // entirely and opens comms with no token. The broker's
+  // resolveUpgradeAuth handles the no-token path. Dev-only knob; in
+  // production the probe returns {bypass:false} and the normal Login
+  // ceremony runs.
   const [authed, setAuthed] = useState(false);
+  const [bypassChecked, setBypassChecked] = useState(false);
+
+  useEffect(() => {
+    if (bypassChecked) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/auth/mode', { cache: 'no-store' });
+        const data = await res.json();
+        if (!cancelled && data && data.bypass) {
+          // Open comms with no token — broker accepts via bypass path.
+          await commsOpen('');
+          if (!cancelled) setAuthed(true);
+        }
+      } catch (e) {
+        // Probe failure is non-fatal — fall through to the Login overlay.
+        console.warn('auth mode probe failed', e);
+      } finally {
+        if (!cancelled) setBypassChecked(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [bypassChecked]);
 
   useEffect(() => {
     if (!authed) return;
@@ -99,6 +130,10 @@ export function App() {
     const interval = setInterval(pollAgents, 8000);
     return () => clearInterval(interval);
   }, [authed]);
+
+  // Hold rendering until the bypass probe completes. Keeps the Login
+  // overlay from flashing when bypass is on.
+  if (!bypassChecked) return html`<div style="display:none"></div>`;
 
   if (!authed) return html`<${Login} onComplete=${() => setAuthed(true)} />`;
 

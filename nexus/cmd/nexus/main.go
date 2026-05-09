@@ -382,15 +382,28 @@ func main() {
 	// during migration. Default off.
 	allowLegacy := os.Getenv("NEXUS_ALLOW_LEGACY_MASTER") == "1"
 
+	// Operator auth bypass (dev-only): when NEXUS_AUTH_BYPASS=1, the
+	// broker accepts /connect upgrades without an operator token and
+	// the HTTP login endpoints return a stub success. Lets remote
+	// testing run without WebAuthn while the SPA is still in flux.
+	// SECURITY: never enable in production — there is no replacement
+	// authn for operator-role connections when this is on.
+	authBypass := os.Getenv("NEXUS_AUTH_BYPASS") == "1"
+	if authBypass {
+		logger.Warn("operator auth bypass ENABLED — DO NOT use in production",
+			"reason", "NEXUS_AUTH_BYPASS=1 set in environment")
+	}
+
 	// #21: derive canonical aspect homes from the discovery scan so
 	// the register handler can override payload.Home (closes the
 	// cmd.Dir control vector for stolen aspect tokens).
 	aspectHomes := discoverAspectHomes(*aspectDir, logger)
 
 	b := broker.New(broker.Config{
-		Addr:              *addr,
-		AuthToken:         token,
-		AllowLegacyMaster: allowLegacy,
+		Addr:               *addr,
+		AuthToken:          token,
+		AllowLegacyMaster:  allowLegacy,
+		OperatorAuthBypass: authBypass,
 		Tokens:            tokenStore,
 		StaleAfter:        *staleAfter,
 		Logger:            logger,

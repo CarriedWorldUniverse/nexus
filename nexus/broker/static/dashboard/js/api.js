@@ -21,7 +21,7 @@
 //      reject with a "not yet wired" error so views render a clean
 //      placeholder rather than hanging on a Promise.
 
-import { rpc } from './comms.js';
+import { rpc, send } from './comms.js';
 
 // In-memory auth-token holder. Exposed so Login.js can stash the
 // JWT after a successful WebAuthn login and the shim functions can
@@ -47,9 +47,17 @@ export function clearAuthToken() {
   authToken = null;
 }
 
-// fetchAgents → roster.list
+// fetchAgents → roster.list. nexus's RosterAspect uses `name` as the
+// identifier; agent-network used `id`. SPA components (ChatInput,
+// AgentsView, mention-autocomplete) read `.id`. Without this mapping
+// every roster entry has `id === undefined` and the mention validator
+// silently drops every aspect, leaving only the synthetic @all/@operator
+// targets — which is the "test-keel wasn't a valid @ target" symptom.
 export function fetchAgents() {
-  return rpc('roster.list', {}).then((p) => p.aspects || []);
+  return rpc('roster.list', {}).then((p) => (p.aspects || []).map((a) => ({
+    ...a,
+    id: a.id || a.name || '',
+  })));
 }
 
 // fetchMessages — agent-network paginated by ?after=lastId; nexus
@@ -58,13 +66,27 @@ export function fetchAgents() {
 // 'topic:X' would need topic.messages which is deferred — same
 // global feed for now (the SPA will see the merged stream until
 // topics land).
+// normalizeChatMessage maps nexus's ChatDeliverPayload shape onto the
+// {created_at, ...} fields the SPA's MessageBubble + ThreadView render
+// from. Without this, every message's timestamp shows "Invalid Date"
+// because views read `m.created_at` and nexus only sends `received_at`.
+// Mirrors the chat-ws.js shim's WS-path translation, applied here for
+// the chat.list / chat.replies REST-via-WS pull paths.
+function normalizeChatMessage(m) {
+  if (!m) return m;
+  return {
+    ...m,
+    created_at: m.created_at || m.received_at || '',
+  };
+}
+
 export function fetchMessages(channel, afterId = 0) {
   const limit = afterId > 0 ? 100 : INITIAL_PAGE;
   return rpc('chat.list', {
     after_id: afterId,
     limit,
   }).then((p) => ({
-    messages: p.messages || [],
+    messages: (p.messages || []).map(normalizeChatMessage),
     has_more: p.has_more || false,
   }));
 }
@@ -75,7 +97,7 @@ export function fetchOlderMessages(channel, beforeId, limit = INITIAL_PAGE) {
     before_id: beforeId,
     limit,
   }).then((p) => ({
-    messages: p.messages || [],
+    messages: (p.messages || []).map(normalizeChatMessage),
     has_more: p.has_more || false,
   }));
 }
@@ -95,12 +117,19 @@ export function sendMessage({ from, content, replyTo = 0, topic = '', imageUrl =
   // Drops cleanly when imageUrl is empty.
   let body = content;
   if (imageUrl) body = body ? `${body}\n${imageUrl}` : imageUrl;
-  return rpc('chat.send', {
+  // Fire-and-forget: the broker's chat.send handler doesn't emit a
+  // .result frame; the message round-trips via the chat.deliver
+  // subscription instead. Calling rpc() here wedged for 30s and
+  // threw "rpc chat.send timed out" on every send. Returns a
+  // resolved promise so call sites that `await sendMessage(...)`
+  // continue to work.
+  send('chat.send', {
     from: from || 'operator',
     content: body,
     reply_to: replyTo || 0,
     topic: topic || '',
   });
+  return Promise.resolve();
 }
 
 // sendToAgent → aspect.say (the broker prepends @<aspect>).

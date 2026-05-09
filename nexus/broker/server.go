@@ -171,6 +171,25 @@ type Config struct {
 	// env into this field.
 	AllowLegacyMaster bool
 
+	// OperatorAuthBypass disables operator-token verification at /connect
+	// and on the HTTP login endpoints. When true:
+	//
+	//   - WS connections without a token resolve as the operator role
+	//     (Admin=true, Operator=true), same shape a valid passkey JWT
+	//     would produce. Aspect-token connections are unchanged.
+	//   - HTTP login endpoints (`/api/operator/login/*`) return a stub
+	//     payload that the SPA accepts without WebAuthn.
+	//   - Startup logs WARN: bypass active. Every accepted bypassed
+	//     connection logs at INFO so the trail is visible.
+	//
+	// Reason: the SPA isn't final yet and requiring real passkeys for
+	// every dev/test session blocks remote testing. Re-enable by leaving
+	// this false. Cmd wrapper reads NEXUS_AUTH_BYPASS env into this field.
+	//
+	// SECURITY: this is a development-only knob. Production deployments
+	// must leave it false and rely on the WebAuthn surface.
+	OperatorAuthBypass bool
+
 	// TLSCertFile / TLSKeyFile point at the PEM-encoded server cert
 	// and key used by ListenAndServe. Required — the broker has no
 	// plain-HTTP path. Operator runs `nexus cert init` once per host
@@ -419,6 +438,20 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	// external monitoring.
 	mux.Handle("GET /api/aspects", b.auth(http.HandlerFunc(b.handleList)))
 	mux.HandleFunc("GET /health", b.handleHealth)
+	// Auth mode probe — SPA reads this on load to decide whether to
+	// run the WebAuthn ceremony or skip straight to the WS open. When
+	// bypass is on, the SPA dials /connect with no token and the broker
+	// accepts (see resolveUpgradeAuth). Dev-only: in production this
+	// always returns {"bypass": false}.
+	mux.HandleFunc("GET /api/auth/mode", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if b.cfg.OperatorAuthBypass {
+			_, _ = w.Write([]byte(`{"bypass":true}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"bypass":false}`))
+	})
 	// Operator-aspect chat UI — single-page smoke-test client. Served
 	// at /chat.html for direct browser access. Token + URL fields are
 	// inputs in the page itself; no server-side state needed.
@@ -436,6 +469,17 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	//
 	// /dashboard (no trailing slash) and /dashboard/ both land on
 	// index.html so the operator can copy-paste the bare URL.
+	//
+	// Bare-host root (`/`) redirects to /dashboard/: typing
+	// `localhost:18888` in a browser is the natural entry, and 404
+	// there is just bad UX. Specific routes registered below
+	// (/health, /api/*, /dashboard/, etc.) take priority because Go's
+	// mux picks the more-specific pattern; "/" only fires when nothing
+	// else matched at the root.
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard/", http.StatusFound)
+	})
+
 	dashboardSub, dashErr := fs.Sub(dashboardFS, "static/dashboard")
 	if dashErr == nil {
 		fileSrv := http.FileServer(http.FS(dashboardSub))
@@ -443,6 +487,21 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 			http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
 		})
 		mux.Handle("GET /dashboard/", http.StripPrefix("/dashboard/", dashboardCacheHandler(fileSrv)))
+		// SPA's index.html and components import vendor scripts via
+		// absolute paths (`/js/vendor/preact.js`, `/js/vendor/htm.js`,
+		// etc.) — a holdover from agent-network where the broker served
+		// `/js` at the root. Without this alias the SPA loads index
+		// from /dashboard/ but the import resolver misses every vendor
+		// module and the page renders a black screen.
+		// Aliasing /js/* → static/dashboard/js/* keeps the SPA portable
+		// without rewriting every import.
+		jsSub, jsErr := fs.Sub(dashboardFS, "static/dashboard/js")
+		if jsErr == nil {
+			jsSrv := http.FileServer(http.FS(jsSub))
+			mux.Handle("GET /js/", http.StripPrefix("/js/", dashboardCacheHandler(jsSrv)))
+		} else {
+			b.log.Warn("dashboard: js subFS failed; vendor scripts will 404", "err", jsErr)
+		}
 	} else {
 		b.log.Warn("dashboard: embed sub failed; SPA not served", "err", dashErr)
 	}
@@ -515,6 +574,19 @@ func (b *Broker) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := ExtractBearer(r.Header.Get("Authorization"))
 		if token == "" {
+			// Bypass: when enabled, no-token requests resolve as
+			// operator. Same shape resolveUpgradeAuth uses. The SPA
+			// running under bypass calls /api/aspects without a
+			// token; without this branch the roster comes back empty
+			// and the compose box can't address any aspect.
+			if b.cfg.OperatorAuthBypass {
+				next.ServeHTTP(w, r.WithContext(withAuthUser(r.Context(), TokenInfo{
+					AgentID:  "operator",
+					Admin:    true,
+					Operator: true,
+				})))
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "missing bearer token")
 			return
 		}
@@ -591,19 +663,42 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // dashboardCacheHandler wraps the embedded-FS file server with cache
-// headers. index.html and the SPA's entry-point JS get no-cache so
-// the operator never picks up a stale shell after a deploy; vendor
-// files (preact, htm, xterm, webauthn helpers, fonts) get a long
-// max-age because they're versioned by content-hash via embed.
+// headers AND explicit Content-Type for the few extensions Go's default
+// mime.TypeByExtension misreports on Windows (the Windows registry
+// often returns "text/plain" for .css, .mjs, .map). Browsers in strict
+// MIME-checking mode reject stylesheets that arrive as text/plain, which
+// renders the SPA as a black page.
+//
+// index.html and the SPA's entry-point JS get no-cache so the operator
+// never picks up a stale shell after a deploy; vendor files (preact,
+// htm, xterm, webauthn helpers, fonts) get a long max-age because
+// they're versioned by content-hash via embed.
 func dashboardCacheHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		if path == "" || strings.HasSuffix(path, "/") || path == "index.html" || path == "js/app.js" {
 			w.Header().Set("Cache-Control", "no-cache")
-		} else if strings.HasPrefix(path, "js/vendor/") || strings.HasPrefix(path, "fonts/") {
+		} else if strings.HasPrefix(path, "js/vendor/") || strings.HasPrefix(path, "fonts/") || strings.HasPrefix(path, "vendor/") {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		} else {
 			w.Header().Set("Cache-Control", "no-cache")
+		}
+		// Explicit MIME map for the extensions Go gets wrong on Windows.
+		// Pre-set so http.FileServer doesn't override (it only sets
+		// Content-Type if not already populated).
+		switch {
+		case strings.HasSuffix(path, ".css"):
+			w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		case strings.HasSuffix(path, ".js"), strings.HasSuffix(path, ".mjs"):
+			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		case strings.HasSuffix(path, ".json"):
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		case strings.HasSuffix(path, ".svg"):
+			w.Header().Set("Content-Type", "image/svg+xml")
+		case strings.HasSuffix(path, ".woff2"):
+			w.Header().Set("Content-Type", "font/woff2")
+		case strings.HasSuffix(path, ".woff"):
+			w.Header().Set("Content-Type", "font/woff")
 		}
 		next.ServeHTTP(w, r)
 	})
