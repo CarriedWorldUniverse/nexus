@@ -18,7 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // AspectTokenResolver looks up the per-aspect bearer token for the

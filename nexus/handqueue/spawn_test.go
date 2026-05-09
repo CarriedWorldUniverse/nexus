@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
-	"github.com/nexus-cw/nexus/runtime/handexec"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/runtime/handexec"
 )
 
 // filepathAbs is a thin wrapper to resolve absolute path; used in

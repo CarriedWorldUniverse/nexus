@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/nexus-cw/bridle"
+	"github.com/CarriedWorldUniverse/bridle"
 )
 
 // recordingUsage is the test double for UsageRecorder. Captures

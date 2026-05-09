@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"os/exec"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
-	"github.com/nexus-cw/nexus/runtime/handexec"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/runtime/handexec"
 )
 
 // AspectHomeResolver looks up the filesystem path for an aspect by

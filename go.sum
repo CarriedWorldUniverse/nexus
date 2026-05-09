@@ -27,8 +27,8 @@ github.com/ncruces/go-sqlite3-wasm/v2 v2.1.35300 h1:cRdxCt3BDfMu0vfSdoqaAPD+dzIX
 github.com/ncruces/go-sqlite3-wasm/v2 v2.1.35300/go.mod h1:R2kJLPoSA/GBX/b8x7zwOq/KLAw6rLMY1l3Hi76SQIo=
 github.com/ncruces/julianday v1.0.0 h1:fH0OKwa7NWvniGQtxdJRxAgkBMolni2BjDHaWTxqt7M=
 github.com/ncruces/julianday v1.0.0/go.mod h1:Dusn2KvZrrovOMJuOt0TNXL6tB7U2E8kvza5fFc9G7g=
-github.com/nexus-cw/bridle v0.0.0-20260430193716-e7ba88231791 h1:k/SLXXJGXQjvb3/FcQv2g2/TlAoyHc6Ss+bFV8XHyc0=
-github.com/nexus-cw/bridle v0.0.0-20260430193716-e7ba88231791/go.mod h1:Ki7vbEizXCDzPV6bVkkgEutvJ5FF9SuGmxyRzRKIPko=
+github.com/CarriedWorldUniverse/bridle v0.0.0-20260430193716-e7ba88231791 h1:k/SLXXJGXQjvb3/FcQv2g2/TlAoyHc6Ss+bFV8XHyc0=
+github.com/CarriedWorldUniverse/bridle v0.0.0-20260430193716-e7ba88231791/go.mod h1:Ki7vbEizXCDzPV6bVkkgEutvJ5FF9SuGmxyRzRKIPko=
 github.com/oklog/ulid/v2 v2.1.1 h1:suPZ4ARWLOJLegGFiZZ1dFAkqzhMjL3J1TzI+5wHz8s=
 github.com/oklog/ulid/v2 v2.1.1/go.mod h1:rcEKHmBBKfef9DhnvX7y1HZBYxjXb0cP5ExxNsTT1QQ=
 github.com/pborman/getopt v0.0.0-20170112200414-7148bc3a4c30/go.mod h1:85jBQOZwpVEaDAr341tbn15RS4fCAsIst0qp7i8ex1o=

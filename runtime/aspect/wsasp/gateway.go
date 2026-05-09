@@ -21,9 +21,9 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/nexus-cw/bridle"
-	"github.com/nexus-cw/nexus/nexus/frame/funnel"
-	"github.com/nexus-cw/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 )
 
 // Gateway adapts a wsasp.Client to the funnel.ChatGateway interface.

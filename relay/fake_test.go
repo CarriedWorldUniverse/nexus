@@ -45,7 +45,7 @@ import (
 	"testing"
 	"time"
 
-	casket "github.com/nexus-cw/casket-go"
+	casket "github.com/CarriedWorldUniverse/casket-go"
 )
 
 // inMemStorage is a casket.ChannelStorage backed by a map — sufficient

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	casket "github.com/nexus-cw/casket-go"
+	casket "github.com/CarriedWorldUniverse/casket-go"
 )
 
 // TestBuildSignedPairHalf verifies the assembled half's self-sig

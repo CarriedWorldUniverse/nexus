@@ -25,11 +25,11 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/nexus-cw/nexus/runtime/agent"
-	"github.com/nexus-cw/nexus/runtime/handexec"
-	"github.com/nexus-cw/nexus/runtime/providers"
-	claudeapi "github.com/nexus-cw/nexus/runtime/providers/claude-api"
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/runtime/agent"
+	"github.com/CarriedWorldUniverse/nexus/runtime/handexec"
+	"github.com/CarriedWorldUniverse/nexus/runtime/providers"
+	claudeapi "github.com/CarriedWorldUniverse/nexus/runtime/providers/claude-api"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 func main() {

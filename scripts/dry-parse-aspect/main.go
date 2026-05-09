@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 func main() {

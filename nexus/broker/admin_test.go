@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 )
 
 // adminTestRig wires a Broker with an admin surface for tests. Token

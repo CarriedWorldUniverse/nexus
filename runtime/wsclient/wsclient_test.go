@@ -13,7 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 )
 
 // fakeServer spins up an httptest WS server with a simple echo-reply

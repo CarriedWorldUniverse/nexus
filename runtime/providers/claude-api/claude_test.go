@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/nexus-cw/nexus/runtime/providers"
+	"github.com/CarriedWorldUniverse/nexus/runtime/providers"
 )
 
 func TestNewEmptyKey(t *testing.T) {

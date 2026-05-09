@@ -40,8 +40,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nexus-cw/bridle"
-	"github.com/nexus-cw/nexus/nexus/frame/route"
+	"github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
 )
 
 // CompactionPolicy tunes the funnel's context-window management.

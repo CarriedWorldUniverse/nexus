@@ -19,11 +19,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/chat"
-	"github.com/nexus-cw/nexus/nexus/handqueue"
-	"github.com/nexus-cw/nexus/nexus/roster"
-	"github.com/nexus-cw/nexus/nexus/sessions"
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // chatHTML is the operator-aspect smoke-test page (chat.html). Served

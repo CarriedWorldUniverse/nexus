@@ -29,7 +29,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 )
 
 // HandleChatSend persists an inbound chat message and fans it out to

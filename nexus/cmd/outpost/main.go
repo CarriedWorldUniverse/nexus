@@ -23,7 +23,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/nexus-cw/nexus/nexus/outpost"
+	"github.com/CarriedWorldUniverse/nexus/nexus/outpost"
 )
 
 func main() {

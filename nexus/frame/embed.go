@@ -22,9 +22,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/broker"
-	"github.com/nexus-cw/nexus/nexus/roster"
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // EmbeddedFrame is the in-process handle to the running Frame. P6 (the

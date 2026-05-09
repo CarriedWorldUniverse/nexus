@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 )
 
 // Dispatcher is the server-side request/response API over WS. The

@@ -3,7 +3,7 @@ package framecomms
 import (
 	"context"
 
-	"github.com/nexus-cw/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 )
 
 // ChatPulser is the in-process funnel.StatusPulser that posts

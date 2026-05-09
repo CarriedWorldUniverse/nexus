@@ -18,7 +18,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/nexus-cw/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 )
 
 // ReplayPageSize is the chat.Store ListSince page size for replay
