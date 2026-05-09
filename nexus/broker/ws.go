@@ -325,6 +325,20 @@ func (c *wsConn) serve(parentCtx context.Context) {
 // dispatch routes a decoded non-response frame to the appropriate
 // handler by kind. Response frames are routed to the dispatcher in
 // the read loop before we ever get here.
+//
+// INVARIANT — operator-only frame kinds: the kinds dispatched by
+// dispatchOperatorFrame (roster.list, chat.list, chat.replies,
+// chat.reactions.fetch, knowledge.{list,search,store}, aspect.say)
+// are accepted ONLY from operator connections. An aspect connection
+// sending one of these kinds falls through this switch's default
+// branch and is silently dropped (logged at info level). This is
+// intentional: aspects access knowledge + chat reads via the
+// bridle MCP tool surface (Crossing Parts 3+4), not direct WS
+// frames. The dispatchOperatorFrame call below preempts the switch
+// when c.auth.Operator is true; aspects never reach the operator
+// handler. If a future kind ever needs both an operator AND aspect
+// path, add an explicit case in this switch — don't rely on
+// fall-through to the operator dispatch.
 func (c *wsConn) dispatch(env frames.Envelope) {
 	// Dashboard SPA frames first — fires only when the connection
 	// resolved as an operator (c.auth.Operator true). Aspects fall
