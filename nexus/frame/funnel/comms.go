@@ -94,6 +94,13 @@ type KnowledgeGateway interface {
 	// whether to include the caller's own and operator-curated
 	// entries. TopK caps results (default 5 if zero).
 	SearchKnowledge(ctx context.Context, q KnowledgeQuery) ([]KnowledgeHit, error)
+
+	// GetKnowledgeShared looks up the current `shared` flag for
+	// (fromAgent, topic). Returns ok=false when no row exists. Used
+	// by store_knowledge to preserve operator-curated state on a
+	// content-only refresh — the runner inherits the existing flag
+	// when the model omits `shared` from the call args.
+	GetKnowledgeShared(ctx context.Context, fromAgent, topic string) (shared bool, ok bool, err error)
 }
 
 // KnowledgeQuery mirrors knowledge.Query without forcing the funnel
@@ -281,7 +288,7 @@ func CommsToolDefs() []bridle.ToolDef {
 				"properties": map[string]any{
 					"topic":   map[string]any{"type": "string", "description": "Short slug — the entry key. Re-using replaces the prior entry."},
 					"content": map[string]any{"type": "string", "description": "Body. Free-form text."},
-					"shared":  map[string]any{"type": "boolean", "description": "Operator-curated flag. Defaults to false; only set true when explicitly approved."},
+					"shared":  map[string]any{"type": "boolean", "description": "Operator-curated flag. Omit on content-only refresh — the prior flag is preserved. Set true only when the operator has explicitly approved; set false to revoke."},
 				},
 				"required": []string{"topic", "content"},
 			}),
@@ -533,7 +540,11 @@ func (r CommsRunner) runStoreKnowledge(ctx context.Context, raw json.RawMessage)
 	var args struct {
 		Topic   string `json:"topic"`
 		Content string `json:"content"`
-		Shared  bool   `json:"shared"`
+		// Pointer so we can distinguish "omitted" (preserve existing
+		// flag on upsert) from "explicit false" (clear it). Without
+		// this, a content-only refresh on an operator-curated entry
+		// silently drops shared=true.
+		Shared *bool `json:"shared"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return errorResult(err), nil
@@ -541,7 +552,20 @@ func (r CommsRunner) runStoreKnowledge(ctx context.Context, raw json.RawMessage)
 	if args.Topic == "" || args.Content == "" {
 		return errorResult(fmt.Errorf("topic and content are required")), nil
 	}
-	id, err := r.Knowledge.StoreKnowledge(ctx, r.AspectID, args.Topic, args.Content, args.Shared)
+	shared := false
+	if args.Shared != nil {
+		shared = *args.Shared
+	} else {
+		// Inherit prior shared flag so re-Put doesn't clear it.
+		prior, ok, err := r.Knowledge.GetKnowledgeShared(ctx, r.AspectID, args.Topic)
+		if err != nil {
+			return gatewayErrorResult(err)
+		}
+		if ok {
+			shared = prior
+		}
+	}
+	id, err := r.Knowledge.StoreKnowledge(ctx, r.AspectID, args.Topic, args.Content, shared)
 	if err != nil {
 		return gatewayErrorResult(err)
 	}

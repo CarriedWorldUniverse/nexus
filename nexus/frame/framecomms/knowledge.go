@@ -7,6 +7,8 @@ package framecomms
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/nexus-cw/nexus/nexus/frame/funnel"
@@ -21,9 +23,28 @@ type KnowledgeGateway struct {
 	Store *knowledge.Store
 }
 
+// Compile-time check that KnowledgeGateway satisfies the funnel
+// interface. Catches method-set drift the moment funnel adds a new
+// method without the framecomms adapter being updated to match.
+var _ funnel.KnowledgeGateway = (*KnowledgeGateway)(nil)
+
 // NewKnowledgeGateway wires a gateway around a Store handle.
 func NewKnowledgeGateway(store *knowledge.Store) *KnowledgeGateway {
 	return &KnowledgeGateway{Store: store}
+}
+
+func (g *KnowledgeGateway) GetKnowledgeShared(ctx context.Context, fromAgent, topic string) (bool, bool, error) {
+	if g.Store == nil {
+		return false, false, fmt.Errorf("framecomms.KnowledgeGateway: no store configured")
+	}
+	e, err := g.Store.Get(ctx, fromAgent, topic)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	return e.Shared, true, nil
 }
 
 func (g *KnowledgeGateway) StoreKnowledge(ctx context.Context, fromAgent, topic, content string, shared bool) (int64, error) {
