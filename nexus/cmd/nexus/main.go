@@ -64,6 +64,24 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
+	bridle "github.com/CarriedWorldUniverse/bridle"
+	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
+	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
+	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/framecomms"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
+	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
+	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
+	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
 )
 
 // exitCodeBootstrapDone signals a successful first-boot setup. Supervisor
@@ -281,7 +299,8 @@ func main() {
 	// AI personality. When no Frame is embedded (legacy mode), chatRouter
 	// stays nil and the broker logs + drops chat.send frames.
 	chatStore := chat.NewSQLStore(db)
-	chatRouter, frameGateway := buildChatRouter(ctx, embeddedFrame, chatStore, usage.NewSQLStore(db), logger)
+	knowledgeStore := knowledge.New(db, logger)
+	chatRouter, frameGateway := buildChatRouter(ctx, embeddedFrame, chatStore, usage.NewSQLStore(db), knowledgeStore, logger)
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
@@ -805,7 +824,7 @@ func (a *usageRecorderAdapter) Record(ctx context.Context, msgID int64, turnID, 
 // to the broker after broker.New so in-process Frame posts go through
 // Broker.HandleChatSend (the unified chat-send path). When ef is nil
 // both returns are nil.
-func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.Store, usageStore *usage.SQLStore, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway) {
+func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.Store, usageStore *usage.SQLStore, knowledgeStore *knowledge.Store, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway) {
 	if ef == nil {
 		return nil, nil
 	}
@@ -849,7 +868,12 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 	// broker.New so SendChat takes the unified Broker.HandleChatSend
 	// path (per docs/2026-05-04-unify-frame-aspect-chat-path.md).
 	gateway := framecomms.NewGateway(store, ef.Aspect.Name)
-	commsRunner := funnel.CommsRunner{Gateway: gateway}
+	knowledgeGateway := framecomms.NewKnowledgeGateway(knowledgeStore)
+	commsRunner := funnel.CommsRunner{
+		Gateway:   gateway,
+		Knowledge: knowledgeGateway,
+		AspectID:  ef.Aspect.Name,
+	}
 	pulser := &framecomms.ChatPulser{Gateway: gateway}
 	recorder := &usageRecorderAdapter{store: usageStore}
 

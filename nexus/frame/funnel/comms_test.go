@@ -178,6 +178,8 @@ func TestCommsToolDefs_HasAllTools(t *testing.T) {
 		ToolNameReadChatThread:  false,
 		ToolNameListShared:      false,
 		ToolNameGetShared:       false,
+		ToolNameStoreKnowledge:  false,
+		ToolNameSearchKnowledge: false,
 	}
 	for _, d := range defs {
 		want[d.Name] = true
@@ -623,5 +625,202 @@ func TestCommsRunner_GetSharedNotFoundFlowsAsToolResult(t *testing.T) {
 	}
 	if !strings.Contains(string(res), "not found") {
 		t.Errorf("expected 'not found' in tool result, got %s", res)
+	}
+}
+
+type fakeKnowledgeGateway struct {
+	mu sync.Mutex
+
+	storeCalls   []storeKnowledgeCall
+	storeNextID  int64
+	storeErr     error
+
+	searchCalls   []KnowledgeQuery
+	searchResults []KnowledgeHit
+	searchErr     error
+}
+
+type storeKnowledgeCall struct {
+	FromAgent string
+	Topic     string
+	Content   string
+	Shared    bool
+}
+
+func (g *fakeKnowledgeGateway) StoreKnowledge(_ context.Context, fromAgent, topic, content string, shared bool) (int64, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.storeCalls = append(g.storeCalls, storeKnowledgeCall{
+		FromAgent: fromAgent, Topic: topic, Content: content, Shared: shared,
+	})
+	if g.storeErr != nil {
+		return 0, g.storeErr
+	}
+	if g.storeNextID == 0 {
+		g.storeNextID = 100
+	}
+	g.storeNextID++
+	return g.storeNextID, nil
+}
+
+func (g *fakeKnowledgeGateway) SearchKnowledge(_ context.Context, q KnowledgeQuery) ([]KnowledgeHit, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.searchCalls = append(g.searchCalls, q)
+	if g.searchErr != nil {
+		return nil, g.searchErr
+	}
+	return g.searchResults, nil
+}
+
+func TestCommsRunner_StoreKnowledgeRequiresGateway(t *testing.T) {
+	r := CommsRunner{Gateway: &fakeGateway{}, AspectID: "keel"}
+	res, _ := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameStoreKnowledge,
+		Args: mustJSON(map[string]any{"topic": "t", "content": "c"}),
+	})
+	if !strings.Contains(string(res), "knowledge gateway not configured") {
+		t.Errorf("expected gateway-not-configured error, got %s", res)
+	}
+}
+
+func TestCommsRunner_StoreKnowledgeRequiresAspectID(t *testing.T) {
+	kg := &fakeKnowledgeGateway{}
+	r := CommsRunner{Gateway: &fakeGateway{}, Knowledge: kg}
+	res, _ := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameStoreKnowledge,
+		Args: mustJSON(map[string]any{"topic": "t", "content": "c"}),
+	})
+	if !strings.Contains(string(res), "aspect id not configured") {
+		t.Errorf("expected aspect-id error, got %s", res)
+	}
+	if len(kg.storeCalls) != 0 {
+		t.Error("gateway should not be called without aspect id")
+	}
+}
+
+func TestCommsRunner_StoreKnowledgeRequiresFields(t *testing.T) {
+	kg := &fakeKnowledgeGateway{}
+	r := CommsRunner{Gateway: &fakeGateway{}, Knowledge: kg, AspectID: "keel"}
+	cases := []map[string]any{
+		{"topic": "", "content": "c"},
+		{"topic": "t", "content": ""},
+	}
+	for _, args := range cases {
+		res, _ := r.Run(context.Background(), bridle.ToolCall{
+			Name: ToolNameStoreKnowledge,
+			Args: mustJSON(args),
+		})
+		if !strings.Contains(string(res), "required") {
+			t.Errorf("expected required-field error, got %s for %+v", res, args)
+		}
+	}
+	if len(kg.storeCalls) != 0 {
+		t.Error("gateway should not be called when validation fails")
+	}
+}
+
+func TestCommsRunner_StoreKnowledgePropagatesAspectID(t *testing.T) {
+	kg := &fakeKnowledgeGateway{}
+	r := CommsRunner{Gateway: &fakeGateway{}, Knowledge: kg, AspectID: "verity"}
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameStoreKnowledge,
+		Args: mustJSON(map[string]any{"topic": "lore", "content": "the canon", "shared": true}),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(kg.storeCalls) != 1 {
+		t.Fatalf("expected 1 store call, got %d", len(kg.storeCalls))
+	}
+	got := kg.storeCalls[0]
+	if got.FromAgent != "verity" || got.Topic != "lore" || got.Content != "the canon" || !got.Shared {
+		t.Errorf("unexpected store call: %+v", got)
+	}
+	if !strings.Contains(string(res), `"id"`) {
+		t.Errorf("expected id in result, got %s", res)
+	}
+}
+
+func TestCommsRunner_SearchKnowledgeDefaultsToOwnAndShared(t *testing.T) {
+	kg := &fakeKnowledgeGateway{searchResults: []KnowledgeHit{{ID: 1, Topic: "t"}}}
+	r := CommsRunner{Gateway: &fakeGateway{}, Knowledge: kg, AspectID: "harrow"}
+	_, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameSearchKnowledge,
+		Args: mustJSON(map[string]any{"text": "decoder"}),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(kg.searchCalls) != 1 {
+		t.Fatalf("expected 1 search call, got %d", len(kg.searchCalls))
+	}
+	q := kg.searchCalls[0]
+	if q.Agent != "harrow" {
+		t.Errorf("agent not propagated: got %q want %q", q.Agent, "harrow")
+	}
+	if !q.OwnAgent || !q.Shared {
+		t.Errorf("expected default OwnAgent+Shared true, got own=%v shared=%v", q.OwnAgent, q.Shared)
+	}
+}
+
+func TestCommsRunner_SearchKnowledgeRespectsExplicitFalse(t *testing.T) {
+	kg := &fakeKnowledgeGateway{searchResults: []KnowledgeHit{}}
+	r := CommsRunner{Gateway: &fakeGateway{}, Knowledge: kg, AspectID: "harrow"}
+	_, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameSearchKnowledge,
+		Args: mustJSON(map[string]any{"text": "x", "own_agent": false, "shared": false, "peers": []string{"verity"}}),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	q := kg.searchCalls[0]
+	if q.OwnAgent || q.Shared {
+		t.Errorf("explicit false ignored: own=%v shared=%v", q.OwnAgent, q.Shared)
+	}
+	if len(q.Peers) != 1 || q.Peers[0] != "verity" {
+		t.Errorf("peers not propagated: %+v", q.Peers)
+	}
+}
+
+func TestCommsRunner_SearchKnowledgeClampsTopK(t *testing.T) {
+	kg := &fakeKnowledgeGateway{}
+	r := CommsRunner{Gateway: &fakeGateway{}, Knowledge: kg, AspectID: "keel"}
+	_, _ = r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameSearchKnowledge,
+		Args: mustJSON(map[string]any{"text": "x", "top_k": 9999}),
+	})
+	if kg.searchCalls[0].TopK != 50 {
+		t.Errorf("top_k must clamp to 50, got %d", kg.searchCalls[0].TopK)
+	}
+}
+
+func TestCommsRunner_SearchKnowledgeRequiresText(t *testing.T) {
+	kg := &fakeKnowledgeGateway{}
+	r := CommsRunner{Gateway: &fakeGateway{}, Knowledge: kg, AspectID: "keel"}
+	res, _ := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameSearchKnowledge,
+		Args: mustJSON(map[string]any{}),
+	})
+	if !strings.Contains(string(res), "text is required") {
+		t.Errorf("expected 'text is required' error, got %s", res)
+	}
+	if len(kg.searchCalls) != 0 {
+		t.Error("gateway should not be called when text is missing")
+	}
+}
+
+func TestCommsRunner_SearchKnowledgeNilHitsBecomeEmptyArray(t *testing.T) {
+	kg := &fakeKnowledgeGateway{searchResults: nil}
+	r := CommsRunner{Gateway: &fakeGateway{}, Knowledge: kg, AspectID: "keel"}
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameSearchKnowledge,
+		Args: mustJSON(map[string]any{"text": "anything"}),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(string(res), "[]") {
+		t.Errorf("nil hits must surface as []: %s", res)
 	}
 }
