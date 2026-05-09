@@ -169,3 +169,62 @@ func (g *Gateway) ShareFile(ctx context.Context, path string, recipients []strin
 	}
 	return g.Store.ShareFile(ctx, g.AspectID, path, recipients)
 }
+
+// ReadMessage returns a single chat row by id.
+func (g *Gateway) ReadMessage(ctx context.Context, msgID int64) (funnel.ChatMessage, error) {
+	if g.Store == nil {
+		return funnel.ChatMessage{}, fmt.Errorf("framecomms.Gateway: no store configured")
+	}
+	r, err := g.Store.GetByID(ctx, msgID)
+	if err != nil {
+		return funnel.ChatMessage{}, err
+	}
+	return funnel.ChatMessage{
+		ID:         r.ID,
+		From:       r.From,
+		Content:    r.Content,
+		ReplyTo:    r.ReplyTo,
+		Topic:      r.Topic,
+		ReceivedAt: r.FormatRFC3339(),
+	}, nil
+}
+
+// ListShared returns recently-shared files (newest-first), capped by limit.
+func (g *Gateway) ListShared(ctx context.Context, limit int) ([]funnel.SharedFileRef, error) {
+	if g.Store == nil {
+		return nil, fmt.Errorf("framecomms.Gateway: no store configured")
+	}
+	rows, err := g.Store.ListShared(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]funnel.SharedFileRef, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, sharedFileRefFromRow(r))
+	}
+	return out, nil
+}
+
+// GetShared returns a single shared_files row by id.
+func (g *Gateway) GetShared(ctx context.Context, shareID int64) (funnel.SharedFileRef, error) {
+	if g.Store == nil {
+		return funnel.SharedFileRef{}, fmt.Errorf("framecomms.Gateway: no store configured")
+	}
+	r, err := g.Store.GetShared(ctx, shareID)
+	if err != nil {
+		return funnel.SharedFileRef{}, err
+	}
+	return sharedFileRefFromRow(r), nil
+}
+
+func sharedFileRefFromRow(r chat.SharedFile) funnel.SharedFileRef {
+	return funnel.SharedFileRef{
+		ID:             r.ID,
+		Path:           r.Path,
+		Description:    r.Description,
+		SharedBy:       r.SharedBy,
+		AnnounceMsgID:  r.AnnounceMsgID,
+		RecipientsJSON: r.RecipientsJSON,
+		CreatedAt:      r.CreatedAt,
+	}
+}

@@ -65,6 +65,31 @@ type ChatGateway interface {
 	// chat post is created (use AnnounceFile for that). Returns a
 	// share id for the model to reference.
 	ShareFile(ctx context.Context, path string, recipients []string) (shareID int64, err error)
+
+	// ReadMessage returns one chat message by id. Used by the
+	// read_chat_message tool — the model resolves an inline `#N`
+	// reference without pulling the surrounding thread.
+	ReadMessage(ctx context.Context, msgID int64) (ChatMessage, error)
+
+	// ListShared returns the recently-shared files (newest first).
+	// limit caps the result; gateway picks a sane default when 0.
+	ListShared(ctx context.Context, limit int) ([]SharedFileRef, error)
+
+	// GetShared returns a single shared_files row by id.
+	GetShared(ctx context.Context, shareID int64) (SharedFileRef, error)
+}
+
+// SharedFileRef is the gateway-level shape of a shared_files row.
+// Mirrors chat.SharedFile but the funnel doesn't import chat to keep
+// the layering clean.
+type SharedFileRef struct {
+	ID             int64  `json:"id"`
+	Path           string `json:"path"`
+	Description    string `json:"description,omitempty"`
+	SharedBy       string `json:"shared_by"`
+	AnnounceMsgID  int64  `json:"announce_msg_id,omitempty"`
+	RecipientsJSON string `json:"recipients_json,omitempty"`
+	CreatedAt      string `json:"created_at"`
 }
 
 // ChatMessage is the gateway-level representation of a chat row.
@@ -87,8 +112,12 @@ const (
 	ToolNameReactTo         = "react_to"
 	ToolNameReactToMessage  = "react_to_message" // legacy alias from Lock 3 — same handler as react_to
 	ToolNameChatRead        = "chat.read"
+	ToolNameReadChatThread  = "read_chat_thread" // alias for chat.read with naming familiar from agent-network
+	ToolNameReadChatMessage = "read_chat_message"
 	ToolNameAnnounceFile    = "announce_file"
 	ToolNameShareFile       = "share_file"
+	ToolNameListShared      = "list_shared"
+	ToolNameGetShared       = "get_shared"
 )
 
 // CommsToolDefs returns the set of bridle.ToolDef registrations for
@@ -158,6 +187,50 @@ func CommsToolDefs() []bridle.ToolDef {
 				"required": []string{"path", "recipients"},
 			}),
 		},
+		{
+			Name:        ToolNameReadChatMessage,
+			Description: "Fetch a single chat message by id. Use when chat references an inline `#N` you don't have context for and pulling the whole thread is overkill.",
+			InputSchema: mustJSON(map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id": map[string]any{"type": "integer", "description": "Message id."},
+				},
+				"required": []string{"id"},
+			}),
+		},
+		{
+			Name:        ToolNameReadChatThread,
+			Description: "Read a thread of messages (alias for chat.read with the naming familiar from agent-network). Use when you need the surrounding conversation, not just one message.",
+			InputSchema: mustJSON(map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"thread_id": map[string]any{"type": "integer", "description": "Root message id of the thread."},
+					"since_id":  map[string]any{"type": "integer", "description": "Optional: only return messages with id > since_id."},
+				},
+				"required": []string{"thread_id"},
+			}),
+		},
+		{
+			Name:        ToolNameListShared,
+			Description: "List recently shared files. Returns id, path, description, sharer, and announce-msg-id for the most recent shares. Use to find files mentioned but not directly delivered.",
+			InputSchema: mustJSON(map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"limit": map[string]any{"type": "integer", "description": "Max rows (default 50, hard cap 200)."},
+				},
+			}),
+		},
+		{
+			Name:        ToolNameGetShared,
+			Description: "Fetch a single shared_files row by id. Returns path + metadata so you can read or reference the file.",
+			InputSchema: mustJSON(map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id": map[string]any{"type": "integer", "description": "Share id."},
+				},
+				"required": []string{"id"},
+			}),
+		},
 	}
 }
 
@@ -195,12 +268,18 @@ func (r CommsRunner) Run(ctx context.Context, call bridle.ToolCall) (json.RawMes
 		return r.runSendChat(ctx, call.Args)
 	case ToolNameReactTo, ToolNameReactToMessage:
 		return r.runReactTo(ctx, call.Args)
-	case ToolNameChatRead:
+	case ToolNameChatRead, ToolNameReadChatThread:
 		return r.runChatRead(ctx, call.Args)
+	case ToolNameReadChatMessage:
+		return r.runReadMessage(ctx, call.Args)
 	case ToolNameAnnounceFile:
 		return r.runAnnounceFile(ctx, call.Args)
 	case ToolNameShareFile:
 		return r.runShareFile(ctx, call.Args)
+	case ToolNameListShared:
+		return r.runListShared(ctx, call.Args)
+	case ToolNameGetShared:
+		return r.runGetShared(ctx, call.Args)
 	default:
 		return nil, fmt.Errorf("CommsRunner: unknown tool %q", call.Name)
 	}
@@ -306,6 +385,59 @@ func (r CommsRunner) runShareFile(ctx context.Context, raw json.RawMessage) (jso
 	return mustJSON(map[string]any{"share_id": id}), nil
 }
 
+func (r CommsRunner) runReadMessage(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var args struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return errorResult(err), nil
+	}
+	if args.ID == 0 {
+		return errorResult(fmt.Errorf("id is required")), nil
+	}
+	msg, err := r.Gateway.ReadMessage(ctx, args.ID)
+	if err != nil {
+		return gatewayErrorResult(err)
+	}
+	return mustJSON(map[string]any{"message": msg}), nil
+}
+
+func (r CommsRunner) runListShared(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var args struct {
+		Limit int `json:"limit"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return errorResult(err), nil
+		}
+	}
+	files, err := r.Gateway.ListShared(ctx, args.Limit)
+	if err != nil {
+		return gatewayErrorResult(err)
+	}
+	if files == nil {
+		files = []SharedFileRef{}
+	}
+	return mustJSON(map[string]any{"shared": files}), nil
+}
+
+func (r CommsRunner) runGetShared(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var args struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return errorResult(err), nil
+	}
+	if args.ID == 0 {
+		return errorResult(fmt.Errorf("id is required")), nil
+	}
+	f, err := r.Gateway.GetShared(ctx, args.ID)
+	if err != nil {
+		return gatewayErrorResult(err)
+	}
+	return mustJSON(map[string]any{"shared": f}), nil
+}
+
 // errorResult renders an error into the standard tool-result shape
 // so the model can read and respond to it. Returning errors as JSON
 // rather than Go errors prevents bridle from aborting the turn —
@@ -343,7 +475,10 @@ type composedRunner struct {
 
 func (r composedRunner) Run(ctx context.Context, call bridle.ToolCall) (json.RawMessage, error) {
 	switch call.Name {
-	case ToolNameSendChat, ToolNameReactTo, ToolNameChatRead, ToolNameAnnounceFile, ToolNameShareFile:
+	case ToolNameSendChat, ToolNameReactTo, ToolNameReactToMessage,
+		ToolNameChatRead, ToolNameReadChatThread, ToolNameReadChatMessage,
+		ToolNameAnnounceFile, ToolNameShareFile,
+		ToolNameListShared, ToolNameGetShared:
 		return r.comms.Run(ctx, call)
 	}
 	if r.next == nil {

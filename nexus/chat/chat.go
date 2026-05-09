@@ -109,6 +109,29 @@ type Store interface {
 	// by the recipient policy's ParentLookup to find the author of
 	// a parent message when computing reply-recipient.
 	GetByID(ctx context.Context, id int64) (Message, error)
+
+	// ListShared returns shared_files rows, newest first, capped to
+	// `limit`. Used by the list_shared comms tool — gives an aspect
+	// the recently-shared file roster.
+	ListShared(ctx context.Context, limit int) ([]SharedFile, error)
+
+	// GetShared fetches a single shared_files row by id. Used by the
+	// get_shared comms tool. Returns sql.ErrNoRows when absent.
+	GetShared(ctx context.Context, id int64) (SharedFile, error)
+}
+
+// SharedFile is the gateway-level representation of a shared_files
+// row. RecipientsJSON stays as opaque JSON — the model can
+// json-decode if it needs the recipient list, otherwise the
+// announce/share split is signalled by AnnounceMsgID being non-zero.
+type SharedFile struct {
+	ID             int64   `json:"id"`
+	Path           string  `json:"path"`
+	Description    string  `json:"description,omitempty"`
+	SharedBy       string  `json:"shared_by"`
+	AnnounceMsgID  int64   `json:"announce_msg_id,omitempty"`
+	RecipientsJSON string  `json:"recipients_json,omitempty"`
+	CreatedAt      string  `json:"created_at"`
 }
 
 // SQLStore is the sqlite-backed Store. Holds a *sql.DB; safe for
@@ -492,4 +515,66 @@ func (s *SQLStore) GetByID(ctx context.Context, id int64) (Message, error) {
 // in their local TZ at presentation.
 func (m Message) FormatRFC3339() string {
 	return m.CreatedAt.UTC().Format(time.RFC3339)
+}
+
+// ListShared implements Store. Returns shared_files rows newest-first
+// up to `limit`. Operator-callers pass a sane cap (50-100); the model
+// shouldn't see thousands of rows in one tool result.
+func (s *SQLStore) ListShared(ctx context.Context, limit int) ([]SharedFile, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT id, path, description, shared_by, announce_msg_id, recipients_json, created_at
+		FROM shared_files
+		ORDER BY id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("chat.ListShared: %w", err)
+	}
+	defer rows.Close()
+	var out []SharedFile
+	for rows.Next() {
+		f, err := scanSharedFile(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("chat.ListShared scan: %w", err)
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// GetShared implements Store. Returns sql.ErrNoRows when the id
+// doesn't exist — callers wrap into tool-result-shaped JSON.
+func (s *SQLStore) GetShared(ctx context.Context, id int64) (SharedFile, error) {
+	row := s.DB.QueryRowContext(ctx, `
+		SELECT id, path, description, shared_by, announce_msg_id, recipients_json, created_at
+		FROM shared_files WHERE id = ?
+	`, id)
+	f, err := scanSharedFile(row.Scan)
+	if err != nil {
+		return SharedFile{}, err
+	}
+	return f, nil
+}
+
+// scanSharedFile populates a SharedFile from sql Scan-shape.
+func scanSharedFile(scan func(...any) error) (SharedFile, error) {
+	var f SharedFile
+	var desc, recips sql.NullString
+	var announce sql.NullInt64
+	if err := scan(&f.ID, &f.Path, &desc, &f.SharedBy, &announce, &recips, &f.CreatedAt); err != nil {
+		return SharedFile{}, err
+	}
+	if desc.Valid {
+		f.Description = desc.String
+	}
+	if recips.Valid {
+		f.RecipientsJSON = recips.String
+	}
+	if announce.Valid {
+		f.AnnounceMsgID = announce.Int64
+	}
+	return f, nil
 }

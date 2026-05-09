@@ -110,6 +110,18 @@ func (g *fakeGateway) ShareFile(_ context.Context, path string, recipients []str
 	return 7001, nil
 }
 
+func (g *fakeGateway) ReadMessage(_ context.Context, msgID int64) (ChatMessage, error) {
+	return ChatMessage{ID: msgID, From: "fake", Content: "fake"}, nil
+}
+
+func (g *fakeGateway) ListShared(_ context.Context, limit int) ([]SharedFileRef, error) {
+	return nil, nil
+}
+
+func (g *fakeGateway) GetShared(_ context.Context, shareID int64) (SharedFileRef, error) {
+	return SharedFileRef{ID: shareID}, nil
+}
+
 func (g *fakeGateway) snapshotSent() []sentMessage {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -118,14 +130,18 @@ func (g *fakeGateway) snapshotSent() []sentMessage {
 	return out
 }
 
-func TestCommsToolDefs_HasAllFiveTools(t *testing.T) {
+func TestCommsToolDefs_HasAllTools(t *testing.T) {
 	defs := CommsToolDefs()
 	want := map[string]bool{
-		ToolNameSendChat:     false,
-		ToolNameReactTo:      false,
-		ToolNameChatRead:     false,
-		ToolNameAnnounceFile: false,
-		ToolNameShareFile:    false,
+		ToolNameSendChat:        false,
+		ToolNameReactTo:         false,
+		ToolNameChatRead:        false,
+		ToolNameAnnounceFile:    false,
+		ToolNameShareFile:       false,
+		ToolNameReadChatMessage: false,
+		ToolNameReadChatThread:  false,
+		ToolNameListShared:      false,
+		ToolNameGetShared:       false,
 	}
 	for _, d := range defs {
 		want[d.Name] = true
@@ -135,8 +151,8 @@ func TestCommsToolDefs_HasAllFiveTools(t *testing.T) {
 			t.Errorf("missing tool def %q", name)
 		}
 	}
-	if len(defs) != 5 {
-		t.Errorf("tool count: got %d, want 5", len(defs))
+	if len(defs) != len(want) {
+		t.Errorf("tool count: got %d, want %d", len(defs), len(want))
 	}
 }
 
