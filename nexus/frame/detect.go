@@ -39,9 +39,9 @@ type Detected struct {
 // role to avoid implying autospawn semantics — Frames are never spawned
 // as subprocesses, they embed in the Nexus process (P5).
 type FrameAspect struct {
-	Path   string                 // absolute path to the home folder
-	Name   string                 // aspect.json:name
-	Config schemas.AspectConfig   // full parsed config
+	Path   string               // absolute path to the home folder
+	Name   string               // aspect.json:name
+	Config schemas.AspectConfig // full parsed config
 }
 
 // ErrMultipleFrames is returned when more than one role:frame aspect is

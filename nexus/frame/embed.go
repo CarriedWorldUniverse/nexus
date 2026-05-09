@@ -24,9 +24,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
-	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
-	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"

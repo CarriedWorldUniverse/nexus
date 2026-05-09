@@ -147,7 +147,7 @@ type AspectState struct {
 	Metadata     map[string]any `json:"metadata,omitempty"`
 
 	// Dynamic — refreshed by heartbeats and enrichment fiber.
-	LastHeartbeat time.Time `json:"last_heartbeat"`
-	Status        string    `json:"status"` // "live" | "stale" | "down"
+	LastHeartbeat time.Time      `json:"last_heartbeat"`
+	Status        string         `json:"status"` // "live" | "stale" | "down"
 	Enrichment    map[string]any `json:"enrichment,omitempty"`
 }

@@ -20,37 +20,6 @@ import (
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
 	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
-	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
-	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
-	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame/framecomms"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
-	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
-	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
-	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
-	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
-	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
-	bridle "github.com/CarriedWorldUniverse/bridle"
-	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
-	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
-	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
-	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
-	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame/framecomms"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
-	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
-	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
-	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
-	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
-	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
-	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
-	bridle "github.com/CarriedWorldUniverse/bridle"
-	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
-	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
 	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
@@ -60,46 +29,11 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
-	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
-	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
-	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
-	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
-	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
-	bridle "github.com/CarriedWorldUniverse/bridle"
-	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
-	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
-	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
-	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
-	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
-	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame/framecomms"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
-	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
-	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
-	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
-	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
-	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
-	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
-	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
-	bridle "github.com/CarriedWorldUniverse/bridle"
-	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
-	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
-	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
-	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
-	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
-	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame/framecomms"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
-	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
-	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
-	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/operator"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 	"github.com/CarriedWorldUniverse/nexus/nexus/usage"
 )
@@ -469,7 +403,7 @@ func main() {
 		AspectHomes:       aspectHomes,
 		TLSCertFile:       *tlsCert,
 		TLSKeyFile:        *tlsKey,
-		KeyfileValidator: keyfileValidator,
+		KeyfileValidator:  keyfileValidator,
 		// Knowledge store powers operator-facing knowledge frames
 		// (knowledge.list / knowledge.search / knowledge.store) on the
 		// dashboard's WS surface. Same store the bridle tool runner
@@ -975,12 +909,12 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, store chat.St
 		// rebuilding the funnel. Spec §11 in-process refresh path.
 		SystemPromptFn: ef.SystemPrompt,
 		Tools:          funnel.CommsToolDefs(),
-		Runner:        funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
-		ChatGateway:   gateway,
-		Threads:       threads,
-		Pulser:        pulser,
-		UsageRecorder: recorder,
-		Logger:        log,
+		Runner:         funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		ChatGateway:    gateway,
+		Threads:        threads,
+		Pulser:         pulser,
+		UsageRecorder:  recorder,
+		Logger:         log,
 	})
 	if err != nil {
 		log.Error("frame funnel: construction failed; deliberation disabled",

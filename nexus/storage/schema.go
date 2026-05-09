@@ -16,8 +16,8 @@ package storage
 
 import (
 	"context"
-	_ "embed"
 	"database/sql"
+	_ "embed"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -105,4 +105,3 @@ func Bootstrap(ctx context.Context, db *sql.DB) error {
 	}
 	return nil
 }
-

@@ -16,10 +16,6 @@ import (
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
-	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
-	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
-	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
-	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
@@ -54,9 +50,9 @@ type wsConn struct {
 	// flags + topic filter; readers under RLock are the fan-out loops in
 	// chat_send.go / register/cleanup; writers under Lock are the
 	// subscribe/unsubscribe handlers in operator_subs.go.
-	subMu             sync.RWMutex
-	subscribedChat    bool
-	subscribedRoster  bool
+	subMu                  sync.RWMutex
+	subscribedChat         bool
+	subscribedRoster       bool
 	subscribedAspectStatus bool
 
 	// host is the source IP (without port) extracted from RemoteAddr

@@ -14,8 +14,8 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	wa "github.com/go-webauthn/webauthn/webauthn"
 
-	"github.com/nexus-cw/nexus/nexus/jwt"
-	"github.com/nexus-cw/nexus/nexus/operator"
+	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
+	"github.com/CarriedWorldUniverse/nexus/nexus/operator"
 )
 
 // fakeAuth implements OperatorAuth without standing up a real
@@ -190,7 +190,7 @@ func TestRegisterBegin_Subsequent_AcceptsValidJWT(t *testing.T) {
 
 func TestRegisterBegin_Subsequent_RejectsNonOperatorSub(t *testing.T) {
 	auth := &fakeAuth{
-		passkeys:        []operator.Passkey{{ID: 1}},
+		passkeys: []operator.Passkey{{ID: 1}},
 	}
 	l := newTestLogin(t, auth)
 	mux := newOperatorMux(l)

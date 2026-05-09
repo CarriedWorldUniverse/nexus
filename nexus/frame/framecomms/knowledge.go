@@ -11,8 +11,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/nexus-cw/nexus/nexus/frame/funnel"
-	"github.com/nexus-cw/nexus/nexus/knowledge"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 )
 
 // KnowledgeGateway adapts a *knowledge.Store to the

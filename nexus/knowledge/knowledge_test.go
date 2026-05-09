@@ -278,7 +278,7 @@ func TestSearchTopKCap(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	for i := 0; i < 10; i++ {
-		s.Put(ctx, "keel", "t-" + string(rune('a'+i)), "matching content here", PutOptions{})
+		s.Put(ctx, "keel", "t-"+string(rune('a'+i)), "matching content here", PutOptions{})
 	}
 
 	hits, _ := s.Search(ctx, Query{
@@ -295,7 +295,7 @@ func TestSearchDefaultTopK(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	for i := 0; i < 10; i++ {
-		s.Put(ctx, "keel", "t-" + string(rune('a'+i)), "matching content here", PutOptions{})
+		s.Put(ctx, "keel", "t-"+string(rune('a'+i)), "matching content here", PutOptions{})
 	}
 
 	hits, _ := s.Search(ctx, Query{
@@ -459,11 +459,11 @@ func TestSearchSyntaxFootgunsDoNotCrash(t *testing.T) {
 
 func TestSanitizeFTSQuery(t *testing.T) {
 	cases := map[string]string{
-		"foo bar":      `"foo bar"`,
-		`say "hi"`:     `"say ""hi"""`,
+		"foo bar":       `"foo bar"`,
+		`say "hi"`:      `"say ""hi"""`,
 		`-keyword OR *`: `"-keyword OR *"`,
-		``:             `""`,
-		`pre"mid"post`: `"pre""mid""post"`,
+		``:              `""`,
+		`pre"mid"post`:  `"pre""mid""post"`,
 	}
 	for in, want := range cases {
 		if got := sanitizeFTSQuery(in); got != want {

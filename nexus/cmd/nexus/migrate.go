@@ -28,8 +28,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/aspects"
-	"github.com/nexus-cw/nexus/shared/schemas"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // runMigrateSubcommand parses `migrate <verb> ...`.

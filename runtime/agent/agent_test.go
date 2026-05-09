@@ -58,11 +58,11 @@ type fakeNexus struct {
 	srv   *httptest.Server
 	token string
 
-	mu           sync.Mutex
-	conns        []*websocket.Conn
-	inboundCh    chan frames.Envelope // non-register/deregister frames land here
-	registers    atomic.Int32
-	deregisters  atomic.Int32
+	mu          sync.Mutex
+	conns       []*websocket.Conn
+	inboundCh   chan frames.Envelope // non-register/deregister frames land here
+	registers   atomic.Int32
+	deregisters atomic.Int32
 }
 
 func newFakeNexus(t *testing.T, token string) *fakeNexus {

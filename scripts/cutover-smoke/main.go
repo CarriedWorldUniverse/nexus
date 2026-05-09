@@ -41,10 +41,10 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
-	"github.com/nexus-cw/nexus/nexus/identity"
-	"github.com/nexus-cw/nexus/nexus/jwt"
-	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
+	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
 
 var (
@@ -341,4 +341,3 @@ func resolveDataDir() string {
 	}
 	return v
 }
-

@@ -26,8 +26,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/frames"
-	"github.com/nexus-cw/nexus/nexus/knowledge"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 )
 
 // dispatchOperatorFrame routes operator-only frame kinds. Returns

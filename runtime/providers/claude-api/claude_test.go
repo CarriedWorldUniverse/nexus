@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/CarriedWorldUniverse/nexus/runtime/providers"
+	"github.com/anthropics/anthropic-sdk-go"
 )
 
 func TestNewEmptyKey(t *testing.T) {

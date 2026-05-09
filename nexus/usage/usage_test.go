@@ -59,7 +59,8 @@ func TestSQLStore_RecordRoundTrip(t *testing.T) {
 }
 
 func TestSQLStore_RecordValidation(t *testing.T) {
-	s, db := openTestStore(t); _ = db
+	s, db := openTestStore(t)
+	_ = db
 	ctx := context.Background()
 	cases := []struct {
 		name string
@@ -84,7 +85,8 @@ func TestSQLStore_RecordValidation(t *testing.T) {
 func TestSQLStore_RecordWithoutMsgID(t *testing.T) {
 	// Internal turns (compaction summarize) record with MsgID=0 —
 	// stored as NULL, retrievable via ListByAspect.
-	s, db := openTestStore(t); _ = db
+	s, db := openTestStore(t)
+	_ = db
 	r, err := s.Record(context.Background(), Record{
 		TurnID: "compact-1", AspectID: "frame", Model: "claude-haiku",
 		InputTokens: 100, OutputTokens: 50,
@@ -116,7 +118,8 @@ func TestSQLStore_ListByMsg(t *testing.T) {
 }
 
 func TestSQLStore_SumByAspect(t *testing.T) {
-	s, db := openTestStore(t); _ = db
+	s, db := openTestStore(t)
+	_ = db
 	ctx := context.Background()
 	s.Record(ctx, Record{TurnID: "t-1", AspectID: "frame", Model: "m", InputTokens: 100, OutputTokens: 20})
 	s.Record(ctx, Record{TurnID: "t-2", AspectID: "frame", Model: "m", InputTokens: 200, OutputTokens: 50})
@@ -132,7 +135,8 @@ func TestSQLStore_SumByAspect(t *testing.T) {
 }
 
 func TestSQLStore_SumByAspectEmpty(t *testing.T) {
-	s, db := openTestStore(t); _ = db
+	s, db := openTestStore(t)
+	_ = db
 	in, out, err := s.SumByAspect(context.Background(), "noone", time.Time{}, time.Time{})
 	if err != nil {
 		t.Fatal(err)

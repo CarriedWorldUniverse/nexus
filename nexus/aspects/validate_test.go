@@ -11,7 +11,7 @@ import (
 
 	"golang.org/x/crypto/nacl/box"
 
-	"github.com/nexus-cw/nexus/nexus/jwt"
+	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
 )
 
 // validateFixture sets up a fresh DB, server identity, and a minted

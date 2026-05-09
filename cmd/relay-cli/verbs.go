@@ -301,8 +301,8 @@ func runRecv(ctx context.Context, args []string) error {
 	}
 
 	type out struct {
-		MsgID string                 `json:"msg_id"`
-		Inner relay.InnerEnvelope    `json:"inner"`
+		MsgID string              `json:"msg_id"`
+		Inner relay.InnerEnvelope `json:"inner"`
 	}
 	var decoded []out
 	var ackIDs []string

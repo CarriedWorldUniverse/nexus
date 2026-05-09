@@ -3,10 +3,10 @@
 // `nexus cert init [--host HOST] [--out DIR]` provisions a server cert
 // + key pair into the chosen directory. Intended workflow:
 //
-//   1. Operator runs `nexus cert init` once per host.
-//   2. Operator points the broker at the resulting files via the
-//      --tls-cert / --tls-key flags (or NEXUS_TLS_CERT / NEXUS_TLS_KEY).
-//   3. Broker boots with TLS-always.
+//  1. Operator runs `nexus cert init` once per host.
+//  2. Operator points the broker at the resulting files via the
+//     --tls-cert / --tls-key flags (or NEXUS_TLS_CERT / NEXUS_TLS_KEY).
+//  3. Broker boots with TLS-always.
 //
 // Behaviour by --host:
 //
@@ -191,8 +191,8 @@ func writeSelfSignedLoopback(outDir string) error {
 			CommonName:   "nexus-local",
 			Organization: []string{"nexus self-signed (local-only)"},
 		},
-		NotBefore:             now.Add(-1 * time.Minute),
-		NotAfter:              now.Add(365 * 24 * time.Hour),
+		NotBefore: now.Add(-1 * time.Minute),
+		NotAfter:  now.Add(365 * 24 * time.Hour),
 		// ECDSA keys: only DigitalSignature is meaningful (TLS handshake
 		// uses ECDHE for key exchange, not the cert key). RFC 5480 §3.
 		// KeyEncipherment is RSA-only and confuses strict validators.
@@ -294,4 +294,3 @@ func trustHintForOS(certPath string) string {
 			certPath)
 	}
 }
-

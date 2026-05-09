@@ -170,4 +170,3 @@ func TestGateway_ShareFileReturnsID(t *testing.T) {
 		t.Error("expected non-zero share id")
 	}
 }
-

@@ -7,19 +7,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/aspects"
-	"github.com/nexus-cw/nexus/nexus/jwt"
-	"github.com/nexus-cw/nexus/nexus/roster"
-	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
+	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
 
 // selfEditTestRig wires the aspect self-edit endpoint with a real
 // JWT-signing secret so tests can mint session tokens for any
 // aspect_name and verify auth gating.
 type selfEditTestRig struct {
-	srv          *httptest.Server
-	signingSec   []byte
-	store        *aspects.SQLStore
+	srv        *httptest.Server
+	signingSec []byte
+	store      *aspects.SQLStore
 }
 
 func newSelfEditTestRig(t *testing.T) *selfEditTestRig {

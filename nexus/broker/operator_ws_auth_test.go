@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/jwt"
+	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
 )
 
 // These tests exercise the JWT fallback path in resolveUpgradeAuth.

@@ -47,11 +47,11 @@ func NewPasskeyStore(db *sql.DB) *PasskeyStore {
 // strict-greater-than semantics; an equal-or-lower value coming back
 // from the authenticator is a clone/replay signal.
 type Passkey struct {
-	ID            int64
-	CredentialID  []byte
-	PublicKey     []byte
-	SignCount     int64
-	Label         string
+	ID           int64
+	CredentialID []byte
+	PublicKey    []byte
+	SignCount    int64
+	Label        string
 	// CredentialJSON is the full webauthn.Credential record marshaled
 	// as JSON. Empty string for rows registered before the credential-
 	// json column was added (5b extension); login handlers should

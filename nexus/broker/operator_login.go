@@ -44,8 +44,8 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	wa "github.com/go-webauthn/webauthn/webauthn"
 
-	"github.com/nexus-cw/nexus/nexus/jwt"
-	"github.com/nexus-cw/nexus/nexus/operator"
+	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
+	"github.com/CarriedWorldUniverse/nexus/nexus/operator"
 )
 
 // OperatorAuth abstracts the *operator.Auth surface this package
@@ -339,10 +339,10 @@ func (l *OperatorLogin) handleLoginBegin(w http.ResponseWriter, r *http.Request)
 }
 
 type loginFinishResponse struct {
-	OK              bool   `json:"ok"`
-	SessionJWT      string `json:"session_jwt"`
-	SessionExpires  string `json:"session_expires"`
-	PasskeyID       int64  `json:"passkey_id"`
+	OK             bool   `json:"ok"`
+	SessionJWT     string `json:"session_jwt"`
+	SessionExpires string `json:"session_expires"`
+	PasskeyID      int64  `json:"passkey_id"`
 }
 
 func (l *OperatorLogin) handleLoginFinish(w http.ResponseWriter, r *http.Request) {

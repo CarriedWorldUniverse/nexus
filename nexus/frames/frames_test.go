@@ -214,9 +214,9 @@ func TestPayloadAsNonEmptyPayloadDecodes(t *testing.T) {
 // against accidental tag breakage during future edits.
 func TestPayloadJSONTags(t *testing.T) {
 	cases := []struct {
-		name     string
-		payload  any
-		needs    []string // substrings that must appear in the JSON output
+		name    string
+		payload any
+		needs   []string // substrings that must appear in the JSON output
 	}{
 		{
 			"RegisterAck",

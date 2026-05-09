@@ -42,9 +42,9 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/nexus-cw/nexus/nexus/aspects"
-	"github.com/nexus-cw/nexus/nexus/identity"
-	"github.com/nexus-cw/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
 
 // runAspectSubcommand parses `aspect <verb> [...]` from os.Args[2:] and

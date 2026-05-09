@@ -265,11 +265,11 @@ func TestShouldRoute_ContentEdgeCases(t *testing.T) {
 		content string
 		want    bool // true = route to frame
 	}{
-		{"empty content", "", true},                                         // un-addressed, routes
-		{"whitespace-only", "   \n  ", true},                                // un-addressed, routes
-		{"@-symbol-no-name", "@", true},                                     // not a valid mention; un-addressed
-		{"frame-name-not-mention", frameName, true},                         // bare word, no @
-		{"frame-name-as-substring", "anchorman @wren said", false},          // not @anchor, addressed @wren
+		{"empty content", "", true},                                // un-addressed, routes
+		{"whitespace-only", "   \n  ", true},                       // un-addressed, routes
+		{"@-symbol-no-name", "@", true},                            // not a valid mention; un-addressed
+		{"frame-name-not-mention", frameName, true},                // bare word, no @
+		{"frame-name-as-substring", "anchorman @wren said", false}, // not @anchor, addressed @wren
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

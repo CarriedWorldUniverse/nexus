@@ -81,9 +81,9 @@ type Event struct {
 
 // TurnStartPayload accompanies EventTurnStart.
 type TurnStartPayload struct {
-	TurnID         string `json:"turn_id"`
-	Round          int    `json:"round"`
-	ContextTokens  int    `json:"context_tokens"`
+	TurnID        string `json:"turn_id"`
+	Round         int    `json:"round"`
+	ContextTokens int    `json:"context_tokens"`
 }
 
 // TurnToolCallPayload accompanies EventTurnToolCall.
@@ -95,11 +95,11 @@ type TurnToolCallPayload struct {
 
 // TurnEndPayload accompanies EventTurnEnd.
 type TurnEndPayload struct {
-	TurnID     string             `json:"turn_id"`
-	Usage      bridle.Usage       `json:"usage"`
-	StopReason bridle.StopReason  `json:"stop_reason"`
-	StepCount  int                `json:"step_count"`
-	Duration   time.Duration      `json:"duration"`
+	TurnID     string            `json:"turn_id"`
+	Usage      bridle.Usage      `json:"usage"`
+	StopReason bridle.StopReason `json:"stop_reason"`
+	StepCount  int               `json:"step_count"`
+	Duration   time.Duration     `json:"duration"`
 }
 
 // CompactReason names what triggered compaction. Soft = threshold

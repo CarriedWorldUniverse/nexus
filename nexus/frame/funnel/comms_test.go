@@ -281,8 +281,8 @@ func TestCommsRunner_ReactToValidatesArgs(t *testing.T) {
 	g := &fakeGateway{}
 	r := CommsRunner{Gateway: g}
 	cases := []map[string]any{
-		{"msg_id": 0, "emoji": "👍"},  // missing msg_id
-		{"msg_id": 5, "emoji": ""},    // missing emoji
+		{"msg_id": 0, "emoji": "👍"}, // missing msg_id
+		{"msg_id": 5, "emoji": ""},  // missing emoji
 	}
 	for _, args := range cases {
 		res, _ := r.Run(context.Background(), bridle.ToolCall{
@@ -631,9 +631,9 @@ func TestCommsRunner_GetSharedNotFoundFlowsAsToolResult(t *testing.T) {
 type fakeKnowledgeGateway struct {
 	mu sync.Mutex
 
-	storeCalls   []storeKnowledgeCall
-	storeNextID  int64
-	storeErr     error
+	storeCalls  []storeKnowledgeCall
+	storeNextID int64
+	storeErr    error
 
 	searchCalls   []KnowledgeQuery
 	searchResults []KnowledgeHit

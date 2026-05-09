@@ -32,12 +32,12 @@ func New(db *sql.DB, log *slog.Logger) *Store {
 
 // Entry is a single knowledge record as seen by callers.
 type Entry struct {
-	ID         int64
-	FromAgent  string
-	Topic      string
-	Content    string
-	Shared     bool
-	UpdatedAt  string
+	ID        int64
+	FromAgent string
+	Topic     string
+	Content   string
+	Shared    bool
+	UpdatedAt string
 	// EmbeddingModel / EmbeddingDim are populated only when vector
 	// retrieval is enabled; empty otherwise.
 	EmbeddingModel string
@@ -279,9 +279,10 @@ func (s *Store) Search(ctx context.Context, q Query) ([]Hit, error) {
 // can pass any byte sequence and get a phrase-only match.
 //
 // Examples:
-//   foo bar              ->  "foo bar"
-//   say "hi"             ->  "say ""hi"""
-//   -keyword OR *        ->  "-keyword OR *"   (operators neutralized)
+//
+//	foo bar              ->  "foo bar"
+//	say "hi"             ->  "say ""hi"""
+//	-keyword OR *        ->  "-keyword OR *"   (operators neutralized)
 //
 // Side effects: caller loses the ability to use FTS operators
 // deliberately. That's the trade — knowledge.Search's contract is

@@ -23,10 +23,10 @@ import (
 // fakeNexus is a tiny WS server that records incoming frames and
 // acks outpost.register. Used in place of a real Nexus for tests.
 type fakeNexus struct {
-	srv          *httptest.Server
-	token        string
-	mu           sync.Mutex
-	conns        []*websocket.Conn
+	srv               *httptest.Server
+	token             string
+	mu                sync.Mutex
+	conns             []*websocket.Conn
 	outpostRegistered atomic.Int32
 	aspectRegistered  atomic.Int32
 	ch                chan frames.Envelope

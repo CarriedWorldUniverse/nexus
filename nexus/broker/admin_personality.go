@@ -21,7 +21,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/nexus-cw/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 )
 
 // adminPersonalityRequest is the PUT body shape.

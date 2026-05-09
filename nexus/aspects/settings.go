@@ -142,11 +142,11 @@ const schemaMetaKeyMigrated = "nexus_settings_migrated"
 // nexus_settings.nexus_md from existing aspect_personalities rows.
 //
 // Selection rule:
-//   1. Prefer the row for `preferredFrame` (typically "keel"). Its
-//      content is authoritative for network-wide operational scope.
-//   2. If that aspect has no row (or empty nexus_md), fall back to
-//      the most-recently-updated non-empty row.
-//   3. If no aspects have any nexus_md content, skip silently.
+//  1. Prefer the row for `preferredFrame` (typically "keel"). Its
+//     content is authoritative for network-wide operational scope.
+//  2. If that aspect has no row (or empty nexus_md), fall back to
+//     the most-recently-updated non-empty row.
+//  3. If no aspects have any nexus_md content, skip silently.
 //
 // Per spec §6 (revised): per-aspect rows are LEFT UNTOUCHED. Operator
 // manually prunes duplicates after migration via personality edit.
