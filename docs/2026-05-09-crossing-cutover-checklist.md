@@ -5,6 +5,13 @@
 
 This is the operator's pre-flight + cutover sequence. Crossing parts 1+3+4+5 are merged; the code substrate is complete. This doc names the ordered actions to switch the network from agent-network to nexus, and the rollback path if cutover goes sideways.
 
+## Topology
+
+- **Host:** `agentnetwork.<tailnet>.ts.net` (existing tailnet hostname).
+- **Port:** **`7888`** — same port agent-network uses today. Locked in (operator chat 2026-05-10) so the migration is binary-swap, not "binary-swap + update every aspect's nexus_url + dashboard origin + tailnet cert SAN." Cost of changing the port is high (every keyfile + every dashboard reference); cost of keeping it is zero.
+- **TLS cert:** existing tailnet cert covers the port; no SAN refresh needed.
+- **Local-test convention:** smoke runs against alt ports (`:18888`, `:18889`) to avoid colliding with the running production broker on `:7888`. Production cutover always lands on `:7888`.
+
 ## When
 
 Per spec §5.3: **big-bang on a low-traffic window.** Agent-network goes down; nexus comes up; aspects reconnect; smoke passes; operator's daily workflow flips. "Hours, not days."
