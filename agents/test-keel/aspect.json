@@ -10,6 +10,8 @@
   "capabilities": ["test"],
   "filter": "hard",
   "rewriter": {
-    "enabled": true
+    "enabled": true,
+    "tool_result_threshold": 100,
+    "assistant_text_threshold": 100
   }
 }

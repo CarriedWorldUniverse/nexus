@@ -30,21 +30,25 @@ func SessionPath(aspectCwd, sessionID string) string {
 }
 
 // encodeCwd reproduces claude-code's projects-directory encoding:
-// every path separator and (on Windows) the drive colon is replaced
-// with a single "-". The encoding is irreversible — multiple distinct
-// paths can collide — but matches claude-code's algorithm so we read
-// the same file it wrote.
+// EVERY character that's a path separator OR drive colon becomes a
+// single "-". `C:\Users\jacin` → `C--Users-jacin` (the colon AND the
+// following backslash both produce dashes; they don't collapse).
+// The encoding is irreversible — distinct paths can collide — but it
+// matches claude-code's algorithm so we read the same file it wrote.
+//
+// Verified empirically against ~/.claude/projects/ entries on
+// Windows: `C:\Users\jacin\AppData\Local\Temp\nexus-diligence` is
+// stored as `C--Users-jacin-AppData-Local-Temp-nexus-diligence`.
 func encodeCwd(cwd string) string {
 	c := cwd
 	if runtime.GOOS == "windows" {
 		// Normalise to backslash-form (claude-code on Windows uses
-		// backslashes) and strip the drive colon: `C:\foo` → `C\foo`.
+		// backslashes); leave the colon — it gets dashed below.
 		c = strings.ReplaceAll(c, "/", "\\")
-		c = strings.Replace(c, ":", "", 1)
 	}
-	// Replace every separator with a dash. Both / and \ are mapped
-	// so behavior is platform-agnostic — claude-code does the same.
+	// Replace every separator AND the drive colon with a dash.
 	c = strings.ReplaceAll(c, "\\", "-")
 	c = strings.ReplaceAll(c, "/", "-")
+	c = strings.ReplaceAll(c, ":", "-")
 	return c
 }

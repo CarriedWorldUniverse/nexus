@@ -7,7 +7,6 @@ package rewriter
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -167,20 +166,31 @@ func buildToolResultPrompt(tool, content string) string {
 	}
 }
 
-// distillerSessionID generates a per-call session id. UnixNano alone
-// can collide under tight goroutine scheduling on some clocks; an
-// 8-byte random suffix removes the concern at negligible cost. The
-// sessionTag is preserved so providers that log session ids can
-// attribute calls to the rewriter.
-func distillerSessionID(tag string) string {
-	var b [8]byte
+// distillerSessionID generates a per-call UUIDv4. claude-code
+// rejects non-UUID --session-id values with "Invalid session ID.
+// Must be a valid UUID." — and the rewriter is precisely the case
+// where the distiller IS claude-code (subprocess-stream). UUID format
+// is the lowest-common-denominator that all bridle providers accept.
+//
+// The tag parameter is retained for future log/observability work but
+// no longer threaded into the id (UUIDs don't have string slots).
+// Providers that log sessions get the bare UUID.
+func distillerSessionID(_ string) string {
+	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand should never fail on supported platforms; fall
-		// back to ns timestamp + tag if it does so we still produce
-		// a usable id rather than crashing the rewriter.
-		return fmt.Sprintf("nexus-rewriter-%s-%d-fallback", tag, time.Now().UnixNano())
+		// crypto/rand failing is impossible on supported platforms.
+		// If it does, fall back to a deterministic-but-likely-unique
+		// string — claude-code will reject it but the haiku distiller
+		// will return an error and the rewriter will leave the record
+		// un-marked, which is the right shape for unrecoverable
+		// rng failure.
+		return fmt.Sprintf("00000000-0000-4000-8000-%012d", time.Now().UnixNano()%1e12)
 	}
-	return fmt.Sprintf("nexus-rewriter-%s-%d-%s", tag, time.Now().UnixNano(), hex.EncodeToString(b[:]))
+	// RFC 4122 v4: version 4 in byte 6 high nibble; variant 10 in byte 8.
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // noopRunner / noopSink satisfy bridle's runtime interfaces — the

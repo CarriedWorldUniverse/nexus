@@ -83,6 +83,9 @@ func (r *Runner) AfterTurnDetailed(ctx context.Context) Stats {
 		r.log.Debug("rewriter runner: skipping AfterTurn — reset pending")
 		return Stats{}
 	}
+	if r.rw != nil {
+		r.log.Info("rewriter: AfterTurn invoked", "session_path", r.rw.sessionPath())
+	}
 
 	distill := r.distillFn
 	if distill == nil {
@@ -96,7 +99,7 @@ func (r *Runner) AfterTurnDetailed(ctx context.Context) Stats {
 		lastErr = err
 		if err == nil {
 			r.recordSuccess()
-			r.log.Debug("rewriter: AfterTurn ok",
+			r.log.Info("rewriter: AfterTurn ok",
 				"scanned", s.RecordsScanned,
 				"rewritten", s.RecordsRewritten,
 				"skipped", s.RecordsSkipped,
