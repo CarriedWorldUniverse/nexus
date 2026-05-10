@@ -31,8 +31,11 @@ if (typeof window !== 'undefined') window.__msgCache = msgCache;
 
 async function loadMessages() {
   try {
-    const rows = await fetchMessages(currentChannel.value, lastMessageId.value);
-    const haveRows = Array.isArray(rows) && rows.length > 0;
+    // fetchMessages returns {messages, has_more}; pull the array.
+    // Tolerate both shapes for callers that might not have migrated.
+    const result = await fetchMessages(currentChannel.value, lastMessageId.value);
+    const rows = Array.isArray(result) ? result : (result?.messages || []);
+    const haveRows = rows.length > 0;
 
     // Anchor oldestLoadedId so the Load Older button can appear even on a
     // reconnect that returned zero new rows (history exists, we just got a
@@ -147,12 +150,14 @@ async function loadOlder() {
   const prevScrollHeight = el ? el.scrollHeight : 0;
   const prevScrollTop = el ? el.scrollTop : 0;
   try {
-    const rows = await fetchOlderMessages(ch, beforeId);
+    // fetchOlderMessages returns {messages, has_more}; pull the array.
+    const result = await fetchOlderMessages(ch, beforeId);
+    const rows = Array.isArray(result) ? result : (result?.messages || []);
     // Discard if the operator switched channels during the fetch — without
     // this guard, channel A's older messages would prepend onto channel B's
     // (now-empty) message list.
     if (currentChannel.value !== ch) return;
-    if (!Array.isArray(rows) || rows.length === 0) {
+    if (rows.length === 0) {
       hasMoreOlder.value = false;
       return;
     }
