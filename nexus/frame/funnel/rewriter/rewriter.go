@@ -74,12 +74,23 @@ type Distiller interface {
 	DistillAssistantText(ctx context.Context, content string) (string, error)
 }
 
-// Config is the per-rewriter configuration. SessionPath, ModelName, and
-// Distiller are required; thresholds default to spec values when zero.
+// Config is the per-rewriter configuration. SessionPath OR SessionPathFn,
+// ModelName, and Distiller are required; thresholds default to spec
+// values when zero.
 type Config struct {
 	// SessionPath is the absolute path to claude-code's session jsonl,
 	// e.g. ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl.
+	// Use this when the path is fixed for the rewriter's lifetime
+	// (test cases, single-session smoke runs). For production wiring
+	// where the funnel rotates session ids, use SessionPathFn so each
+	// AfterTurn call resolves the current path lazily.
 	SessionPath string
+
+	// SessionPathFn returns the current session-jsonl path. Called on
+	// every readSession invocation. Takes precedence over SessionPath
+	// when set. Use this for funnel wiring where the session id can
+	// rotate (compaction; rewriter-driven session reset).
+	SessionPathFn func() string
 
 	// Distiller compresses heavy content. Required.
 	Distiller Distiller
@@ -109,11 +120,22 @@ type Rewriter struct {
 	cfg Config
 }
 
+// sessionPath resolves the current jsonl path. SessionPathFn takes
+// precedence so callers (the funnel runner) can return whatever the
+// current bridle session id is — the funnel rotates ids on
+// compaction and on rewriter-driven resets.
+func (rw *Rewriter) sessionPath() string {
+	if rw.cfg.SessionPathFn != nil {
+		return rw.cfg.SessionPathFn()
+	}
+	return rw.cfg.SessionPath
+}
+
 // New returns a configured Rewriter. Returns error if cfg is missing
-// required fields.
+// required fields. SessionPath OR SessionPathFn must be set.
 func New(cfg Config) (*Rewriter, error) {
-	if cfg.SessionPath == "" {
-		return nil, errors.New("rewriter: SessionPath required")
+	if cfg.SessionPath == "" && cfg.SessionPathFn == nil {
+		return nil, errors.New("rewriter: SessionPath or SessionPathFn required")
 	}
 	if cfg.Distiller == nil {
 		return nil, errors.New("rewriter: Distiller required")

@@ -27,6 +27,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/framecomms"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/rewriter"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
@@ -995,6 +996,123 @@ func isClaudeFlavor(id bridle.ProviderID) bool {
 	return false
 }
 
+// buildRewriterRunner constructs the per-turn jsonl rewriter runner
+// for the Frame's funnel. Returns funnel.NoopPostTurn when the
+// rewriter is disabled or the configuration would be unworkable
+// (non-claude-code provider with no operator override; missing
+// distiller config; etc).
+//
+// Defaults:
+//   - claude-code provider → enabled unless aspect.json sets
+//     rewriter.enabled = false
+//   - any other provider → disabled unless explicitly enabled (and
+//     even then, the rewriter is a no-op if there's no jsonl to walk;
+//     warn but don't crash)
+//
+// The session path is resolved lazily through sessionIDFn so the
+// funnel's session id rotations (compaction, rewriter-driven reset)
+// are picked up automatically.
+func buildRewriterRunner(cfg schemas.AspectConfig, aspectCwd string, frameProviderID bridle.ProviderID, frameProvider bridle.Provider, frameModel string, sessionIDFn func() string, log *slog.Logger) funnel.PostTurnHook {
+	rwCfg := cfg.Rewriter
+	claudeFlavor := isClaudeFlavor(frameProviderID)
+	enabledByDefault := claudeFlavor
+	enabled := enabledByDefault
+	if rwCfg != nil && rwCfg.Enabled != nil {
+		enabled = *rwCfg.Enabled
+	}
+	if !enabled {
+		reason := "non-claude-default"
+		if rwCfg != nil && rwCfg.Enabled != nil {
+			reason = "explicit-off"
+		}
+		log.Info("frame funnel: rewriter disabled",
+			"aspect", cfg.Name, "provider", frameProviderID, "reason", reason)
+		return funnel.NoopPostTurn{}
+	}
+	// Hard guard: rewriter only makes sense for providers that write a
+	// session jsonl on disk. claude-code writes one; direct-API
+	// providers (claude-api, ollama-local, openai-api) do not. An
+	// operator who explicitly enables rewriter on one of those would
+	// trigger a never-ending fail-and-reset loop because DistillTail
+	// would always hit ENOENT. Override to off and warn.
+	if !claudeFlavor || frameProviderID == "claude-api" || frameProviderID == "claude" {
+		log.Warn("frame funnel: rewriter requested but provider has no session jsonl; disabling",
+			"aspect", cfg.Name, "provider", frameProviderID,
+			"hint", "rewriter only applies to claude-code (subprocess-stream) providers")
+		return funnel.NoopPostTurn{}
+	}
+
+	// Resolve distiller provider+model. Defaults: same provider as the
+	// Frame, claude-haiku-4-5 model when Claude flavor.
+	distillerProvider := frameProvider
+	distillerProviderID := frameProviderID
+	distillerModel := ""
+	if rwCfg != nil {
+		if rwCfg.DistillerProvider != "" {
+			p, id, ok := buildProviderByName(rwCfg.DistillerProvider, log)
+			if ok {
+				distillerProvider = p
+				distillerProviderID = id
+			} else {
+				log.Warn("frame funnel: rewriter distiller_provider unrecognised; falling back to frame provider",
+					"aspect", cfg.Name, "configured", rwCfg.DistillerProvider)
+			}
+		}
+		distillerModel = rwCfg.DistillerModel
+	}
+	if distillerModel == "" {
+		if isClaudeFlavor(distillerProviderID) {
+			distillerModel = "claude-haiku-4-5"
+		} else {
+			distillerModel = frameModel
+		}
+	}
+
+	haiku, err := rewriter.NewHaikuDistiller(bridle.NewHarness(distillerProvider), distillerProviderID, distillerModel)
+	if err != nil {
+		log.Warn("frame funnel: rewriter haiku distiller construction failed; disabling rewriter",
+			"aspect", cfg.Name, "err", err)
+		return funnel.NoopPostTurn{}
+	}
+	haiku.AspectID = cfg.Name
+
+	// Thresholds: zero falls back to spec defaults inside rewriter.New.
+	var trThreshold, atThreshold int
+	if rwCfg != nil {
+		trThreshold = rwCfg.ToolResultThreshold
+		atThreshold = rwCfg.AssistantTextThreshold
+	}
+
+	rw, err := rewriter.New(rewriter.Config{
+		SessionPathFn: func() string {
+			id := sessionIDFn()
+			if id == "" {
+				return ""
+			}
+			return rewriter.SessionPath(aspectCwd, id)
+		},
+		Distiller:              haiku,
+		ModelName:              distillerModel,
+		ToolResultThreshold:    trThreshold,
+		AssistantTextThreshold: atThreshold,
+		Logger:                 log,
+	})
+	if err != nil {
+		log.Warn("frame funnel: rewriter construction failed; disabling",
+			"aspect", cfg.Name, "err", err)
+		return funnel.NoopPostTurn{}
+	}
+
+	log.Info("frame funnel: rewriter enabled",
+		"aspect", cfg.Name,
+		"distiller_provider", distillerProviderID,
+		"distiller_model", distillerModel,
+		"tool_result_threshold", trThreshold,
+		"assistant_text_threshold", atThreshold)
+
+	return rewriter.NewRunner(rw, log)
+}
+
 // buildChatRouter returns the chat-router callbacks plus the gateway it
 // wired the funnel to. The caller is expected to assign gateway.Sender
 // to the broker after broker.New so in-process Frame posts go through
@@ -1055,6 +1173,18 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 
 	threads := route.NewThreadIndex()
 	outputFilter := buildOutputFilter(ef.Aspect.Config, p, bridle.ProviderID(provider), model, log)
+	// PostTurn hook resolves the funnel's session id lazily: the
+	// funnel itself doesn't exist yet (we're constructing its config),
+	// so we capture a pointer that gets filled in after funnel.New.
+	// The runner only invokes the closure inside AfterTurn, by which
+	// time the pointer has been assigned.
+	var funnelPtr *funnel.Funnel
+	postTurn := buildRewriterRunner(ef.Aspect.Config, ef.Aspect.Path, bridle.ProviderID(provider), p, model, func() string {
+		if funnelPtr == nil {
+			return ""
+		}
+		return funnelPtr.SessionID()
+	}, log)
 	f, err := funnel.New(funnel.Config{
 		AspectID: ef.Aspect.Name,
 		Harness:  bridle.NewHarness(p),
@@ -1071,6 +1201,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		Threads:        threads,
 		Pulser:         pulser,
 		UsageRecorder:  recorder,
+		PostTurn:       postTurn,
 		Logger:         log,
 	})
 	if err != nil {
@@ -1078,6 +1209,8 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 			"err", err, "frame", ef.Aspect.Name)
 		return nil, nil
 	}
+	// Bind the lazy session-id closure used by the rewriter runner.
+	funnelPtr = f
 
 	log.Info("frame funnel: deliberation loop ready",
 		"frame", ef.Aspect.Name, "provider", provider, "model", model,

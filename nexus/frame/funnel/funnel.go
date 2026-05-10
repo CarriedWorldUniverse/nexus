@@ -146,6 +146,17 @@ type Config struct {
 	// block the chat path.
 	UsageRecorder UsageRecorder
 
+	// PostTurn runs after each successful provider turn, before the
+	// next deliberation begins. Concrete implementation: the rewriter
+	// runner (nexus/frame/funnel/rewriter), which distills the just-
+	// completed turn's tail in the session jsonl. Synchronous —
+	// distillation must complete before the next --resume so we don't
+	// race claude-code on the file. Returns whether the funnel should
+	// rotate the session id (after sustained distillation failure).
+	// Nil = no post-turn work; default behavior matches Nexus pre-
+	// rewriter.
+	PostTurn PostTurnHook
+
 	// Pulser fires chat-visible status pulses before long ops
 	// (compaction always; long tool chains and provider retries
 	// once F1.4 wires them). Per Lock 5 of the architecture: the
@@ -222,6 +233,9 @@ func New(cfg Config) (*Funnel, error) {
 	}
 	if cfg.UsageRecorder == nil {
 		cfg.UsageRecorder = NoopUsageRecorder{}
+	}
+	if cfg.PostTurn == nil {
+		cfg.PostTurn = NoopPostTurn{}
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -427,6 +441,37 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	f.cumulativeTokens += result.Usage.InputTokens + result.Usage.OutputTokens
 	f.sessionHandle.New = false
 	f.mu.Unlock()
+
+	// Post-turn hook — distills the just-completed turn's tail in
+	// claude-code's session jsonl before we hit --resume on the next
+	// turn. Synchronous; the rewriter's atomic temp-rename is safe
+	// because no provider call is in flight here. If sustained
+	// distillation failures cross the runner's threshold, rotate the
+	// session id to a fresh one rather than continue racking up
+	// errors against a session we can't compress.
+	f.cfg.PostTurn.AfterTurn(ctx)
+	if f.cfg.PostTurn.ShouldResetSession() {
+		// Reset shape mirrors compaction: rotate session id to a
+		// fresh one AND clear sessionTail + cumulativeTokens. The
+		// rewriter requested this because it couldn't compress the
+		// existing jsonl; carrying the same large sessionTail into
+		// the new session would defeat the purpose (next turn would
+		// inherit the bloat and the rewriter would fail again on the
+		// new file). Better to start fully clean.
+		f.mu.Lock()
+		oldID := f.sessionHandle.ID
+		oldTail := len(f.sessionTail)
+		oldTokens := f.cumulativeTokens
+		f.sessionHandle = bridle.SessionHandle{ID: newSessionID(), New: true}
+		f.sessionTail = nil
+		f.cumulativeTokens = 0
+		newID := f.sessionHandle.ID
+		f.mu.Unlock()
+		f.cfg.PostTurn.AcknowledgeReset()
+		f.log.Warn("funnel: rotated session after sustained rewriter failures",
+			"old_session", oldID, "new_session", newID,
+			"discarded_tail_events", oldTail, "discarded_tokens", oldTokens)
+	}
 
 	// Post-hoc filter judges the natural reply. Lock 5's
 	// EventFilterJudging fires before the call so dashboards can
