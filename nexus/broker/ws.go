@@ -394,6 +394,10 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleChatReadFrame(env)
 	case frames.KindChatReaction:
 		c.handleChatReactionFrame(env)
+	case frames.KindAnnounceFile:
+		c.handleAnnounceFileFrame(env)
+	case frames.KindShareFile:
+		c.handleShareFileFrame(env)
 	default:
 		c.log.Info("frame kind not yet handled", "kind", env.Kind)
 	}
@@ -729,6 +733,90 @@ func (c *wsConn) handleChatReactionFrame(env frames.Envelope) {
 		c.log.Warn("chat.reaction: store error",
 			"msg_id", p.MsgID, "reactor", reactor, "emoji", p.Emoji, "err", err)
 	}
+}
+
+// handleAnnounceFileFrame creates a chat post announcing a file plus
+// a linked shared_files row. Responds with file.result carrying the
+// new chat msg_id so the caller can reference the announce in
+// subsequent frames (replies, reactions). The sender is taken from
+// the authenticated connection — payload.From is informational only.
+func (c *wsConn) handleAnnounceFileFrame(env frames.Envelope) {
+	store := c.broker.cfg.ChatStore
+	if store == nil {
+		c.respondError(env, "chat store not configured")
+		return
+	}
+	var p frames.AnnounceFilePayload
+	if err := frames.PayloadAs(env, &p); err != nil {
+		c.respondError(env, "announce_file payload malformed: "+err.Error())
+		return
+	}
+	if p.Path == "" {
+		c.respondError(env, "announce_file: path required")
+		return
+	}
+	from := c.registeredAs
+	if from == "" {
+		from = p.From
+	}
+	if from == "" {
+		c.respondError(env, "announce_file: no sender identity")
+		return
+	}
+	ctx := c.broker.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	msgID, _, err := store.AnnounceSharedFile(ctx, from, p.Path, p.Description)
+	if err != nil {
+		c.respondError(env, "announce_file: store error: "+err.Error())
+		return
+	}
+	resp, _ := frames.NewResponse(frames.KindFileResult, env.ID, frames.FileResultPayload{
+		MsgID: msgID,
+	})
+	c.send(resp)
+}
+
+// handleShareFileFrame records a direct file share to recipients
+// without producing a chat post. Responds with file.result carrying
+// the new share_id. Sender taken from the authenticated connection.
+func (c *wsConn) handleShareFileFrame(env frames.Envelope) {
+	store := c.broker.cfg.ChatStore
+	if store == nil {
+		c.respondError(env, "chat store not configured")
+		return
+	}
+	var p frames.ShareFilePayload
+	if err := frames.PayloadAs(env, &p); err != nil {
+		c.respondError(env, "share_file payload malformed: "+err.Error())
+		return
+	}
+	if p.Path == "" {
+		c.respondError(env, "share_file: path required")
+		return
+	}
+	from := c.registeredAs
+	if from == "" {
+		from = p.From
+	}
+	if from == "" {
+		c.respondError(env, "share_file: no sender identity")
+		return
+	}
+	ctx := c.broker.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	shareID, err := store.ShareFile(ctx, from, p.Path, p.Recipients)
+	if err != nil {
+		c.respondError(env, "share_file: store error: "+err.Error())
+		return
+	}
+	resp, _ := frames.NewResponse(frames.KindFileResult, env.ID, frames.FileResultPayload{
+		ShareID: shareID,
+	})
+	c.send(resp)
 }
 
 // handleRegisterFrame processes the first-frame-after-connect register
