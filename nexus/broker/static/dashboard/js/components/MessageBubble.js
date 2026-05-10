@@ -192,7 +192,7 @@ export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly }) {
         ${!compact && html`
           <div class="msg-head">
             <span class="msg-from" style=${{ color }}>${msg.from}</span>
-            <span class="msg-time">${formatTime(msg.at)}</span>
+            <span class="msg-time">${formatTime(msg.created_at || msg.received_at || msg.at)}</span>
           </div>
         `}
         ${parentMsg && html`

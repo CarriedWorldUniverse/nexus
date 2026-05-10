@@ -138,12 +138,34 @@ function getTopLevelMessages() {
       topLevel.push(m);
     }
   }
-  return { topLevel, replyMap };
+  // Broker doesn't surface reply_count today — derive it from the page
+  // we already loaded so the thread expander shows up. The WS-bump path
+  // above also touches reply_count when a fresh reply arrives, so max()
+  // keeps that explicit value if it's higher than what we can see.
+  const decorated = topLevel.map(t => {
+    const replies = replyMap[t.id]?.length || 0;
+    const existing = t.reply_count || 0;
+    if (replies <= existing) return t;
+    return { ...t, reply_count: replies };
+  });
+  return { topLevel: decorated, replyMap };
 }
 
 function dayLabel(dateStr) {
-  const d = new Date(dateStr + 'Z');
+  if (!dateStr) return '';
+  // formatTime in MessageBubble does the same dance: nexus emits RFC 3339
+  // (already terminated with Z), agent-network's legacy shape was naive
+  // UTC needing Z appended. Tolerate both.
+  const isISO = /Z$|[+-]\d\d:?\d\d$/.test(dateStr);
+  const d = new Date(isISO ? dateStr : dateStr + 'Z');
+  if (isNaN(d.getTime())) return '';
   return d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+}
+
+// chat.list normalizes timestamps to created_at; chat.deliver carries
+// received_at; legacy code paths used `at`. Read whichever exists.
+function msgAt(msg) {
+  return msg && (msg.created_at || msg.received_at || msg.at) || '';
 }
 
 function handleMessageTap(e) {
@@ -256,7 +278,7 @@ export function FeedView() {
 
       <div class="chat-messages" onclick=${handleMessageTap}>
         ${filteredTopLevel.map(msg => {
-          const day = dayLabel(msg.at);
+          const day = dayLabel(msgAt(msg));
           const showDay = day !== lastDay;
           const compact = !showDay && msg.from === lastFrom;
           lastFrom = msg.from;

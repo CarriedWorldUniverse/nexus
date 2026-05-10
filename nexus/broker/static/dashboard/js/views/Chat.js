@@ -258,7 +258,19 @@ function getTopLevelMessages() {
       topLevel.push(m);
     }
   }
-  return { topLevel, replyMap };
+  // The broker doesn't surface reply_count in chat.list / chat.deliver,
+  // so derive it from what we have loaded. This keeps the thread expander
+  // visible even if the parent's row was returned without the field.
+  // The WS-bump path in onWsMessageCreated still bumps an explicit
+  // reply_count on parents already in the signal — we max() so that a
+  // fresh derivation from replyMap doesn't undercount stale state.
+  const decorated = topLevel.map(t => {
+    const replies = replyMap[t.id]?.length || 0;
+    const existing = t.reply_count || 0;
+    if (replies <= existing) return t;
+    return { ...t, reply_count: replies };
+  });
+  return { topLevel: decorated, replyMap };
 }
 
 function channelLabel(ch) {
@@ -274,8 +286,20 @@ function channelDesc(ch) {
 }
 
 function dayLabel(dateStr) {
-  const d = new Date(dateStr + 'Z');
+  if (!dateStr) return '';
+  // Match formatTime's tolerance: nexus emits RFC 3339 (already terminated
+  // with Z), agent-network's legacy shape was naive UTC needing Z appended.
+  const isISO = /Z$|[+-]\d\d:?\d\d$/.test(dateStr);
+  const d = new Date(isISO ? dateStr : dateStr + 'Z');
+  if (isNaN(d.getTime())) return '';
   return d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+}
+
+// Pick the timestamp field for a message regardless of which path delivered
+// it. chat.list (REST-via-WS) normalizes to created_at; WS shim does the
+// same; legacy code paths used `at`. Try in that order.
+function msgAt(msg) {
+  return msg && (msg.created_at || msg.received_at || msg.at) || '';
 }
 
 // Delegated handler for #NNNN msg id refs rendered as <a class="msg-id-ref">.
@@ -430,7 +454,7 @@ export function Chat() {
           <div class="chat-load-older chat-load-older-end">Start of history</div>
         `}
         ${topLevel.map(msg => {
-          const day = dayLabel(msg.at);
+          const day = dayLabel(msgAt(msg));
           const showDay = day !== lastDay;
           const compact = !showDay && msg.from === lastFrom;
           lastFrom = msg.from;
