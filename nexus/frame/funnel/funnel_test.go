@@ -106,8 +106,8 @@ func TestNew_RequiresFields(t *testing.T) {
 
 func TestNew_AppliesDefaultCompaction(t *testing.T) {
 	f, _ := newTestFunnel(t)
-	if f.cfg.Compaction.ThresholdTokens != 150_000 {
-		t.Errorf("default ThresholdTokens=%d want 150000", f.cfg.Compaction.ThresholdTokens)
+	if f.cfg.Compaction.ThresholdTokens != 125_000 {
+		t.Errorf("default ThresholdTokens=%d want 125000", f.cfg.Compaction.ThresholdTokens)
 	}
 }
 
