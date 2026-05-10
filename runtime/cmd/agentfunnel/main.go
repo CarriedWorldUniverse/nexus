@@ -50,6 +50,7 @@ import (
 	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
 	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/rewriter"
 	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
 	"github.com/CarriedWorldUniverse/nexus/runtime/keyfile"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
@@ -162,6 +163,18 @@ func main() {
 	gateway := wsasp.NewGateway(wsClient)
 	commsRunner := funnel.CommsRunner{Gateway: gateway}
 
+	// Rewriter wiring: default-on for claude-code-flavored providers,
+	// no-op otherwise. The session jsonl path is resolved lazily
+	// through funnelPtr so funnel session-id rotations (compaction,
+	// rewriter-driven reset) are picked up automatically.
+	var funnelPtr *funnel.Funnel
+	postTurn := buildAgentFunnelRewriter(res.AspectName, res.Provider, provider, res.Model, func() string {
+		if funnelPtr == nil {
+			return ""
+		}
+		return funnelPtr.SessionID()
+	}, log)
+
 	systemPrompt := composeSystemPrompt(res)
 	f, err := funnel.New(funnel.Config{
 		AspectID:     res.AspectName,
@@ -171,11 +184,13 @@ func main() {
 		SystemPrompt: systemPrompt,
 		Tools:        funnel.CommsToolDefs(),
 		Runner:       funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		PostTurn:     postTurn,
 		Logger:       log,
 	})
 	if err != nil {
 		fail(log, "funnel.New", err)
 	}
+	funnelPtr = f
 	bridge = wsasp.NewBridge(f)
 
 	log.Info("agentfunnel: starting deliberation loop",
@@ -324,6 +339,76 @@ func resolveCursorDir(flagVal string) string {
 		return "cursor"
 	}
 	return cwd
+}
+
+// buildAgentFunnelRewriter wires the per-turn jsonl rewriter for
+// aspects spawned via agentfunnel. Symmetric with the Frame-side
+// wiring in cmd/nexus/main.go but simpler — no aspect.json on the
+// host, so config defaults are inferred from the provider and
+// thresholds use spec defaults.
+//
+// Rules:
+//   - claude-code-flavored providers → enabled, claude-haiku-4-5 as
+//     distiller (Frame's provider reused)
+//   - direct-api providers (claude-api etc.) → no-op (no jsonl to
+//     compress)
+//   - any error during construction → no-op + WARN; never blocks
+//     funnel startup
+//
+// The session path is resolved lazily so funnel session rotations
+// land correctly without a config refresh.
+func buildAgentFunnelRewriter(aspectName, providerName string, frameProvider bridle.Provider, frameModel string, sessionIDFn func() string, log *slog.Logger) funnel.PostTurnHook {
+	if !isClaudeCodeProvider(providerName) {
+		log.Info("agentfunnel: rewriter disabled (provider has no session jsonl)",
+			"aspect", aspectName, "provider", providerName)
+		return funnel.NoopPostTurn{}
+	}
+
+	// Distiller: reuse the frame provider with claude-haiku-4-5 as the
+	// model. Operator override would land via a future rewriter
+	// section in the validation response — out of scope for v1.
+	haiku, err := rewriter.NewHaikuDistiller(bridle.NewHarness(frameProvider), bridle.ProviderID(providerName), "claude-haiku-4-5")
+	if err != nil {
+		log.Warn("agentfunnel: rewriter haiku construction failed; disabling rewriter",
+			"aspect", aspectName, "err", err)
+		return funnel.NoopPostTurn{}
+	}
+	haiku.AspectID = aspectName
+
+	cwd, _ := os.Getwd()
+	rw, err := rewriter.New(rewriter.Config{
+		SessionPathFn: func() string {
+			id := sessionIDFn()
+			if id == "" {
+				return ""
+			}
+			return rewriter.SessionPath(cwd, id)
+		},
+		Distiller: haiku,
+		ModelName: "claude-haiku-4-5",
+		Logger:    log,
+	})
+	if err != nil {
+		log.Warn("agentfunnel: rewriter construction failed; disabling",
+			"aspect", aspectName, "err", err)
+		return funnel.NoopPostTurn{}
+	}
+
+	log.Info("agentfunnel: rewriter enabled",
+		"aspect", aspectName, "provider", providerName,
+		"distiller_model", "claude-haiku-4-5", "cwd", cwd)
+	return rewriter.NewRunner(rw, log)
+}
+
+// isClaudeCodeProvider reports whether the provider name corresponds
+// to claude-code (subprocess-stream — writes a session jsonl). Other
+// providers don't, so the rewriter is moot for them.
+func isClaudeCodeProvider(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claude-code", "claudecode":
+		return true
+	}
+	return false
 }
 
 func fail(log *slog.Logger, msg string, err error) {

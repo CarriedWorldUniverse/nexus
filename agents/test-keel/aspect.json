@@ -1,0 +1,15 @@
+{
+  "name": "test-keel",
+  "role": "aspect",
+  "context_mode": "global",
+  "provider": "claude-code",
+  "provider_config": {
+    "model": "claude-opus-4-7"
+  },
+  "port": 0,
+  "capabilities": ["test"],
+  "filter": "hard",
+  "rewriter": {
+    "enabled": true
+  }
+}
