@@ -76,7 +76,39 @@ type AspectConfig struct {
 	// otherwise to the aspect's main Model.
 	FilterProviderConfig map[string]any `json:"filter_provider_config,omitempty"`
 
+	// Rewriter configures the per-turn session-jsonl rewriter (see
+	// nexus/frame/funnel/rewriter). Only meaningful for claude-code-
+	// backed aspects — direct-API providers don't replay a jsonl, so
+	// distillation is moot. Empty/absent → enabled by default for
+	// claude-code, disabled for everyone else.
+	Rewriter *RewriterConfig `json:"rewriter,omitempty"`
+
 	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// RewriterConfig controls the per-turn jsonl rewriter. All fields are
+// optional; zero-values resolve to the spec defaults
+// (G:/My Drive/nexus/general/specs/2026-05-10-jsonl-rewriter-spec.md).
+//
+//   - Enabled: nil = default-on for claude-code-backed aspects,
+//     default-off otherwise. Explicit *bool lets the operator override
+//     either way.
+//   - ToolResultThreshold: bytes; tool_result content above this is
+//     distilled. Default 1000.
+//   - AssistantTextThreshold: bytes; assistant text above this is
+//     distilled. Default 500.
+//   - DistillerProvider: provider id for the haiku call. Empty falls
+//     back to the Frame's main provider when it's a Claude flavor;
+//     otherwise the operator must set it explicitly so we don't
+//     accidentally hammer a non-Claude main model.
+//   - DistillerModel: model id. Empty falls back to claude-haiku-4-5
+//     for Claude providers, the Frame's main model otherwise.
+type RewriterConfig struct {
+	Enabled                *bool  `json:"enabled,omitempty"`
+	ToolResultThreshold    int    `json:"tool_result_threshold,omitempty"`
+	AssistantTextThreshold int    `json:"assistant_text_threshold,omitempty"`
+	DistillerProvider      string `json:"distiller_provider,omitempty"`
+	DistillerModel         string `json:"distiller_model,omitempty"`
 }
 
 // EffectiveRole returns the role with empty-string normalized to RoleAspect.

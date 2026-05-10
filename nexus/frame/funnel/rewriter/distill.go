@@ -7,6 +7,36 @@ import (
 	"time"
 )
 
+// DistillTail rewrites records from the previous distilled boundary
+// up to the LAST record in the session. Use this when the caller
+// doesn't know the precise turn-boundary uuid (claude-code's
+// subprocess provider doesn't expose it). The rewriter walks back
+// from EOF to the most recent _nexus_distilled marker (or session
+// start) and distills that span.
+//
+// Returns ErrNoBoundary if the session has zero parseable records.
+// Otherwise behaves identically to DistillTurn — same atomicity,
+// idempotence, error handling, marker semantics.
+func (rw *Rewriter) DistillTail(ctx context.Context) (Stats, error) {
+	records, fallback, totalBytes, err := readSession(rw.sessionPath())
+	if err != nil {
+		return Stats{}, err
+	}
+	// Find the last parseable record — that's the end of the most
+	// recent turn. nil entries (parse failures) get skipped.
+	boundary := -1
+	for i := len(records) - 1; i >= 0; i-- {
+		if records[i] != nil {
+			boundary = i
+			break
+		}
+	}
+	if boundary < 0 {
+		return Stats{}, ErrNoBoundary
+	}
+	return rw.distill(ctx, records, fallback, totalBytes, boundary)
+}
+
 // DistillTurn rewrites records from the previous distilled boundary up
 // to and including the record identified by turnBoundaryUUID.
 //
@@ -25,7 +55,7 @@ func (rw *Rewriter) DistillTurn(ctx context.Context, turnBoundaryUUID string) (S
 		return Stats{}, ErrNoBoundary
 	}
 
-	records, fallback, totalBytes, err := readSession(rw.cfg.SessionPath)
+	records, fallback, totalBytes, err := readSession(rw.sessionPath())
 	if err != nil {
 		return Stats{}, err
 	}
@@ -34,6 +64,14 @@ func (rw *Rewriter) DistillTurn(ctx context.Context, turnBoundaryUUID string) (S
 	if boundary < 0 {
 		return Stats{}, ErrNoBoundary
 	}
+	return rw.distill(ctx, records, fallback, totalBytes, boundary)
+}
+
+// distill is the shared implementation behind DistillTurn and
+// DistillTail. Caller has already located the boundary index; this
+// function walks the rewrite scope, calls the distiller per record,
+// stamps markers, and writes the session back atomically.
+func (rw *Rewriter) distill(ctx context.Context, records []rawRecord, fallback [][]byte, totalBytes, boundary int) (Stats, error) {
 	start := scopeStart(records, boundary)
 
 	// Pre-compute tool_use_id → tool name from every assistant
@@ -97,7 +135,7 @@ func (rw *Rewriter) DistillTurn(ctx context.Context, turnBoundaryUUID string) (S
 		return stats, nil
 	}
 
-	if err := writeSessionAtomic(rw.cfg.SessionPath, records, fallback); err != nil {
+	if err := writeSessionAtomic(rw.sessionPath(), records, fallback); err != nil {
 		return stats, err
 	}
 
