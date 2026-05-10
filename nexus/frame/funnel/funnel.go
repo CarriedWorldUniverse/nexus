@@ -492,6 +492,8 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		"tool_calls", len(result.ToolCalls),
 		"input_tokens", result.Usage.InputTokens,
 		"output_tokens", result.Usage.OutputTokens,
+		"cache_read", result.Usage.CacheReadInputTokens,
+		"cache_create", result.Usage.CacheCreationInputTokens,
 		"cumulative", f.cumulativeTokens,
 		"stop_reason", result.StopReason,
 		"filter_post", decision.ShouldPost,

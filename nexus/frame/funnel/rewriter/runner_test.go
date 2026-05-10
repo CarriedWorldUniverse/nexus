@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -51,8 +52,12 @@ func (f *failingDistiller) DistillAssistantText(ctx context.Context, content str
 // stays at 0, ShouldResetSession is false.
 func TestRunner_AfterTurn_HappyPath(t *testing.T) {
 	long := longString(800)
+	// Two turns: turn 1 distillable, turn 2 left intact for cache safety.
 	path := writeJSONL(t, []map[string]any{
-		{"type": "assistant", "uuid": "a1", "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": long}}}},
+		{"type": "user", "uuid": "u1", "parentUuid": nil, "message": map[string]any{"content": "go"}},
+		{"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": long}}}},
+		{"type": "user", "uuid": "u2", "parentUuid": nil, "message": map[string]any{"content": "again"}},
+		{"type": "assistant", "uuid": "a2", "parentUuid": "u2", "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": "small"}}}},
 	})
 	rw, err := New(Config{
 		SessionPath:            path,
@@ -251,6 +256,78 @@ func TestSessionPathFn_Precedence(t *testing.T) {
 	}
 	if got := rw.sessionPath(); got != dynPath {
 		t.Errorf("sessionPath = %q, want %q (Fn should take precedence)", got, dynPath)
+	}
+}
+
+// Cache-preservation invariant: DistillTail must NOT touch records
+// from the most-recent turn. The most-recent turn is identified by
+// finding the last `user` record with parentUuid == null. Records at
+// or after that index are left intact so claude-code's prefix cache
+// stays valid on the next --resume.
+func TestDistillTail_LeavesMostRecentTurnIntact(t *testing.T) {
+	long := longString(800)
+	// Layout:
+	//   [0] user, parentUuid=null  (turn 1 start)
+	//   [1] assistant, big text    (turn 1 — should distill)
+	//   [2] user, parentUuid=null  (turn 2 start — NOT for distill)
+	//   [3] assistant, big text    (turn 2 — NOT for distill)
+	path := writeJSONL(t, []map[string]any{
+		{"type": "user", "uuid": "u1", "parentUuid": nil, "message": map[string]any{"content": "hi"}},
+		{"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": long}}}},
+		{"type": "user", "uuid": "u2", "parentUuid": nil, "message": map[string]any{"content": "again"}},
+		{"type": "assistant", "uuid": "a2", "parentUuid": "u2", "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": long}}}},
+	})
+	d := &stubDistiller{suffix: "scope"}
+	rw, _ := New(Config{
+		SessionPath:            path,
+		Distiller:              d,
+		Logger:                 quietLogger(),
+		AssistantTextThreshold: 100,
+	})
+	stats, err := rw.DistillTail(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Turn 1's assistant (a1) should be distilled; turn 2's (a2) MUST NOT.
+	if stats.RecordsRewritten != 1 {
+		t.Errorf("RecordsRewritten = %d, want 1 (only turn 1, leaving turn 2 cache-stable)", stats.RecordsRewritten)
+	}
+	out := readJSONL(t, path)
+	a1 := out[1]["message"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	a2 := out[3]["message"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.HasPrefix(a1, "[distilled-text]") {
+		t.Errorf("turn 1 assistant should be distilled, got %q", a1[:50])
+	}
+	if a2 != long {
+		t.Errorf("turn 2 assistant MUST be byte-identical to original (cache invariant); got distillation marker")
+	}
+	// Turn 2's records also must not have markers — that would also
+	// break the cache (marker bytes are themselves prefix bytes).
+	if _, ok := out[2][MarkerKey]; ok {
+		t.Errorf("turn 2 user record got marker stamp — cache invariant violated")
+	}
+	if _, ok := out[3][MarkerKey]; ok {
+		t.Errorf("turn 2 assistant record got marker stamp — cache invariant violated")
+	}
+}
+
+// Single-turn session: DistillTail must return ErrNoBoundary cleanly
+// rather than distill the only turn (which would invalidate cache).
+func TestDistillTail_SingleTurn_NoBoundary(t *testing.T) {
+	long := longString(800)
+	path := writeJSONL(t, []map[string]any{
+		{"type": "user", "uuid": "u1", "parentUuid": nil, "message": map[string]any{"content": "hi"}},
+		{"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": long}}}},
+	})
+	rw, _ := New(Config{
+		SessionPath:            path,
+		Distiller:              &stubDistiller{suffix: "single"},
+		Logger:                 quietLogger(),
+		AssistantTextThreshold: 100,
+	})
+	_, err := rw.DistillTail(context.Background())
+	if !errors.Is(err, ErrNoBoundary) {
+		t.Errorf("single-turn session: got %v, want ErrNoBoundary", err)
 	}
 }
 

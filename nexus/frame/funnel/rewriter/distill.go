@@ -22,19 +22,70 @@ func (rw *Rewriter) DistillTail(ctx context.Context) (Stats, error) {
 	if err != nil {
 		return Stats{}, err
 	}
-	// Find the last parseable record — that's the end of the most
-	// recent turn. nil entries (parse failures) get skipped.
-	boundary := -1
-	for i := len(records) - 1; i >= 0; i-- {
-		if records[i] != nil {
-			boundary = i
-			break
-		}
+	// Cache-preservation invariant: never distill records the model
+	// just used in the most-recent turn. Mutating those records
+	// invalidates claude-code's prefix cache (the cache is keyed by
+	// bytes-as-sent; any mutation breaks the prefix). Empirically
+	// observed on the smoke run: ~4-10K tokens of cache_read got
+	// re-cached when distillation touched recent records.
+	//
+	// Strategy: find the start of the MOST-RECENT turn (the last
+	// `user` record with parentUuid == null, which is claude-code's
+	// turn-boundary marker), then set scope boundary to one record
+	// BEFORE that index. Records from turn N-1 and earlier are fair
+	// game; turn N is left untouched until the next AfterTurn.
+	currentTurnStart := findMostRecentTurnStart(records)
+	if currentTurnStart < 0 {
+		// No turn boundaries found yet — session probably has only
+		// scaffolding records. Nothing safe to distill.
+		return Stats{}, ErrNoBoundary
+	}
+	if currentTurnStart == 0 {
+		// The only turn IS the most-recent turn. Nothing to distill
+		// without invalidating cache. Skip cleanly.
+		return Stats{}, ErrNoBoundary
+	}
+	boundary := currentTurnStart - 1
+	// Walk back past nil entries (parse failures) to a real record.
+	for boundary >= 0 && records[boundary] == nil {
+		boundary--
 	}
 	if boundary < 0 {
 		return Stats{}, ErrNoBoundary
 	}
 	return rw.distill(ctx, records, fallback, totalBytes, boundary)
+}
+
+// findMostRecentTurnStart returns the index of the last `user` record
+// whose parentUuid is null. claude-code emits one such record at the
+// start of each turn (the prompt that triggered the agentic loop).
+// Returns -1 if no turn-start record is present.
+//
+// We also accept records with the legacy "type":"user" shape used by
+// queue-operation lines AS LONG AS parentUuid is null AND
+// content matches the turn-start pattern. claude-code's queue-operation
+// records have type=queue-operation, not user, so they don't match.
+func findMostRecentTurnStart(records []rawRecord) int {
+	for i := len(records) - 1; i >= 0; i-- {
+		rec := records[i]
+		if rec == nil {
+			continue
+		}
+		if rec.recordType() != "user" {
+			continue
+		}
+		// parentUuid must be present AND null. A missing field is
+		// not a turn boundary — claude-code always sets it.
+		raw, ok := rec["parentUuid"]
+		if !ok {
+			continue
+		}
+		// json.RawMessage of `null` is exactly the bytes "null".
+		if string(raw) == "null" {
+			return i
+		}
+	}
+	return -1
 }
 
 // DistillTurn rewrites records from the previous distilled boundary up
