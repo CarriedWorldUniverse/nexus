@@ -392,6 +392,8 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleChatSendFrame(env)
 	case frames.KindChatRead:
 		c.handleChatReadFrame(env)
+	case frames.KindChatReaction:
+		c.handleChatReactionFrame(env)
 	default:
 		c.log.Info("frame kind not yet handled", "kind", env.Kind)
 	}
@@ -421,11 +423,15 @@ func (c *wsConn) handleChatReadFrame(env frames.Envelope) {
 		c.send(empty)
 		return
 	}
-	if p.ThreadID <= 0 {
-		// chat.read without a thread is a no-op. The funnel calls this
-		// with a thread id known via prior chat.deliver; calling
-		// without one is most likely a model bug, not a real read
-		// request — return empty and move on.
+	// Per ChatReadPayload doc: "request for a specific message or thread".
+	// Fall back to MsgID when ThreadID is unset — ListThread walks descendants
+	// from the given node, so a leaf returns just itself, a root returns the
+	// whole subtree. Either is a meaningful read.
+	rootID := p.ThreadID
+	if rootID <= 0 {
+		rootID = int64(p.MsgID)
+	}
+	if rootID <= 0 {
 		empty, _ := frames.NewResponse(frames.KindChatReadResult, env.ID, frames.ChatReadResultPayload{})
 		c.send(empty)
 		return
@@ -436,10 +442,10 @@ func (c *wsConn) handleChatReadFrame(env frames.Envelope) {
 		ctx = context.Background()
 	}
 	const maxMessages = 200 // bounded so a thread with 5k entries doesn't slurp them all
-	msgs, err := store.ListThread(ctx, p.ThreadID, p.SinceID, maxMessages)
+	msgs, err := store.ListThread(ctx, rootID, p.SinceID, maxMessages)
 	if err != nil {
 		c.log.Warn("chat.read: store error",
-			"thread", p.ThreadID, "since", p.SinceID, "err", err)
+			"thread", rootID, "since", p.SinceID, "err", err)
 		empty, _ := frames.NewResponse(frames.KindChatReadResult, env.ID, frames.ChatReadResultPayload{})
 		c.send(empty)
 		return
@@ -680,6 +686,48 @@ func (c *wsConn) handleChatSendFrame(env frames.Envelope) {
 	if _, err := c.broker.HandleChatSend(ctx, from, payload.Content,
 		int64(payload.ReplyTo), payload.Topic); err != nil {
 		c.log.Warn("chat.send: handler error", "err", err, "from", from)
+	}
+}
+
+// handleChatReactionFrame toggles an emoji reaction on a chat message.
+// Accepts the frame from any authenticated connection (operator or
+// aspect). Reactions are toggle-semantics — same (msg, reactor, emoji)
+// triple twice = react, then unreact. The reactor is taken from the
+// authenticated connection identity, never trusting the payload's
+// `from` field for cross-identity spoofing protection. Fire-and-forget:
+// no response frame; downstream observers learn via reaction.applied
+// fan-out (when wired).
+func (c *wsConn) handleChatReactionFrame(env frames.Envelope) {
+	store := c.broker.cfg.ChatStore
+	if store == nil {
+		c.log.Warn("chat.reaction: no chat store configured")
+		return
+	}
+	var p frames.ChatReactionPayload
+	if err := frames.PayloadAs(env, &p); err != nil {
+		c.log.Warn("chat.reaction payload malformed", "err", err, "from", c.registeredAs)
+		return
+	}
+	if p.MsgID <= 0 || p.Emoji == "" {
+		c.log.Warn("chat.reaction missing required fields",
+			"msg_id", p.MsgID, "emoji", p.Emoji, "from", c.registeredAs)
+		return
+	}
+	reactor := c.registeredAs
+	if reactor == "" {
+		reactor = p.From // fall back only if the connection has no name (test paths)
+	}
+	if reactor == "" {
+		c.log.Warn("chat.reaction: no reactor identity")
+		return
+	}
+	ctx := c.broker.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, err := store.ToggleReaction(ctx, int64(p.MsgID), reactor, p.Emoji); err != nil {
+		c.log.Warn("chat.reaction: store error",
+			"msg_id", p.MsgID, "reactor", reactor, "emoji", p.Emoji, "err", err)
 	}
 }
 
