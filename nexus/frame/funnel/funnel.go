@@ -49,9 +49,13 @@ import (
 // before hitting the provider's auto-compact threshold.
 type CompactionPolicy struct {
 	// ThresholdTokens is the cumulative input+output token count at
-	// which the funnel runs a summarize-turn. Default 150_000 — leaves
-	// 40k headroom under claude-code's empirically-observed 191k
-	// auto-trigger.
+	// which the funnel runs a summarize-turn. Default 125_000 — keeps
+	// the working context in the operator's 125K-150K target window.
+	// cumulativeTokens counts only UNCACHED input + output; the cached
+	// portion of the prefix (often 30-70K once the conversation warms
+	// up) is on top of this number. Setting the trigger at 125K leaves
+	// headroom for the cached prefix without overshooting claude-code's
+	// empirically-observed 191k auto-compact.
 	ThresholdTokens int
 
 	// SummarizationModel is the model to use for the cheap summarize
@@ -67,7 +71,7 @@ type CompactionPolicy struct {
 // DefaultCompactionPolicy returns sensible v1 defaults.
 func DefaultCompactionPolicy() CompactionPolicy {
 	return CompactionPolicy{
-		ThresholdTokens:  150_000,
+		ThresholdTokens:  125_000,
 		MaxSummaryTokens: 4_096,
 	}
 }
