@@ -498,6 +498,68 @@ func operatorChecks() []Check {
 			},
 		},
 		{
+			Name: "announce_file", Kind: "announce_file", Surface: SurfaceOperator,
+			Description: "announce a file path to chat; verify msg_id ack and chat row visibility",
+			Run: func(ctx context.Context, c *Conn) Result {
+				probePath := fmt.Sprintf("/tmp/wstest-announce-%d.md", time.Now().UnixMicro())
+				probeDesc := fmt.Sprintf("wstest announce probe %d", time.Now().UnixMicro())
+				raw, err := c.RPC(ctx, frames.KindAnnounceFile, frames.AnnounceFilePayload{
+					From:        "operator",
+					Path:        probePath,
+					Description: probeDesc,
+				})
+				if err != nil {
+					return fail("rpc: " + err.Error())
+				}
+				var p frames.FileResultPayload
+				if err := json.Unmarshal(raw, &p); err != nil {
+					return fail("decode: " + err.Error())
+				}
+				if p.MsgID == 0 {
+					return fail("file.result missing msg_id for announce")
+				}
+				// Confirm via chat.read that the row landed.
+				readRaw, err := c.RPC(ctx, frames.KindChatRead, frames.ChatReadPayload{MsgID: int(p.MsgID)})
+				if err != nil {
+					return fail("verify read: " + err.Error())
+				}
+				var rr frames.ChatReadResultPayload
+				if err := json.Unmarshal(readRaw, &rr); err != nil {
+					return fail("verify decode: " + err.Error())
+				}
+				if len(rr.Messages) == 0 {
+					return fail("announce msg_id not retrievable via chat.read")
+				}
+				return pass(fmt.Sprintf("msg_id=%d announced %q", p.MsgID, probePath))
+			},
+		},
+		{
+			Name: "share_file", Kind: "share_file", Surface: SurfaceOperator,
+			Description: "share a file with named recipients (no chat post); verify share_id ack",
+			Run: func(ctx context.Context, c *Conn) Result {
+				probePath := fmt.Sprintf("/tmp/wstest-share-%d.md", time.Now().UnixMicro())
+				raw, err := c.RPC(ctx, frames.KindShareFile, frames.ShareFilePayload{
+					From:       "operator",
+					Path:       probePath,
+					Recipients: []string{"keel", "anvil"},
+				})
+				if err != nil {
+					return fail("rpc: " + err.Error())
+				}
+				var p frames.FileResultPayload
+				if err := json.Unmarshal(raw, &p); err != nil {
+					return fail("decode: " + err.Error())
+				}
+				if p.ShareID == 0 {
+					return fail("file.result missing share_id for share")
+				}
+				if p.MsgID != 0 {
+					return fail(fmt.Sprintf("share_file should not produce a msg_id, got %d", p.MsgID))
+				}
+				return pass(fmt.Sprintf("share_id=%d for %q", p.ShareID, probePath))
+			},
+		},
+		{
 			Name: "unsubscribe.chat", Kind: "unsubscribe.chat", Surface: SurfaceOperator,
 			Description: "drop the chat.deliver subscription",
 			Run: func(ctx context.Context, c *Conn) Result {
