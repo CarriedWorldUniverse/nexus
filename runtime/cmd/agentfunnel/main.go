@@ -182,7 +182,10 @@ func main() {
 		Provider:     bridle.ProviderID(res.Provider),
 		Model:        res.Model,
 		SystemPrompt: systemPrompt,
-		Tools:        funnel.CommsToolDefs(),
+		// Tools field is for direct-API providers; claude-code subprocess
+		// owns its own tool surface natively. Mirrors cmd/nexus/main.go's
+		// toolsForProvider — see #181 for the MCP fix.
+		Tools:        toolsForProviderAgent(bridle.ProviderID(res.Provider)),
 		Runner:       funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
 		PostTurn:     postTurn,
 		Logger:       log,
@@ -409,6 +412,20 @@ func isClaudeCodeProvider(name string) bool {
 		return true
 	}
 	return false
+}
+
+// toolsForProviderAgent mirrors cmd/nexus/main.go's toolsForProvider:
+// claude-code subprocess owns its tool surface natively, so passing
+// CommsToolDefs creates a phantom surface (model sees the SystemPrompt
+// promise of send_chat etc. but cannot call them, AND can talk itself
+// out of using legit native tools). Empty Tools for claude-code; full
+// CommsToolDefs for direct-API providers. MCP is the proper fix (#181).
+func toolsForProviderAgent(id bridle.ProviderID) []bridle.ToolDef {
+	switch id {
+	case "claude-code", "claudecode":
+		return nil
+	}
+	return funnel.CommsToolDefs()
 }
 
 func fail(log *slog.Logger, msg string, err error) {
