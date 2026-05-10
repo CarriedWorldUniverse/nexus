@@ -254,6 +254,25 @@ func TestSessionPathFn_Precedence(t *testing.T) {
 	}
 }
 
+// Exact-match encoding: confirmed empirically against
+// ~/.claude/projects/ on Windows that
+// `C:\Users\jacin\AppData\Local\Temp\nexus-diligence` ↔
+// `C--Users-jacin-AppData-Local-Temp-nexus-diligence`. The colon AND
+// the following backslash both produce dashes (not collapsed).
+// Smoke-test landed this regression — original encoding stripped the
+// colon and produced `C-Users-...` (one dash), missing the file.
+func TestEncodeCwd_MatchesClaudeCodeExact(t *testing.T) {
+	if got, want := encodeCwd(`C:\Users\jacin\AppData\Local\Temp\nexus-diligence`),
+		"C--Users-jacin-AppData-Local-Temp-nexus-diligence"; got != want {
+		t.Errorf("encodeCwd: got %q, want %q", got, want)
+	}
+	// Forward-slash path equivalent (Go's os.Getwd may emit either).
+	if got, want := encodeCwd(`C:/Users/jacin/AppData/Local/Temp/nexus-diligence`),
+		"C--Users-jacin-AppData-Local-Temp-nexus-diligence"; got != want {
+		t.Errorf("encodeCwd (forward-slash): got %q, want %q", got, want)
+	}
+}
+
 // SessionPath is the encoded-cwd format claude-code uses. Round-trip
 // the canonical Windows example from real keel session jsonl path.
 func TestSessionPath_EncodingShape(t *testing.T) {

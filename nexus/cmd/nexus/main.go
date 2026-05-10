@@ -1179,7 +1179,13 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 	// The runner only invokes the closure inside AfterTurn, by which
 	// time the pointer has been assigned.
 	var funnelPtr *funnel.Funnel
-	postTurn := buildRewriterRunner(ef.Aspect.Config, ef.Aspect.Path, bridle.ProviderID(provider), p, model, func() string {
+	// claude-code uses the PARENT process's cwd to encode the
+	// projects-directory key (it spawns `claude` with no Dir override).
+	// The Frame is embedded in the nexus process, so its subprocess
+	// inherits the nexus cwd — NOT the aspect home path. Resolve cwd
+	// here so the rewriter looks at the same file claude-code writes.
+	processCwd, _ := os.Getwd()
+	postTurn := buildRewriterRunner(ef.Aspect.Config, processCwd, bridle.ProviderID(provider), p, model, func() string {
 		if funnelPtr == nil {
 			return ""
 		}
