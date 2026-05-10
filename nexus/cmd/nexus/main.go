@@ -996,6 +996,24 @@ func isClaudeFlavor(id bridle.ProviderID) bool {
 	return false
 }
 
+// toolsForProvider returns the bridle.ToolDef set the funnel should
+// register on TurnRequest.Tools. Direct-API providers (claude-api,
+// future ollama/openai) use the funnel's Go-function tool surface
+// (CommsToolDefs) — bridle routes tool_use through ToolRunner. claude-
+// code is subprocess-stream: the CLI owns tool execution against its
+// own native toolkit; bridle's Tools field doesn't propagate. Passing
+// CommsToolDefs to claude-code creates a phantom tool surface where
+// the model thinks send_chat/triage etc. exist but can't call them.
+// Until the MCP route (#181) ships, claude-code Frames get empty
+// Tools and rely on the funnel's auto-post path for reply surfacing.
+func toolsForProvider(id bridle.ProviderID) []bridle.ToolDef {
+	switch id {
+	case "claude-code", "claudecode":
+		return nil
+	}
+	return funnel.CommsToolDefs()
+}
+
 // buildRewriterRunner constructs the per-turn jsonl rewriter runner
 // for the Frame's funnel. Returns funnel.NoopPostTurn when the
 // rewriter is disabled or the configuration would be unworkable
@@ -1200,8 +1218,19 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		// the EmbeddedFrame is picked up by the next turn without
 		// rebuilding the funnel. Spec §11 in-process refresh path.
 		SystemPromptFn: ef.SystemPrompt,
-		Tools:          funnel.CommsToolDefs(),
-		Runner:         funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		// Tools: bridle.ToolDef[] is for direct-API providers where bridle
+		// routes the model's tool_use through ToolRunner. For claude-code
+		// (subprocess-stream), the CLI owns tool execution against its
+		// own native toolkit (Bash, Read, Glob, etc.) and bridle's Tools
+		// field doesn't propagate. Passing CommsToolDefs() for a claude-
+		// code Frame creates a phantom tool surface — the model sees the
+		// SystemPrompt promise of send_chat/triage etc. but cannot call
+		// them, AND can confuse itself out of using legit native tools.
+		// The MCP route (task #181) is the proper fix; for now, empty
+		// Tools for claude-code Frames so the model relies on its native
+		// toolkit + the funnel's auto-post path for replies.
+		Tools:  toolsForProvider(bridle.ProviderID(provider)),
+		Runner: funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
 		Filter:         outputFilter,
 		ChatGateway:    gateway,
 		Threads:        threads,
@@ -1220,7 +1249,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 
 	log.Info("frame funnel: deliberation loop ready",
 		"frame", ef.Aspect.Name, "provider", provider, "model", model,
-		"tools", len(funnel.CommsToolDefs()))
+		"tools", len(toolsForProvider(bridle.ProviderID(provider))))
 
 	frameName := ef.Aspect.Name
 	return &broker.ChatRouterCallbacks{
