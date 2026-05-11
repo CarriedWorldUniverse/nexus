@@ -452,6 +452,33 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 		}
 		_, _ = w.Write([]byte(`{"bypass":false}`))
 	})
+	// Session validity probe — SPA hits this on page load to decide
+	// whether the cached localStorage JWT is still good. 200 = keep
+	// using it; 401 = drop it and show the WebAuthn login overlay.
+	//
+	// Without this endpoint the SPA's checkAuth() always returns false
+	// (404 from this path → !res.ok), so the operator gets the login
+	// modal on every refresh regardless of token validity. With the
+	// endpoint plus the 24h JWTTTL bump (cmd/nexus/main.go), normal
+	// workday browsing stops re-prompting.
+	mux.HandleFunc("GET /api/auth/check", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		token := ExtractBearer(r.Header.Get("Authorization"))
+		if token == "" {
+			http.Error(w, `{"ok":false,"error":"missing bearer"}`, http.StatusUnauthorized)
+			return
+		}
+		if _, ok := b.tryVerifyOperatorJWT(token); ok {
+			_, _ = w.Write([]byte(`{"ok":true,"role":"operator"}`))
+			return
+		}
+		if _, ok := b.tryVerifyAspectJWT(token); ok {
+			_, _ = w.Write([]byte(`{"ok":true,"role":"aspect"}`))
+			return
+		}
+		http.Error(w, `{"ok":false,"error":"invalid or expired"}`, http.StatusUnauthorized)
+	})
 	// Operator-aspect chat UI — single-page smoke-test client. Served
 	// at /chat.html for direct browser access. Token + URL fields are
 	// inputs in the page itself; no server-side state needed.
