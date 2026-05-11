@@ -134,9 +134,19 @@ func main() {
 	sessionID := uuid.NewString()
 	cursorFile := wsasp.CursorFileForAspect(resolveCursorDir(*cursorDir))
 
+	// Defensive: the WS dial path must be /connect; older keyfiles
+	// minted with the bare authority (no path) would silently hit the
+	// broker's root handler instead. Surfaced on 2026-05-11 cutover
+	// (plumb's first connect attempt). Append /connect if missing so
+	// keyfiles without it still work.
+	wsURL := res.NexusURL
+	if !strings.HasSuffix(wsURL, "/connect") && !strings.HasSuffix(wsURL, "/connect/") {
+		wsURL = strings.TrimRight(wsURL, "/") + "/connect"
+	}
+
 	var bridge *wsasp.Bridge
 	wsCfg := wsasp.Config{
-		URL:        res.NexusURL,
+		URL:        wsURL,
 		AuthToken:  res.SessionJWT, // <- the JWT replaces NEXUS_TOKEN
 		AspectName: res.AspectName,
 		CursorFile: cursorFile,
