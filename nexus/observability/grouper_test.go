@@ -1,0 +1,340 @@
+package observability
+
+import (
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+)
+
+// fixedClock returns a clock that advances by 1ms on each call.
+func fixedClock() (func() time.Time, func()) {
+	t := time.Date(2026, 5, 12, 9, 0, 0, 0, time.UTC)
+	tick := time.Millisecond
+	fn := func() time.Time {
+		now := t
+		t = t.Add(tick)
+		return now
+	}
+	restore := SetNowForTesting(fn)
+	return fn, restore
+}
+
+type capture struct {
+	frames []Frame
+}
+
+func (c *capture) emit(f Frame) { c.frames = append(c.frames, f) }
+
+func (c *capture) lastOf(kind FrameKind) (Frame, bool) {
+	for i := len(c.frames) - 1; i >= 0; i-- {
+		if c.frames[i].Kind == kind {
+			return c.frames[i], true
+		}
+	}
+	return Frame{}, false
+}
+
+func decodeTurn(t *testing.T, f Frame) TurnFrame {
+	t.Helper()
+	var tf TurnFrame
+	if err := json.Unmarshal(f.Payload, &tf); err != nil {
+		t.Fatalf("decode turn payload: %v", err)
+	}
+	return tf
+}
+
+func TestGrouperHappyPath(t *testing.T) {
+	_, restore := fixedClock()
+	defer restore()
+	c := &capture{}
+	g := NewGrouper("plumb", c.emit)
+
+	g.BeginTurn("turn-1", "claude-opus-4-7", "claude-api", 189)
+	g.OnBridleEvent(bridle.ModelChunk{Text: "thinking "})
+	g.OnBridleEvent(bridle.ModelChunk{Text: "about it. "})
+	g.OnBridleEvent(bridle.ToolCallStart{
+		ID: "t1", Name: "Edit",
+		Args: json.RawMessage(`{"file_path":"/a.go","old_string":"x","new_string":"y"}`),
+	})
+	g.OnBridleEvent(bridle.ToolCallResult{ID: "t1", Result: json.RawMessage(`"ok"`)})
+	g.OnBridleEvent(bridle.ModelChunk{Text: "done"})
+	g.OnBridleEvent(bridle.TurnDone{Result: bridle.TurnResult{
+		Usage: bridle.Usage{InputTokens: 100, OutputTokens: 50, CacheReadInputTokens: 10, CostUSD: 0.001},
+	}})
+	g.EndTurn()
+
+	// Verify monotonic seqs.
+	for i, f := range c.frames {
+		if f.Sequence != int64(i+1) {
+			t.Errorf("frame %d seq=%d want %d", i, f.Sequence, i+1)
+		}
+		if f.Aspect != "plumb" {
+			t.Errorf("frame %d aspect=%s", i, f.Aspect)
+		}
+	}
+
+	// Final frame should be terminal turn snapshot.
+	last, ok := c.lastOf(FrameTurn)
+	if !ok {
+		t.Fatal("no turn frame")
+	}
+	tf := decodeTurn(t, last)
+	if tf.Status != TurnComplete {
+		t.Errorf("status=%s want complete", tf.Status)
+	}
+	if tf.Ended == nil {
+		t.Error("Ended is nil")
+	}
+	if tf.TriggerMsg != 189 {
+		t.Errorf("trigger=%d", tf.TriggerMsg)
+	}
+	if tf.Model != "claude-opus-4-7" || tf.Provider != "claude-api" {
+		t.Errorf("model/provider mismatch: %+v", tf)
+	}
+	if tf.Usage == nil || tf.Usage.InputTokens != 100 || tf.Usage.OutputTokens != 50 {
+		t.Errorf("usage: %+v", tf.Usage)
+	}
+
+	// Events: text("thinking about it. "), tool_call(Edit, result, artifact), text("done")
+	if len(tf.Events) != 3 {
+		t.Fatalf("events len=%d want 3: %+v", len(tf.Events), tf.Events)
+	}
+	if tf.Events[0].Kind != TurnEventText || tf.Events[0].Text != "thinking about it. " {
+		t.Errorf("event0: %+v", tf.Events[0])
+	}
+	if tf.Events[1].Kind != TurnEventToolCall || tf.Events[1].Tool == nil {
+		t.Fatalf("event1: %+v", tf.Events[1])
+	}
+	tc := tf.Events[1].Tool
+	if tc.ID != "t1" || tc.Name != "Edit" {
+		t.Errorf("tool id/name: %+v", tc)
+	}
+	if tc.Result == nil || tc.Result.IsError {
+		t.Errorf("tool result: %+v", tc.Result)
+	}
+	if tc.Artifact == nil || tc.Artifact.Kind != ArtifactFileEdit || tc.Artifact.FilePath != "/a.go" {
+		t.Errorf("artifact: %+v", tc.Artifact)
+	}
+	if tf.Events[2].Kind != TurnEventText || tf.Events[2].Text != "done" {
+		t.Errorf("event2: %+v", tf.Events[2])
+	}
+}
+
+func TestGrouperToolPairingByID(t *testing.T) {
+	_, restore := fixedClock()
+	defer restore()
+	c := &capture{}
+	g := NewGrouper("plumb", c.emit)
+	g.BeginTurn("turn-x", "m", "p", 0)
+	g.OnBridleEvent(bridle.ToolCallStart{ID: "a", Name: "Read", Args: json.RawMessage(`{}`)})
+	g.OnBridleEvent(bridle.ToolCallStart{ID: "b", Name: "Bash", Args: json.RawMessage(`{}`)})
+	g.OnBridleEvent(bridle.ToolCallResult{ID: "b", Result: json.RawMessage(`"b-ok"`)})
+	g.OnBridleEvent(bridle.ToolCallResult{ID: "a", Result: json.RawMessage(`"a-ok"`)})
+	g.EndTurn()
+
+	last, _ := c.lastOf(FrameTurn)
+	tf := decodeTurn(t, last)
+	if len(tf.Events) != 2 {
+		t.Fatalf("events: %+v", tf.Events)
+	}
+	for _, ev := range tf.Events {
+		if ev.Tool == nil || ev.Tool.Result == nil {
+			t.Fatalf("missing result on %+v", ev)
+		}
+	}
+	if tf.Events[0].Tool.ID != "a" || tf.Events[0].Tool.Result.Preview != `"a-ok"` {
+		t.Errorf("a: %+v", tf.Events[0].Tool)
+	}
+	if tf.Events[1].Tool.ID != "b" || tf.Events[1].Tool.Result.Preview != `"b-ok"` {
+		t.Errorf("b: %+v", tf.Events[1].Tool)
+	}
+}
+
+func TestGrouperOrphanToolResult(t *testing.T) {
+	_, restore := fixedClock()
+	defer restore()
+	c := &capture{}
+	g := NewGrouper("p", c.emit)
+	g.BeginTurn("t", "m", "p", 0)
+	g.OnBridleEvent(bridle.ToolCallResult{ID: "ghost", Result: json.RawMessage(`"r"`)})
+	g.EndTurn()
+	last, _ := c.lastOf(FrameTurn)
+	tf := decodeTurn(t, last)
+	if len(tf.Events) != 1 || tf.Events[0].Kind != TurnEventOrphanResult {
+		t.Fatalf("expected one orphan event, got %+v", tf.Events)
+	}
+	if tf.Events[0].Tool == nil || tf.Events[0].Tool.ID != "ghost" {
+		t.Errorf("orphan tool: %+v", tf.Events[0].Tool)
+	}
+}
+
+func TestGrouperErroredTurn(t *testing.T) {
+	_, restore := fixedClock()
+	defer restore()
+	c := &capture{}
+	g := NewGrouper("p", c.emit)
+	g.BeginTurn("t", "m", "prv", 0)
+	g.OnBridleEvent(bridle.ModelChunk{Text: "partial"})
+	g.OnBridleEvent(bridle.TurnError{Err: errors.New("boom"), Stage: "provider"})
+	g.EndTurn()
+	last, _ := c.lastOf(FrameTurn)
+	tf := decodeTurn(t, last)
+	if tf.Status != TurnErrored {
+		t.Errorf("status=%s want errored", tf.Status)
+	}
+	if tf.Error != "boom" {
+		t.Errorf("error=%q", tf.Error)
+	}
+}
+
+func TestGrouperToolErrorBuildsErrorResult(t *testing.T) {
+	_, restore := fixedClock()
+	defer restore()
+	c := &capture{}
+	g := NewGrouper("p", c.emit)
+	g.BeginTurn("t", "m", "p", 0)
+	g.OnBridleEvent(bridle.ToolCallStart{ID: "1", Name: "Bash", Args: json.RawMessage(`{}`)})
+	g.OnBridleEvent(bridle.ToolCallResult{ID: "1", Err: "permission denied"})
+	g.EndTurn()
+	last, _ := c.lastOf(FrameTurn)
+	tf := decodeTurn(t, last)
+	if tf.Events[0].Tool.Result == nil || !tf.Events[0].Tool.Result.IsError {
+		t.Errorf("expected error result: %+v", tf.Events[0].Tool.Result)
+	}
+	if tf.Events[0].Tool.Result.Preview != "permission denied" {
+		t.Errorf("preview=%q", tf.Events[0].Tool.Result.Preview)
+	}
+}
+
+func TestGrouperChatInboundOutbound(t *testing.T) {
+	_, restore := fixedClock()
+	defer restore()
+	c := &capture{}
+	g := NewGrouper("plumb", c.emit)
+	t0 := time.Date(2026, 5, 12, 9, 0, 0, 0, time.UTC)
+	g.OnChat(chat.Message{ID: 1, From: "operator", Content: "hi", CreatedAt: t0}, DirectionInbound)
+	g.OnChat(chat.Message{ID: 2, From: "plumb", Content: "yo", ReplyTo: 1, CreatedAt: t0}, DirectionOutbound)
+
+	if len(c.frames) != 2 {
+		t.Fatalf("frames len=%d", len(c.frames))
+	}
+	for i, want := range []Direction{DirectionInbound, DirectionOutbound} {
+		if c.frames[i].Kind != FrameChat {
+			t.Errorf("frame %d kind=%s", i, c.frames[i].Kind)
+		}
+		if c.frames[i].Sequence != int64(i+1) {
+			t.Errorf("frame %d seq=%d", i, c.frames[i].Sequence)
+		}
+		var cf ChatFrame
+		if err := json.Unmarshal(c.frames[i].Payload, &cf); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if cf.Direction != want {
+			t.Errorf("frame %d direction=%s want %s", i, cf.Direction, want)
+		}
+	}
+}
+
+func TestGrouperPresence(t *testing.T) {
+	_, restore := fixedClock()
+	defer restore()
+	c := &capture{}
+	g := NewGrouper("plumb", c.emit)
+	g.OnPresence(true, "registered")
+	g.OnPresence(false, "ws_closed")
+	if len(c.frames) != 2 {
+		t.Fatalf("frames len=%d", len(c.frames))
+	}
+	for i, f := range c.frames {
+		if f.Kind != FramePresence {
+			t.Errorf("frame %d kind=%s", i, f.Kind)
+		}
+		var pf PresenceFrame
+		_ = json.Unmarshal(f.Payload, &pf)
+		if i == 0 && (!pf.Connected || pf.Reason != "registered") {
+			t.Errorf("frame 0: %+v", pf)
+		}
+		if i == 1 && (pf.Connected || pf.Reason != "ws_closed") {
+			t.Errorf("frame 1: %+v", pf)
+		}
+	}
+}
+
+func TestGrouperEventWithoutActiveTurnIsNoOp(t *testing.T) {
+	_, restore := fixedClock()
+	defer restore()
+	c := &capture{}
+	g := NewGrouper("p", c.emit)
+	g.OnBridleEvent(bridle.ModelChunk{Text: "stray"})
+	g.OnBridleEvent(bridle.ToolCallStart{ID: "x", Name: "Edit", Args: json.RawMessage(`{}`)})
+	g.EndTurn() // also a no-op
+	if len(c.frames) != 0 {
+		t.Errorf("expected 0 frames, got %d: %+v", len(c.frames), c.frames)
+	}
+}
+
+func TestGrouperMonotonicSequence(t *testing.T) {
+	_, restore := fixedClock()
+	defer restore()
+	c := &capture{}
+	g := NewGrouper("p", c.emit)
+	g.BeginTurn("t", "m", "p", 0)
+	g.OnBridleEvent(bridle.ModelChunk{Text: "a"})
+	g.OnChat(chat.Message{ID: 1, From: "op", Content: "hi", CreatedAt: time.Now()}, DirectionInbound)
+	g.OnBridleEvent(bridle.ModelChunk{Text: "b"})
+	g.OnPresence(true, "")
+	g.EndTurn()
+	for i, f := range c.frames {
+		if f.Sequence != int64(i+1) {
+			t.Errorf("frame %d seq=%d", i, f.Sequence)
+		}
+	}
+}
+
+func TestGrouperInFlightSnapshotsBeforeEnd(t *testing.T) {
+	_, restore := fixedClock()
+	defer restore()
+	c := &capture{}
+	g := NewGrouper("p", c.emit)
+	g.BeginTurn("t", "m", "p", 0)
+	g.OnBridleEvent(bridle.ModelChunk{Text: "x"})
+	// Without EndTurn, status of every emitted snapshot must be in_flight.
+	if len(c.frames) < 2 {
+		t.Fatalf("expected >=2 in-flight frames, got %d", len(c.frames))
+	}
+	for i, f := range c.frames {
+		tf := decodeTurn(t, f)
+		if tf.Status != TurnInFlight {
+			t.Errorf("frame %d status=%s want in_flight", i, tf.Status)
+		}
+		if tf.Ended != nil {
+			t.Errorf("frame %d Ended=%v want nil pre-EndTurn", i, tf.Ended)
+		}
+	}
+}
+
+func TestGrouperTextPreviewTruncation(t *testing.T) {
+	_, restore := fixedClock()
+	defer restore()
+	c := &capture{}
+	g := NewGrouper("p", c.emit)
+	g.BeginTurn("t", "m", "p", 0)
+	big := make([]byte, 500)
+	for i := range big {
+		big[i] = 'a'
+	}
+	g.OnBridleEvent(bridle.ToolCallStart{ID: "1", Name: "Bash", Args: json.RawMessage(`{}`)})
+	g.OnBridleEvent(bridle.ToolCallResult{ID: "1", Result: json.RawMessage(big)})
+	g.EndTurn()
+	last, _ := c.lastOf(FrameTurn)
+	tf := decodeTurn(t, last)
+	preview := tf.Events[0].Tool.Result.Preview
+	// previewMax + 1-byte ellipsis marker; ensure shorter than input.
+	if len(preview) >= 500 {
+		t.Errorf("preview not truncated: %d bytes", len(preview))
+	}
+}
