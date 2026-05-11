@@ -202,6 +202,13 @@ type ChatDeliverPayload struct {
 	ReceivedAt string `json:"received_at"`      // RFC 3339 UTC; server-stamped at Nexus DB insert
 	Reason     string `json:"reason"`           // mention | reply | thread | all
 	Replay     bool   `json:"replay,omitempty"` // true iff this frame was emitted as part of a since_msg_id replay
+
+	// ReplyCount is the number of descendants in the subtree rooted
+	// at this message — recursive, not just direct children. Set by
+	// chat.list (operator dashboard's main feed) so the SPA can show
+	// the "N replies" expander. Live chat.deliver frames leave it
+	// zero — the SPA increments locally on each incoming reply.
+	ReplyCount int `json:"reply_count,omitempty"`
 }
 
 // ChatReactionPayload toggles an emoji reaction.

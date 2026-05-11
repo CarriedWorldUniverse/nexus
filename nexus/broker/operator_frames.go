@@ -152,6 +152,7 @@ func (c *wsConn) handleOperatorChatList(env frames.Envelope) {
 			Content:    m.Content,
 			ReplyTo:    int(m.ReplyTo),
 			ReceivedAt: m.CreatedAt.UTC().Format(time.RFC3339),
+			ReplyCount: m.ReplyCount, // ListPage's recursive subtree count
 		})
 	}
 	resp, _ := frames.NewResponse(frames.KindChatListResult, env.ID, frames.ChatListResultPayload{

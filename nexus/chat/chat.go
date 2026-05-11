@@ -42,6 +42,13 @@ type Message struct {
 	Topic     string    `json:"topic,omitempty"`    // empty = default topic
 	Kind      string    `json:"kind"`               // chat | hand | system
 	CreatedAt time.Time `json:"created_at"`         // server-stamped at INSERT
+
+	// ReplyCount is the number of descendants in the subtree rooted at
+	// this message (recursive — depth ≥ 1). Populated only by ListPage
+	// today; other reads leave it at zero. Powers the dashboard's
+	// "N replies" badge. Per-message CTE is fine at page sizes ≤ 500;
+	// if this becomes a hot path, see task #121 for the O(N) join.
+	ReplyCount int `json:"reply_count,omitempty"`
 }
 
 // Store is the persistence seam for chat messages. Implementations
@@ -305,6 +312,83 @@ func (s *SQLStore) ListThread(ctx context.Context, threadID, sinceID int64, limi
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("chat.ListThread: rows: %w", err)
+	}
+	return out, nil
+}
+
+// subtreeCounts computes the number of descendants (depth ≥ 1) for
+// each id in `ids`, in a single recursive CTE. Returns a map keyed by
+// ancestor id; ids with no descendants are present in the map with
+// value zero so callers don't have to second-guess "missing == zero".
+//
+// One roundtrip regardless of |ids|. The CTE seeds with rows whose
+// reply_to is in `ids`, walks down via UNION ALL, and groups by the
+// originating ancestor (tracked through the recursion). Cost is
+// proportional to the total reachable subtree, which at v1 chat
+// volumes is small. For the operator dashboard's main feed the page
+// is bounded at 500 and most threads are shallow — this is fine.
+//
+// If a future workload pushes per-thread sizes past ~1k, see task #121
+// for the O(N) join replacement using a denormalized reply_count
+// column on chat_messages.
+func (s *SQLStore) subtreeCounts(ctx context.Context, ids []int64) (map[int64]int, error) {
+	out := make(map[int64]int, len(ids))
+	for _, id := range ids {
+		out[id] = 0 // ensure caller can read every id
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	// Build the IN clause and arg list. SQLite's placeholder is `?`;
+	// no driver-side $N variant. Repeat the args twice — once for the
+	// initial seed (reply_to IN ids), once for the ancestor anchor.
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1] // trim trailing comma
+
+	q := `
+		WITH RECURSIVE descend(ancestor, id) AS (
+			-- Seed: direct children of any page-resident id, tagged
+			-- with which ancestor each came from.
+			SELECT cm.reply_to AS ancestor, cm.id AS id
+			FROM chat_messages cm
+			WHERE cm.reply_to IN (` + placeholders + `)
+
+			UNION ALL
+
+			-- Recurse: descendants of descendants, preserving the
+			-- original ancestor tag so the final GROUP BY rolls back
+			-- to the right page row.
+			SELECT d.ancestor, cm.id
+			FROM chat_messages cm
+			JOIN descend d ON cm.reply_to = d.id
+		)
+		SELECT ancestor, COUNT(*) AS n
+		FROM descend
+		GROUP BY ancestor
+	`
+
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+
+	rows, err := s.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("subtreeCounts: query: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var ancestor int64
+		var n int
+		if err := rows.Scan(&ancestor, &n); err != nil {
+			return nil, fmt.Errorf("subtreeCounts: scan: %w", err)
+		}
+		out[ancestor] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("subtreeCounts: rows: %w", err)
 	}
 	return out, nil
 }
@@ -730,6 +814,29 @@ func (s *SQLStore) ListPage(ctx context.Context, beforeID, afterID int64, limit 
 	if len(msgs) > limit {
 		msgs = msgs[:limit]
 		hasMore = true
+	}
+
+	// Per-message subtree counts. One recursive CTE that walks the
+	// whole reply graph starting from every page-resident id at once,
+	// excludes the seeds, and groups by ancestor. Single roundtrip,
+	// no per-message N+1. Cost is bounded by total descendants under
+	// the page — at v1 thread depths (handfuls of replies per root)
+	// this is fine; if a single thread ever grows to thousands, see
+	// task #121 for the O(N) join replacement.
+	if len(msgs) > 0 {
+		ids := make([]int64, len(msgs))
+		for i, m := range msgs {
+			ids[i] = m.ID
+		}
+		counts, err := s.subtreeCounts(ctx, ids)
+		if err != nil {
+			// Counts are a UX nicety; don't fail the page on a count
+			// query error. Surface in logs at the caller's tier.
+			return nil, false, fmt.Errorf("chat.ListPage: subtree counts: %w", err)
+		}
+		for i := range msgs {
+			msgs[i].ReplyCount = counts[msgs[i].ID]
+		}
 	}
 
 	// before/newest paths queried DESC; reverse to oldest-first.
