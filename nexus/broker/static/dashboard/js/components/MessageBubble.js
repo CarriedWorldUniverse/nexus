@@ -163,13 +163,9 @@ export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly }) {
 
   // Tap whole bubble to set reply target (toggle: tap again to cancel).
   // Inner controls (reactions/buttons/replies-link/content) call
-  // stopPropagation so they don't also trigger reply. agentOnly mode keeps
-  // its own click-to-expand behaviour.
+  // stopPropagation so they don't also trigger reply. Operator may want
+  // to interject into agent-only chatter, so tap-to-reply works there too.
   function handleBubbleClick(e) {
-    if (agentOnly) {
-      e.currentTarget.classList.toggle('expanded');
-      return;
-    }
     if (replyTo.value && replyTo.value.id === msg.id) {
       replyTo.value = null;
     } else {
@@ -179,12 +175,12 @@ export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly }) {
   const stop = (e) => e.stopPropagation();
 
   return html`
-    <div class=${'msg' + (compact ? ' compact' : '') + (agentOnly ? ' agent-only' : '') + (!agentOnly ? ' tappable' : '') + (isReplying ? ' replying' : '')} id=${`msg-${msg.id}`}
-      role=${agentOnly ? undefined : 'button'}
-      tabindex=${agentOnly ? undefined : '0'}
-      aria-label=${agentOnly ? undefined : `Reply to ${msg.from}`}
+    <div class=${'msg' + (compact ? ' compact' : '') + (agentOnly ? ' agent-only' : '') + ' tappable' + (isReplying ? ' replying' : '')} id=${`msg-${msg.id}`}
+      role="button"
+      tabindex="0"
+      aria-label=${`Reply to ${msg.from}`}
       onClick=${handleBubbleClick}
-      onKeyDown=${agentOnly ? undefined : (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleReply(); } }}>
+      onKeyDown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleReply(); } }}>
       <div class="msg-avatar" style=${{ background: color }}>
         ${initials}
       </div>
@@ -205,8 +201,8 @@ export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly }) {
           onClick=${stop}
           dangerouslySetInnerHTML=${{ __html: rendered }}
         />
-        ${msg.reply_count > 0 && html`
-          <span class="msg-replies" onClick=${(e) => { stop(e); onReply && onReply(msg); }}>
+        ${msg.reply_count > 0 && onReply && html`
+          <span class="msg-replies" onClick=${(e) => { stop(e); onReply(msg); }}>
             ${msg.reply_count} ${msg.reply_count === 1 ? 'reply' : 'replies'}
           </span>
         `}
