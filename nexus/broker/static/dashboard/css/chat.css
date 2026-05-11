@@ -694,42 +694,16 @@
 }
 
 /* Agent-only messages (operator not involved) — collapsed & faded */
+/* Flat-view mode: agent-only is a subtle hint, not a hide. Content fully
+   readable; just dimmed so the operator can skim what's theirs without
+   losing visibility into autonomous team chatter. */
 .msg.agent-only {
-  opacity: 0.35;
-  padding-top: 1px;
-  padding-bottom: 1px;
-  cursor: pointer;
-  transition: opacity 0.2s, max-height 0.3s;
-}
-
-.msg.agent-only .msg-content {
-  max-height: 1.55em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.msg.agent-only .msg-actions,
-.msg.agent-only .msg-replies {
-  display: none;
+  opacity: 0.7;
+  transition: opacity 0.2s;
 }
 
 .msg.agent-only:hover {
-  opacity: 0.6;
-}
-
-.msg.agent-only.expanded {
-  opacity: 0.7;
-}
-
-.msg.agent-only.expanded .msg-content {
-  max-height: none;
-  white-space: pre-wrap;
-}
-
-.msg.agent-only.expanded .msg-actions,
-.msg.agent-only.expanded .msg-replies {
-  display: revert;
+  opacity: 1;
 }
 
 @media (max-width: 768px) {

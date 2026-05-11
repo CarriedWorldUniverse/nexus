@@ -6,10 +6,8 @@ import { checkForMentions } from '../notifications.js';
 import { chatWS } from '../chat-ws.js';
 import { MessageBubble } from '../components/MessageBubble.js';
 import { ChatInput } from '../components/ChatInput.js';
-import { ThreadView } from '../components/ThreadView.js';
 
 const topics = signal([]);
-const expandedThreads = signal({});
 
 // Oldest currently-loaded message id per channel — anchor for backward
 // pagination ("Load older"). Set on first successful loadMessages, cleared
@@ -131,7 +129,6 @@ function switchChannel(ch) {
   oldestLoadedId.value = 0;
   hasMoreOlder.value = true;
   loadingOlder.value = false;
-  expandedThreads.value = {};
   loadMessages();
   window.location.hash = ch === 'general' ? '#/chat' : `#/chat/${ch}`;
 }
@@ -247,30 +244,59 @@ function onWsReactionChanged(ev) {
   messages.value = next;
 }
 
-function getTopLevelMessages() {
-  const topLevel = [];
-  const replyMap = {};
+// Mark messages that are part of an operator-involved conversation.
+// "Involved" means: operator sent it, mentioned operator/@all, or it's
+// part of a reply chain that includes any operator-involved message.
+// Returns a Set of message IDs.
+//
+// The flat-render view surfaces every message, but agent-to-agent
+// chatter that doesn't touch the operator gets a subtle .agent-only
+// visual hint (dimmer text) so the operator can still skim what's
+// theirs without losing visibility into the team's autonomous activity.
+function computeOpInvolvedSet() {
+  const opIds = new Set();
+  const byId = new Map();
+
+  for (const m of messages.value) byId.set(m.id, m);
+
+  const isOpish = (m) => {
+    if (m.from === 'operator' || m.type === 'input') return true;
+    const c = (m.content || '').toLowerCase();
+    return c.includes('@operator') || c.includes('@all');
+  };
+
+  // Pass 1: seed direct op-involved.
   for (const m of messages.value) {
-    if (m.reply_to) {
-      if (!replyMap[m.reply_to]) replyMap[m.reply_to] = [];
-      replyMap[m.reply_to].push(m);
-    } else {
-      topLevel.push(m);
+    if (isOpish(m)) opIds.add(m.id);
+  }
+
+  // Pass 2: walk reply chain upward from each opish message. Limited
+  // depth so cycles can't hang us.
+  for (const m of messages.value) {
+    if (!isOpish(m)) continue;
+    let cur = m;
+    for (let i = 0; i < 64 && cur && cur.reply_to; i++) {
+      const parent = byId.get(cur.reply_to);
+      if (!parent || opIds.has(parent.id)) break;
+      opIds.add(parent.id);
+      cur = parent;
     }
   }
-  // The broker doesn't surface reply_count in chat.list / chat.deliver,
-  // so derive it from what we have loaded. This keeps the thread expander
-  // visible even if the parent's row was returned without the field.
-  // The WS-bump path in onWsMessageCreated still bumps an explicit
-  // reply_count on parents already in the signal — we max() so that a
-  // fresh derivation from replyMap doesn't undercount stale state.
-  const decorated = topLevel.map(t => {
-    const replies = replyMap[t.id]?.length || 0;
-    const existing = t.reply_count || 0;
-    if (replies <= existing) return t;
-    return { ...t, reply_count: replies };
-  });
-  return { topLevel: decorated, replyMap };
+
+  // Pass 3: walk downward — any reply to an opish message inherits.
+  // Iterate until fixed point (cheap because the set only grows).
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const m of messages.value) {
+      if (m.reply_to && opIds.has(m.reply_to) && !opIds.has(m.id)) {
+        opIds.add(m.id);
+        grew = true;
+      }
+    }
+  }
+
+  return opIds;
 }
 
 function channelLabel(ch) {
@@ -356,41 +382,15 @@ export function Chat() {
   }, []);
 
   const ch = currentChannel.value;
-  const { topLevel, replyMap } = getTopLevelMessages();
 
-  // Build operator-involved thread set for agent-only collapsing
-  const opThreads = new Set();
-  if (ch === 'general') {
-    for (const m of messages.value) {
-      const isOp = m.from === 'operator' || m.type === 'input';
-      const mentionsOp = (m.content || '').toLowerCase().includes('@operator') || (m.content || '').toLowerCase().includes('@all');
-      if (isOp || mentionsOp) {
-        opThreads.add(m.id);
-        if (m.reply_to) opThreads.add(m.reply_to);
-      }
-      if (m.reply_to && opThreads.has(m.reply_to)) {
-        opThreads.add(m.id);
-      }
-    }
-    // Propagate: if any reply in a thread involves operator, mark the parent
-    for (const [pid, reps] of Object.entries(replyMap)) {
-      const parentId = Number(pid);
-      for (const rep of reps) {
-        if (opThreads.has(rep.id)) opThreads.add(parentId);
-      }
-      if (opThreads.has(parentId)) {
-        for (const rep of reps) opThreads.add(rep.id);
-      }
-    }
-  }
+  // Flat chronological render — every message visible, replies shown in
+  // order with the inherited quote-bar pointing at their parent.
+  // agentOnly is now a subtle visual hint for "not involving operator",
+  // not a hide. Only computed for #general where mixed traffic happens.
+  const opIds = ch === 'general' ? computeOpInvolvedSet() : null;
 
   let lastFrom = null;
   let lastDay = null;
-
-  function toggleThread(msg) {
-    const cur = expandedThreads.value;
-    expandedThreads.value = { ...cur, [msg.id]: !cur[msg.id] };
-  }
 
   return html`
     <div class="chat-view">
@@ -453,20 +453,21 @@ export function Chat() {
         ${oldestLoadedId.value > 0 && !hasMoreOlder.value && messages.value.length > 0 && html`
           <div class="chat-load-older chat-load-older-end">Start of history</div>
         `}
-        ${topLevel.map(msg => {
+        ${messages.value.map(msg => {
           const day = dayLabel(msgAt(msg));
           const showDay = day !== lastDay;
           const compact = !showDay && msg.from === lastFrom;
           lastFrom = msg.from;
           lastDay = day;
 
+          // Quote-bar context lookup. If the parent isn't loaded (paginated
+          // out), MessageBubble still renders cleanly without it.
           const parentMsg = msg.reply_to ? msgCache[msg.reply_to] : null;
-          const threadMsgs = replyMap[msg.id] || [];
-          const threadOpen = !!expandedThreads.value[msg.id];
 
-          const isAgentOnly = ch === 'general' && msg.from !== 'operator' && msg.type !== 'input'
-            && !(m => (m.content || '').toLowerCase().includes('@operator') || (m.content || '').toLowerCase().includes('@all'))(msg)
-            && !opThreads.has(msg.id);
+          // agentOnly is now a faint-but-visible hint. Only marks messages
+          // that are NOT part of any operator-touched chain in #general.
+          const isAgentOnly = opIds !== null && !opIds.has(msg.id)
+            && msg.from !== 'operator' && msg.type !== 'input';
 
           return html`
             ${showDay && html`<div class="day-sep">${day}</div>`}
@@ -475,10 +476,8 @@ export function Chat() {
               msg=${msg}
               compact=${compact}
               parentMsg=${parentMsg}
-              onReply=${toggleThread}
               agentOnly=${isAgentOnly}
             />
-            ${threadOpen && html`<${ThreadView} parentId=${msg.id} />`}
           `;
         })}
       </div>
