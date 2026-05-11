@@ -72,7 +72,7 @@ or --operator-token-file.
 
 	var (
 		nexusURL     = fs.String("nexus-url", "", "WS URL of the nexus broker (e.g. wss://host:port/connect). Required.")
-		opToken      = fs.String("operator-token", "", "Operator JWT (mutually exclusive with --operator-token-file)")
+		opToken      = fs.String("operator-token", "", "Operator JWT — exposes the token via ps/proc cmdline; prefer --operator-token-file in any non-dev environment")
 		opTokenFile  = fs.String("operator-token-file", "", "Read operator JWT from this file (alternative to --operator-token)")
 		insecureSkip = fs.Bool("insecure-skip-verify", false, "Skip TLS cert verification (dev/self-signed only — do NOT use in production)")
 		logFile      = fs.String("log-file", "", "Write logs here instead of stderr; stdout is reserved for the rendered observation feed")
@@ -180,6 +180,10 @@ or --operator-token-file.
 
 	// Renderer goroutine: serialises stdout writes and owns the
 	// per-aspect lastSeen + recent buffer state.
+	// v0.1: typed input and rendered frames share one TTY. A frame
+	// arriving mid-keystroke may print over a partial input line — no
+	// cursor-save/clear-line dance. Accepted for now; a readline lib
+	// (linenoise, term/readline) is the upgrade path in a later phase.
 	rendererDone := make(chan struct{})
 	go func() {
 		defer close(rendererDone)
@@ -313,6 +317,7 @@ func (s *watchState) clearLastSeen(aspect string) {
 // should terminate (/quit).
 func handleSlash(ctx context.Context, line string, ws *wsclient.Client, rd *renderer, state *watchState, log *slog.Logger) bool {
 	cmd, rest := splitCommand(line)
+	cmd = strings.ToLower(cmd) // /QUIT == /quit etc.
 	switch cmd {
 	case "/quit", "/exit":
 		return true
@@ -330,6 +335,12 @@ func handleSlash(ctx context.Context, line string, ws *wsclient.Client, rd *rend
 			rd.systemf("already observing @%s", newAspect)
 			return false
 		}
+		// v0.1 limitation: if the subsequent subscribe fails, this unsubscribe
+		// has already torn down the old subscription on the broker side, and
+		// we don't roll it back. Operator gets a "subscribe failed" message
+		// and can /switch back manually. Acceptable for a v0.1 CLI; a
+		// transactional subscribe-then-unsubscribe would be cleaner but
+		// requires broker-side support for ack-on-subscribe.
 		_ = sendUnsubscribeObserve(ctx, ws, old)
 		if err := sendSubscribeObserve(ctx, ws, newAspect, 0); err != nil {
 			rd.systemf("subscribe failed: %v", err)
