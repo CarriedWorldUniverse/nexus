@@ -170,7 +170,8 @@ function ChatRow({ frame }) {
   return html`
     <div class=${'observe-chatrow observe-chatrow-' + direction}>
       <div class=${'observe-direction ' + direction} title=${label} aria-label=${label}>${arrow}</div>
-      <${MessageBubble} msg=${msg} />
+      ${/* observe pane is read-only by intent: no Reply, no reactions */ ''}
+      <${MessageBubble} msg=${msg} readOnly=${true} />
     </div>
   `;
 }

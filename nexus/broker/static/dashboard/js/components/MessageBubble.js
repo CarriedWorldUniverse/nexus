@@ -152,7 +152,7 @@ function renderContent(content) {
   return out;
 }
 
-export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly }) {
+export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly, readOnly }) {
   const colors = agentColors.value;
   const color = colors[msg.from] || '#bb86fc';
   const initials = (msg.from || '??').slice(0, 2).toUpperCase();
@@ -237,13 +237,19 @@ export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly }) {
   }
   const stop = (e) => e.stopPropagation();
 
+  // readOnly: ObserveView reuses MessageBubble to render observability
+  // frames for another aspect's stream. Reply + reaction picker would
+  // silently target the underlying message (replyTo signal /
+  // toggleReaction API) on a stream the operator can't act on. Strip
+  // the interactivity surface when readOnly is set.
+  const baseClass = 'msg' + (compact ? ' compact' : '') + (agentOnly ? ' agent-only' : '') + (isReplying ? ' replying' : '') + (readOnly ? ' read-only' : ' tappable');
   return html`
-    <div class=${'msg' + (compact ? ' compact' : '') + (agentOnly ? ' agent-only' : '') + ' tappable' + (isReplying ? ' replying' : '')} id=${`msg-${msg.id}`}
-      role="button"
-      tabindex="0"
-      aria-label=${`Reply to ${msg.from}`}
-      onClick=${handleBubbleClick}
-      onKeyDown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleReply(); } }}>
+    <div class=${baseClass} id=${`msg-${msg.id}`}
+      role=${readOnly ? null : 'button'}
+      tabindex=${readOnly ? null : '0'}
+      aria-label=${readOnly ? null : `Reply to ${msg.from}`}
+      onClick=${readOnly ? null : handleBubbleClick}
+      onKeyDown=${readOnly ? null : (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleReply(); } }}>
       <div class="msg-avatar" style=${{ background: color }}>
         ${initials}
       </div>
@@ -273,6 +279,16 @@ export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly }) {
           <div class="msg-reactions" onClick=${stop}>
             ${reactions.map((r) => {
               const mine = r.aspect === 'operator';
+              // readOnly: render reactions as static spans — no click,
+              // no toggleReaction API call against the underlying msg.
+              if (readOnly) {
+                return html`
+                  <span class=${'reaction-chip' + (mine ? ' mine' : '')} title=${r.aspect}>
+                    <span class="reaction-emoji">${r.emoji}</span>
+                    <span class="reaction-attr">${r.aspect}</span>
+                  </span>
+                `;
+              }
               return html`
                 <button
                   class=${'reaction-chip' + (mine ? ' mine' : '')}
@@ -287,17 +303,19 @@ export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly }) {
           </div>
         `}
       </div>
-      <div class=${'msg-actions' + (pickerOpen ? ' picker-open' : '')} onClick=${stop}>
-        <button onClick=${(e) => { stop(e); handleReply(); }}>Reply</button>
-        <button class="msg-react-btn" onClick=${(e) => { stop(e); setPickerOpen(p => !p); }}>☺</button>
-        ${pickerOpen && html`
-          <div class="reaction-picker" onClick=${stop}>
-            ${QUICK_EMOJI.map(em => html`
-              <button class="reaction-picker-item" onClick=${(e) => { stop(e); react(em); }}>${em}</button>
-            `)}
-          </div>
-        `}
-      </div>
+      ${!readOnly && html`
+        <div class=${'msg-actions' + (pickerOpen ? ' picker-open' : '')} onClick=${stop}>
+          <button onClick=${(e) => { stop(e); handleReply(); }}>Reply</button>
+          <button class="msg-react-btn" onClick=${(e) => { stop(e); setPickerOpen(p => !p); }}>☺</button>
+          ${pickerOpen && html`
+            <div class="reaction-picker" onClick=${stop}>
+              ${QUICK_EMOJI.map(em => html`
+                <button class="reaction-picker-item" onClick=${(e) => { stop(e); react(em); }}>${em}</button>
+              `)}
+            </div>
+          `}
+        </div>
+      `}
     </div>
   `;
 }
