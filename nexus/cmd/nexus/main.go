@@ -1296,7 +1296,16 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 			// including ones the Frame just sent via SendChat — without
 			// this guard, a Frame post containing "@frame" would queue a
 			// spurious deliberation cycle on the same goroutine.
+			//
+			// But: record Frame-authored posts in the threads index so
+			// rule 2c ("replying to a Frame-authored message") routes
+			// future replies back to the funnel. Without this the index
+			// stays empty and operator replies to keel's own messages
+			// silently never reach keel. Surfaced on 2026-05-11 cutover.
 			if from == frameName {
+				if threads != nil {
+					threads.RecordPost(msgID, topic)
+				}
 				return
 			}
 			// Route predicate: only deliberate on messages ShouldRouteToFrame
