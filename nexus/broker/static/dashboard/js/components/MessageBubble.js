@@ -7,6 +7,50 @@ import DOMPurify from '/js/vendor/dompurify.js';
 
 const QUICK_EMOJI = ['👍', '✅', '👀', '❤️', '🎉', '🤔'];
 
+// Display priority for reaction emojis. Earlier = shown first in the
+// reaction strip. The first two are the "work signal" emojis (per
+// #189 decision 2026-05-12) — they get top-row visibility so the
+// operator can scan who's actively working vs. just acknowledged.
+// Anything not listed sorts to the end in insertion order.
+const REACTION_PRIORITY = ['👀', '👍'];
+function reactionRank(emoji) {
+  const i = REACTION_PRIORITY.indexOf(emoji);
+  return i === -1 ? REACTION_PRIORITY.length : i;
+}
+
+// normalizeReactions accepts the server's ReactionRow[] shape
+// ([{aspect, emoji}, ...]) and returns the same array, sorted by
+// priority. Tolerates the legacy grouped {emoji: [agents]} shape too
+// (one-time during cutover) by flattening it back to the row shape —
+// the moment any new reaction lands via WS push, the legacy data is
+// replaced.
+function normalizeReactions(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) {
+    return [...raw].sort((a, b) => {
+      const ar = reactionRank(a.emoji);
+      const br = reactionRank(b.emoji);
+      if (ar !== br) return ar - br;
+      return (a.emoji || '').localeCompare(b.emoji || '');
+    });
+  }
+  // Legacy grouped shape — flatten. Each (emoji, [agents]) becomes
+  // one row per agent. Stable enough for the brief cutover window.
+  const out = [];
+  for (const [emoji, agents] of Object.entries(raw)) {
+    if (!Array.isArray(agents)) continue;
+    for (const agent of agents) {
+      out.push({ aspect: agent, emoji });
+    }
+  }
+  return out.sort((a, b) => {
+    const ar = reactionRank(a.emoji);
+    const br = reactionRank(b.emoji);
+    if (ar !== br) return ar - br;
+    return (a.emoji || '').localeCompare(b.emoji || '');
+  });
+}
+
 function escapeHtml(str) {
   return String(str)
     .replace(/&/g, '&amp;')
@@ -113,15 +157,24 @@ export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly }) {
   const color = colors[msg.from] || '#bb86fc';
   const initials = (msg.from || '??').slice(0, 2).toUpperCase();
 
-  // Local optimistic reactions state; server shape: { emoji: [agent, agent, ...] }
-  const [reactions, setReactions] = useState(msg.reactions || {});
+  // Server shape (post-2026-05-12 single-emoji-per-reactor rule):
+  // ReactionRow[] = [{aspect, emoji}, ...]. Each reactor has at most
+  // one entry per msg. Display is per-row (one chip per row) so the
+  // operator can see WHO reacted with WHAT at a glance — that's the
+  // observability point of reactions in this network ("eyes-on by
+  // keel, thumbs-up by plumb").
+  //
+  // Legacy {emoji: [agents]} shape is gone — that was a count-style
+  // render for stacked human reactions. With single-emoji-per-reactor
+  // there's nothing to count; attribution IS the display.
+  const [reactions, setReactions] = useState(normalizeReactions(msg.reactions));
   const [pickerOpen, setPickerOpen] = useState(false);
   const [reacting, setReacting] = useState(false);
 
   // Re-sync when the underlying message changes (poll refresh, etc.)
   useEffect(() => {
-    setReactions(msg.reactions || {});
-  }, [msg.id, JSON.stringify(msg.reactions || {})]);
+    setReactions(normalizeReactions(msg.reactions));
+  }, [msg.id, JSON.stringify(msg.reactions)]);
 
   function handleReply() {
     replyTo.value = msg;
@@ -131,17 +184,28 @@ export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly }) {
     if (reacting) return; // ignore rapid double-clicks while a request is in flight
     setPickerOpen(false);
     setReacting(true);
-    // Optimistic toggle
+
+    // Optimistic update under single-emoji-per-reactor rule (#189):
+    //   - operator already has THIS emoji → remove their row
+    //   - operator already has a DIFFERENT emoji → replace it
+    //   - operator has no row → add this one
+    // The server enforces the same rule on commit; we mirror locally
+    // so the UI feels instant. Roll back on failure.
     const prev = reactions;
-    const cur = { ...prev };
-    const list = (cur[emoji] || []).slice();
-    const i = list.indexOf('operator');
-    if (i >= 0) list.splice(i, 1); else list.push('operator');
-    if (list.length === 0) delete cur[emoji]; else cur[emoji] = list;
-    setReactions(cur);
+    const myExisting = prev.find(r => r.aspect === 'operator');
+    let next;
+    if (myExisting && myExisting.emoji === emoji) {
+      next = prev.filter(r => r.aspect !== 'operator');
+    } else {
+      next = prev.filter(r => r.aspect !== 'operator');
+      next.push({ aspect: 'operator', emoji });
+    }
+    setReactions(normalizeReactions(next));
+
     try {
-      const res = await toggleReaction(msg.id, 'operator', emoji);
-      if (res && res.agents) setReactions(res.agents);
+      // Server returns confirmed state via chat.reaction.update push,
+      // not via the toggle response. Just fire and trust the rule.
+      await toggleReaction(msg.id, 'operator', emoji);
     } catch (e) {
       // Roll back on failure
       setReactions(prev);
@@ -158,7 +222,6 @@ export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly }) {
   }
 
   const rendered = renderContent(msg.content || '');
-  const reactionEntries = Object.entries(reactions || {}).filter(([, agents]) => agents && agents.length);
   const isReplying = replyTo.value?.id === msg.id;
 
   // Tap whole bubble to set reply target (toggle: tap again to cancel).
@@ -206,18 +269,18 @@ export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly }) {
             ${msg.reply_count} ${msg.reply_count === 1 ? 'reply' : 'replies'}
           </span>
         `}
-        ${reactionEntries.length > 0 && html`
+        ${reactions.length > 0 && html`
           <div class="msg-reactions" onClick=${stop}>
-            ${reactionEntries.map(([emoji, agents]) => {
-              const mine = agents.includes('operator');
+            ${reactions.map((r) => {
+              const mine = r.aspect === 'operator';
               return html`
                 <button
                   class=${'reaction-chip' + (mine ? ' mine' : '')}
-                  title=${agents.join(', ')}
-                  onClick=${(e) => { stop(e); react(emoji); }}
+                  title=${r.aspect}
+                  onClick=${(e) => { stop(e); react(r.emoji); }}
                 >
-                  <span class="reaction-emoji">${emoji}</span>
-                  <span class="reaction-count">${agents.length}</span>
+                  <span class="reaction-emoji">${r.emoji}</span>
+                  <span class="reaction-attr">${r.aspect}</span>
                 </button>
               `;
             })}
