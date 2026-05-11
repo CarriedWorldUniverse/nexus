@@ -180,13 +180,24 @@ func (c *wsConn) handleOperatorChatReplies(env frames.Envelope) {
 	}
 	ctx, cancel := c.opCtx()
 	defer cancel()
-	msgs, err := store.ListReplies(ctx, p.ParentID)
+	// ListThread (recursive CTE) returns the parent + every descendant
+	// in the subtree, not just direct children. The SPA's ThreadView
+	// renders the result flat and doesn't recurse on its own, so using
+	// the shallow ListReplies hid depth-2+ replies entirely — keel
+	// replies to your reply never showed up in the thread view, even
+	// though they were in the DB. Recursive walk + drop the root from
+	// the result (the dashboard already renders it in the parent feed).
+	const maxThread = 500
+	all, err := store.ListThread(ctx, p.ParentID, 0, maxThread)
 	if err != nil {
 		c.operatorError(env, "list: "+err.Error())
 		return
 	}
-	out := make([]frames.ChatDeliverPayload, 0, len(msgs))
-	for _, m := range msgs {
+	out := make([]frames.ChatDeliverPayload, 0, len(all))
+	for _, m := range all {
+		if m.ID == p.ParentID {
+			continue // ListThread includes the root; the SPA already has it
+		}
 		out = append(out, frames.ChatDeliverPayload{
 			ID:         int(m.ID),
 			From:       m.From,
