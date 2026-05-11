@@ -985,6 +985,7 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 				Harness:  bridle.NewHarness(judgeProvider),
 				Provider: judgeProviderID,
 				Model:    judgeModel,
+				Logger:   log,
 			},
 		}
 	default:
@@ -999,6 +1000,7 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 				Harness:  bridle.NewHarness(judgeProvider),
 				Provider: judgeProviderID,
 				Model:    judgeModel,
+				Logger:   log,
 			},
 		}
 	}

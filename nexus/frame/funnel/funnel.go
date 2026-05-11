@@ -828,22 +828,27 @@ func newTurnID() string {
 	return "turn-" + time.Now().UTC().Format("20060102T150405.000000Z") + "-" + randHex(3)
 }
 
-// filterTimeout caps how long the funnel waits for a filter's Judge
-// to return. CheapModelFilter sets its own ~1.5s internal cap; a
-// custom filter that ignores ctx and blocks would otherwise stall
-// the deliberation indefinitely. 2s gives the cheap-model filter
-// some headroom while still bounding the worst case.
-const filterTimeout = 2 * time.Second
-
-// runFilter wraps OutputFilter.Judge with a goroutine + timeout so a
-// blocking or misbehaving filter cannot stall deliberation. Mirrors
-// the safety pattern around emit() — the filter is observability-
-// adjacent and must not hold up the chat path.
+// runFilter calls OutputFilter.Judge and waits for its answer. There
+// is no outer timeout — the judge MUST be the authority on whether
+// to post.
 //
-// On timeout, fail open (ShouldPost=true). Same reasoning as
-// CheapModelFilter's internal failure path: suppressing real content
-// because telemetry hung is worse than the noise of letting a thin
-// reply through.
+// Previous design raced an outer 2s timeout against the inner judge
+// call; in practice the timer almost always won, the funnel "failed
+// open" with ShouldPost=true, and the actual judge answer arrived
+// hundreds of ms later — too late, post already out. The filter was
+// effectively a noop. (Operator 2026-05-12: "i lean to remove the
+// timeout as well — waiting an extra 1-2 sec over the noise when you
+// have 4-5 agents in the room".)
+//
+// Per-implementation timeouts (e.g. CheapModelFilter's filterJudgeTimeout)
+// still bound how long a single call can hang; if the judge harness
+// itself wedges that's a bridle/provider bug to surface, not paper
+// over with a fail-open race. Panic protection stays — a panicking
+// filter still fails open as the least-bad recovery.
+//
+// Context cancellation also fails open: ctx-cancelled at this point
+// means the turn is tearing down, so suppressing wouldn't matter
+// anyway (the deliberation goroutine is already on its way out).
 func (f *Funnel) runFilter(ctx context.Context, in FilterInput) FilterDecision {
 	ch := make(chan FilterDecision, 1)
 	go func() {
@@ -859,10 +864,6 @@ func (f *Funnel) runFilter(ctx context.Context, in FilterInput) FilterDecision {
 	select {
 	case d := <-ch:
 		return d
-	case <-time.After(filterTimeout):
-		f.log.Warn("funnel: filter timed out; failing open",
-			"timeout", filterTimeout, "turn_id", in.TurnID)
-		return FilterDecision{ShouldPost: true}
 	case <-ctx.Done():
 		f.log.Warn("funnel: context cancelled during filter; failing open",
 			"turn_id", in.TurnID)
