@@ -3,6 +3,7 @@ package observability
 import (
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -399,5 +400,62 @@ func TestGrouperBeginTurnForcesCloseOfInFlight(t *testing.T) {
 	}
 	if firstT2.Error != "" {
 		t.Errorf("turn-2 should start with no error, got %q", firstT2.Error)
+	}
+}
+
+// TestGrouper_OnChat_Concurrent fires N OnChat calls from N goroutines
+// and asserts every emitted ChatFrame has a unique sequence number and
+// that the set of sequences is exactly {1..N}. Run under -race to
+// catch any reintroduction of unsynchronised access to g.seq / g.emit.
+func TestGrouper_OnChat_Concurrent(t *testing.T) {
+	const N = 100
+
+	var mu sync.Mutex
+	seqs := make([]int64, 0, N)
+	emit := func(f Frame) {
+		// Capture under our own mutex — emit is called while the
+		// Grouper's mutex is held, so this is contention-free, but
+		// the slice is not the Grouper's so we own its sync.
+		mu.Lock()
+		seqs = append(seqs, f.Sequence)
+		mu.Unlock()
+	}
+	g := NewGrouper("plumb", emit)
+
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			g.OnChat(chat.Message{
+				ID:        int64(i + 1),
+				From:      "operator",
+				Content:   "hi",
+				CreatedAt: time.Now(),
+			}, DirectionInbound)
+		}()
+	}
+	wg.Wait()
+
+	if len(seqs) != N {
+		t.Fatalf("got %d emissions, want %d", len(seqs), N)
+	}
+	seen := make(map[int64]bool, N)
+	var maxSeq int64
+	for _, s := range seqs {
+		if seen[s] {
+			t.Errorf("duplicate sequence %d", s)
+		}
+		seen[s] = true
+		if s > maxSeq {
+			maxSeq = s
+		}
+		if s < 1 || s > N {
+			t.Errorf("sequence %d out of range [1,%d]", s, N)
+		}
+	}
+	if maxSeq != N {
+		t.Errorf("max sequence = %d, want %d", maxSeq, N)
 	}
 }

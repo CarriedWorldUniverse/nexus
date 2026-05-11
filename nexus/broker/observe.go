@@ -37,22 +37,34 @@ func (c *wsConn) handleSubscribeObserve(env frames.Envelope) {
 		return
 	}
 
+	c.log.Info("observability subscribe", "aspect", payload.Aspect, "since_seq", payload.SinceSeq)
+
+	// Order matters: drain the tail FIRST (while subscribedObserve is
+	// still false for this aspect → broadcastObserveFrame cannot pick
+	// us up as a live target), THEN flip the subscription flag, THEN
+	// ack. The earlier flag-first ordering let a concurrent chat.send
+	// race a live frame in ahead of the historical tail, breaking the
+	// spec's history-then-live ordering.
+	//
+	// Tradeoff: a frame appended to the Hub buffer AFTER Tail() returns
+	// but BEFORE we flip the flag below will be neither replayed nor
+	// delivered live to this op. The gap is sub-millisecond. The
+	// resync-on-reconnect path (re-subscribe with SinceSeq) covers it;
+	// the alternative — holding the Hub's emit chain across this
+	// handler — would block all writes for the duration of any
+	// subscribe and is worse.
+	if c.broker != nil && c.broker.observability != nil {
+		for _, f := range c.broker.observability.Tail(payload.Aspect, payload.SinceSeq) {
+			c.sendObserveFrame(payload.Aspect, f)
+		}
+	}
+
 	c.subMu.Lock()
 	if c.subscribedObserve == nil {
 		c.subscribedObserve = make(map[string]bool)
 	}
 	c.subscribedObserve[payload.Aspect] = true
 	c.subMu.Unlock()
-
-	c.log.Info("observability subscribe", "aspect", payload.Aspect, "since_seq", payload.SinceSeq)
-
-	// Drain the Hub's retained tail before acking so the operator
-	// receives history-then-ack-then-live in deterministic order.
-	if c.broker != nil && c.broker.observability != nil {
-		for _, f := range c.broker.observability.Tail(payload.Aspect, payload.SinceSeq) {
-			c.sendObserveFrame(payload.Aspect, f)
-		}
-	}
 
 	c.ackSubscribe(env)
 }
@@ -99,6 +111,11 @@ func (c *wsConn) sendObserveFrame(aspect string, f observability.Frame) {
 // the frame to any with this aspect in their subscribedObserve set.
 // Mirrors the fanOutToOperators predicate pattern but reads from the
 // per-aspect map instead of a single flag.
+//
+// Invariant: called from Grouper.emit without the Hub lock held —
+// must not re-enter Hub.GrouperFor or it'll deadlock with the Hub
+// mutex acquisition order. Likewise must not call back into the
+// same Grouper (Grouper.mu is held across emit).
 func (b *Broker) broadcastObserveFrame(aspect string, f observability.Frame) {
 	b.opMu.RLock()
 	targets := make([]*wsConn, 0, len(b.operators))
