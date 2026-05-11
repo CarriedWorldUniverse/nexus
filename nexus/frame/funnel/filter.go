@@ -116,6 +116,14 @@ type HardRulesFilter struct {
 // selfSuppressSubstrings are unambiguous self-suppress phrases — a
 // substantive reply would not plausibly contain these strings even
 // in the middle of useful content. Substring match is safe.
+//
+// Kept narrow on purpose. The temptation to add every new shape the
+// model invents ("not me. silence.", "addressed to @X, not me", etc)
+// is whack-a-mole — every novel phrasing slips through and we
+// re-patch. The cheap-model judge in filterJudgePrompt is the
+// off-cycle AI evaluator that's supposed to handle the
+// variable-phrasing class. New self-suppress shapes belong in the
+// judge prompt's example list, not here.
 var selfSuppressSubstrings = []string{
 	"i don't have anything to add",
 	"this isn't for me",
@@ -182,15 +190,36 @@ const filterJudgeTimeout = 1500 * time.Millisecond
 // Optimized for "yes/no with no preamble" — the funnel parses the
 // response with a substring check, so anything but a clean yes/no
 // degrades into the fail-open path.
-const filterJudgePrompt = `You are a chat-meaningfulness judge. You will be shown a single message produced by an aspect (an AI agent) at the end of a turn. Your job: decide whether this message contains meaningful content for the group chat, or whether it is scratch/internal-thinking/empty/non-reply content that should be suppressed.
+const filterJudgePrompt = `You are a chat-meaningfulness judge. You will be shown a single message produced by an aspect (an AI agent) at the end of a turn. Your job: decide whether this message contains meaningful content for the group chat, or whether it is scratch/internal-thinking/empty/non-reply/meta-routing content that should be suppressed.
 
-Reply with EXACTLY one token: either "yes" (meaningful, post it) or "no" (scratch, suppress it). No preamble, no punctuation, no explanation. Just one word.
+A message is MEANINGFUL only if it contributes something the recipients would want to read: information, a question, a decision, a status update, a substantive opinion, a tool result they need to see, or an emotional/social acknowledgement that's part of an ongoing conversation they're actively in.
+
+A message is NOT meaningful (and should be suppressed) if it falls into any of these patterns — note that these are CATEGORIES, not exhaustive phrasings. Match the intent, not the words:
+
+  1. Self-suppress / non-reply. The aspect saying it has nothing to add, isn't going to respond, will stay quiet, is observing only. Direct ("I don't have anything to add") and indirect ("Nothing further from me on this") both count.
+
+  2. Meta-routing commentary. The aspect noticing that a message wasn't addressed to it and narrating that observation. "This isn't for me." / "Addressed to @operator, not me. No action required." / "Still addressed to @X, not me. Silence." / "Routing artifact — ignoring." All of these talk ABOUT being silent instead of being silent. ALL suppress.
+
+  3. Internal thinking / scratch. Bracketed thoughts, "(thinking: ...)", "should I respond?", chain-of-reasoning leak.
+
+  4. Empty acknowledgements. "Acknowledged.", "Noted.", "Holding.", "Standing by.", "Copy that." — content-free even when grammatical.
+
+  5. Echo / mirror. A reply that just restates what the previous message said without adding anything ("So you're saying X" where X is verbatim the prior msg).
+
+Reply with EXACTLY one token: either "yes" (meaningful, post it) or "no" (scratch/meta/empty, suppress it). No preamble, no punctuation, no explanation. Just one word.
 
 Examples:
 - "I'll check the database and report back" → yes
 - "Looking at the code now" → yes
+- "Migration completed — 4.2M rows updated, 0 errors" → yes
 - "I don't have anything to add to this thread" → no
+- "This message is addressed to @operator, not me. No action required." → no
+- "Still addressed to @anvil, not me. Silence." → no
+- "plumb's message is for the operator — I'll stay out of it." → no
 - "(internal: should I respond?)" → no
+- "Holding." → no
+- "Acknowledged." → no
+- "Noted, will let you know if it changes" → yes (commits to a future action)
 - empty / whitespace only → no
 - "{thinking: this is for someone else}" → no`
 
