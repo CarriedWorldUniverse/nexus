@@ -345,6 +345,21 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	triggerMsgID := f.triggeringMsgID
 	f.triggeringMsgID = 0
 
+	// Work-signal: 👀 on the triggering message means "I saw it, I'm
+	// working on it." Resolved post-filter:
+	//   - filter approves → reply posts → remove 👀 (same-emoji toggle).
+	//   - filter suppresses → replace with 👍 ("saw it, nothing to add").
+	// Gated on having a real trigger msg + a chat gateway; non-chat-
+	// triggered deliberations (operator REST, eval) have no msg to react
+	// to. Per #189 — single-emoji-per-reactor makes this an ambient
+	// observability layer the operator can scan across all aspects.
+	if triggerMsgID != 0 && f.cfg.ChatGateway != nil {
+		if err := f.cfg.ChatGateway.ReactTo(ctx, triggerMsgID, "👀"); err != nil {
+			f.log.Debug("funnel: 👀 work-signal failed",
+				"aspect", f.cfg.AspectID, "trigger_msg_id", triggerMsgID, "err", err)
+		}
+	}
+
 	// Check compaction threshold before running the turn. If we'd cross
 	// it, summarize first and rotate the session.
 	threshold := f.cfg.Compaction.ThresholdTokens
@@ -535,6 +550,27 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		"stop_reason", result.StopReason,
 		"filter_post", decision.ShouldPost,
 		"filter_reason", decision.Reason)
+
+	// Resolve the 👀 work-signal based on the filter outcome. Approve →
+	// remove (same-emoji toggle on single-emoji-per-reactor); suppress →
+	// replace with 👍 ("saw it, nothing to add"). The work-signal post
+	// happened earlier under the same gate, so only resolve if we
+	// actually posted it.
+	if triggerMsgID != 0 && f.cfg.ChatGateway != nil {
+		var resolveEmoji string
+		if decision.ShouldPost {
+			resolveEmoji = "👀" // toggle off
+		} else {
+			resolveEmoji = "👍" // replaces 👀
+		}
+		if err := f.cfg.ChatGateway.ReactTo(ctx, triggerMsgID, resolveEmoji); err != nil {
+			f.log.Debug("funnel: resolve work-signal failed",
+				"aspect", f.cfg.AspectID,
+				"trigger_msg_id", triggerMsgID,
+				"emoji", resolveEmoji,
+				"err", err)
+		}
+	}
 
 	// Auto-post the model's natural reply when the filter approves and a
 	// gateway is wired. This closes the gap left when providers don't
