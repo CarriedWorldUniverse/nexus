@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -834,6 +835,55 @@ func buildOperatorLogin(db *sql.DB, nexusID string, secret []byte, addr string, 
 	}
 }
 
+// seedThreadIndex populates the in-memory ThreadIndex with the Frame's
+// historical posts so reply-routing (route.ShouldRouteToFrame rule 2c)
+// survives nexus restarts. The index is in-process; without seeding,
+// every reboot loses authorship knowledge and operator replies to any
+// pre-restart Frame post route nowhere.
+//
+// Reads chat_messages where from_agent == frameName, oldest first, no
+// limit (replays the full Frame chat history). Topic comes through as
+// empty for messages without one; RecordPost handles that.
+//
+// Errors propagate to the caller, which logs + continues — a seed
+// failure degrades reply-routing to this-boot-only but doesn't block
+// startup.
+func seedThreadIndex(ctx context.Context, store chat.Store, idx *route.ThreadIndex, frameName string, log *slog.Logger) error {
+	if store == nil || idx == nil || frameName == "" {
+		return nil
+	}
+	// chat.Store doesn't expose ListByFromAgent today; walk ListPage
+	// in batches and filter. This is one-shot at boot, so the cost is
+	// negligible relative to a server lifetime.
+	var afterID int64
+	const batch = 500
+	seeded := 0
+	for {
+		msgs, hasMore, err := store.ListPage(ctx, 0, afterID, batch)
+		if err != nil {
+			return fmt.Errorf("seed thread index: list chat page: %w", err)
+		}
+		if len(msgs) == 0 {
+			break
+		}
+		for _, m := range msgs {
+			if m.From == frameName {
+				idx.RecordPost(m.ID, m.Topic)
+				seeded++
+			}
+			if m.ID > afterID {
+				afterID = m.ID
+			}
+		}
+		if !hasMore {
+			break
+		}
+	}
+	log.Info("frame threads index seeded from chat history",
+		"frame", frameName, "messages_recorded", seeded)
+	return nil
+}
+
 // deriveDefaultOrigin builds the WebAuthn origin string for the operator
 // dashboard from the rpID + listen addr. WebAuthn matches origins as
 // exact strings — including port — so a default of "https://<rpID>"
@@ -1226,6 +1276,15 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 	recorder := &usageRecorderAdapter{store: usageStore}
 
 	threads := route.NewThreadIndex()
+	// Seed the in-memory index from chat history so reply-routing
+	// (route.Rule 2c) survives nexus restarts. The threads index is
+	// transient; without this seed, every restart drops the Frame's
+	// authorship record and operator replies to pre-restart Frame
+	// posts route nowhere. Surfaced on 2026-05-11 cutover.
+	if seedErr := seedThreadIndex(ctx, store, threads, ef.Aspect.Name, log); seedErr != nil {
+		log.Warn("frame threads index seed failed; reply-to-Frame routing limited to this boot",
+			"err", seedErr, "frame", ef.Aspect.Name)
+	}
 	outputFilter := buildOutputFilter(ef.Aspect.Config, p, bridle.ProviderID(provider), model, log)
 	// PostTurn hook resolves the funnel's session id lazily: the
 	// funnel itself doesn't exist yet (we're constructing its config),
