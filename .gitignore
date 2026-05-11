@@ -39,3 +39,7 @@ tmp/
 # Vector index files (if ever dumped separately)
 *.vec
 *.index
+
+agents/*/cursor
+*.exe~
+
