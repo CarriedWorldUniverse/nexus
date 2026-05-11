@@ -22,6 +22,7 @@ package funnel
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -179,12 +180,21 @@ type CheapModelFilter struct {
 	Harness  *bridle.Harness
 	Provider bridle.ProviderID
 	Model    string
+
+	// Logger is optional; when set, every Judge() call emits an INFO
+	// log with the input preview + judge raw output + decision. Pair
+	// the input text against the model's verdict for post-hoc analysis
+	// ("why did the filter let X through"). nil = silent.
+	Logger *slog.Logger
 }
 
-// filterJudgeTimeout caps the cheap-model call. A filter that takes
-// 2s before posting defeats the point of mid-turn comms; the filter
-// has to be fast or fail open.
-const filterJudgeTimeout = 1500 * time.Millisecond
+// filterJudgeTimeout is a safety bound for a fully hung judge —
+// "model is broken / network gone" backstop, not a "make it snappy"
+// budget. The outer runFilter waits without timing out (the judge
+// IS the authority on whether to post), so this only fires when
+// something pathological is going on. 30s is way past any normal
+// cold-start; if we hit it, log the WARN and fall back to posting.
+const filterJudgeTimeout = 30 * time.Second
 
 // filterJudgePrompt is the system prompt for the cheap-model filter.
 // Optimized for "yes/no with no preamble" — the funnel parses the
@@ -238,10 +248,23 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 	ctx, cancel := context.WithTimeout(parent, filterJudgeTimeout)
 	defer cancel()
 
+	// No session at all. The filter judge is a one-shot text classifier:
+	// system prompt + one user message + one-token reply, no continuity
+	// across calls. Previously we passed Session.ID = "filter-<turn_id>"
+	// which the claude-code CLI rejected because --session-id must be a
+	// valid UUID — every cheap-judge call exited 1, harness returned an
+	// error, CheapModelFilter failed open, and the filter was effectively
+	// disabled the entire time it was configured.
+	//
+	// Leaving SessionHandle zero-valued (no ID, no New flag) skips the
+	// --session-id / --resume args entirely; claude-code creates its own
+	// auto-generated session per call. Per-call sessions are slight waste
+	// (we never resume any of them) but zero risk of UUID-validation
+	// surprises and no UUID-gen dep needed. Surfaced 2026-05-12 by the
+	// judge-decision logging — see task #186 for the discovery trail.
 	req := bridle.TurnRequest{
 		AspectID:     in.AspectID,
 		SystemPrompt: filterJudgePrompt,
-		Session:      bridle.SessionHandle{ID: "filter-" + in.TurnID, New: true},
 		UserMessage:  in.FinalText,
 		Provider:     f.Provider,
 		Model:        f.Model,
@@ -250,6 +273,10 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 
 	result, err := f.Harness.RunTurn(ctx, req, NullRunner{}, collectSink{})
 	if err != nil {
+		if f.Logger != nil {
+			f.Logger.Warn("filter judge: harness error — failing open",
+				"aspect", in.AspectID, "turn_id", in.TurnID, "err", err)
+		}
 		// Fail open: posting a thin reply is better than suppressing
 		// a real one because the filter timed out or errored.
 		return FilterDecision{ShouldPost: true}
@@ -259,13 +286,35 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 	// Tolerate "no.", "no!", "no\n" by checking prefix on a
 	// pre-trimmed string. The prompt asks for a clean yes/no but
 	// providers don't always cooperate.
+	var decision FilterDecision
 	switch {
 	case strings.HasPrefix(answer, "no"):
-		return FilterDecision{ShouldPost: false, Reason: FilterReasonScratch}
+		decision = FilterDecision{ShouldPost: false, Reason: FilterReasonScratch}
 	case strings.HasPrefix(answer, "yes"):
-		return FilterDecision{ShouldPost: true}
+		decision = FilterDecision{ShouldPost: true}
 	default:
 		// Unparseable — fail open.
-		return FilterDecision{ShouldPost: true}
+		decision = FilterDecision{ShouldPost: true}
 	}
+
+	// Always log the judge round-trip so post-hoc analysis can pair
+	// the input text against the model's verdict. Without this, "why
+	// did the filter let X through" requires reproducing the model
+	// call by hand. Truncate the input to keep log lines readable;
+	// the FinalText raw answer is bounded by MaxSteps:1 and short by
+	// construction so it logs in full.
+	if f.Logger != nil {
+		preview := in.FinalText
+		if len(preview) > 200 {
+			preview = preview[:200] + "…"
+		}
+		f.Logger.Info("filter judge decision",
+			"aspect", in.AspectID,
+			"turn_id", in.TurnID,
+			"should_post", decision.ShouldPost,
+			"reason", decision.Reason,
+			"judge_raw", result.FinalText,
+			"input_preview", preview)
+	}
+	return decision
 }
