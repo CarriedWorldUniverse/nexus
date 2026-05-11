@@ -4,7 +4,7 @@
 
 **Approach:** two-port swap. Stand up nexus on `:18888` while agent-network is still alive on `:7888`, validate, then cut over to `:7888`.
 
-**Production token:** `<set NEXUS_TOKEN before launch — operator picks value>`.
+**Production token:** `cutover-prod-2026-05-11 (back-compat legacy-master shim; aspects use keyfile JWTs)`.
 
 **Origins allow-list spans both ports** so a single passkey works on `:18888` and `:7888`. The cutover command sets `NEXUS_OPERATOR_ORIGINS=https://agentnetwork.<tailnet>.ts.net:18888,https://agentnetwork.<tailnet>.ts.net:7888`.
 
@@ -39,7 +39,7 @@ Run alongside the live agent-network. agent-network keeps :7888.
 ### B1. Start nexus on :18888
 
 ```powershell
-$env:NEXUS_TOKEN = "<production-token>"
+$env:NEXUS_TOKEN = "cutover-prod-2026-05-11"
 $env:NEXUS_OPERATOR_RPID = "agentnetwork.<tailnet>.ts.net"
 $env:NEXUS_OPERATOR_ORIGINS = "https://agentnetwork.<tailnet>.ts.net:18888,https://agentnetwork.<tailnet>.ts.net:7888"
 $env:NEXUS_ALLOW_LEGACY_MASTER = "1"
@@ -164,7 +164,7 @@ Get-NetTCPConnection -LocalPort 7888 -State Listen -ErrorAction SilentlyContinue
 Same env as B1 (origins-allow-list spans both ports already). Just change `-addr`:
 
 ```powershell
-$env:NEXUS_TOKEN = "<production-token>"
+$env:NEXUS_TOKEN = "cutover-prod-2026-05-11"
 $env:NEXUS_OPERATOR_RPID = "agentnetwork.<tailnet>.ts.net"
 $env:NEXUS_OPERATOR_ORIGINS = "https://agentnetwork.<tailnet>.ts.net:18888,https://agentnetwork.<tailnet>.ts.net:7888"
 $env:NEXUS_ALLOW_LEGACY_MASTER = "1"
