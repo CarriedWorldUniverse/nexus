@@ -107,12 +107,22 @@ func main() {
 		log.Debug("uncorrelated frame received", "kind", env.Kind, "id", env.ID, "payload", string(env.Payload))
 	})
 
+	// FailFirstConnect: false so a transient broker outage between
+	// auth-success and the first WS dial doesn't tear the MCP down.
+	// Tools surface "broker unavailable" via b.brokerDown() in that
+	// window; wsclient keeps reconnecting in the background and the
+	// MCP stays addressable to claude-code throughout.
+	//
+	// (Note: this only helps post-auth. If the broker is down at
+	// MCP startup, resolveAuth fails earlier at the validate POST
+	// and the MCP still exits. Wrapping resolveAuth in a retry loop
+	// is a separate, larger change.)
 	wsCli, err := wsclient.New(wsclient.Config{
 		URL:              auth.wsURL,
 		AuthToken:        auth.jwt,
 		Handler:          wsHandler,
 		Logger:           log,
-		FailFirstConnect: true,
+		FailFirstConnect: false,
 	})
 	if err != nil {
 		log.Error("wsclient.New", "err", err)
@@ -360,6 +370,26 @@ type wsBridge struct {
 	writeTimeout time.Duration
 }
 
+// brokerUnavailableMsg is what every tool returns when the WS connection
+// is mid-reconnect or otherwise not ready. We surface this as a normal
+// (successful) MCP tool result rather than an MCP error so the client
+// (claude-code) doesn't mark the entire MCP server as dead — the model
+// reads the text, understands "broker's restarting, try again," and
+// retries on its own cadence. Operator chose this shape over blocking-
+// through-reconnect and over optimistic buffering (no silent loss).
+const brokerUnavailableMsg = "nexus broker unavailable — connection is reconnecting. The MCP transport stays up; retry shortly."
+
+// brokerDown returns true and the structured "unavailable" tool result
+// when the WS isn't connected. Tool handlers call this first and bail
+// before attempting any write, so a broker restart looks like a brief
+// "retry shortly" instead of a transport-level error.
+func (b *wsBridge) brokerDown() (*mcpgo.CallToolResult, bool) {
+	if b.ws.Connected() {
+		return nil, false
+	}
+	return mcpgo.NewToolResultText(brokerUnavailableMsg), true
+}
+
 // newMCPServer builds the stdio MCP server with all Part 2 tools
 // registered. Server name/version are surfaced to MCP clients via the
 // initialize handshake.
@@ -470,6 +500,10 @@ func (b *wsBridge) handleSendChat(ctx context.Context, req mcpgo.CallToolRequest
 
 	replyTo := req.GetInt("reply_to", 0)
 	topic := strings.TrimSpace(req.GetString("topic", ""))
+
+	if r, down := b.brokerDown(); down {
+		return r, nil
+	}
 
 	payload := frames.ChatSendPayload{
 		From:    from,
@@ -590,6 +624,9 @@ func (b *wsBridge) handleReadChatThread(ctx context.Context, req mcpgo.CallToolR
 // single-message and thread-walk tools — they differ only in what the
 // model is being told they do.
 func (b *wsBridge) chatRead(ctx context.Context, msgID int, sinceID int64) (*mcpgo.CallToolResult, error) {
+	if r, down := b.brokerDown(); down {
+		return r, nil
+	}
 	payload := frames.ChatReadPayload{
 		MsgID:   msgID,
 		SinceID: sinceID,
@@ -647,6 +684,10 @@ func (b *wsBridge) handleReactTo(ctx context.Context, req mcpgo.CallToolRequest)
 	from := strings.TrimSpace(req.GetString("from", ""))
 	if from == "" {
 		from = b.defaultFrom
+	}
+
+	if r, down := b.brokerDown(); down {
+		return r, nil
 	}
 
 	env, err := frames.New(frames.KindChatReaction, frames.ChatReactionPayload{
