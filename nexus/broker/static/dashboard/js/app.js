@@ -1,7 +1,7 @@
 const { h, html, signal, useEffect, useState } = window.__preact;
 
 import { setAgents, currentChannel } from './state.js';
-import { fetchAgents } from './api.js';
+import { fetchAgents, setAuthToken } from './api.js';
 import { Shell } from './components/Shell.js';
 import { Login } from './Login.js';
 import { open as commsOpen } from './comms.js';
@@ -105,12 +105,43 @@ export function App() {
     let cancelled = false;
     (async () => {
       try {
+        // 1. Auth-mode probe (dev bypass).
         const res = await fetch('/api/auth/mode', { cache: 'no-store' });
         const data = await res.json();
         if (!cancelled && data && data.bypass) {
-          // Open comms with no token — broker accepts via bypass path.
           await commsOpen('');
           if (!cancelled) setAuthed(true);
+          return;
+        }
+
+        // 2. Resume probe: do we have a JWT in localStorage that the
+        // broker still considers valid? If so, restore the session
+        // (token → in-memory + WS open) and skip the Login overlay.
+        // Without this path, every refresh prompts for a passkey even
+        // when the cached JWT has hours left on it — the source of
+        // the "reauth on every refresh" UX bug. Pairs with
+        // /api/auth/check + setAuthToken's localStorage write-through
+        // + the 24h JWT TTL bump.
+        const tok = (typeof localStorage !== 'undefined') ? localStorage.getItem('auth_token') : null;
+        if (tok) {
+          try {
+            const probe = await fetch('/api/auth/check', {
+              headers: { 'Authorization': 'Bearer ' + tok },
+              cache: 'no-store',
+            });
+            if (!cancelled && probe.ok) {
+              setAuthToken(tok); // sync in-memory holder with localStorage
+              await commsOpen(tok);
+              if (!cancelled) setAuthed(true);
+              return;
+            }
+            // 401 → token stale; drop it so the next reload doesn't loop.
+            if (!cancelled && probe.status === 401) {
+              localStorage.removeItem('auth_token');
+            }
+          } catch (e) {
+            console.warn('auth check probe failed', e);
+          }
         }
       } catch (e) {
         // Probe failure is non-fatal — fall through to the Login overlay.

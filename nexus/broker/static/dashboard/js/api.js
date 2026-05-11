@@ -23,11 +23,6 @@
 
 import { rpc, send } from './comms.js';
 
-// In-memory auth-token holder. Exposed so Login.js can stash the
-// JWT after a successful WebAuthn login and the shim functions can
-// surface it for any UI affordance that wanted the bearer string.
-let authToken = null;
-
 export const BASE = window.location.origin;
 
 // Page-size constants — kept at the agent-network values so views
@@ -35,16 +30,40 @@ export const BASE = window.location.origin;
 // initial slice.
 export const INITIAL_PAGE = 50;
 
+// Token persistence: in-memory holder + localStorage mirror.
+//
+// History: the spec originally called for memory-only auth ("refresh =
+// re-auth"), but ten read sites grew up reading localStorage.auth_token
+// directly (Terminal, AgentsView, Status, DocsView, harness-stream-store,
+// Auth.useAuthGate, etc), and no write site ever populated it. Login.js
+// stashed JWTs in-memory only, so on every page reload those readers
+// got null OR a stale legacy hex token someone set externally — which
+// then 401'd against the WS upgrade endpoint, leaving the operator
+// looking at half-loaded REST chat history with no live delivery.
+//
+// Fix: setAuthToken writes through to localStorage so the contract every
+// view assumed actually holds. Combined with the 24h JWT TTL bump
+// (cmd/nexus/main.go) + /api/auth/check (broker/server.go), reload now
+// detects a still-valid session and skips the WebAuthn modal.
+
+const TOKEN_KEY = 'auth_token';
+
+let authToken = (typeof localStorage !== 'undefined') ? localStorage.getItem(TOKEN_KEY) : null;
+
 export function getAuthToken() {
   return authToken;
 }
 
 export function setAuthToken(t) {
   authToken = t;
+  if (typeof localStorage === 'undefined') return;
+  if (t) localStorage.setItem(TOKEN_KEY, t);
+  else localStorage.removeItem(TOKEN_KEY);
 }
 
 export function clearAuthToken() {
   authToken = null;
+  if (typeof localStorage !== 'undefined') localStorage.removeItem(TOKEN_KEY);
 }
 
 // fetchAgents → roster.list. nexus's RosterAspect uses `name` as the

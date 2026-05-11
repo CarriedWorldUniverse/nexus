@@ -1,5 +1,6 @@
 const { html, useState, useEffect } = window.__preact;
 import { setAuthToken, clearAuthToken, BASE } from '../api.js';
+import { open as commsOpen, isConnected as commsConnected } from '../comms.js';
 
 let _webauthnMod = null;
 const _webauthnReady = import('/js/vendor/webauthn/index.js').then(m => { _webauthnMod = m; }).catch(() => {});
@@ -9,20 +10,44 @@ const _qrReady = import('/js/vendor/qrcode.js').then(m => { _qrMod = m.default |
 
 async function checkAuth() {
   const token = localStorage.getItem('auth_token');
-  if (!token) return false;
+  if (!token) return null;
   try {
     const res = await fetch(`${BASE}/api/auth/check`, {
       headers: { 'Authorization': `Bearer ${token}` }
     });
-    return res.ok;
-  } catch { return false; }
+    return res.ok ? token : null;
+  } catch { return null; }
 }
 
+// useAuthGate is the boot path that runs BEFORE the Login overlay
+// considers itself. Two valid outcomes:
+//
+//   1. checkAuth() returns a still-valid JWT → call setAuthToken so
+//      every view's getAuthToken() works, AND call commsOpen so the
+//      WS substrate is live before views mount and try to subscribe.
+//      Without that second step, the chat view boots, registers a
+//      message.created handler, and never receives a frame because
+//      nobody opened the socket — the Login.js path used to be the
+//      only caller of commsOpen, so the "skip login" branch silently
+//      left the socket closed. Manifested as "I'm logged in, history
+//      half-loaded, but no live messages."
+//   2. checkAuth() returns null → fall through to the WebAuthn
+//      ceremony in Login.js, which calls commsOpen itself.
 export function useAuthGate() {
   const [authed, setAuthed] = useState(null); // null = checking
 
   useEffect(() => {
-    checkAuth().then(ok => setAuthed(ok));
+    checkAuth().then(async (token) => {
+      if (!token) { setAuthed(false); return; }
+      setAuthToken(token);
+      try { await commsOpen(token); } catch (e) {
+        console.error('useAuthGate: commsOpen failed', e);
+        // Don't reject the session — the comms layer's reconnect
+        // loop will keep trying. Views render; live frames just
+        // won't flow until the WS settles.
+      }
+      setAuthed(true);
+    });
   }, []);
 
   function onLogin() { setAuthed(true); }
