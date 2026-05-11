@@ -110,12 +110,18 @@ Add Args + a new `EventTurnToolResult` to Config.Events for file-diff artifacts,
 
 ## 4. Why the dual scoping is correct (not duplicate)
 
-When Phase E wires Path 2, both `Config.Events.turn.start` AND `ObservabilityHook.BeginTurn` fire for the same logical event. This isn't redundant; they're answering different questions for different consumers:
+When Phase E wires Path 2, both `Config.Events.turn.start` AND `ObservabilityHook.BeginTurn` fire near the same time boundary in the trivial case. **They are not the same event at different aggregation levels — they are different events that happen to share a boundary** (corrected per keel-cli msg #214):
 
-- **Config.Events** answers: *"what is the funnel doing right now?"* Lifecycle telemetry. Subscribers: dashboard activity strip, agentfunnel outbound WS frames, anything that wants coarse "is something happening?" signal.
-- **ObservabilityHook** answers: *"what is the model doing inside this turn?"* Rich observability. Subscribers: the Grouper, which builds TurnFrames for the observability stream.
+- **`Config.Events.turn.start`** fires **once per Deliberate** call. Semantic: "this funnel just began a deliberation cycle." Operator-facing telemetry. Subscribers: dashboard activity strip, agentfunnel outbound WS frames, anything that wants coarse "is something happening?" signal.
+- **`ObservabilityHook.BeginTurn`** fires **1–3 times per Deliberate** depending on whether compact and/or filter-judge run inside that deliberation. Semantic: "the funnel just invoked a bridle turn (main, compact, or filter-judge)." Rich observability. Subscribers: the Grouper, which builds TurnFrames for the observability stream.
 
-Same logical event from one viewpoint; different aggregation level. Both deliberate. The interface comment makes this explicit so a future maintainer doesn't tear one out thinking it's redundant.
+So a single Deliberate produces:
+- 1 × `Config.Events.turn.start`
+- 1 × `ObservabilityHook.BeginTurn(label="main")` — always
+- 0 or 1 × `ObservabilityHook.BeginTurn(label="compact")` — only when compaction triggers mid-deliberation
+- 0 or 1 × `ObservabilityHook.BeginTurn(label="filter-judge")` — only when post-hoc filter runs a real bridle turn (cheap-judge mode)
+
+Counting them together is wrong. Renderers consuming both channels must not pair them N-to-N. The interface comment makes this explicit so a future maintainer doesn't tear one out thinking it's redundant, AND doesn't try to align them 1:1.
 
 ## 5. Concurrency check
 
