@@ -44,6 +44,10 @@ func (c *wsConn) dispatchOperatorSubFrame(env frames.Envelope) bool {
 		c.handleUnsubscribeChat(env)
 	case frames.KindUnsubscribeAspectStatus:
 		c.handleUnsubscribeAspectStatus(env)
+	case frames.KindSubscribeObserve:
+		c.handleSubscribeObserve(env)
+	case frames.KindUnsubscribeObserve:
+		c.handleUnsubscribeObserve(env)
 	default:
 		return false
 	}

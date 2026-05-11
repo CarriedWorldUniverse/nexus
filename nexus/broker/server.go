@@ -25,6 +25,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
+	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
@@ -325,6 +326,12 @@ type Broker struct {
 	// adminOps tracks in-flight long-running admin operations
 	// (shutdown/compact/rewind). Lazily allocated by registerAdmin.
 	adminOps *adminOpStore
+
+	// observability is the Phase B observability Hub: per-aspect
+	// Groupers + a shared Buffer for tail-replay on subscribe. Chat
+	// pipeline emissions land here (chat_send.go); fan-out to
+	// subscribed operators flows through broadcastObserveFrame.
+	observability *observability.Hub
 }
 
 func New(cfg Config, r *roster.Roster) *Broker {
@@ -362,7 +369,7 @@ func New(cfg Config, r *roster.Roster) *Broker {
 		cfg.Logger.Warn("legacy master token enabled — every /connect via this token will WARN. " +
 			"Migrate aspects to per-aspect tokens; clear NEXUS_ALLOW_LEGACY_MASTER once done.")
 	}
-	return &Broker{
+	b := &Broker{
 		cfg:        cfg,
 		roster:     r,
 		log:        cfg.Logger,
@@ -370,6 +377,8 @@ func New(cfg Config, r *roster.Roster) *Broker {
 		connPerIP:  make(map[string]int),
 		operators:  make(map[*wsConn]struct{}),
 	}
+	b.observability = observability.NewHub(500, b.broadcastObserveFrame)
+	return b
 }
 
 // reserveConn accounts a new /connect against the global + per-IP

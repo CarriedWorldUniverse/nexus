@@ -29,7 +29,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 )
 
 // HandleChatSend persists an inbound chat message and fans it out to
@@ -128,6 +130,30 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 			routerCtx = context.Background()
 		}
 		go b.cfg.ChatRouter.RouteChat(routerCtx, msg.ID, from, content, replyTo, topic)
+	}
+
+	// 5. Observability (Phase B): emit ChatFrames for the sender
+	// (outbound) and each computed recipient (inbound). Lazy-create
+	// groupers per aspect via the Hub. Non-aspect senders (operator,
+	// frame) still get a Grouper today — they only become visible if
+	// someone subscribes; filtering by registered roster is deferred.
+	if b.observability != nil {
+		obsMsg := chat.Message{
+			ID:        msg.ID,
+			From:      from,
+			Content:   content,
+			ReplyTo:   replyTo,
+			Topic:     topic,
+			CreatedAt: msg.CreatedAt,
+		}
+		if g := b.observability.GrouperFor(from); g != nil {
+			g.OnChat(obsMsg, observability.DirectionOutbound)
+		}
+		for _, rec := range recipients {
+			if g := b.observability.GrouperFor(rec); g != nil {
+				g.OnChat(obsMsg, observability.DirectionInbound)
+			}
+		}
 	}
 
 	return msg.ID, nil
