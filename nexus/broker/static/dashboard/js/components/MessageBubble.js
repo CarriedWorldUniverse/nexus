@@ -1,6 +1,6 @@
 const { h, html, useState, useEffect } = window.__preact;
 
-import { agentColors, replyTo } from '../state.js';
+import { agentColors, colorForAgent, replyTo } from '../state.js';
 import { toggleReaction } from '../api.js';
 import { marked } from '/js/vendor/marked.js';
 import DOMPurify from '/js/vendor/dompurify.js';
@@ -105,7 +105,7 @@ function renderContent(content) {
     // @mentions — extract so markdown doesn't italicise the @ symbol
     .replace(/@([\w-]+)/g, (_, name) => {
       const colors = agentColors.value;
-      const color = colors[name] || '#bb86fc';
+      const color = colors[name] || colorForAgent(name);
       tokens.push(DOMPurify.sanitize(
         `<span style="color:${color};font-weight:600">@${escapeHtml(name)}</span>`
       ));
@@ -154,7 +154,7 @@ function renderContent(content) {
 
 export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly, readOnly }) {
   const colors = agentColors.value;
-  const color = colors[msg.from] || '#bb86fc';
+  const color = colors[msg.from] || colorForAgent(msg.from);
   const initials = (msg.from || '??').slice(0, 2).toUpperCase();
 
   // Server shape (post-2026-05-12 single-emoji-per-reactor rule):

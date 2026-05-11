@@ -14,15 +14,42 @@ const AGENT_PALETTE = [
   '#80deea', '#f48fb1', '#b39ddb', '#80cbc4', '#ffab91',
 ];
 
+// Stable palette fallback: hash the agent id into a palette slot so the
+// same name always gets the same color, regardless of registration order
+// or which agents are currently online. Without this, register/deregister
+// reshuffles indices and existing chips change color.
+//
+// FNV-1a 32-bit — fast, deterministic, well-distributed for short strings.
+function paletteFor(id) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return AGENT_PALETTE[(h >>> 0) % AGENT_PALETTE.length];
+}
+
+// colorForAgent returns the color to use for an agent id. Server-
+// configured colors win; otherwise a deterministic palette slot keyed
+// off the id (NOT registration order) so colors stay stable across
+// register/deregister.
+export function colorForAgent(id, configured) {
+  if (id === 'operator') return '#bb86fc';
+  if (configured) return configured;
+  return paletteFor(id || '');
+}
+
 export function setAgents(agentList) {
   agents.value = agentList;
-  const colors = { operator: '#bb86fc' };
-  agentList.forEach((agent, i) => {
+  // Carry forward any colors we've already assigned so a deregister
+  // doesn't drop the entry — messages from offline agents still need
+  // their color to render correctly.
+  const colors = { ...agentColors.value, operator: '#bb86fc' };
+  agentList.forEach((agent) => {
     const id = typeof agent === 'string' ? agent : agent.id;
-    if (id) {
-      // Use the agent's configured color from the API, fall back to palette
-      colors[id] = (typeof agent === 'object' && agent.color) || AGENT_PALETTE[i % AGENT_PALETTE.length];
-    }
+    if (!id) return;
+    const configured = (typeof agent === 'object' && agent.color) || null;
+    colors[id] = colorForAgent(id, configured);
   });
   agentColors.value = colors;
 }
