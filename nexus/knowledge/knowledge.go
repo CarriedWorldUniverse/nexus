@@ -331,6 +331,44 @@ func (s *Store) List(ctx context.Context, fromAgent string, limit int) ([]Entry,
 	return out, rows.Err()
 }
 
+// ListAll returns entries across every from_agent, newest first.
+// Mirrors List but without the agent filter — used by the operator
+// dashboard's default knowledge view so migrated rows (canon, research,
+// per-aspect notes) are visible without the operator having to specify
+// each agent.
+func (s *Store) ListAll(ctx context.Context, limit int) ([]Entry, error) {
+	if limit <= 0 {
+		limit = DefaultListLimit
+	}
+	rows, err := s.db.QueryContext(ctx, `
+	SELECT id, from_agent, topic, content, shared, updated_at,
+	       COALESCE(embed_model, ''), COALESCE(embed_dim, 0)
+	FROM knowledge
+	ORDER BY updated_at DESC
+	LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("knowledge.ListAll: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Entry
+	for rows.Next() {
+		var e Entry
+		var shared int
+		if err := rows.Scan(
+			&e.ID, &e.FromAgent, &e.Topic, &e.Content, &shared, &e.UpdatedAt,
+			&e.EmbeddingModel, &e.EmbeddingDim,
+		); err != nil {
+			return nil, fmt.Errorf("knowledge.ListAll: scan: %w", err)
+		}
+		e.Shared = shared == 1
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // buildScope constructs the SQL predicate (and arg list) that selects
 // which entries a Scope allows. Returns hasScope=false when the scope
 // admits nothing — caller returns empty results in that case without
