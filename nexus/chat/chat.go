@@ -417,45 +417,96 @@ func parseSQLiteTime(raw string) (time.Time, error) {
 	return t.UTC(), nil
 }
 
-// ToggleReaction implements toggle-semantics for a (msg, reactor,
-// emoji) triple. The unique constraint on (msg_id, reactor, emoji)
-// is the source of truth: an INSERT that fails with constraint
-// violation means the row exists, and we DELETE instead.
+// ToggleReaction enforces single-emoji-per-reactor semantics
+// (decision 2026-05-12): a given (msg_id, reactor) pair holds at most
+// ONE row at any time. The legacy multi-emoji-stack behavior is gone.
 //
-// Race window: two concurrent toggles from the same reactor on the
-// same msg+emoji can interleave (insert→insert-fails-delete vs
-// delete→insert), but the outcome is correct under any interleaving
-// because each operation is atomic. The reported `reacted` may not
-// match the caller's mental model under heavy concurrent toggling,
-// but that's only a UI concern and doesn't break the table.
+// Three observable outcomes for ReactTo(msg, reactor, emoji):
+//
+//  1. No existing row for (msg, reactor): INSERT new emoji. reacted=true.
+//  2. Existing row with same emoji: DELETE it (pure toggle-off).
+//     reacted=false.
+//  3. Existing row with DIFFERENT emoji: DELETE old, INSERT new
+//     (replace). reacted=true.
+//
+// The schema's old UNIQUE(msg_id, reactor, emoji) constraint stays in
+// place — it's still valid under the new semantics (we just never
+// insert a second-emoji row for the same reactor). Legacy rows from
+// before this change (one reactor with multiple emojis on one msg)
+// are tolerated: the first re-react from that reactor on that msg
+// deletes ALL their existing rows in the transaction below, then
+// inserts a single new one. Migration-free collapse.
+//
+// Atomicity: DELETE-then-INSERT runs inside a transaction so a
+// concurrent reader never observes "no reaction at all" mid-toggle
+// and can't catch us between the two statements.
 func (s *SQLStore) ToggleReaction(ctx context.Context, msgID int64, reactor, emoji string) (bool, error) {
 	if msgID == 0 || reactor == "" || emoji == "" {
 		return false, fmt.Errorf("chat.ToggleReaction: msgID, reactor, emoji all required")
 	}
-	// Try INSERT first; on UNIQUE conflict, DELETE.
-	_, err := s.DB.ExecContext(ctx, `
-		INSERT INTO chat_reactions (msg_id, reactor, emoji)
-		VALUES (?, ?, ?)
-	`, msgID, reactor, emoji)
-	if err == nil {
-		return true, nil
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("chat.ToggleReaction: begin tx: %w", err)
 	}
-	// Constraint violation = row exists, toggle off.
-	res, derr := s.DB.ExecContext(ctx, `
-		DELETE FROM chat_reactions
-		WHERE msg_id = ? AND reactor = ? AND emoji = ?
-	`, msgID, reactor, emoji)
-	if derr != nil {
-		return false, fmt.Errorf("chat.ToggleReaction: delete after insert conflict: %w (insert err: %v)", derr, err)
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+
+	// Read what (if anything) the reactor already has on this msg.
+	// At most one row in the steady state; tolerate >1 for legacy
+	// rows by deleting them all.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT emoji FROM chat_reactions
+		WHERE msg_id = ? AND reactor = ?
+	`, msgID, reactor)
+	if err != nil {
+		return false, fmt.Errorf("chat.ToggleReaction: select: %w", err)
 	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		// Insert failed for a non-conflict reason (FK violation,
-		// disk full, etc.) and the delete found nothing to remove.
-		// Surface the original insert error.
-		return false, fmt.Errorf("chat.ToggleReaction: %w", err)
+	var existing []string
+	for rows.Next() {
+		var e string
+		if err := rows.Scan(&e); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("chat.ToggleReaction: scan: %w", err)
+		}
+		existing = append(existing, e)
 	}
-	return false, nil
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("chat.ToggleReaction: rows: %w", err)
+	}
+
+	// Determine the outcome BEFORE we mutate, so the return value is
+	// derivable from intent rather than side-effects.
+	sameOnly := len(existing) == 1 && existing[0] == emoji
+
+	// Always delete every existing row for (msg, reactor) — collapses
+	// legacy stacks and clears the slot for the new emoji (or for the
+	// pure toggle-off case).
+	if len(existing) > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM chat_reactions
+			WHERE msg_id = ? AND reactor = ?
+		`, msgID, reactor); err != nil {
+			return false, fmt.Errorf("chat.ToggleReaction: delete: %w", err)
+		}
+	}
+
+	if !sameOnly {
+		// Insert the new emoji (cases 1 + 3 in the docstring).
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO chat_reactions (msg_id, reactor, emoji)
+			VALUES (?, ?, ?)
+		`, msgID, reactor, emoji); err != nil {
+			return false, fmt.Errorf("chat.ToggleReaction: insert: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("chat.ToggleReaction: commit: %w", err)
+	}
+	// `reacted` matches "is there now a row for (msg, reactor, emoji)?"
+	// — false only for the pure toggle-off case.
+	return !sameOnly, nil
 }
 
 // AnnounceSharedFile inserts a chat message announcing the file and
