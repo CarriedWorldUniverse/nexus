@@ -294,6 +294,111 @@ func TestSQLStore_ToggleReactionPerReactor(t *testing.T) {
 	_ = r2Still
 }
 
+// TestSQLStore_ToggleReactionReplacesExistingEmoji asserts the
+// single-emoji-per-reactor rule shipped 2026-05-12: when a reactor
+// already has an emoji on a msg, reacting with a DIFFERENT emoji
+// replaces the old one rather than stacking.
+func TestSQLStore_ToggleReactionReplacesExistingEmoji(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	msg, _ := s.Insert(ctx, "operator", "ping", 0, "")
+
+	// First emoji — fresh add.
+	r1, err := s.ToggleReaction(ctx, msg.ID, "anvil", "👀")
+	if err != nil || !r1 {
+		t.Fatalf("first react 👀: reacted=%v err=%v, want reacted=true err=nil", r1, err)
+	}
+
+	// Different emoji from same reactor — replaces, not stacks.
+	r2, err := s.ToggleReaction(ctx, msg.ID, "anvil", "👍")
+	if err != nil || !r2 {
+		t.Fatalf("replace 👀 with 👍: reacted=%v err=%v, want reacted=true err=nil", r2, err)
+	}
+
+	// Verify: anvil has exactly one reaction (👍), not both.
+	rs, err := s.GetReactions(ctx, []int64{msg.ID})
+	if err != nil {
+		t.Fatalf("GetReactions: %v", err)
+	}
+	anvilEmojis := []string{}
+	for _, r := range rs[msg.ID] {
+		if r.Aspect == "anvil" {
+			anvilEmojis = append(anvilEmojis, r.Emoji)
+		}
+	}
+	if len(anvilEmojis) != 1 || anvilEmojis[0] != "👍" {
+		t.Errorf("after replace anvil has %v, want exactly [👍]", anvilEmojis)
+	}
+}
+
+// TestSQLStore_ToggleReactionPureToggleOff asserts that re-reacting
+// with the SAME emoji still removes (pure toggle-off, no replacement
+// happens), distinguished from the replace case by the same-emoji
+// short-circuit.
+func TestSQLStore_ToggleReactionPureToggleOff(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	msg, _ := s.Insert(ctx, "operator", "ping", 0, "")
+
+	_, _ = s.ToggleReaction(ctx, msg.ID, "anvil", "👀")
+	reacted, err := s.ToggleReaction(ctx, msg.ID, "anvil", "👀")
+	if err != nil {
+		t.Fatalf("toggle-off: err=%v", err)
+	}
+	if reacted {
+		t.Error("re-react with same emoji should toggle off (reacted=false)")
+	}
+
+	rs, _ := s.GetReactions(ctx, []int64{msg.ID})
+	if len(rs[msg.ID]) != 0 {
+		t.Errorf("after pure toggle-off, expected 0 reactions, got %v", rs[msg.ID])
+	}
+}
+
+// TestSQLStore_ToggleReactionCollapsesLegacyMultiEmoji simulates a
+// pre-rule-change reactor with two emojis on one msg (legacy stacked
+// state). The first new react under the new semantics should collapse
+// ALL of that reactor's rows down to a single row — no migration
+// needed, just a one-time touch.
+func TestSQLStore_ToggleReactionCollapsesLegacyMultiEmoji(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	msg, _ := s.Insert(ctx, "operator", "ping", 0, "")
+
+	// Simulate legacy state: insert two emojis directly, bypassing
+	// ToggleReaction. The schema's UNIQUE(msg_id, reactor, emoji) still
+	// allows this because the triples differ.
+	_, err := s.DB.ExecContext(ctx, `
+		INSERT INTO chat_reactions (msg_id, reactor, emoji) VALUES (?, ?, ?), (?, ?, ?)
+	`, msg.ID, "plumb", "👀", msg.ID, "plumb", "❤️")
+	if err != nil {
+		t.Fatalf("seed legacy rows: %v", err)
+	}
+
+	// Verify seeded state.
+	rs, _ := s.GetReactions(ctx, []int64{msg.ID})
+	if len(rs[msg.ID]) != 2 {
+		t.Fatalf("seed: expected 2 legacy rows, got %d", len(rs[msg.ID]))
+	}
+
+	// New react from same reactor — should collapse both legacy rows
+	// and replace with a single new row.
+	if _, err := s.ToggleReaction(ctx, msg.ID, "plumb", "👍"); err != nil {
+		t.Fatalf("collapse react: %v", err)
+	}
+
+	rs, _ = s.GetReactions(ctx, []int64{msg.ID})
+	plumbEmojis := []string{}
+	for _, r := range rs[msg.ID] {
+		if r.Aspect == "plumb" {
+			plumbEmojis = append(plumbEmojis, r.Emoji)
+		}
+	}
+	if len(plumbEmojis) != 1 || plumbEmojis[0] != "👍" {
+		t.Errorf("after collapse plumb has %v, want exactly [👍]", plumbEmojis)
+	}
+}
+
 func TestSQLStore_ToggleReactionRequiresValidArgs(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
