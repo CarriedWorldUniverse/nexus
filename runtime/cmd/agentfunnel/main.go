@@ -197,6 +197,12 @@ func main() {
 		// toolsForProvider — see #181 for the MCP fix.
 		Tools:        toolsForProviderAgent(bridle.ProviderID(res.Provider)),
 		Runner:       funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		// ChatGateway routes the model's auto-post FinalText through the
+		// same SendChat path CommsRunner uses for explicit send_chat tool
+		// calls. Required for claude-code (subprocess mode): without it,
+		// model output evaporates because the CLI has no MCP-loaded tools
+		// to call. Mirrors cmd/nexus/main.go's Frame funnel wiring.
+		ChatGateway:  gateway,
 		PostTurn:     postTurn,
 		Logger:       log,
 	})
