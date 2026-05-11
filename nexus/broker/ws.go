@@ -54,6 +54,11 @@ type wsConn struct {
 	subscribedChat         bool
 	subscribedRoster       bool
 	subscribedAspectStatus bool
+	// subscribedObserve is the per-aspect observability subscription
+	// set. Distinct from subscribedChat (which is global "everything").
+	// Lazily allocated on first subscribe.observe; nil means no
+	// subscriptions yet (the common case).
+	subscribedObserve map[string]bool
 
 	// host is the source IP (without port) extracted from RemoteAddr
 	// at accept time. Used to release the per-IP connection slot in

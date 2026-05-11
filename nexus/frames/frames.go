@@ -136,13 +136,16 @@ const (
 	KindSubscribeRoster         Kind = "subscribe.roster"
 	KindSubscribeChat           Kind = "subscribe.chat"
 	KindSubscribeAspectStatus   Kind = "subscribe.aspect_status"
+	KindSubscribeObserve        Kind = "subscribe.observe"
 	KindUnsubscribeRoster       Kind = "unsubscribe.roster"
 	KindUnsubscribeChat         Kind = "unsubscribe.chat"
 	KindUnsubscribeAspectStatus Kind = "unsubscribe.aspect_status"
+	KindUnsubscribeObserve      Kind = "unsubscribe.observe"
 	KindSubscribeAck            Kind = "subscribe.ack"
 	// Push frames the broker emits to subscribed operators.
 	KindRosterUpdate      Kind = "roster.update"
 	KindAspectStatusPulse Kind = "aspect.status_pulse"
+	KindObserveFrame      Kind = "observe.frame"
 )
 
 // Envelope is the shared shape of every frame.
@@ -266,9 +269,11 @@ func IsKnown(k Kind) bool {
 		KindAspectSay, KindAspectSayResult,
 		// Subscription frames (5d)
 		KindSubscribeRoster, KindSubscribeChat, KindSubscribeAspectStatus,
+		KindSubscribeObserve,
 		KindUnsubscribeRoster, KindUnsubscribeChat, KindUnsubscribeAspectStatus,
+		KindUnsubscribeObserve,
 		KindSubscribeAck,
-		KindRosterUpdate, KindAspectStatusPulse:
+		KindRosterUpdate, KindAspectStatusPulse, KindObserveFrame:
 		return true
 	}
 	return false

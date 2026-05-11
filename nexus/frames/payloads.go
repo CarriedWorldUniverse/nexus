@@ -501,6 +501,31 @@ type RosterUpdatePayload struct {
 	Reason string `json:"reason"`
 }
 
+// SubscribeObservePayload — operator subscribes to one aspect's
+// observability stream. SinceSeq is optional: pass 0 (or omit) for the
+// full retained tail; pass a known sequence to only get frames newer
+// than it (useful on reconnect after a brief drop).
+type SubscribeObservePayload struct {
+	Aspect   string `json:"aspect"`
+	SinceSeq int64  `json:"since_seq,omitempty"`
+}
+
+// UnsubscribeObservePayload — operator drops one aspect from its
+// observability subscription set.
+type UnsubscribeObservePayload struct {
+	Aspect string `json:"aspect"`
+}
+
+// ObserveFramePayload — server push of one observability frame to a
+// subscriber. Frame is the package-shaped value from
+// nexus/observability.Frame, marshaled to JSON. Aspect is also
+// surfaced at the envelope payload level so the client doesn't need
+// to peek into Frame to route.
+type ObserveFramePayload struct {
+	Aspect string          `json:"aspect"`
+	Frame  json.RawMessage `json:"frame"`
+}
+
 // AspectStatusPulsePayload is pushed when an aspect emits a
 // mid-work status pulse (#118 — currently aspirational; the
 // payload shape lands here so 5e can render UI for it once the
