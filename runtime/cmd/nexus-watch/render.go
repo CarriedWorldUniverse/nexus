@@ -32,11 +32,15 @@ const (
 // reader pushing a frame while the input loop fires /history) don't
 // interleave ANSI output.
 type renderer struct {
-	mu       sync.Mutex
-	out      io.Writer
-	color    bool
-	cap      int
-	recent   map[string][]observability.Frame
+	mu     sync.Mutex
+	out    io.Writer
+	color  bool
+	cap    int
+	recent map[string][]observability.Frame
+	// loc controls the timezone used when formatting ChatFrame timestamps.
+	// Defaults to time.Local (production behaviour); tests inject time.UTC
+	// for determinism without mutating the time.Local global.
+	loc *time.Location
 }
 
 func newRenderer(out io.Writer, color bool, cap int) *renderer {
@@ -48,6 +52,7 @@ func newRenderer(out io.Writer, color bool, cap int) *renderer {
 		color:  color,
 		cap:    cap,
 		recent: make(map[string][]observability.Frame),
+		loc:    time.Local,
 	}
 }
 
@@ -81,7 +86,7 @@ func (r *renderer) renderFrameLocked(w io.Writer, f observability.Frame, current
 			r.dimf(w, "(chat decode error: %v)", err)
 			return
 		}
-		renderChatFrame(w, f.Aspect, cf, r.color)
+		renderChatFrame(w, f.Aspect, cf, r.color, r.loc)
 	case observability.FramePresence:
 		var pf observability.PresenceFrame
 		if err := json.Unmarshal(f.Payload, &pf); err != nil {
@@ -177,7 +182,7 @@ func (r *renderer) history(aspect string, n int) {
 //	< #N [@from HH:MM] content       (inbound)
 //	→ #N [@from HH:MM] content       (outbound)
 //	   ↳ reply to #M                  (only if ReplyTo > 0)
-func renderChatFrame(w io.Writer, aspect string, cf observability.ChatFrame, color bool) {
+func renderChatFrame(w io.Writer, aspect string, cf observability.ChatFrame, color bool, loc *time.Location) {
 	var marker string
 	switch cf.Direction {
 	case observability.DirectionOutbound:
@@ -187,7 +192,10 @@ func renderChatFrame(w io.Writer, aspect string, cf observability.ChatFrame, col
 	default:
 		marker = "·"
 	}
-	ts := cf.CreatedAt.Local().Format("15:04")
+	if loc == nil {
+		loc = time.Local
+	}
+	ts := cf.CreatedAt.In(loc).Format("15:04")
 	from := cf.From
 	fromColored := colorizeFrom(from, color)
 	head := fmt.Sprintf("%s #%d [%s %s] %s",

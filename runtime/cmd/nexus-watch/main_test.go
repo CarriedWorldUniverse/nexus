@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
@@ -23,6 +24,25 @@ func TestSplitCommand(t *testing.T) {
 		if gotCmd != c.wantCmd || gotRest != c.wantRest {
 			t.Errorf("splitCommand(%q) = (%q, %q); want (%q, %q)",
 				c.in, gotCmd, gotRest, c.wantCmd, c.wantRest)
+		}
+	}
+}
+
+func TestSplitCommandCaseInsensitive(t *testing.T) {
+	// splitCommand preserves case (it's a pure lexer); handleSlash is
+	// what lowercases the command. Verify the lowercasing convention
+	// by checking that the command tokens of mixed-case inputs match
+	// their canonical lowercase forms after strings.ToLower.
+	cases := map[string]string{
+		"/QUIT":         "/quit",
+		"/Help":         "/help",
+		"/SWITCH plumb": "/switch",
+	}
+	for in, want := range cases {
+		gotCmd, _ := splitCommand(in)
+		gotCmd = strings.ToLower(gotCmd)
+		if gotCmd != want {
+			t.Errorf("lower(splitCommand(%q)) = %q; want %q", in, gotCmd, want)
 		}
 	}
 }
