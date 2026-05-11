@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,12 +26,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 	"github.com/CarriedWorldUniverse/nexus/runtime/keyfile"
 	"github.com/CarriedWorldUniverse/nexus/runtime/wsclient"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 func main() {
@@ -42,7 +45,10 @@ func main() {
 		insecureSkip = flag.Bool("insecure-skip-verify", false, "Skip TLS cert verification (dev/self-signed only — do NOT use in production)")
 		logLevel     = flag.String("log-level", "info", "slog level: debug|info|warn|error")
 		logFile      = flag.String("log-file", "", "Write logs here instead of stderr; stdout is always reserved for the MCP protocol stream")
-		noMCP        = flag.Bool("no-mcp", false, "Skip starting the stdio MCP server — Part 1 transport-only mode for diagnostics")
+		noMCP        = flag.Bool("no-mcp", false, "Skip starting the stdio MCP server — transport-only mode for diagnostics")
+		inboxCap     = flag.Int("inbox-buffer", 500, "Max chat.deliver frames buffered before oldest is dropped")
+		doRegister   = flag.Bool("register", true, "Send a register frame after connecting so the broker delivers chat.deliver pushes (set false for diagnostics or when an agentfunnel for this identity already owns the WS slot)")
+		startSince   = flag.Int64("since-msg-id", 0, "Initial since_msg_id for the first register frame — non-zero asks Nexus to replay addressed messages newer than this id (Lock 6). Default 0 means no replay (cold start, live frames only).")
 	)
 	flag.Parse()
 
@@ -69,10 +75,36 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Build the WS client. The Handler is a no-op for Part 2 (uncorrelated
-	// inbox frames are logged at debug). Part 3 swaps in the inbox buffer.
+	// Inbox buffer captures every chat.deliver pushed by the broker.
+	// Sized for "the operator typing fast for a few minutes" with
+	// generous headroom; falls behind via FIFO drop, not memory growth.
+	inbox := newInboxBuffer(*inboxCap)
+	if *startSince > 0 {
+		inbox.seedHighest(*startSince)
+	}
+
+	// Build the WS client. The Handler routes every uncorrelated frame:
+	// chat.deliver goes into the inbox; everything else gets logged at
+	// debug. Request/response correlation (chat.list etc.) is handled
+	// inside wsclient itself — those never reach Handler.
 	wsHandler := wsclient.HandlerFunc(func(env frames.Envelope) {
-		log.Debug("uncorrelated frame received", "kind", env.Kind, "id", env.ID)
+		if env.Kind == frames.KindChatDeliver {
+			var p frames.ChatDeliverPayload
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				log.Warn("chat.deliver payload decode failed", "err", err)
+				return
+			}
+			inbox.add(p)
+			log.Debug("chat.deliver captured", "id", p.ID, "from", p.From, "reason", p.Reason)
+			return
+		}
+		// Surface register-side errors prominently — these mean the
+		// broker rejected our handshake and we won't get chat pushes.
+		if env.Kind == "register.error" || env.Kind == "register.ack" {
+			log.Info("register response", "kind", env.Kind, "payload", string(env.Payload))
+			return
+		}
+		log.Debug("uncorrelated frame received", "kind", env.Kind, "id", env.ID, "payload", string(env.Payload))
 	})
 
 	wsCli, err := wsclient.New(wsclient.Config{
@@ -87,13 +119,26 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Connect-event drain: surfaces connect/disconnect transitions.
+	// Session id is fresh per process — nexus-comms-mcp isn't a
+	// continuous agent session, just a transport. Persisting it across
+	// restarts would conflict with agentfunnel-owned aspect sessions.
+	sessionID := uuid.NewString()
+
+	// Connect-event handler: logs transitions and sends a register
+	// frame on each fresh connect (so the broker delivers chat.deliver
+	// pushes to us). For operator-token mode we skip register — the
+	// operator subscription is keyed off the JWT itself by the broker.
 	go func() {
 		for ev := range wsCli.Events() {
-			if ev.Connected {
-				log.Info("ws connected", "url", auth.wsURL)
-			} else {
+			if !ev.Connected {
 				log.Warn("ws disconnected", "url", auth.wsURL)
+				continue
+			}
+			log.Info("ws connected", "url", auth.wsURL)
+			if *doRegister && auth.aspect != "operator" {
+				if err := sendRegister(ctx, wsCli, auth, sessionID, inbox.highest(), log); err != nil {
+					log.Warn("register frame failed", "err", err)
+				}
 			}
 		}
 	}()
@@ -119,6 +164,7 @@ func main() {
 	// tool handler a way to talk to the WS connection.
 	bridge := &wsBridge{
 		ws:           wsCli,
+		inbox:        inbox,
 		defaultFrom:  auth.aspect,
 		log:          log,
 		writeTimeout: 5 * time.Second,
@@ -160,6 +206,12 @@ type authInfo struct {
 	wsURL     string    // wss://host:port/connect
 	expiresAt time.Time // best-effort; zero if unknown (operator token path)
 	tls       *tls.Config
+
+	// Filled from the validate response for keyfile auth. Used to
+	// populate the register frame when --register is on. Empty for
+	// operator-token auth (operator never sends register).
+	provider string
+	model    string
 }
 
 // resolveAuth normalises the two auth modes into a single authInfo.
@@ -220,6 +272,8 @@ func resolveKeyfileAuth(path, urlOverride string, tlsCfg *tls.Config, log *slog.
 		wsURL:     wsURL,
 		expiresAt: res.SessionExpiresAt,
 		tls:       tlsCfg,
+		provider:  res.Provider,
+		model:     res.Model,
 	}, nil
 }
 
@@ -300,6 +354,7 @@ func buildLogger(level, file string) (*slog.Logger, func(), error) {
 
 type wsBridge struct {
 	ws           *wsclient.Client
+	inbox        *inboxBuffer
 	defaultFrom  string // JWT subject — aspect name or "operator"
 	log          *slog.Logger
 	writeTimeout time.Duration
@@ -313,6 +368,19 @@ func newMCPServer(b *wsBridge, log *slog.Logger) *mcpserver.MCPServer {
 		"nexus-comms-mcp",
 		"0.2.0",
 		mcpserver.WithToolCapabilities(false), // tools don't list-change at runtime
+	)
+
+	srv.AddTool(
+		mcpgo.NewTool("read_chat",
+			mcpgo.WithDescription("Read chat messages that have been delivered to this identity since the last read (or since the buffer started filling). Returns messages oldest-first. Pass since_id to only get messages newer than a known msg id. Each line looks like: #N [from time reason] content. The N is the msg id usable in send_chat reply_to / read_chat_thread / react_to."),
+			mcpgo.WithNumber("since_id",
+				mcpgo.Description("Only return messages with id greater than this. Default 0 (drain everything buffered)."),
+			),
+			mcpgo.WithNumber("limit",
+				mcpgo.Description("Max messages to return (default 50; the buffer holds up to --inbox-buffer)."),
+			),
+		),
+		b.handleReadChat,
 	)
 
 	srv.AddTool(
@@ -384,4 +452,107 @@ func (b *wsBridge) handleSendChat(ctx context.Context, req mcpgo.CallToolRequest
 
 	b.log.Debug("send_chat: posted", "from", from, "reply_to", replyTo, "topic", topic, "len", len(content))
 	return mcpgo.NewToolResultText("ok"), nil
+}
+
+// handleReadChat drains the inbox of delivered chat.deliver frames.
+// Returns oldest-first, formatted one per line so MCP clients can
+// trivially scan for ids. Format matches the old comms-mcp surface
+// closely enough that existing aspect prompts still parse:
+//
+//	#123 [from=anvil reason=mention 2026-05-11T20:30:00Z] message text
+//
+// If the buffer dropped any messages since the last read, a leading
+// "[N messages dropped, buffer overflow]" note is prepended so the
+// caller knows it fell behind.
+func (b *wsBridge) handleReadChat(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	sinceID := int64(req.GetInt("since_id", 0))
+	limit := req.GetInt("limit", 50)
+	if limit <= 0 {
+		limit = 50
+	}
+
+	items, dropped := b.inbox.drainAfter(sinceID)
+	if len(items) > limit {
+		// Drain returned everything past since_id; cap to limit but
+		// put the rest back so a follow-up call can fetch them. Cheap
+		// for v1 where limit ≈ buffer cap; if this gets hot, swap for
+		// a proper cursor-based read.
+		extra := items[limit:]
+		items = items[:limit]
+		for _, e := range extra {
+			b.inbox.add(e)
+		}
+	}
+
+	if len(items) == 0 {
+		msg := "no new messages"
+		if dropped > 0 {
+			msg = fmt.Sprintf("[%d messages dropped, buffer overflow]\nno new messages", dropped)
+		}
+		return mcpgo.NewToolResultText(msg), nil
+	}
+
+	var sb strings.Builder
+	if dropped > 0 {
+		fmt.Fprintf(&sb, "[%d messages dropped, buffer overflow]\n", dropped)
+	}
+	for _, m := range items {
+		reason := m.Reason
+		if reason == "" {
+			reason = "delivered"
+		}
+		replyHint := ""
+		if m.ReplyTo > 0 {
+			replyHint = fmt.Sprintf(" reply_to=%d", m.ReplyTo)
+		}
+		replayHint := ""
+		if m.Replay {
+			replayHint = " replay"
+		}
+		fmt.Fprintf(&sb, "#%d [from=%s reason=%s%s%s %s] %s\n",
+			m.ID, m.From, reason, replyHint, replayHint, m.ReceivedAt, m.Content)
+	}
+	return mcpgo.NewToolResultText(strings.TrimRight(sb.String(), "\n")), nil
+}
+
+// sendRegister emits the post-connect register frame so the broker
+// puts this identity onto the subscribe.chat fan-out + (if since_msg_id
+// is non-zero) replays addressed messages we missed while disconnected.
+//
+// Best-effort: failures are logged by the caller. The next reconnect
+// will retry the register. Errors here don't tear down the WS — the
+// transport might still be useful for send-only flows.
+func sendRegister(ctx context.Context, ws *wsclient.Client, auth *authInfo, sessionID string, sinceMsgID int64, log *slog.Logger) error {
+	provider := auth.provider
+	if provider == "" {
+		// Operator path or no validate response — register the
+		// transport identity descriptively so the dashboard can show
+		// it without inventing a fake provider.
+		provider = "nexus-comms-mcp"
+	}
+
+	payload := frames.RegisterPayload{
+		RegisterRequest: schemas.RegisterRequest{
+			Name:        auth.aspect,
+			ContextMode: schemas.ContextThread, // arbitrary; we don't run a context loop
+			Provider:    provider,
+			PID:         os.Getpid(),
+			StartedAt:   time.Now().UTC(),
+			Model:       auth.model,
+			SessionID:   sessionID,
+		},
+		SinceMsgID: sinceMsgID,
+	}
+
+	env, err := frames.New(frames.KindRegister, payload)
+	if err != nil {
+		return fmt.Errorf("encode register: %w", err)
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := ws.Send(sendCtx, env); err != nil {
+		return fmt.Errorf("send register: %w", err)
+	}
+	log.Info("register frame sent", "aspect", auth.aspect, "since_msg_id", sinceMsgID, "session", sessionID)
+	return nil
 }
