@@ -313,7 +313,14 @@ func deliberateLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if _, err := f.Deliberate(ctx, ""); err != nil && !errors.Is(err, context.Canceled) {
+			if _, err := f.Deliberate(ctx, ""); err != nil &&
+				!errors.Is(err, context.Canceled) &&
+				!errors.Is(err, funnel.ErrEmptyInbox) {
+				// ErrEmptyInbox is the normal idle case — the tick fires
+				// 4x/sec regardless of inbox state. Logging it as WARN
+				// floods the log and hides real errors. Surfaced on
+				// 2026-05-11 when anvil came online and produced 4 WARN
+				// lines per second.
 				log.Warn("agentfunnel: deliberate", "err", err)
 			}
 		}

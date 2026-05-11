@@ -202,6 +202,15 @@ func (b *Broker) resolveUpgradeAuth(r *http.Request) (TokenInfo, bool) {
 		if info, ok := b.tryVerifyOperatorJWT(token); ok {
 			return info, true
 		}
+		// JWT fallback for aspect keyfile-issued tokens. Aspects use
+		// /api/aspect/validate to exchange their keyfile for a session
+		// JWT (same signing secret, sub=aspect_name). Without this
+		// path the keyfile flow only works for the operator login —
+		// aspect WS upgrades 401. Surfaced on 2026-05-11 cutover when
+		// anvil's first agentfunnel boot couldn't dial.
+		if info, ok := b.tryVerifyAspectJWT(token); ok {
+			return info, true
+		}
 	}
 	// Operator auth bypass (dev-only knob). Token-presenting paths above
 	// already covered aspect-token connections; if we got here without
@@ -246,6 +255,46 @@ func (b *Broker) tryVerifyOperatorJWT(token string) (TokenInfo, bool) {
 		AgentID:  "operator",
 		Admin:    true,
 		Operator: true,
+	}, true
+}
+
+// tryVerifyAspectJWT attempts to verify the bearer as an aspect
+// session JWT (issued by /api/aspect/validate from a keyfile).
+// Returns (info, true) when the JWT signs against the operator-shared
+// signing secret AND sub names a known aspect. The aspect doesn't
+// get the Operator/Admin flags — those are for the operator session;
+// aspects get AgentID=<aspect_name> and dispatch through the aspect
+// switch in ws.go.
+//
+// Failures are silent; the WS handler treats this as a TokenStore
+// miss and returns 401, same as any other unrecognized bearer.
+func (b *Broker) tryVerifyAspectJWT(token string) (TokenInfo, bool) {
+	ol := b.cfg.OperatorLogin
+	if ol == nil || len(ol.SessionSigningSecret) == 0 {
+		return TokenInfo{}, false
+	}
+	now := time.Now()
+	if ol.Now != nil {
+		now = ol.Now()
+	}
+	claims, err := jwt.Verify(ol.SessionSigningSecret, token, now)
+	if err != nil {
+		return TokenInfo{}, false
+	}
+	if claims.Sub == "" || claims.Sub == "operator" {
+		// "operator" goes through the operator path; empty sub is
+		// malformed.
+		return TokenInfo{}, false
+	}
+	// Sub names an aspect. Trust the signature (same secret only the
+	// validate endpoint can sign with) — no extra DB lookup. If the
+	// aspect was retired post-mint, the next keyfile re-validation
+	// will fail; this WS upgrade remains valid for the JWT's TTL,
+	// which is the design per docs/2026-05-08-nexus-resident-personality-spec.
+	return TokenInfo{
+		AgentID:  claims.Sub,
+		Admin:    false,
+		Operator: false,
 	}, true
 }
 
