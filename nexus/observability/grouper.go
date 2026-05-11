@@ -3,45 +3,19 @@ package observability
 import (
 	"encoding/json"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 )
 
-// previewMax is the maximum length (in runes-as-bytes; non-Unicode
-// safe is fine here, this is a display preview) of a tool result
-// before truncation. Renderers can request the full body via the
-// optional ToolResult.Full field; Phase A never populates it.
+// previewMax is the maximum length (in bytes) of a tool result before
+// truncation. Renderers can request the full body via the optional
+// ToolResult.Full field; Phase A never populates it.
+//
+// TODO(observability): rune-aware truncation when renderers display
+// tool previews — current byte-length cut can split a multibyte rune.
 const previewMax = 200
-
-// nowFn is the package's time source — swappable in tests via
-// SetNowForTesting so frame timestamps are deterministic.
-var (
-	nowMu sync.Mutex
-	nowFn = time.Now
-)
-
-// SetNowForTesting overrides the clock used for Grouper timestamps.
-// Returns a restore function. Tests only.
-func SetNowForTesting(fn func() time.Time) func() {
-	nowMu.Lock()
-	prev := nowFn
-	nowFn = fn
-	nowMu.Unlock()
-	return func() {
-		nowMu.Lock()
-		nowFn = prev
-		nowMu.Unlock()
-	}
-}
-
-func now() time.Time {
-	nowMu.Lock()
-	defer nowMu.Unlock()
-	return nowFn()
-}
 
 // Grouper consumes bridle events plus chat/presence/turn-boundary
 // calls from the funnel and emits Frame snapshots. One Grouper per
@@ -53,6 +27,7 @@ func now() time.Time {
 type Grouper struct {
 	aspect string
 	emit   func(Frame)
+	clock  func() time.Time
 	seq    int64
 
 	// in-flight turn state — nil between turns.
@@ -61,18 +36,45 @@ type Grouper struct {
 	turnErrSet bool // sticky: any TurnError in this turn → status=errored
 }
 
-// NewGrouper constructs a Grouper bound to an aspect identifier.
-// emit is called synchronously for every produced Frame; the caller
-// is responsible for any fanout (broker write, buffer append, etc).
+// NewGrouper constructs a Grouper bound to an aspect identifier with
+// the wall-clock as its time source. emit is called synchronously for
+// every produced Frame; the caller is responsible for any fanout
+// (broker write, buffer append, etc).
 func NewGrouper(aspect string, emit func(Frame)) *Grouper {
-	return &Grouper{aspect: aspect, emit: emit}
+	return NewGrouperWithClock(aspect, emit, time.Now)
+}
+
+// NewGrouperWithClock constructs a Grouper with a caller-supplied
+// clock. Tests pass a deterministic time source; production code
+// should use NewGrouper.
+func NewGrouperWithClock(aspect string, emit func(Frame), clock func() time.Time) *Grouper {
+	return &Grouper{aspect: aspect, emit: emit, clock: clock}
 }
 
 // BeginTurn opens a new in-flight turn and emits the initial
 // TurnFrame snapshot. trigger may be 0 if the turn was not driven
 // by a specific chat message (e.g. proactive deliberation).
 func (g *Grouper) BeginTurn(turnID, model, provider string, trigger int64) {
-	t := now()
+	t := g.clock()
+	// Defensive: if a previous turn is still in flight, treat as a
+	// protocol violation (missing EndTurn) but recover by force-closing
+	// it as errored so the renderer sees a terminal snapshot before
+	// the new turn begins.
+	if g.turn != nil {
+		g.turn.Status = TurnErrored
+		if g.turn.Error == "" {
+			g.turn.Error = "interrupted by new turn"
+		} else {
+			g.turn.Error = g.turn.Error + "; interrupted by new turn"
+		}
+		end := t
+		g.turn.Ended = &end
+		if g.turn.Usage != nil {
+			g.turn.Usage.Duration = end.Sub(g.turnStart)
+		}
+		g.emitTurnSnapshot()
+		g.turn = nil
+	}
 	g.turn = &TurnFrame{
 		TurnID:     turnID,
 		Status:     TurnInFlight,
@@ -106,7 +108,7 @@ func (g *Grouper) OnBridleEvent(ev bridle.Event) {
 	case bridle.StepBoundary:
 		g.turn.Events = append(g.turn.Events, TurnEvent{Kind: TurnEventStep, Step: e.Step})
 	case bridle.TurnDone:
-		g.turn.Usage = usageFromBridle(e.Result.Usage, now().Sub(g.turnStart))
+		g.turn.Usage = usageFromBridle(e.Result.Usage, g.clock().Sub(g.turnStart))
 	case bridle.TurnError:
 		g.turnErrSet = true
 		if e.Err != nil {
@@ -130,7 +132,7 @@ func (g *Grouper) EndTurn() {
 	if g.turn == nil {
 		return
 	}
-	end := now()
+	end := g.clock()
 	g.turn.Ended = &end
 	if g.turnErrSet {
 		g.turn.Status = TurnErrored
@@ -173,7 +175,7 @@ func (g *Grouper) OnPresence(connected bool, reason string) {
 	g.emitFrame(Frame{
 		Kind:    FramePresence,
 		Aspect:  g.aspect,
-		TS:      now(),
+		TS:      g.clock(),
 		Payload: payload,
 	})
 }
@@ -200,7 +202,9 @@ func (g *Grouper) startToolCall(e bridle.ToolCallStart) {
 		Name:  e.Name,
 		Input: e.Args,
 	}
-	if art, err := ParseArtifact(e.Name, e.Args); err == nil && art != nil {
+	if art, err := ParseArtifact(e.Name, e.Args); err != nil {
+		tc.ArtifactParseErr = err.Error()
+	} else if art != nil {
 		tc.Artifact = art
 	}
 	g.turn.Events = append(g.turn.Events, TurnEvent{Kind: TurnEventToolCall, Tool: tc})
@@ -260,25 +264,40 @@ func usageFromBridle(u bridle.Usage, d time.Duration) *UsageStats {
 	}
 }
 
-// emitTurnSnapshot marshals a deep-ish copy of the current TurnFrame
-// and emits it. The Events slice is copied so downstream consumers
-// don't observe later mutations; ToolCall pointers are shared because
-// they're only mutated in-place when results arrive — by which point
-// the previous snapshot has already been consumed by the renderer.
-//
-// Tradeoff documented: we accept that a renderer holding two
-// successive snapshots could see the same *ToolCall mutate between
-// reads if it retains references rather than rendering immediately.
-// In practice the emit callback fans out to JSON marshaling (broker
-// → WS) which captures a value snapshot at emit time.
+// emitTurnSnapshot deep-copies the current TurnFrame and emits it.
+// Events, ToolCall, ToolResult, and Artifact (including its Edits
+// slice) are all copied so a Phase B broker can safely queue or
+// retain references to Frames without observing later mutations
+// (e.g. a ToolCallResult landing after the snapshot was queued).
+// ToolCall.Input is json.RawMessage and treated as immutable
+// post-creation, so the underlying byte slice is shared.
 func (g *Grouper) emitTurnSnapshot() {
 	tf := *g.turn
-	tf.Events = append([]TurnEvent(nil), g.turn.Events...)
+	events := make([]TurnEvent, len(g.turn.Events))
+	for i, ev := range g.turn.Events {
+		events[i] = ev
+		if ev.Tool != nil {
+			tc := *ev.Tool
+			if ev.Tool.Result != nil {
+				r := *ev.Tool.Result
+				tc.Result = &r
+			}
+			if ev.Tool.Artifact != nil {
+				a := *ev.Tool.Artifact
+				if len(ev.Tool.Artifact.Edits) > 0 {
+					a.Edits = append([]EditPair(nil), ev.Tool.Artifact.Edits...)
+				}
+				tc.Artifact = &a
+			}
+			events[i].Tool = &tc
+		}
+	}
+	tf.Events = events
 	payload, _ := json.Marshal(tf)
 	g.emitFrame(Frame{
 		Kind:    FrameTurn,
 		Aspect:  g.aspect,
-		TS:      now(),
+		TS:      g.clock(),
 		Payload: payload,
 	})
 }

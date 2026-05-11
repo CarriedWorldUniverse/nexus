@@ -10,17 +10,16 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 )
 
-// fixedClock returns a clock that advances by 1ms on each call.
-func fixedClock() (func() time.Time, func()) {
+// fixedClock returns a deterministic clock that advances by 1ms on
+// each call. Pass it to NewGrouperWithClock.
+func fixedClock() func() time.Time {
 	t := time.Date(2026, 5, 12, 9, 0, 0, 0, time.UTC)
 	tick := time.Millisecond
-	fn := func() time.Time {
+	return func() time.Time {
 		now := t
 		t = t.Add(tick)
 		return now
 	}
-	restore := SetNowForTesting(fn)
-	return fn, restore
 }
 
 type capture struct {
@@ -48,10 +47,8 @@ func decodeTurn(t *testing.T, f Frame) TurnFrame {
 }
 
 func TestGrouperHappyPath(t *testing.T) {
-	_, restore := fixedClock()
-	defer restore()
 	c := &capture{}
-	g := NewGrouper("plumb", c.emit)
+	g := NewGrouperWithClock("plumb", c.emit, fixedClock())
 
 	g.BeginTurn("turn-1", "claude-opus-4-7", "claude-api", 189)
 	g.OnBridleEvent(bridle.ModelChunk{Text: "thinking "})
@@ -125,10 +122,8 @@ func TestGrouperHappyPath(t *testing.T) {
 }
 
 func TestGrouperToolPairingByID(t *testing.T) {
-	_, restore := fixedClock()
-	defer restore()
 	c := &capture{}
-	g := NewGrouper("plumb", c.emit)
+	g := NewGrouperWithClock("plumb", c.emit, fixedClock())
 	g.BeginTurn("turn-x", "m", "p", 0)
 	g.OnBridleEvent(bridle.ToolCallStart{ID: "a", Name: "Read", Args: json.RawMessage(`{}`)})
 	g.OnBridleEvent(bridle.ToolCallStart{ID: "b", Name: "Bash", Args: json.RawMessage(`{}`)})
@@ -155,10 +150,8 @@ func TestGrouperToolPairingByID(t *testing.T) {
 }
 
 func TestGrouperOrphanToolResult(t *testing.T) {
-	_, restore := fixedClock()
-	defer restore()
 	c := &capture{}
-	g := NewGrouper("p", c.emit)
+	g := NewGrouperWithClock("p", c.emit, fixedClock())
 	g.BeginTurn("t", "m", "p", 0)
 	g.OnBridleEvent(bridle.ToolCallResult{ID: "ghost", Result: json.RawMessage(`"r"`)})
 	g.EndTurn()
@@ -173,10 +166,8 @@ func TestGrouperOrphanToolResult(t *testing.T) {
 }
 
 func TestGrouperErroredTurn(t *testing.T) {
-	_, restore := fixedClock()
-	defer restore()
 	c := &capture{}
-	g := NewGrouper("p", c.emit)
+	g := NewGrouperWithClock("p", c.emit, fixedClock())
 	g.BeginTurn("t", "m", "prv", 0)
 	g.OnBridleEvent(bridle.ModelChunk{Text: "partial"})
 	g.OnBridleEvent(bridle.TurnError{Err: errors.New("boom"), Stage: "provider"})
@@ -192,10 +183,8 @@ func TestGrouperErroredTurn(t *testing.T) {
 }
 
 func TestGrouperToolErrorBuildsErrorResult(t *testing.T) {
-	_, restore := fixedClock()
-	defer restore()
 	c := &capture{}
-	g := NewGrouper("p", c.emit)
+	g := NewGrouperWithClock("p", c.emit, fixedClock())
 	g.BeginTurn("t", "m", "p", 0)
 	g.OnBridleEvent(bridle.ToolCallStart{ID: "1", Name: "Bash", Args: json.RawMessage(`{}`)})
 	g.OnBridleEvent(bridle.ToolCallResult{ID: "1", Err: "permission denied"})
@@ -211,10 +200,8 @@ func TestGrouperToolErrorBuildsErrorResult(t *testing.T) {
 }
 
 func TestGrouperChatInboundOutbound(t *testing.T) {
-	_, restore := fixedClock()
-	defer restore()
 	c := &capture{}
-	g := NewGrouper("plumb", c.emit)
+	g := NewGrouperWithClock("plumb", c.emit, fixedClock())
 	t0 := time.Date(2026, 5, 12, 9, 0, 0, 0, time.UTC)
 	g.OnChat(chat.Message{ID: 1, From: "operator", Content: "hi", CreatedAt: t0}, DirectionInbound)
 	g.OnChat(chat.Message{ID: 2, From: "plumb", Content: "yo", ReplyTo: 1, CreatedAt: t0}, DirectionOutbound)
@@ -240,10 +227,8 @@ func TestGrouperChatInboundOutbound(t *testing.T) {
 }
 
 func TestGrouperPresence(t *testing.T) {
-	_, restore := fixedClock()
-	defer restore()
 	c := &capture{}
-	g := NewGrouper("plumb", c.emit)
+	g := NewGrouperWithClock("plumb", c.emit, fixedClock())
 	g.OnPresence(true, "registered")
 	g.OnPresence(false, "ws_closed")
 	if len(c.frames) != 2 {
@@ -265,10 +250,8 @@ func TestGrouperPresence(t *testing.T) {
 }
 
 func TestGrouperEventWithoutActiveTurnIsNoOp(t *testing.T) {
-	_, restore := fixedClock()
-	defer restore()
 	c := &capture{}
-	g := NewGrouper("p", c.emit)
+	g := NewGrouperWithClock("p", c.emit, fixedClock())
 	g.OnBridleEvent(bridle.ModelChunk{Text: "stray"})
 	g.OnBridleEvent(bridle.ToolCallStart{ID: "x", Name: "Edit", Args: json.RawMessage(`{}`)})
 	g.EndTurn() // also a no-op
@@ -278,10 +261,8 @@ func TestGrouperEventWithoutActiveTurnIsNoOp(t *testing.T) {
 }
 
 func TestGrouperMonotonicSequence(t *testing.T) {
-	_, restore := fixedClock()
-	defer restore()
 	c := &capture{}
-	g := NewGrouper("p", c.emit)
+	g := NewGrouperWithClock("p", c.emit, fixedClock())
 	g.BeginTurn("t", "m", "p", 0)
 	g.OnBridleEvent(bridle.ModelChunk{Text: "a"})
 	g.OnChat(chat.Message{ID: 1, From: "op", Content: "hi", CreatedAt: time.Now()}, DirectionInbound)
@@ -296,10 +277,8 @@ func TestGrouperMonotonicSequence(t *testing.T) {
 }
 
 func TestGrouperInFlightSnapshotsBeforeEnd(t *testing.T) {
-	_, restore := fixedClock()
-	defer restore()
 	c := &capture{}
-	g := NewGrouper("p", c.emit)
+	g := NewGrouperWithClock("p", c.emit, fixedClock())
 	g.BeginTurn("t", "m", "p", 0)
 	g.OnBridleEvent(bridle.ModelChunk{Text: "x"})
 	// Without EndTurn, status of every emitted snapshot must be in_flight.
@@ -318,10 +297,8 @@ func TestGrouperInFlightSnapshotsBeforeEnd(t *testing.T) {
 }
 
 func TestGrouperTextPreviewTruncation(t *testing.T) {
-	_, restore := fixedClock()
-	defer restore()
 	c := &capture{}
-	g := NewGrouper("p", c.emit)
+	g := NewGrouperWithClock("p", c.emit, fixedClock())
 	g.BeginTurn("t", "m", "p", 0)
 	big := make([]byte, 500)
 	for i := range big {
@@ -336,5 +313,91 @@ func TestGrouperTextPreviewTruncation(t *testing.T) {
 	// previewMax + 1-byte ellipsis marker; ensure shorter than input.
 	if len(preview) >= 500 {
 		t.Errorf("preview not truncated: %d bytes", len(preview))
+	}
+}
+
+// TestGrouperArtifactParseErrorSurfaced feeds malformed JSON to a
+// known artifact-bearing tool (Edit) and asserts the parse error is
+// surfaced on the ToolCall rather than silently dropped.
+func TestGrouperArtifactParseErrorSurfaced(t *testing.T) {
+	c := &capture{}
+	g := NewGrouperWithClock("p", c.emit, fixedClock())
+	g.BeginTurn("t", "m", "p", 0)
+	// Well-formed JSON envelope (so the snapshot can be re-marshaled)
+	// but wrong shape for Edit — file_path is a number, which makes
+	// json.Unmarshal into the Edit struct fail.
+	g.OnBridleEvent(bridle.ToolCallStart{
+		ID: "1", Name: "Edit",
+		Args: json.RawMessage(`{"file_path":123,"old_string":"x","new_string":"y"}`),
+	})
+	g.EndTurn()
+	last, _ := c.lastOf(FrameTurn)
+	tf := decodeTurn(t, last)
+	if len(tf.Events) != 1 || tf.Events[0].Tool == nil {
+		t.Fatalf("expected one tool event, got %+v", tf.Events)
+	}
+	tc := tf.Events[0].Tool
+	if tc.Artifact != nil {
+		t.Errorf("artifact should be nil on parse error: %+v", tc.Artifact)
+	}
+	if tc.ArtifactParseErr == "" {
+		t.Errorf("ArtifactParseErr should be non-empty")
+	}
+}
+
+// TestGrouperBeginTurnForcesCloseOfInFlight asserts that calling
+// BeginTurn twice without EndTurn between force-closes the first
+// turn as errored with the expected message, then the second turn
+// starts fresh.
+func TestGrouperBeginTurnForcesCloseOfInFlight(t *testing.T) {
+	c := &capture{}
+	g := NewGrouperWithClock("p", c.emit, fixedClock())
+	g.BeginTurn("turn-1", "m", "p", 0)
+	g.OnBridleEvent(bridle.ModelChunk{Text: "partial"})
+	// Second BeginTurn — should force-close turn-1.
+	g.BeginTurn("turn-2", "m", "p", 0)
+
+	// Find the last frame for turn-1 and assert it's errored.
+	var lastT1 *TurnFrame
+	var firstT2 *TurnFrame
+	for _, f := range c.frames {
+		if f.Kind != FrameTurn {
+			continue
+		}
+		tf := decodeTurn(t, f)
+		switch tf.TurnID {
+		case "turn-1":
+			x := tf
+			lastT1 = &x
+		case "turn-2":
+			if firstT2 == nil {
+				x := tf
+				firstT2 = &x
+			}
+		}
+	}
+	if lastT1 == nil {
+		t.Fatal("no turn-1 frame found")
+	}
+	if lastT1.Status != TurnErrored {
+		t.Errorf("turn-1 final status=%s want errored", lastT1.Status)
+	}
+	if lastT1.Error != "interrupted by new turn" {
+		t.Errorf("turn-1 error=%q want %q", lastT1.Error, "interrupted by new turn")
+	}
+	if lastT1.Ended == nil {
+		t.Error("turn-1 Ended is nil")
+	}
+	if firstT2 == nil {
+		t.Fatal("no turn-2 frame found")
+	}
+	if firstT2.Status != TurnInFlight {
+		t.Errorf("turn-2 initial status=%s want in_flight", firstT2.Status)
+	}
+	if len(firstT2.Events) != 0 {
+		t.Errorf("turn-2 should start with no events, got %+v", firstT2.Events)
+	}
+	if firstT2.Error != "" {
+		t.Errorf("turn-2 should start with no error, got %q", firstT2.Error)
 	}
 }

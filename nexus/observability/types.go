@@ -76,11 +76,12 @@ type TurnEvent struct {
 // ToolCallStart time for the editing tools so renderers don't have
 // to re-parse Input on every frame.
 type ToolCall struct {
-	ID       string          `json:"id"`
-	Name     string          `json:"name"`
-	Input    json.RawMessage `json:"input"`
-	Result   *ToolResult     `json:"result,omitempty"`
-	Artifact *Artifact       `json:"artifact,omitempty"`
+	ID               string          `json:"id"`
+	Name             string          `json:"name"`
+	Input            json.RawMessage `json:"input"`
+	Result           *ToolResult     `json:"result,omitempty"`
+	Artifact         *Artifact       `json:"artifact,omitempty"`
+	ArtifactParseErr string          `json:"artifact_parse_err,omitempty"`
 }
 
 // ToolResult is the renderer-friendly summary of a tool's output.
