@@ -240,6 +240,16 @@ func ShouldRouteToFrame(msg Message, frameName string, roster []string, idx *Thr
 		return true
 	}
 
+	// Rule 2a-bis: @all is broadcast and includes the Frame. Without
+	// this, "@all <announcement>" reaches every aspect EXCEPT the
+	// Frame, which is exactly backwards — the Frame is the network
+	// coordinator and the operator's partner; broadcast traffic is
+	// the one thing it must see. Pre-cutover diligence missed this
+	// because @all wasn't exercised; surfaced on 2026-05-11 cutover.
+	if mentionContains(strings.ToLower(msg.Content), "@all") {
+		return true
+	}
+
 	// Rule 2b: Frame is the addressor. Delivery is a no-op (the Frame
 	// already knows about its own posts) but we record it for downstream
 	// consumers that compute "did the Frame see this?".
