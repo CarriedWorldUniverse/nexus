@@ -1,11 +1,18 @@
 // Inbox buffer + chat.deliver capture for nexus-comms-mcp.
 //
-// Why a buffer: MCP's stdio model is request/response. Tool clients
-// call read_chat when they want chat; we can't push to them. So we
-// hold incoming chat.deliver frames in a bounded ring until they're
-// drained. New frames overwrite oldest when full — chat is best-effort
+// Why a buffer: MCP's stdio protocol is poll-on-read, not server-push.
+// The model has no way to be notified mid-turn that chat arrived; it
+// has to *ask* via read_chat, which is a synchronous tool call. We
+// hold incoming chat.deliver frames in a bounded ring between those
+// calls. New frames overwrite oldest when full — chat is best-effort
 // and the broker has authoritative state; if the buffer overflows the
 // caller can re-fetch via since_msg_id on the next register cycle.
+//
+// The drain-preserves-highestID invariant is what makes the design
+// work across reconnects: read_chat empties the buffer, but the
+// watermark survives, so the next register-on-reconnect tells the
+// broker to replay only rows we haven't seen yet. See inbox_test.go's
+// TestInboxDrainAfter_PreservesHighest for the lock-in.
 //
 // Concurrency: WS read goroutine writes; MCP tool goroutines read.
 // One mutex guards the slice. Operations are short (append / copy a
