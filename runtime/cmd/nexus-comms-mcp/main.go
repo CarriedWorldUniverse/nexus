@@ -403,6 +403,49 @@ func newMCPServer(b *wsBridge, log *slog.Logger) *mcpserver.MCPServer {
 		b.handleSendChat,
 	)
 
+	srv.AddTool(
+		mcpgo.NewTool("read_chat_message",
+			mcpgo.WithDescription("Fetch a single chat message by msg_id, plus any descendants in its thread subtree. Useful when read_chat surfaces a #N reference and you want the full text. Synchronous WS round-trip via chat.read — does not affect the inbox buffer."),
+			mcpgo.WithNumber("msg_id",
+				mcpgo.Required(),
+				mcpgo.Description("Message id to fetch."),
+			),
+		),
+		b.handleReadChatMessage,
+	)
+
+	srv.AddTool(
+		mcpgo.NewTool("read_chat_thread",
+			mcpgo.WithDescription("Read every message in a thread, oldest-first. Pass any msg_id within the thread (typically the root); the server walks descendants. Use since_id to only return messages newer than a known cursor. Synchronous WS round-trip via chat.read — does not affect the inbox buffer."),
+			mcpgo.WithNumber("msg_id",
+				mcpgo.Required(),
+				mcpgo.Description("Any message id in the thread (typically the root)."),
+			),
+			mcpgo.WithNumber("since_id",
+				mcpgo.Description("Only include messages with id > since_id. Default 0 (return everything in the thread, bounded server-side to 200)."),
+			),
+		),
+		b.handleReadChatThread,
+	)
+
+	srv.AddTool(
+		mcpgo.NewTool("react_to",
+			mcpgo.WithDescription("Toggle a reaction (emoji) on a chat message. Call again with the same emoji to remove it. Use for lightweight acknowledgements (👍 seen, ✅ done, 👀 looking) instead of full replies. Fire-and-forget — broker doesn't synchronously confirm the toggle."),
+			mcpgo.WithNumber("msg_id",
+				mcpgo.Required(),
+				mcpgo.Description("Message id to react to — the #N from read_chat output."),
+			),
+			mcpgo.WithString("emoji",
+				mcpgo.Required(),
+				mcpgo.Description("Emoji to toggle (e.g. 👍, ✅, 👀, ❤️)."),
+			),
+			mcpgo.WithString("from",
+				mcpgo.Description("Your agent identity. If omitted, defaults to the keyfile/JWT-bound identity."),
+			),
+		),
+		b.handleReactTo,
+	)
+
 	return srv
 }
 
@@ -513,6 +556,117 @@ func (b *wsBridge) handleReadChat(_ context.Context, req mcpgo.CallToolRequest) 
 			m.ID, m.From, reason, replyHint, replayHint, m.ReceivedAt, m.Content)
 	}
 	return mcpgo.NewToolResultText(strings.TrimRight(sb.String(), "\n")), nil
+}
+
+// handleReadChatMessage fetches one message + its descendants via the
+// chat.read pull path. Aspect-available (Lock 2) — does not require
+// roster registration. Synchronous Request/Response over WS.
+//
+// The broker's chat.read implementation walks descendants from the
+// given node, so leaves return just themselves and roots return the
+// whole subtree. The caller-facing distinction (single message vs
+// whole thread) is purely cosmetic.
+func (b *wsBridge) handleReadChatMessage(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	msgID := req.GetInt("msg_id", 0)
+	if msgID <= 0 {
+		return mcpgo.NewToolResultError("msg_id is required and must be positive"), nil
+	}
+	return b.chatRead(ctx, msgID, 0)
+}
+
+// handleReadChatThread is read_chat_message with explicit thread-walk
+// semantics + a since_id cursor for pagination.
+func (b *wsBridge) handleReadChatThread(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	msgID := req.GetInt("msg_id", 0)
+	if msgID <= 0 {
+		return mcpgo.NewToolResultError("msg_id is required and must be positive"), nil
+	}
+	sinceID := int64(req.GetInt("since_id", 0))
+	return b.chatRead(ctx, msgID, sinceID)
+}
+
+// chatRead issues a chat.read Request, awaits the correlated result,
+// and formats it per the read_chat line convention. Shared by the
+// single-message and thread-walk tools — they differ only in what the
+// model is being told they do.
+func (b *wsBridge) chatRead(ctx context.Context, msgID int, sinceID int64) (*mcpgo.CallToolResult, error) {
+	payload := frames.ChatReadPayload{
+		MsgID:   msgID,
+		SinceID: sinceID,
+	}
+	env, err := frames.NewRequest(frames.KindChatRead, payload)
+	if err != nil {
+		b.log.Warn("chat.read: encode failed", "err", err)
+		return mcpgo.NewToolResultError(fmt.Sprintf("encode frame: %v", err)), nil
+	}
+
+	// 10s timeout: a chat.read against a 200-row thread should be sub-
+	// second; 10s leaves slack for a slow broker without blocking the
+	// MCP client indefinitely.
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	resp, err := b.ws.Request(reqCtx, env)
+	if err != nil {
+		b.log.Warn("chat.read: request failed", "err", err, "msg_id", msgID)
+		return mcpgo.NewToolResultError(fmt.Sprintf("chat.read: %v", err)), nil
+	}
+
+	var result frames.ChatReadResultPayload
+	if err := json.Unmarshal(resp.Payload, &result); err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("decode result: %v", err)), nil
+	}
+
+	if len(result.Messages) == 0 {
+		return mcpgo.NewToolResultText("(no messages)"), nil
+	}
+
+	var sb strings.Builder
+	for _, m := range result.Messages {
+		replyHint := ""
+		if m.ReplyTo > 0 {
+			replyHint = fmt.Sprintf(" reply_to=%d", m.ReplyTo)
+		}
+		fmt.Fprintf(&sb, "#%d [from=%s%s %s] %s\n",
+			m.ID, m.From, replyHint, m.ReceivedAt, m.Content)
+	}
+	return mcpgo.NewToolResultText(strings.TrimRight(sb.String(), "\n")), nil
+}
+
+// handleReactTo translates an MCP react_to tool call into a
+// chat.reaction WS frame. Fire-and-forget per the chat substrate
+// (reactions toggle on the broker; no synchronous confirmation).
+func (b *wsBridge) handleReactTo(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	msgID := req.GetInt("msg_id", 0)
+	if msgID <= 0 {
+		return mcpgo.NewToolResultError("msg_id is required and must be positive"), nil
+	}
+	emoji := strings.TrimSpace(req.GetString("emoji", ""))
+	if emoji == "" {
+		return mcpgo.NewToolResultError("emoji is required and must be non-empty"), nil
+	}
+	from := strings.TrimSpace(req.GetString("from", ""))
+	if from == "" {
+		from = b.defaultFrom
+	}
+
+	env, err := frames.New(frames.KindChatReaction, frames.ChatReactionPayload{
+		From:  from,
+		MsgID: msgID,
+		Emoji: emoji,
+	})
+	if err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("encode frame: %v", err)), nil
+	}
+
+	sendCtx, cancel := context.WithTimeout(ctx, b.writeTimeout)
+	defer cancel()
+	if err := b.ws.Send(sendCtx, env); err != nil {
+		b.log.Warn("react_to: WS send failed", "err", err, "from", from)
+		return mcpgo.NewToolResultError(fmt.Sprintf("WS send: %v", err)), nil
+	}
+
+	b.log.Debug("react_to: posted", "from", from, "msg_id", msgID, "emoji", emoji)
+	return mcpgo.NewToolResultText("ok"), nil
 }
 
 // sendRegister emits the post-connect register frame so the broker
