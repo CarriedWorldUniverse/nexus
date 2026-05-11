@@ -1,7 +1,7 @@
 {
   "name": "anvil",
   "context_mode": "thread",
-  "provider": "claude-api",
+  "provider": "claude-code",
   "provider_config": {
     "model": "claude-opus-4-7"
   },
