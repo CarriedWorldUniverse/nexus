@@ -97,8 +97,16 @@ func TestObserve_BufferedTailReplay(t *testing.T) {
 	srv, b, _, _, tok := newOperatorTestServerFull(t)
 
 	// Pre-seed the Hub's buffer before the operator subscribes.
+	// N=10 historical frames exercises the drain-then-flag ordering
+	// in handleSubscribeObserve: the operator must receive frames
+	// 1..N in sequence order without any later-arriving live frame
+	// jumping the queue. (A concurrency probe — fire chat.send while
+	// the subscribe is in flight — is hard to schedule deterministically;
+	// the structural fix is what we lean on, this asserts the
+	// invariant that fix preserves.)
+	const N = 10
 	g := b.observability.GrouperFor("plumb")
-	for i := int64(1); i <= 3; i++ {
+	for i := int64(1); i <= N; i++ {
 		g.OnChat(chat.Message{
 			ID:        i,
 			From:      "plumb",
@@ -109,8 +117,8 @@ func TestObserve_BufferedTailReplay(t *testing.T) {
 
 	c := dialWS(t, srv, tok)
 	replay := subscribeObserve(t, c, "plumb", 0)
-	if len(replay) != 3 {
-		t.Fatalf("replay length: got %d want 3", len(replay))
+	if len(replay) != N {
+		t.Fatalf("replay length: got %d want %d", len(replay), N)
 	}
 	for i, env := range replay {
 		op, f := decodeObserveFrame(t, env)

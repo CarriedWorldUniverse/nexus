@@ -3,6 +3,7 @@ package observability
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/CarriedWorldUniverse/bridle"
@@ -22,9 +23,15 @@ const previewMax = 200
 // aspect; the Sequence field of every emitted Frame is monotonic
 // within that Grouper instance.
 //
-// Not safe for concurrent use — callers serialize calls (the broker
-// drives one Grouper from its per-aspect goroutine).
+// All exported methods are safe to call from multiple goroutines.
+// Emit callbacks run while the per-Grouper mutex is held; callbacks
+// MUST NOT re-enter the same Grouper (would deadlock). The Hub's
+// emit path (buffer.Append + onFrame broadcast → broadcastObserveFrame
+// → wsConn.send) does not re-enter, so the canonical wiring is safe.
 type Grouper struct {
+	// mu guards every mutable field below. Held across emit callbacks
+	// — see type-level doc on the no-reentry contract.
+	mu     sync.Mutex
 	aspect string
 	emit   func(Frame)
 	clock  func() time.Time
@@ -55,6 +62,8 @@ func NewGrouperWithClock(aspect string, emit func(Frame), clock func() time.Time
 // TurnFrame snapshot. trigger may be 0 if the turn was not driven
 // by a specific chat message (e.g. proactive deliberation).
 func (g *Grouper) BeginTurn(turnID, model, provider string, trigger int64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	t := g.clock()
 	// Defensive: if a previous turn is still in flight, treat as a
 	// protocol violation (missing EndTurn) but recover by force-closing
@@ -95,6 +104,8 @@ func (g *Grouper) BeginTurn(turnID, model, provider string, trigger int64) {
 // path matters because tests exercise it and provider failures
 // can race the boundary calls.
 func (g *Grouper) OnBridleEvent(ev bridle.Event) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.turn == nil {
 		return
 	}
@@ -129,6 +140,8 @@ func (g *Grouper) OnBridleEvent(ev bridle.Event) {
 // EndTurn finalises the in-flight turn and emits the terminal
 // TurnFrame. No-op if no turn is in flight.
 func (g *Grouper) EndTurn() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.turn == nil {
 		return
 	}
@@ -150,6 +163,8 @@ func (g *Grouper) EndTurn() {
 
 // OnChat emits a ChatFrame independent of turn state.
 func (g *Grouper) OnChat(msg chat.Message, direction Direction) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	cf := ChatFrame{
 		MsgID:     msg.ID,
 		From:      msg.From,
@@ -170,6 +185,8 @@ func (g *Grouper) OnChat(msg chat.Message, direction Direction) {
 
 // OnPresence emits a PresenceFrame for the WS connection-state flip.
 func (g *Grouper) OnPresence(connected bool, reason string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	pf := PresenceFrame{Connected: connected, Reason: reason}
 	payload, _ := json.Marshal(pf)
 	g.emitFrame(Frame{
