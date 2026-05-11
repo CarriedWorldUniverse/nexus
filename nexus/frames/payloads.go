@@ -411,6 +411,23 @@ type ReactionsFetchResultPayload struct {
 	Reactions map[string][]ReactionRow `json:"reactions"`
 }
 
+// ChatReactionUpdatePayload is the push frame broadcast when a chat
+// reaction toggles. Carries the FULL current reactions list for the
+// affected message (not a delta) so the SPA can replace in-place
+// without merge logic. Reactor + emoji + op are included for clients
+// that want to surface "X reacted with Y" UI; clients that just want
+// the new counts can ignore them and consume Reactions directly.
+//
+// op: "added" when ToggleReaction inserted (no prior matching
+// triple); "removed" when it deleted.
+type ChatReactionUpdatePayload struct {
+	MsgID     int           `json:"msg_id"`
+	Reactor   string        `json:"reactor"`
+	Emoji     string        `json:"emoji"`
+	Op        string        `json:"op"` // "added" | "removed"
+	Reactions []ReactionRow `json:"reactions"`
+}
+
 // KnowledgeListPayload mirrors the knowledge.Store.List shape:
 // scope by from_agent (omit for the operator's own entries via the
 // caller-identity convention; explicit name for peer reads).

@@ -778,10 +778,41 @@ func (c *wsConn) handleChatReactionFrame(env frames.Envelope) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if _, err := store.ToggleReaction(ctx, int64(p.MsgID), reactor, p.Emoji); err != nil {
+	reacted, err := store.ToggleReaction(ctx, int64(p.MsgID), reactor, p.Emoji)
+	if err != nil {
 		c.log.Warn("chat.reaction: store error",
 			"msg_id", p.MsgID, "reactor", reactor, "emoji", p.Emoji, "err", err)
+		return
 	}
+
+	// Broadcast the full current reactions for this msg to subscribed
+	// operators. Without this fan-out the SPA only sees reaction state
+	// via chat.reactions.fetch (called on page load and reconnect) —
+	// reactions emitted by other clients during a live session never
+	// reach the UI until the next refetch. Surfaced 2026-05-12 when
+	// plumb reacted from little-blue and the dashboard never showed it.
+	all, fetchErr := store.GetReactions(ctx, []int64{int64(p.MsgID)})
+	if fetchErr != nil {
+		c.log.Warn("chat.reaction: GetReactions after toggle",
+			"msg_id", p.MsgID, "err", fetchErr)
+		return
+	}
+	current := all[int64(p.MsgID)]
+	rows := make([]frames.ReactionRow, 0, len(current))
+	for _, r := range current {
+		rows = append(rows, frames.ReactionRow{Aspect: r.Aspect, Emoji: r.Emoji})
+	}
+	op := "removed"
+	if reacted {
+		op = "added"
+	}
+	c.broker.broadcastChatReactionUpdate(frames.ChatReactionUpdatePayload{
+		MsgID:     p.MsgID,
+		Reactor:   reactor,
+		Emoji:     p.Emoji,
+		Op:        op,
+		Reactions: rows,
+	})
 }
 
 // handleAnnounceFileFrame creates a chat post announcing a file plus

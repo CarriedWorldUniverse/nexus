@@ -115,6 +115,13 @@ const (
 	KindChatRepliesResult    Kind = "chat.replies.result"
 	KindReactionsFetch       Kind = "chat.reactions.fetch"
 	KindReactionsFetchResult Kind = "chat.reactions.fetch.result"
+
+	// KindChatReactionUpdate is the push frame broadcast to subscribed
+	// operators when a chat reaction toggles. Carries the full reactions
+	// list for the affected msg so the SPA can replace in-place — same
+	// per-id shape as chat.reactions.fetch.result so the existing
+	// rendering path works for both load and live-update.
+	KindChatReactionUpdate Kind = "chat.reaction.update"
 	KindKnowledgeList        Kind = "knowledge.list"
 	KindKnowledgeListResult  Kind = "knowledge.list.result"
 	KindKnowledgeStoreResult Kind = "knowledge.store.result"
@@ -253,6 +260,7 @@ func IsKnown(k Kind) bool {
 		KindChatList, KindChatListResult,
 		KindChatReplies, KindChatRepliesResult,
 		KindReactionsFetch, KindReactionsFetchResult,
+		KindChatReactionUpdate,
 		KindKnowledgeList, KindKnowledgeListResult,
 		KindKnowledgeStoreResult,
 		KindAspectSay, KindAspectSayResult,

@@ -11,13 +11,13 @@
 // Event mapping:
 //
 //   message.created   ← chat.deliver push
-//   reaction.changed  ← (deferred — no reaction-push frame yet;
-//                        SPA refetches on demand via
-//                        fetchReactionsForIds)
+//   reaction.changed  ← chat.reaction.update push (piggy-backs on
+//                        subscribe.chat; broker fans both kinds out
+//                        to the same subscription gate)
 //   ready             ← onConnectionState onOpen
 //   reconnect         ← onConnectionState onOpen (after first)
 
-import { subscribe, onConnectionState, isConnected } from './comms.js';
+import { subscribe, onPushKind, onConnectionState, isConnected } from './comms.js';
 
 class ChatWS {
   constructor() {
@@ -28,6 +28,7 @@ class ChatWS {
       'reconnect': [],
     };
     this.unsubChat = null;
+    this.unsubReact = null;
     this.unsubConn = null;
     this.firstReady = false;
   }
@@ -50,6 +51,26 @@ class ChatWS {
         topic: payload.topic || '',
       };
       this.fire('message.created', { type: 'message.created', msg });
+    });
+
+    // chat.reaction.update → reaction.changed. Server broadcasts this
+    // on the same subscribedChat gate, so no extra subscribe frame —
+    // onPushKind registers a passive listener for the kind. The
+    // payload carries the FULL reactions list for the affected msg
+    // (not a delta), shape:
+    //   { msg_id, reactor, emoji, op: "added"|"removed",
+    //     reactions: [{aspect, emoji}, ...] }
+    // Chat.js's onWsReactionChanged reads `ev.reactions` and replaces
+    // the message's reactions in place.
+    this.unsubReact = onPushKind('chat.reaction.update', (payload) => {
+      this.fire('reaction.changed', {
+        type: 'reaction.changed',
+        msg_id: payload.msg_id,
+        reactor: payload.reactor,
+        emoji: payload.emoji,
+        op: payload.op,
+        reactions: payload.reactions || [],
+      });
     });
 
     // Connection-state events
@@ -79,6 +100,7 @@ class ChatWS {
 
   stop() {
     if (this.unsubChat) { this.unsubChat(); this.unsubChat = null; }
+    if (this.unsubReact) { this.unsubReact(); this.unsubReact = null; }
     if (this.unsubConn) { this.unsubConn(); this.unsubConn = null; }
     this.firstReady = false;
   }

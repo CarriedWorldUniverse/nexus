@@ -175,6 +175,23 @@ func (b *Broker) broadcastChatDeliverToOperators(env frames.Envelope) {
 	})
 }
 
+// broadcastChatReactionUpdate pushes a chat.reaction.update frame to
+// every operator with subscribedChat true. Piggy-backs the chat
+// subscription rather than introducing a separate subscribe.reactions
+// channel: reactions are part of chat in the operator's mental model,
+// and an operator who wants chat at all wants its reactions live too.
+// Hooked from handleChatReactionFrame after ToggleReaction succeeds.
+func (b *Broker) broadcastChatReactionUpdate(payload frames.ChatReactionUpdatePayload) {
+	env, err := frames.New(frames.KindChatReactionUpdate, payload)
+	if err != nil {
+		b.log.Warn("chat.reaction.update build", "err", err, "msg_id", payload.MsgID)
+		return
+	}
+	b.fanOutToOperators(env, func(c *wsConn) bool {
+		return c.subscribedChat
+	})
+}
+
 // broadcastRosterUpdate pushes a roster.update frame to every
 // operator with subscribedRoster true. Called from
 // handleRegisterFrame (reason: "connect"), cleanup (reason:
