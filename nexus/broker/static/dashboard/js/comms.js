@@ -33,9 +33,13 @@ const state = {
   ready: false,
   // pending RPCs: correlation_id → {resolve, reject, kind, deadline}
   pending: new Map(),
-  // active subscriptions: kind → array of handler fns. Replayed on
-  // reconnect by re-issuing the subscribe.<kind> frame.
+  // active subscriptions: pushKind (e.g. chat.deliver) → array of
+  // handler fns. Replayed on reconnect by re-issuing the corresponding
+  // subscribe.X frame, looked up via subKinds.
   subs: new Map(),
+  // pushKind → subscribe.X (so reconnect replay can issue the right
+  // frame). Populated alongside subs in subscribe().
+  subKinds: new Map(),
   // outbound queue for frames sent before the WS opened OR during a
   // reconnect window. Drained on open. Bounded by a soft cap so a
   // long offline period doesn't grow the queue unboundedly.
@@ -112,9 +116,16 @@ function connect() {
       state.ready = true;
       state.backoffMs = 1000; // reset on successful connect
       // Replay subscriptions over the new connection so server-side
-      // state matches what the SPA thinks it has.
-      for (const kind of state.subs.keys()) {
-        sendFrame({ kind, id: correlationID(), ts: nowISO(), payload: {} });
+      // state matches what the SPA thinks it has. state.subs is keyed
+      // by the inbound push kind (chat.deliver, roster.update, etc) so
+      // the per-frame route lookup is cheap. To replay we have to send
+      // the subscribe.X frame, not the push kind — the server doesn't
+      // accept push kinds inbound (logs "frame kind not yet handled"
+      // and never flips subscribedChat). Map back via state.subKinds.
+      for (const pushKind of state.subs.keys()) {
+        const subKind = state.subKinds.get(pushKind);
+        if (!subKind) continue;
+        sendFrame({ kind: subKind, id: correlationID(), ts: nowISO(), payload: {} });
       }
       // Drain the outbox.
       while (state.outbox.length > 0) {
@@ -277,6 +288,7 @@ export function subscribe(kind, params, handler) {
   if (fresh) {
     handlers = [];
     state.subs.set(pushKind, handlers);
+    state.subKinds.set(pushKind, kind);
   }
   handlers.push(handler);
 
@@ -295,6 +307,7 @@ export function subscribe(kind, params, handler) {
     if (i >= 0) list.splice(i, 1);
     if (list.length === 0) {
       state.subs.delete(pushKind);
+      state.subKinds.delete(pushKind);
       // Tell the server too. Best-effort — if we're already closed,
       // the server's wsConn cleanup tears down the sub anyway.
       sendFrame({
