@@ -193,7 +193,12 @@ func main() {
 		SessionSigningSecret: nexusIdentity.SessionSigningSecret,
 		Store:                aspects.NewSQLStore(db),
 		Settings:             aspects.NewSQLSettingsStore(db), // Part 9
-		JWTTTL:               time.Hour,                       // spec §6
+		// 24h: passkey is the strong credential; this JWT is a session
+		// bridge between WebAuthn ceremonies. 24h matches the operator
+		// expectation of "reauth once a day" without re-prompting on
+		// every refresh. Tightening to <24h breaks the workday session;
+		// loosening to 7d+ stretches blast radius if a token leaks.
+		JWTTTL:               24 * time.Hour,
 	}
 
 	r := roster.New()
@@ -830,7 +835,7 @@ func buildOperatorLogin(db *sql.DB, nexusID string, secret []byte, addr string, 
 	return &broker.OperatorLogin{
 		Auth:                 auth,
 		SessionSigningSecret: secret,
-		JWTTTL:               time.Hour,
+		JWTTTL:               24 * time.Hour,
 		NexusID:              nexusID,
 	}
 }
