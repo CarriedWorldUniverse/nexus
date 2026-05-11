@@ -259,8 +259,9 @@ func main() {
 	// AI personality. When no Frame is embedded (legacy mode), chatRouter
 	// stays nil and the broker logs + drops chat.send frames.
 	chatStore := chat.NewSQLStore(db)
+	triageStore := chat.NewSQLTriageStore(db)
 	knowledgeStore := knowledge.New(db, logger)
-	chatRouter, frameGateway := buildChatRouter(ctx, embeddedFrame, r, chatStore, usage.NewSQLStore(db), knowledgeStore, logger)
+	chatRouter, frameGateway := buildChatRouter(ctx, embeddedFrame, r, chatStore, triageStore, usage.NewSQLStore(db), knowledgeStore, logger)
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
@@ -1170,7 +1171,7 @@ func buildRewriterRunner(cfg schemas.AspectConfig, aspectCwd string, frameProvid
 // to the broker after broker.New so in-process Frame posts go through
 // Broker.HandleChatSend (the unified chat-send path). When ef is nil
 // both returns are nil.
-func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.Roster, store chat.Store, usageStore *usage.SQLStore, knowledgeStore *knowledge.Store, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway) {
+func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.Roster, store chat.Store, triageStore chat.TriageStore, usageStore *usage.SQLStore, knowledgeStore *knowledge.Store, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway) {
 	if ef == nil {
 		return nil, nil
 	}
@@ -1219,6 +1220,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		Gateway:   gateway,
 		Knowledge: knowledgeGateway,
 		AspectID:  ef.Aspect.Name,
+		Triage:    triageStore,
 	}
 	pulser := &framecomms.ChatPulser{Gateway: gateway}
 	recorder := &usageRecorderAdapter{store: usageStore}
@@ -1270,6 +1272,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		Threads:        threads,
 		Pulser:         pulser,
 		UsageRecorder:  recorder,
+		Triage:         triageStore,
 		PostTurn:       postTurn,
 		Logger:         log,
 	})

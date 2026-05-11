@@ -30,7 +30,31 @@ import (
 	"log"
 
 	"github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 )
+
+// turnIDCtxKey is the unexported context key under which the funnel
+// stashes the current turn_id before invoking bridle.RunTurn. The
+// triage tool reads it back to tag persisted decisions. Per-turn
+// state via context avoids the alternative — mutating CommsRunner
+// fields across goroutine boundaries, which the bridle contract
+// permits but would race the tool runner against the funnel.
+type turnIDCtxKey struct{}
+
+// WithTurnID returns a context that carries turn_id for tool calls
+// invoked during the turn. Funnel must call this on the Deliberate
+// context before passing into bridle.RunTurn so triage rows land
+// against the right turn.
+func WithTurnID(ctx context.Context, turnID string) context.Context {
+	return context.WithValue(ctx, turnIDCtxKey{}, turnID)
+}
+
+// TurnIDFromContext returns the turn_id set via WithTurnID, or empty
+// when none. Tools that persist per-turn state read it here.
+func TurnIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(turnIDCtxKey{}).(string)
+	return v
+}
 
 // ChatGateway is the funnel's seam onto the actual chat surface. The
 // in-process Frame implements this against the broker's chat router
@@ -357,6 +381,14 @@ type CommsRunner struct {
 	// AspectID identifies the caller for knowledge writes and
 	// scoped reads. Required when Knowledge is set; ignored otherwise.
 	AspectID string
+
+	// Triage persists triage decisions per the inbox-triage contract
+	// (docs/2026-05-10-funnel-triage-contract.md). When nil the
+	// triage tool degrades to a log-only stub — every turn still
+	// invokes the tool but no row lands and the per-turn enforcer
+	// can't audit. Production paths set this; legacy callers (aspect
+	// runtime, agentfunnel) leave it nil until they migrate.
+	Triage chat.TriageStore
 }
 
 // Run dispatches a tool call by name. Unknown tool names return an
@@ -401,11 +433,13 @@ func (r CommsRunner) Run(ctx context.Context, call bridle.ToolCall) (json.RawMes
 	}
 }
 
-// runTriage records a per-msg-id triage decision. v1 stub: logs to
-// stderr and returns a success result so the model gets a clean ack
-// and can continue its turn. Persistence to the inbox_triage table
-// lands in Phase 1's storage layer; this stub closes the "unknown
-// tool" loop so the prompt's triage requirement behaves predictably.
+// runTriage records a per-msg-id triage decision into the
+// inbox_triage table when CommsRunner.Triage is wired. When the store
+// is nil the call degrades to a log-only stub so legacy aspect
+// runtimes (aspect.exe, agentfunnel) that haven't migrated yet still
+// produce a clean tool ack. The per-turn enforcer in funnel.go reads
+// these rows after deliberation ends to detect inbox items the model
+// failed to triage and emit synthetic skip rows.
 func (r CommsRunner) runTriage(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -424,11 +458,38 @@ func (r CommsRunner) runTriage(ctx context.Context, raw json.RawMessage) (json.R
 	if args.Decision != "reply" && args.Decision != "skip" {
 		return mustJSON(map[string]any{"error": "triage: decision must be 'reply' or 'skip'"}), nil
 	}
-	// v1 stub: stderr log. Phase 1 hardening adds a TriageStore for
-	// SQL-backed persistence + an enforcer that emits synthetic skips
-	// for inbox items the model failed to triage.
-	log.Printf("triage: aspect=%s msg_id=%d decision=%s reason=%q",
-		r.AspectID, args.MsgID, args.Decision, args.Reason)
+
+	if r.Triage == nil {
+		// Legacy runtime: log + ack. The 1:1 audit trail is empty
+		// but the model's turn proceeds cleanly. Real coverage lands
+		// when the runtime wires a TriageStore.
+		log.Printf("triage (stub, no store): aspect=%s msg_id=%d decision=%s reason=%q",
+			r.AspectID, args.MsgID, args.Decision, args.Reason)
+		return mustJSON(map[string]any{"ok": true, "msg_id": args.MsgID, "decision": args.Decision}), nil
+	}
+
+	turnID := TurnIDFromContext(ctx)
+	if turnID == "" {
+		// Funnel forgot to wrap the context. Persist with empty
+		// turn_id would violate the NOT NULL constraint and surface
+		// the bug as a model-visible tool error. Be loud here.
+		log.Printf("triage: turn_id missing from context — funnel did not call WithTurnID; aspect=%s msg_id=%d",
+			r.AspectID, args.MsgID)
+		return mustJSON(map[string]any{"error": "triage: internal — turn_id missing"}), nil
+	}
+
+	if _, err := r.Triage.Record(ctx, chat.TriageDecision{
+		AspectName: r.AspectID,
+		MsgID:      args.MsgID,
+		TurnID:     turnID,
+		Decision:   args.Decision,
+		Reason:     args.Reason,
+	}); err != nil {
+		log.Printf("triage: persist failed: aspect=%s msg_id=%d err=%v",
+			r.AspectID, args.MsgID, err)
+		return mustJSON(map[string]any{"error": "triage: persist failed: " + err.Error()}), nil
+	}
+
 	return mustJSON(map[string]any{"ok": true, "msg_id": args.MsgID, "decision": args.Decision}), nil
 }
 

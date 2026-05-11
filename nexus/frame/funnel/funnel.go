@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
 )
 
@@ -149,6 +150,18 @@ type Config struct {
 	// logged but don't fail the deliberation. Forensics can't
 	// block the chat path.
 	UsageRecorder UsageRecorder
+
+	// Triage persists per-msg-id triage decisions per the inbox-triage
+	// contract (docs/2026-05-10-funnel-triage-contract.md). After every
+	// deliberation the funnel reconciles the inbox against persisted
+	// decisions; any msg_id the model failed to triage gets a synthetic
+	// skip row tagged "no_triage_emitted" so the operator's 1:1 view
+	// can audit "did the aspect see this msg, and what did it decide?"
+	//
+	// Nil disables enforcement (no synthetic skips). The triage tool
+	// still runs but with no persistence, matching legacy aspect.exe /
+	// agentfunnel callers that haven't migrated yet.
+	Triage chat.TriageStore
 
 	// PostTurn runs after each successful provider turn, before the
 	// next deliberation begins. Concrete implementation: the rewriter
@@ -386,7 +399,11 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	})
 
 	sink := &collectSink{}
-	result, err := f.cfg.Harness.RunTurn(ctx, req, f.cfg.Runner, sink)
+	// Tag the context with the turn_id so the triage tool runner
+	// persists rows under the right turn. Required when Triage is
+	// wired; harmless otherwise.
+	turnCtx := WithTurnID(ctx, turnID)
+	result, err := f.cfg.Harness.RunTurn(turnCtx, req, f.cfg.Runner, sink)
 	// turn.end must fire whether the turn succeeded or errored — the
 	// Lock 5 spec promises every turn.start has a paired turn.end.
 	// Without this, dashboards listening for paired events would
@@ -409,6 +426,22 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	if recErr := f.cfg.UsageRecorder.Record(ctx, triggerMsgID, turnID, f.cfg.AspectID, f.cfg.Model, result.Usage); recErr != nil {
 		f.log.Warn("funnel: usage record failed",
 			"err", recErr, "turn_id", turnID, "msg_id", triggerMsgID)
+	}
+
+	// Triage enforcement (inbox-triage contract). For every inbox
+	// msg_id we sent into this turn, check whether the model called
+	// triage(); if not, emit a synthetic skip row with reason
+	// "no_triage_emitted" so the operator's 1:1 view shows a complete
+	// audit trail. Pre-fix bug: model produced one reply that acked
+	// the latest probe and silently dropped the earlier inbox items
+	// — uninhabitable as a substrate.
+	//
+	// Runs on both success and error paths: the model may have
+	// triaged some items before erroring; we still want those rows,
+	// and the untriaged ones still need synthetic skips so the
+	// reconciliation invariant holds regardless of provider outcome.
+	if f.cfg.Triage != nil {
+		f.reconcileTriage(ctx, turnID, pending)
 	}
 
 	if err != nil {
@@ -845,6 +878,61 @@ func (f *Funnel) runFilter(ctx context.Context, in FilterInput) FilterDecision {
 // The real number lands in TurnEnd via bridle.Usage. This estimate
 // exists so dashboard panels can show a "going in at ~X tokens" hint
 // before a slow turn completes.
+// reconcileTriage walks the inbox items the turn ingested and inserts
+// synthetic skip rows for any whose msg_id wasn't already triaged by
+// the model. Without this the inbox-triage contract collapses to "the
+// model triages when it remembers to," which is exactly the bug we're
+// closing. Items with MsgID==0 are synthetic/internal (no real chat
+// row to triage against) and are skipped here.
+//
+// Errors from the store are logged, never returned: triage enforcement
+// is observability, not correctness — a failed audit row mustn't fail
+// a turn that already produced a model reply.
+func (f *Funnel) reconcileTriage(ctx context.Context, turnID string, inbox []bridle.InboxItem) {
+	// Build the set of msg_ids the funnel sent into this turn.
+	want := make(map[int64]struct{}, len(inbox))
+	for _, item := range inbox {
+		if item.MsgID > 0 {
+			want[item.MsgID] = struct{}{}
+		}
+	}
+	if len(want) == 0 {
+		return
+	}
+
+	// Read what the model actually triaged.
+	have, err := f.cfg.Triage.ListByTurn(ctx, turnID)
+	if err != nil {
+		f.log.Warn("funnel: triage reconcile read failed",
+			"err", err, "turn_id", turnID, "aspect", f.cfg.AspectID)
+		return
+	}
+	seen := make(map[int64]struct{}, len(have))
+	for _, dec := range have {
+		seen[dec.MsgID] = struct{}{}
+	}
+
+	// Emit synthetic skips for the difference.
+	for msgID := range want {
+		if _, ok := seen[msgID]; ok {
+			continue
+		}
+		if _, err := f.cfg.Triage.Record(ctx, chat.TriageDecision{
+			AspectName: f.cfg.AspectID,
+			MsgID:      msgID,
+			TurnID:     turnID,
+			Decision:   "skip",
+			Reason:     "no_triage_emitted",
+		}); err != nil {
+			f.log.Warn("funnel: synthetic triage write failed",
+				"err", err, "turn_id", turnID, "msg_id", msgID, "aspect", f.cfg.AspectID)
+			continue
+		}
+		f.log.Info("funnel: synthetic triage emitted (model did not call triage())",
+			"turn_id", turnID, "msg_id", msgID, "aspect", f.cfg.AspectID)
+	}
+}
+
 func estimateContextTokens(tail []bridle.SessionEvent, inbox []bridle.InboxItem, userMessage string) int {
 	chars := len(userMessage)
 	for _, ev := range tail {
