@@ -51,7 +51,7 @@ func TestGrouperHappyPath(t *testing.T) {
 	c := &capture{}
 	g := NewGrouperWithClock("plumb", c.emit, fixedClock())
 
-	g.BeginTurn("turn-1", "claude-opus-4-7", "claude-api", 189)
+	g.BeginTurn("turn-1", "", "claude-opus-4-7", "claude-api", 189)
 	g.OnBridleEvent(bridle.ModelChunk{Text: "thinking "})
 	g.OnBridleEvent(bridle.ModelChunk{Text: "about it. "})
 	g.OnBridleEvent(bridle.ToolCallStart{
@@ -125,7 +125,7 @@ func TestGrouperHappyPath(t *testing.T) {
 func TestGrouperToolPairingByID(t *testing.T) {
 	c := &capture{}
 	g := NewGrouperWithClock("plumb", c.emit, fixedClock())
-	g.BeginTurn("turn-x", "m", "p", 0)
+	g.BeginTurn("turn-x", "", "m", "p", 0)
 	g.OnBridleEvent(bridle.ToolCallStart{ID: "a", Name: "Read", Args: json.RawMessage(`{}`)})
 	g.OnBridleEvent(bridle.ToolCallStart{ID: "b", Name: "Bash", Args: json.RawMessage(`{}`)})
 	g.OnBridleEvent(bridle.ToolCallResult{ID: "b", Result: json.RawMessage(`"b-ok"`)})
@@ -153,7 +153,7 @@ func TestGrouperToolPairingByID(t *testing.T) {
 func TestGrouperOrphanToolResult(t *testing.T) {
 	c := &capture{}
 	g := NewGrouperWithClock("p", c.emit, fixedClock())
-	g.BeginTurn("t", "m", "p", 0)
+	g.BeginTurn("t", "", "m", "p", 0)
 	g.OnBridleEvent(bridle.ToolCallResult{ID: "ghost", Result: json.RawMessage(`"r"`)})
 	g.EndTurn()
 	last, _ := c.lastOf(FrameTurn)
@@ -169,7 +169,7 @@ func TestGrouperOrphanToolResult(t *testing.T) {
 func TestGrouperErroredTurn(t *testing.T) {
 	c := &capture{}
 	g := NewGrouperWithClock("p", c.emit, fixedClock())
-	g.BeginTurn("t", "m", "prv", 0)
+	g.BeginTurn("t", "", "m", "prv", 0)
 	g.OnBridleEvent(bridle.ModelChunk{Text: "partial"})
 	g.OnBridleEvent(bridle.TurnError{Err: errors.New("boom"), Stage: "provider"})
 	g.EndTurn()
@@ -186,7 +186,7 @@ func TestGrouperErroredTurn(t *testing.T) {
 func TestGrouperToolErrorBuildsErrorResult(t *testing.T) {
 	c := &capture{}
 	g := NewGrouperWithClock("p", c.emit, fixedClock())
-	g.BeginTurn("t", "m", "p", 0)
+	g.BeginTurn("t", "", "m", "p", 0)
 	g.OnBridleEvent(bridle.ToolCallStart{ID: "1", Name: "Bash", Args: json.RawMessage(`{}`)})
 	g.OnBridleEvent(bridle.ToolCallResult{ID: "1", Err: "permission denied"})
 	g.EndTurn()
@@ -264,7 +264,7 @@ func TestGrouperEventWithoutActiveTurnIsNoOp(t *testing.T) {
 func TestGrouperMonotonicSequence(t *testing.T) {
 	c := &capture{}
 	g := NewGrouperWithClock("p", c.emit, fixedClock())
-	g.BeginTurn("t", "m", "p", 0)
+	g.BeginTurn("t", "", "m", "p", 0)
 	g.OnBridleEvent(bridle.ModelChunk{Text: "a"})
 	g.OnChat(chat.Message{ID: 1, From: "op", Content: "hi", CreatedAt: time.Now()}, DirectionInbound)
 	g.OnBridleEvent(bridle.ModelChunk{Text: "b"})
@@ -280,7 +280,7 @@ func TestGrouperMonotonicSequence(t *testing.T) {
 func TestGrouperInFlightSnapshotsBeforeEnd(t *testing.T) {
 	c := &capture{}
 	g := NewGrouperWithClock("p", c.emit, fixedClock())
-	g.BeginTurn("t", "m", "p", 0)
+	g.BeginTurn("t", "", "m", "p", 0)
 	g.OnBridleEvent(bridle.ModelChunk{Text: "x"})
 	// Without EndTurn, status of every emitted snapshot must be in_flight.
 	if len(c.frames) < 2 {
@@ -300,7 +300,7 @@ func TestGrouperInFlightSnapshotsBeforeEnd(t *testing.T) {
 func TestGrouperTextPreviewTruncation(t *testing.T) {
 	c := &capture{}
 	g := NewGrouperWithClock("p", c.emit, fixedClock())
-	g.BeginTurn("t", "m", "p", 0)
+	g.BeginTurn("t", "", "m", "p", 0)
 	big := make([]byte, 500)
 	for i := range big {
 		big[i] = 'a'
@@ -323,7 +323,7 @@ func TestGrouperTextPreviewTruncation(t *testing.T) {
 func TestGrouperArtifactParseErrorSurfaced(t *testing.T) {
 	c := &capture{}
 	g := NewGrouperWithClock("p", c.emit, fixedClock())
-	g.BeginTurn("t", "m", "p", 0)
+	g.BeginTurn("t", "", "m", "p", 0)
 	// Well-formed JSON envelope (so the snapshot can be re-marshaled)
 	// but wrong shape for Edit — file_path is a number, which makes
 	// json.Unmarshal into the Edit struct fail.
@@ -353,10 +353,10 @@ func TestGrouperArtifactParseErrorSurfaced(t *testing.T) {
 func TestGrouperBeginTurnForcesCloseOfInFlight(t *testing.T) {
 	c := &capture{}
 	g := NewGrouperWithClock("p", c.emit, fixedClock())
-	g.BeginTurn("turn-1", "m", "p", 0)
+	g.BeginTurn("turn-1", "", "m", "p", 0)
 	g.OnBridleEvent(bridle.ModelChunk{Text: "partial"})
 	// Second BeginTurn — should force-close turn-1.
-	g.BeginTurn("turn-2", "m", "p", 0)
+	g.BeginTurn("turn-2", "", "m", "p", 0)
 
 	// Find the last frame for turn-1 and assert it's errored.
 	var lastT1 *TurnFrame
@@ -457,5 +457,48 @@ func TestGrouper_OnChat_Concurrent(t *testing.T) {
 	}
 	if maxSeq != N {
 		t.Errorf("max sequence = %d, want %d", maxSeq, N)
+	}
+}
+
+// TestGrouperLabelRouting asserts BeginTurn's label argument lands on
+// the emitted TurnFrame.Label field, with empty defaulting to "main".
+// Sub-turn labels ("compact" / "filter-judge") let renderers
+// distinguish bridle-driven turns that nest inside one Deliberate
+// call. Per chat #213 with keel-cli — different bridle turns within
+// one deliberation cycle are different events, not aggregation levels
+// of the same event; renderers must be able to tell them apart.
+func TestGrouperLabelRouting(t *testing.T) {
+	cases := []struct {
+		give string
+		want string
+	}{
+		{"", "main"},
+		{"main", "main"},
+		{"compact", "compact"},
+		{"filter-judge", "filter-judge"},
+		{"some-future-label", "some-future-label"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.give+"_to_"+tc.want, func(t *testing.T) {
+			c := &capture{}
+			g := NewGrouperWithClock("p", c.emit, fixedClock())
+			g.BeginTurn("t", tc.give, "m", "p", 0)
+			g.EndTurn()
+			// Find the last turn frame emitted (post-EndTurn).
+			var last *TurnFrame
+			for _, f := range c.frames {
+				if f.Kind != FrameTurn {
+					continue
+				}
+				x := decodeTurn(t, f)
+				last = &x
+			}
+			if last == nil {
+				t.Fatal("no turn frame found")
+			}
+			if last.Label != tc.want {
+				t.Errorf("Label = %q, want %q", last.Label, tc.want)
+			}
+		})
 	}
 }

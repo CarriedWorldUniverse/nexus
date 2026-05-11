@@ -61,7 +61,12 @@ func NewGrouperWithClock(aspect string, emit func(Frame), clock func() time.Time
 // BeginTurn opens a new in-flight turn and emits the initial
 // TurnFrame snapshot. trigger may be 0 if the turn was not driven
 // by a specific chat message (e.g. proactive deliberation).
-func (g *Grouper) BeginTurn(turnID, model, provider string, trigger int64) {
+//
+// label distinguishes which kind of bridle turn this is — see
+// TurnFrame.Label for the documented values ("main", "compact",
+// "filter-judge"). Empty label is normalised to "main" in the
+// emitted frame so renderers can default cleanly.
+func (g *Grouper) BeginTurn(turnID, label, model, provider string, trigger int64) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	t := g.clock()
@@ -84,8 +89,12 @@ func (g *Grouper) BeginTurn(turnID, model, provider string, trigger int64) {
 		g.emitTurnSnapshot()
 		g.turn = nil
 	}
+	if label == "" {
+		label = "main"
+	}
 	g.turn = &TurnFrame{
 		TurnID:     turnID,
+		Label:      label,
 		Status:     TurnInFlight,
 		Started:    t,
 		TriggerMsg: trigger,

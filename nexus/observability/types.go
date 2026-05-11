@@ -40,6 +40,13 @@ const (
 // renderers can replace-by-turn_id rather than reconcile deltas.
 type TurnFrame struct {
 	TurnID     string      `json:"turn_id"`
+	// Label distinguishes which kind of bridle turn this is. Documented
+	// values: "main" (the operator-addressed deliberation turn),
+	// "compact" (mid-deliberation context summarization), "filter-judge"
+	// (post-turn meaningfulness evaluation). Freeform string so new wrap
+	// sites can land without an interface bump. Empty string is treated
+	// as "main" by renderers — back-compat default.
+	Label      string      `json:"label,omitempty"`
 	Status     TurnStatus  `json:"status"`
 	Started    time.Time   `json:"started"`
 	Ended      *time.Time  `json:"ended,omitempty"`
