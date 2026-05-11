@@ -50,11 +50,29 @@ Verify the cert applies to the hostname the operator's browser will type — pas
 
 ### 3. Aspect provisioning verified
 
+On a **fresh production DB** the `aspect_personalities` table is empty — `nexus aspect list` will show nothing useful, and the embedded Frame will boot with `personality_loaded=false`. The migration must run before any aspect (Frame or otherwise) deliberates coherently:
+
+```
+nexus migrate personality-from-disk --aspect-dir <agents-dir> --data-dir <data-dir>
+```
+
+This reads every `agents/*/aspect.json + NEXUS.md + SOUL.md + PRIMER.md` and inserts the composed personality into the DB. Output should list every aspect inserted (≈8 rows: forge, wren, verity, keel, harrow, maren, anvil, plumb). Diligence run 2026-05-11 confirmed this is REQUIRED, not recovery — the test deployment showed `frame: no personality row found — running with empty SystemPrompt` before migrate ran.
+
+Then mint a keyfile for each aspect to bump it from placeholder pubkey to a real validating keyfile:
+
+```
+for name in forge wren verity keel harrow maren anvil plumb; do
+  nexus aspect mint $name --out $name.keyfile.json --nexus-url wss://... --data-dir <data-dir>
+done
+```
+
+Verify:
+
 ```
 nexus aspect list
 ```
 
-Should show all 7 aspects (forge, wren, verity, keel, harrow, maren, anvil) plus plumb if registered. Each minted with a current keyfile version. If an aspect isn't there, run `nexus migrate personality-from-disk` then `nexus aspect mint <name>` per Crossing Part 1.
+Should show all 8 aspects, `version >= 2`, `status=active`, with the right `provider` + `model` columns populated. **keel must show `provider=claude-code`** (not `claude-api`) so cutover spawns the subprocess instead of trying to dial an API endpoint.
 
 Aspect homes in `<nexus-cw>/nexus/agents/<name>/` should each have:
 
