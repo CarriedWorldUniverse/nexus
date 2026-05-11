@@ -267,6 +267,34 @@ export function rpc(kind, payload = {}) {
   });
 }
 
+// onPushKind registers a handler for a server push kind WITHOUT
+// issuing a subscribe.X frame. Use when the server fans the kind out
+// via another subscription you (or someone else) is already on —
+// e.g. chat.reaction.update piggy-backs on the chat subscription, so
+// the SPA just needs to listen for the kind, not subscribe to it.
+//
+// Returns an unsubscribe fn. Multiple handlers per kind are allowed.
+export function onPushKind(pushKind, handler) {
+  let handlers = state.subs.get(pushKind);
+  if (!handlers) {
+    handlers = [];
+    state.subs.set(pushKind, handlers);
+    // Note: no entry in state.subKinds — reconnect won't replay this
+    // (there's no subscribe frame to replay). That's correct: the
+    // server fans the kind out via the OTHER subscription's gate, so
+    // as long as that subscription is replayed, the kind keeps
+    // flowing.
+  }
+  handlers.push(handler);
+  return function off() {
+    const list = state.subs.get(pushKind);
+    if (!list) return;
+    const i = list.indexOf(handler);
+    if (i >= 0) list.splice(i, 1);
+    if (list.length === 0) state.subs.delete(pushKind);
+  };
+}
+
 // subscribe enrols the connection in a push channel and routes
 // matching frames to handler. Returns an unsubscribeFn that:
 //
