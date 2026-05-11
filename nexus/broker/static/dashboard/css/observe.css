@@ -1,0 +1,206 @@
+/* ── Observe View ── */
+
+/* Per-aspect observability surface. Replaces the deleted AgentsView
+ * (DM list). Picker styling lifted from chat.css's .agents-bar /
+ * .agent-btn / .agent-dot and namespaced .observe-* so the two views
+ * can diverge without selector collisions. */
+
+.observe-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.observe-bar {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 4px;
+  padding: 8px 12px;
+  background: var(--bg-deep);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.observe-bar::-webkit-scrollbar { height: 3px; }
+.observe-bar::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: 2px; }
+
+.observe-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 20px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.observe-btn:hover { border-color: var(--observe-color, var(--accent)); color: var(--text-primary); }
+.observe-btn.active { border-color: var(--observe-color, var(--accent)); color: var(--observe-color, var(--accent)); background: var(--bg-elevated); }
+
+.observe-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #444;
+  flex-shrink: 0;
+}
+
+.observe-dot.alive { box-shadow: 0 0 4px currentColor; }
+
+.observe-btn-name { font-weight: 500; }
+
+.observe-status {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 0 12px;
+}
+
+.observe-status.connected { color: var(--accent); }
+
+.observe-stream {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+  min-height: 0;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+.observe-empty {
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+  margin-top: 40px;
+}
+
+/* ── Chat row with direction indicator ──
+ *
+ * We reuse MessageBubble unchanged for ChatFrame content rendering;
+ * direction is communicated via a small badge in a flex row alongside
+ * the bubble. CSS-only — MessageBubble doesn't know about Observe.
+ * (Single component reuse over a thin wrapper: simpler, no extra file.) */
+.observe-chatrow {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0;
+}
+
+.observe-direction {
+  flex-shrink: 0;
+  width: 22px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.observe-direction.inbound  { color: var(--text-muted); }
+.observe-direction.outbound { color: var(--accent); }
+
+.observe-chatrow .msg { flex: 1; min-width: 0; }
+
+/* ── Presence marker ── */
+.observe-presence {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.observe-presence.disconnected { color: #cf6679; }
+
+.observe-presence-rule {
+  flex: 1;
+  border-top: 1px dashed var(--border-subtle);
+  height: 0;
+  display: block;
+  font-size: 0;
+  line-height: 0;
+}
+
+.observe-presence-text {
+  white-space: nowrap;
+}
+
+.observe-presence-time {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+/* ── Turn stub block ── */
+.observe-turn {
+  margin: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  background: var(--bg-deep);
+}
+
+.observe-turn-head,
+.observe-turn-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  color: var(--text-muted);
+}
+
+.observe-turn-rule {
+  color: var(--border-subtle);
+  white-space: pre;
+}
+
+.observe-turn-rule-fill {
+  flex: 1;
+  border-top: 1px solid var(--border-subtle);
+  height: 0;
+  font-size: 0;
+}
+
+.observe-turn-bits {
+  white-space: nowrap;
+}
+
+.observe-turn-body {
+  padding: 6px 16px;
+  font-style: italic;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.observe-turn-status-errored { border-left: 2px solid #cf6679; }
+.observe-turn-status-complete { opacity: 0.85; }
+.observe-turn-status-in_flight .observe-turn-head { color: var(--accent); }
+
+/* ── Mobile ── */
+@media (max-width: 768px) and (pointer: coarse) {
+  .observe-btn {
+    font-size: 13px;
+    padding: 8px 14px;
+    min-height: 44px;
+  }
+  .observe-direction {
+    width: 18px;
+    font-size: 10px;
+  }
+  .observe-presence {
+    font-size: 12px;
+  }
+}

@@ -7,11 +7,10 @@ import { Login } from './Login.js';
 import { open as commsOpen } from './comms.js';
 import { initNotifications } from './notifications.js';
 import { FeedView } from './views/FeedView.js';
-import { AgentsView } from './views/AgentsView.js';
+import { ObserveView } from './views/ObserveView.js';
 import { FilesView } from './views/FilesView.js';
 import { Tickets } from './views/Tickets.js';
 import { Status } from './views/Status.js';
-import { Terminal } from './views/Terminal.js';
 import { DocsView } from './views/DocsView.js';
 import { SplitView } from './views/SplitView.js';
 
@@ -19,7 +18,6 @@ function getRoute() {
   const hash = window.location.hash;
   if (hash === '#/' || hash === '' || hash.startsWith('#/feed') || hash.startsWith('#/chat')) return 'feed';
   if (hash.startsWith('#/agents')) return 'agents';
-  if (hash === '#/terminal') return 'terminal';
   if (hash === '#/files') return 'files';
   if (hash === '#/tickets') return 'tickets';
   if (hash === '#/status') return 'status';
@@ -37,8 +35,7 @@ function getAgentFromHash() {
 function RouteView({ route }) {
   switch (route) {
     case 'feed':     return html`<${FeedView} />`;
-    case 'agents':   return html`<${AgentsView} />`;
-    case 'terminal': return html`<${Terminal} />`;
+    case 'agents':   return html`<${ObserveView} />`;
     case 'files':    return html`<${FilesView} />`;
     case 'tickets':  return html`<${Tickets} />`;
     case 'status':   return html`<${Status} />`;
