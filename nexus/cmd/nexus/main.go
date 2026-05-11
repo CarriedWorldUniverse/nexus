@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -803,8 +804,13 @@ func buildOperatorLogin(db *sql.DB, nexusID string, secret []byte, addr string, 
 	}
 
 	// Origins: NEXUS_OPERATOR_ORIGINS is comma-separated; default
-	// is the single "https://<rpID>" guess.
-	origins := []string{"https://" + rpID}
+	// derives from rpID + listen port. WebAuthn matches origins as
+	// exact strings (including port), so "https://host" without the
+	// port will silently reject every assertion when the dashboard
+	// runs on a non-443 port. Diligence 2026-05-11 hit this — derive
+	// from --addr by default so the common case (tailnet host, custom
+	// port) works without operator config.
+	origins := []string{deriveDefaultOrigin(rpID, addr)}
 	if env := os.Getenv("NEXUS_OPERATOR_ORIGINS"); env != "" {
 		origins = strings.Split(env, ",")
 		for i := range origins {
@@ -825,6 +831,34 @@ func buildOperatorLogin(db *sql.DB, nexusID string, secret []byte, addr string, 
 		JWTTTL:               time.Hour,
 		NexusID:              nexusID,
 	}
+}
+
+// deriveDefaultOrigin builds the WebAuthn origin string for the operator
+// dashboard from the rpID + listen addr. WebAuthn matches origins as
+// exact strings — including port — so a default of "https://<rpID>"
+// silently rejects every assertion when the dashboard runs on a non-443
+// port. Diligence 2026-05-11 hit this with rpID=host + addr=:18888.
+//
+// Rules:
+//   - addr like ":18888" or "host:18888" extracts port 18888 → emits
+//     "https://<rpID>:18888"
+//   - addr empty, port unparseable, or port == 443 → emits
+//     "https://<rpID>" (the original default; correct for the standard
+//     HTTPS port)
+//
+// Operator can still override via NEXUS_OPERATOR_ORIGINS for setups
+// behind a front proxy where the listen addr doesn't match the
+// browser-visible origin.
+func deriveDefaultOrigin(rpID, addr string) string {
+	if addr == "" {
+		return "https://" + rpID
+	}
+	// addr can be ":18888" or "host:18888"; SplitHostPort handles both.
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" || port == "443" {
+		return "https://" + rpID
+	}
+	return "https://" + rpID + ":" + port
 }
 
 // buildChatRouter constructs the funnel and returns a ChatRouterCallbacks
