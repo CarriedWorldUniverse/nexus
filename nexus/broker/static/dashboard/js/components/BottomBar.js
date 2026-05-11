@@ -1,11 +1,14 @@
 const { html } = window.__preact;
-import { IconChat, IconFiles, IconTickets, IconTerminal, IconStatus, IconAgents, IconDocs, IconSplit } from '../icons.js';
+import { IconChat, IconFiles, IconTickets, IconStatus, IconAgents, IconDocs, IconSplit } from '../icons.js';
 import { usageData } from '../state.js';
 
+// "Activity" rather than the old "Agents" label — the tab now points
+// at ObserveView (per-aspect observability stream), not the dead DM
+// list. URL stays #/agents to preserve operator muscle memory and
+// existing bookmarks.
 const TABS = [
   { id: 'feed',     label: 'Feed',     Icon: IconChat     },
-  { id: 'agents',   label: 'Agents',   Icon: IconAgents   },
-  { id: 'terminal', label: 'Terminal', Icon: IconTerminal },
+  { id: 'agents',   label: 'Activity', Icon: IconAgents   },
   { id: 'files',    label: 'Files',    Icon: IconFiles    },
   { id: 'tickets',  label: 'Tickets',  Icon: IconTickets  },
   { id: 'docs',     label: 'Docs',     Icon: IconDocs     },
