@@ -256,16 +256,19 @@ func (c *wsConn) handleOperatorKnowledgeList(env frames.Envelope) {
 		return
 	}
 	agent := strings.TrimSpace(p.Agent)
-	if agent == "" {
-		// Default to the operator's own entries — knowledge.Store.List
-		// requires a from_agent. The dashboard supplies a specific
-		// agent name to read peer entries; the empty default keeps
-		// the "my notes" view clean.
-		agent = "operator"
-	}
 	ctx, cancel := c.opCtx()
 	defer cancel()
-	entries, err := kstore.List(ctx, agent, p.Limit)
+	// Empty agent filter → cross-agent listing so the dashboard's default
+	// knowledge view surfaces every entry (canon, research, per-aspect
+	// notes, operator-authored). Previous behavior defaulted to
+	// agent="operator" which hid all migrated rows.
+	var entries []knowledge.Entry
+	var err error
+	if agent == "" {
+		entries, err = kstore.ListAll(ctx, p.Limit)
+	} else {
+		entries, err = kstore.List(ctx, agent, p.Limit)
+	}
 	if err != nil {
 		c.operatorError(env, "list: "+err.Error())
 		return
