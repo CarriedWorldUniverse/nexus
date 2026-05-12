@@ -447,6 +447,9 @@ func claudeCandidates() []string {
 		}
 		if home != "" {
 			paths = append(paths,
+				// Native Windows install path used by the operator's
+				// rebuild — the Windows `claude` standalone drops here.
+				filepath.Join(home, ".local", "bin", "claude.exe"),
 				filepath.Join(home, ".bun", "bin", "claude.exe"),
 			)
 		}
