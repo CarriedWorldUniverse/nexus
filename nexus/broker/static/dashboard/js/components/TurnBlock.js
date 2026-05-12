@@ -105,5 +105,12 @@ function TurnFooter({ usage, started, ended }) {
 
 function shortID(id) {
   if (!id) return '?';
-  return id.length > 10 ? id.slice(0, 10) : id;
+  // funnel.newTurnID() shape: "turn-YYYYMMDDTHHMMSS.uuuuuuZ-abc123"
+  // — first 10 chars is the constant "turn-YYYYM" prefix which collides
+  // across every turn in the same UTC minute. Use the random hex suffix
+  // (everything after the final '-') so distinct turns are visually
+  // distinct; fall back to the trailing 8 chars for non-conforming ids.
+  const i = id.lastIndexOf('-');
+  if (i > 0 && i < id.length - 1) return id.slice(i + 1);
+  return id.length > 8 ? id.slice(-8) : id;
 }
