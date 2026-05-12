@@ -388,18 +388,31 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	if f.cfg.SystemPromptFn != nil {
 		systemPrompt = f.cfg.SystemPromptFn()
 	}
+	// Toolkit-awareness blurb for the claude-code provider only. The
+	// provider passes our prompt as --append-system-prompt, layered on
+	// top of Anthropic's default. The default frames the assistant and
+	// describes its toolkit; the personality bundle frames identity and
+	// role. Neither tells claude-code which network it's embedded in
+	// or that the Skill ecosystem is available — without this nudge,
+	// aspects answer "what tools do you have?" with silence even though
+	// the tools are right there. Other providers (claude-api, openai,
+	// ollama) have no Anthropic default to layer onto; the blurb would
+	// be load-bearing-as-instruction not as-augmentation, so skip it.
+	if f.cfg.Provider == "claudecode" {
+		systemPrompt = appendToolkitBlurb(systemPrompt)
+	}
 	req := bridle.TurnRequest{
-		AspectID:     f.cfg.AspectID,
-		SystemPrompt: systemPrompt,
-		Session:      session,
-		SessionTail:  tail,
-		UserMessage:  userMessage,
-		Inbox:        pending,
-		Tools:        f.cfg.Tools,
-		MCP:          f.cfg.MCP,
-		Provider:     f.cfg.Provider,
-		Model:        f.cfg.Model,
-		MaxSteps:     f.cfg.MaxStepsPerTurn,
+		AspectID:           f.cfg.AspectID,
+		AppendSystemPrompt: systemPrompt,
+		Session:            session,
+		SessionTail:        tail,
+		UserMessage:        userMessage,
+		Inbox:              pending,
+		Tools:              f.cfg.Tools,
+		MCP:                f.cfg.MCP,
+		Provider:           f.cfg.Provider,
+		Model:              f.cfg.Model,
+		MaxSteps:           f.cfg.MaxStepsPerTurn,
 	}
 
 	turnID := newTurnID()
@@ -658,8 +671,8 @@ func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error 
 
 	summarizePrompt := summarizationPrompt
 	req := bridle.TurnRequest{
-		AspectID:     f.cfg.AspectID,
-		SystemPrompt: summarizePrompt,
+		AspectID:           f.cfg.AspectID,
+		AppendSystemPrompt: summarizePrompt,
 		// Fresh session for the summarize turn so it doesn't pollute
 		// the main session JSONL.
 		Session:     bridle.SessionHandle{ID: newSessionID(), New: true},
@@ -798,6 +811,26 @@ type NullRunner struct{}
 
 func (NullRunner) Run(_ context.Context, _ bridle.ToolCall) (json.RawMessage, error) {
 	return json.RawMessage(`{}`), nil
+}
+
+// toolkitBlurb is appended to the system prompt for claude-code-provider
+// aspects so they reach for their tools when asked. Without this, the
+// personality bundle says "you are X, this is your role" and the
+// Anthropic default says "you are an assistant with these tools" — but
+// neither one prompts the model to enumerate or invoke them when the
+// operator asks "what can you do?" Empty answers are the symptom.
+//
+// Style: short, present-tense, mention the categories (native tools +
+// Skill ecosystem) rather than enumerating every individual tool —
+// the toolkit changes; this blurb shouldn't have to.
+const toolkitBlurb = `
+
+You operate inside the Nexus network and have full access to your underlying claude-code toolkit: native tools (Bash, Read, Write, Edit, Glob, Grep, Task, WebFetch, WebSearch) plus the Skill ecosystem (invoke via the Skill tool — common skills include brainstorming, executing-plans, systematic-debugging, writing-plans). When the operator asks about your capabilities, enumerate them concretely from your toolkit rather than answering abstractly. When a task suits a skill, use it.`
+
+// appendToolkitBlurb concatenates the toolkit blurb onto a personality
+// bundle. Safe to call with empty input.
+func appendToolkitBlurb(personality string) string {
+	return personality + toolkitBlurb
 }
 
 // collectSink is a no-op EventSink. v1 funnel doesn't act on bridle

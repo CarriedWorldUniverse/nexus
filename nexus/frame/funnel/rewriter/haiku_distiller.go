@@ -102,8 +102,8 @@ func (d *HaikuDistiller) runDistill(parent context.Context, systemPrompt, userMe
 	defer cancel()
 
 	req := bridle.TurnRequest{
-		AspectID:     d.AspectID,
-		SystemPrompt: systemPrompt,
+		AspectID:           d.AspectID,
+		AppendSystemPrompt: systemPrompt,
 		// Fresh session per call — distillations don't accumulate.
 		// The session ID is sufficiently unique that there's no
 		// collision risk, and bridle's claude-api provider treats it
