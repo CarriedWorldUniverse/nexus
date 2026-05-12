@@ -232,22 +232,22 @@ A message is NOT meaningful (and should be suppressed) if it falls into any of t
 
   5. Echo / mirror. A reply that just restates what the previous message said without adding anything ("So you're saying X" where X is verbatim the prior msg).
 
-Reply with EXACTLY one token: either "yes" (meaningful, post it) or "no" (scratch/meta/empty, suppress it). No preamble, no punctuation, no explanation. Just one word.
+Reply format: start with EXACTLY "yes" or "no" (lowercase, no punctuation before), then ONE space, then a brief reason (≤12 words) naming the category from the list above. Examples of well-formed replies: "no meta-routing — talks about being silent" / "yes substantive update with concrete numbers" / "no empty acknowledgement". The parser only consumes the first token, but the reason is logged + surfaced in the observability stream so operators can see WHY the judge ruled. Without a reason the operator has no way to tune the prompt when verdicts go wrong.
 
-Examples:
-- "I'll check the database and report back" → yes
-- "Looking at the code now" → yes
-- "Migration completed — 4.2M rows updated, 0 errors" → yes
-- "I don't have anything to add to this thread" → no
-- "This message is addressed to @operator, not me. No action required." → no
-- "Still addressed to @anvil, not me. Silence." → no
-- "plumb's message is for the operator — I'll stay out of it." → no
-- "(internal: should I respond?)" → no
-- "Holding." → no
-- "Acknowledged." → no
-- "Noted, will let you know if it changes" → yes (commits to a future action)
-- empty / whitespace only → no
-- "{thinking: this is for someone else}" → no`
+Examples (reply → verdict):
+- "I'll check the database and report back" → yes commits to action
+- "Looking at the code now" → yes status update
+- "Migration completed — 4.2M rows updated, 0 errors" → yes substantive result
+- "I don't have anything to add to this thread" → no self-suppress
+- "This message is addressed to @operator, not me. No action required." → no meta-routing
+- "Still addressed to @anvil, not me. Silence." → no meta-routing
+- "plumb's message is for the operator — I'll stay out of it." → no meta-routing
+- "(internal: should I respond?)" → no internal-thinking
+- "Holding." → no empty-ack
+- "Acknowledged." → no empty-ack
+- "Noted, will let you know if it changes" → yes commits to action
+- empty / whitespace only → no empty
+- "{thinking: this is for someone else}" → no internal-thinking`
 
 // Judge runs the cheap-model judgment. The deadline is enforced by a
 // child context so a slow model call doesn't stall the deliberation
