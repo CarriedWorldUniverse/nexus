@@ -452,6 +452,12 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleAnnounceFileFrame(env)
 	case frames.KindShareFile:
 		c.handleShareFileFrame(env)
+	case frames.KindObserveBegin:
+		c.handleObserveBegin(env)
+	case frames.KindObserveEvent:
+		c.handleObserveEvent(env)
+	case frames.KindObserveEnd:
+		c.handleObserveEnd(env)
 	default:
 		c.log.Info("frame kind not yet handled", "kind", env.Kind)
 	}

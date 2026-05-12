@@ -146,6 +146,21 @@ const (
 	KindRosterUpdate      Kind = "roster.update"
 	KindAspectStatusPulse Kind = "aspect.status_pulse"
 	KindObserveFrame      Kind = "observe.frame"
+
+	// Upstream observability frames — sent from aspect/agentfunnel TO
+	// broker so remote funnels (running in a different process from the
+	// broker's observability.Hub) can stream bridle events to operator
+	// dashboards via the existing observe.frame fanout.
+	//
+	// Attribution: the broker tags incoming events with the aspect
+	// identity from the wsConn's authenticated registration
+	// (wsConn.registeredAs), NOT from the payload. Per keel-cli's
+	// caveat at chat #236, a mismatch between payload.Aspect and
+	// registeredAs is treated as advisory and the connection's
+	// authenticated identity wins.
+	KindObserveBegin Kind = "observe.begin"
+	KindObserveEvent Kind = "observe.event"
+	KindObserveEnd   Kind = "observe.end"
 )
 
 // Envelope is the shared shape of every frame.
@@ -273,7 +288,8 @@ func IsKnown(k Kind) bool {
 		KindUnsubscribeRoster, KindUnsubscribeChat, KindUnsubscribeAspectStatus,
 		KindUnsubscribeObserve,
 		KindSubscribeAck,
-		KindRosterUpdate, KindAspectStatusPulse, KindObserveFrame:
+		KindRosterUpdate, KindAspectStatusPulse, KindObserveFrame,
+		KindObserveBegin, KindObserveEvent, KindObserveEnd:
 		return true
 	}
 	return false

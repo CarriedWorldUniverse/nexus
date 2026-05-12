@@ -526,6 +526,39 @@ type ObserveFramePayload struct {
 	Frame  json.RawMessage `json:"frame"`
 }
 
+// ObserveBeginPayload — aspect/agentfunnel forwards a Grouper
+// BeginTurn boundary upstream so the broker's Hub can open the same
+// turn for this aspect on the broadcast side. Aspect is advisory; the
+// broker authoritatively uses the wsConn's registered identity per
+// keel-cli's attribution caveat (#236).
+type ObserveBeginPayload struct {
+	Aspect     string `json:"aspect,omitempty"`
+	TurnID     string `json:"turn_id"`
+	Label      string `json:"label"`
+	Model      string `json:"model,omitempty"`
+	Provider   string `json:"provider,omitempty"`
+	TriggerMsg int64  `json:"trigger_msg,omitempty"`
+}
+
+// ObserveEventPayload — one bridle.Event marshaled for upstream
+// transport. EventKind discriminates which bridle event type is
+// encoded in Event; the broker decodes by kind and forwards to the
+// per-aspect Grouper's OnBridleEvent. JSON-encoding bridle events
+// directly avoids a separate wire vocabulary at the cost of being
+// coupled to bridle's field shapes (acceptable — bridle is pinned
+// per nexus go.mod).
+type ObserveEventPayload struct {
+	Aspect    string          `json:"aspect,omitempty"`
+	EventKind string          `json:"event_kind"`
+	Event     json.RawMessage `json:"event"`
+}
+
+// ObserveEndPayload — closes the in-flight turn on the broker side.
+// No body needed beyond aspect attribution (advisory).
+type ObserveEndPayload struct {
+	Aspect string `json:"aspect,omitempty"`
+}
+
 // AspectStatusPulsePayload is pushed when an aspect emits a
 // mid-work status pulse (#118 — currently aspirational; the
 // payload shape lands here so 5e can render UI for it once the

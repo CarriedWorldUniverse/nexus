@@ -53,6 +53,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/rewriter"
 	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
 	"github.com/CarriedWorldUniverse/nexus/runtime/keyfile"
+	"github.com/CarriedWorldUniverse/nexus/runtime/obsforward"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 	"github.com/google/uuid"
 )
@@ -173,6 +174,19 @@ func main() {
 	gateway := wsasp.NewGateway(wsClient)
 	commsRunner := funnel.CommsRunner{Gateway: gateway}
 
+	// Phase E remote forwarding: agentfunnel's funnel runs in a
+	// different process from the broker's observability Hub, so the
+	// hook here marshals each BeginTurn / OnBridleEvent / EndTurn call
+	// into a wire frame and pushes it through the same WS connection
+	// the aspect already uses. Best-effort path (no replay buffer) —
+	// stale observability frames after a reconnect are worse than
+	// missing ones.
+	obsHook := obsforward.New(
+		obsforward.SenderFunc(wsClient.SendBestEffort),
+		res.AspectName,
+		log,
+	)
+
 	// Rewriter wiring: default-on for claude-code-flavored providers,
 	// no-op otherwise. The session jsonl path is resolved lazily
 	// through funnelPtr so funnel session-id rotations (compaction,
@@ -202,9 +216,10 @@ func main() {
 		// calls. Required for claude-code (subprocess mode): without it,
 		// model output evaporates because the CLI has no MCP-loaded tools
 		// to call. Mirrors cmd/nexus/main.go's Frame funnel wiring.
-		ChatGateway:  gateway,
-		PostTurn:     postTurn,
-		Logger:       log,
+		ChatGateway:       gateway,
+		PostTurn:          postTurn,
+		ObservabilityHook: obsHook,
+		Logger:            log,
 	})
 	if err != nil {
 		fail(log, "funnel.New", err)

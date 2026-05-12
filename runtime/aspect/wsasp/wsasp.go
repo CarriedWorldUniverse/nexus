@@ -389,6 +389,11 @@ func (c *Client) ShareFile(ctx context.Context, path string, recipients []string
 	return out.ShareID, nil
 }
 
+// errNotConnected is returned by SendBestEffort when the underlying
+// wsclient isn't connected. Sentinel so callers can distinguish
+// "wire down" from a real wire-level write error.
+var errNotConnected = fmt.Errorf("wsasp: not connected")
+
 // queueOrSend tries an immediate send; on disconnect, buffers.
 func (c *Client) queueOrSend(ctx context.Context, env frames.Envelope) {
 	if c.ws.Connected() {
@@ -399,6 +404,23 @@ func (c *Client) queueOrSend(ctx context.Context, env frames.Envelope) {
 	c.mu.Lock()
 	c.pending = append(c.pending, env)
 	c.mu.Unlock()
+}
+
+// SendBestEffort attempts an immediate send and drops on disconnect.
+// Use for fire-and-forget streams (observability) where stale frames
+// surfacing minutes after their turn-of-origin are worse than missing
+// frames. The pending-buffer replay semantics are wrong for these —
+// renderers would see "TurnFrames from 5 minutes ago appearing as
+// live" after a reconnect.
+//
+// Returns the underlying Send error (if any) so the caller can log
+// at the right severity for its use case. Returns nil when the
+// connection was up and the write succeeded.
+func (c *Client) SendBestEffort(ctx context.Context, env frames.Envelope) error {
+	if !c.ws.Connected() {
+		return errNotConnected
+	}
+	return c.ws.Send(ctx, env)
 }
 
 // CursorFileForAspect returns a default cursor-file path under the
