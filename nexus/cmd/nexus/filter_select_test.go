@@ -68,8 +68,11 @@ func TestBuildOutputFilter_Cheap_ClaudeFrameDefaultsToHaiku(t *testing.T) {
 		got := buildOutputFilter(cfgWith("cheap", "", ""), stubProvider{}, id, "claude-opus-4-7", nil, "", quietLogger())
 		hr := got.(funnel.HardRulesFilter)
 		cmf := hr.Inner.(funnel.CheapModelFilter)
-		if cmf.Model != "claude-haiku-4-5" {
-			t.Errorf("Claude flavor %q default: expected claude-haiku-4-5, got %q", id, cmf.Model)
+		// Bare "haiku" rather than a versioned api-style id — under
+		// claude-code the versioned name made the CLI run as a full
+		// agent rather than a single-shot classifier. See #194.
+		if cmf.Model != "haiku" {
+			t.Errorf("Claude flavor %q default: expected haiku, got %q", id, cmf.Model)
 		}
 	}
 }
@@ -96,8 +99,8 @@ func TestBuildOutputFilter_Cheap_OverrideProviderWithoutModelFallsToHaiku(t *tes
 	if cmf.Provider != "claude-api" {
 		t.Errorf("expected provider claude-api, got %q", cmf.Provider)
 	}
-	if cmf.Model != "claude-haiku-4-5" {
-		t.Errorf("Claude override no model: expected claude-haiku-4-5, got %q", cmf.Model)
+	if cmf.Model != "haiku" {
+		t.Errorf("Claude override no model: expected haiku, got %q", cmf.Model)
 	}
 }
 

@@ -1049,12 +1049,22 @@ func resolveJudgeProviderAndModel(cfg schemas.AspectConfig, frameProvider bridle
 	}
 
 	if overrideProvider == "" {
-		// Inherit Frame's provider. Default model preference:
-		// haiku for Claude flavors, otherwise the Frame's own model.
+		// Inherit Frame's provider. Default model preference: a haiku
+		// tier for Claude flavors, otherwise the Frame's own model.
+		//
+		// Bare "haiku" rather than a versioned id like "claude-haiku-4-5"
+		// because the cheap-judge runs under whichever claude provider
+		// the Frame uses — and for claude-code (subprocess CLI) the
+		// versioned api-style name made the CLI run as a full agent
+		// rather than a classifier (observed 2026-05-12: judge produced
+		// 9-tool-call multi-step deliberations instead of "yes"/"no").
+		// Bare "haiku" picks the CLI's own default haiku tier; under
+		// claude-api the same shorthand still resolves to the current
+		// haiku model. See task #193's filter-suppression trail.
 		model := overrideModel
 		if model == "" {
 			if isClaudeFlavor(frameProviderID) {
-				model = "claude-haiku-4-5"
+				model = "haiku"
 			} else {
 				model = frameModel
 			}
@@ -1070,7 +1080,7 @@ func resolveJudgeProviderAndModel(cfg schemas.AspectConfig, frameProvider bridle
 	model := overrideModel
 	if model == "" {
 		if isClaudeFlavor(id) {
-			model = "claude-haiku-4-5"
+			model = "haiku"
 		} else {
 			model = frameModel // last-resort fallback; operator should set the model explicitly for non-Claude
 		}
