@@ -152,3 +152,115 @@ func TestColorizeFromStableHash(t *testing.T) {
 		t.Errorf("expected different colours for different aspects; got both %q", a)
 	}
 }
+
+func TestRenderTurnFrame_TextAndToolCallWithArtifact(t *testing.T) {
+	var buf bytes.Buffer
+	ended := fixedTS(t).Add(2 * time.Second)
+	tf := observability.TurnFrame{
+		TurnID:   "abc",
+		Label:    "main",
+		Status:   observability.TurnComplete,
+		Started:  fixedTS(t),
+		Ended:    &ended,
+		Model:    "claude-opus-4-7",
+		Provider: "claudecode",
+		Events: []observability.TurnEvent{
+			{Kind: observability.TurnEventText, Text: "checking the file"},
+			{Kind: observability.TurnEventToolCall, Tool: &observability.ToolCall{
+				ID:   "t1",
+				Name: "Edit",
+				Artifact: &observability.Artifact{
+					Kind:     observability.ArtifactFileEdit,
+					FilePath: "main.go",
+					OldText:  "old",
+					NewText:  "new",
+				},
+				Result: &observability.ToolResult{Preview: "applied", IsError: false},
+			}},
+		},
+		Usage: &observability.UsageStats{InputTokens: 100, OutputTokens: 20},
+	}
+	renderTurnFrame(&buf, "plumb", tf, false)
+	got := buf.String()
+	for _, want := range []string{
+		"turn @plumb",
+		"main",
+		"complete",
+		"checking the file",
+		"🔧 Edit",
+		"[ok]",
+		"main.go",
+		"- old",
+		"+ new",
+		"→ applied",
+		"100 in",
+		"20 out",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in render output:\n%s", want, got)
+		}
+	}
+}
+
+func TestRenderTurnFrame_PendingToolCallAndStep(t *testing.T) {
+	var buf bytes.Buffer
+	tf := observability.TurnFrame{
+		TurnID:  "xyz",
+		Status:  observability.TurnInFlight,
+		Started: fixedTS(t),
+		Events: []observability.TurnEvent{
+			{Kind: observability.TurnEventToolCall, Tool: &observability.ToolCall{
+				ID:    "t1",
+				Name:  "Bash",
+				Input: []byte(`{"command":"ls"}`),
+			}},
+			{Kind: observability.TurnEventStep, Step: 1},
+		},
+	}
+	renderTurnFrame(&buf, "plumb", tf, false)
+	got := buf.String()
+	for _, want := range []string{"[pending]", "Bash", "step 1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in render output:\n%s", want, got)
+		}
+	}
+}
+
+func TestRenderTurnFrame_OrphanResult(t *testing.T) {
+	var buf bytes.Buffer
+	tf := observability.TurnFrame{
+		TurnID:  "xyz",
+		Status:  observability.TurnComplete,
+		Started: fixedTS(t),
+		Events: []observability.TurnEvent{
+			{Kind: observability.TurnEventOrphanResult, Tool: &observability.ToolCall{
+				ID:     "t-missing",
+				Result: &observability.ToolResult{Preview: "spurious", IsError: false},
+			}},
+		},
+	}
+	renderTurnFrame(&buf, "plumb", tf, false)
+	got := buf.String()
+	for _, want := range []string{"[orphan]", "spurious"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in render output:\n%s", want, got)
+		}
+	}
+}
+
+func TestRenderTurnFrame_Error(t *testing.T) {
+	var buf bytes.Buffer
+	tf := observability.TurnFrame{
+		TurnID:  "xyz",
+		Status:  observability.TurnErrored,
+		Started: fixedTS(t),
+		Error:   "provider 429",
+	}
+	renderTurnFrame(&buf, "plumb", tf, false)
+	got := buf.String()
+	for _, want := range []string{"errored", "✗ provider 429"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in render output:\n%s", want, got)
+		}
+	}
+}

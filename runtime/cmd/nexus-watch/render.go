@@ -228,41 +228,250 @@ func renderPresenceFrame(w io.Writer, aspect string, pf observability.PresenceFr
 // renderTurnFrame is intentionally minimal for v0.1 — bridle events
 // aren't wired so TurnFrames won't normally arrive. Render defensively
 // so a stray one is legible without aspiring to Phase F's rich layout.
+// renderTurnFrame writes one TurnFrame's structured content.
+// Header shows aspect + label + status + model/provider/trigger.
+// Body iterates events: text runs as prose, tool calls show their
+// name + key arg + result preview (or pending state), step boundaries
+// render as a thin dashed separator, orphan results bear an explicit
+// warning. Footer reports usage stats and any final error.
 func renderTurnFrame(w io.Writer, aspect string, tf observability.TurnFrame, color bool) {
+	label := tf.Label
+	if label == "" {
+		label = "main"
+	}
 	trig := ""
 	if tf.TriggerMsg > 0 {
 		trig = fmt.Sprintf(" trigger #%d", tf.TriggerMsg)
 	}
-	model := ""
+	modelBit := ""
 	if tf.Model != "" {
-		model = " " + tf.Model
+		modelBit = " " + tf.Model
 	}
-	header := fmt.Sprintf("─── turn @%s [%s%s%s] ───", aspect, tf.Status, trig, model)
-	fmt.Fprintln(w, colorize(header, ansiCyan, color))
+	if tf.Provider != "" {
+		modelBit += "/" + tf.Provider
+	}
+	header := fmt.Sprintf("─── turn @%s [%s · %s%s%s] ───", aspect, label, tf.Status, trig, modelBit)
+	fmt.Fprintln(w, colorize(header, statusColor(tf.Status), color))
+
 	for _, ev := range tf.Events {
-		switch ev.Kind {
-		case observability.TurnEventText:
-			fmt.Fprintln(w, "  💭 "+ev.Text)
-		case observability.TurnEventToolCall:
-			if ev.Tool != nil {
-				preview := ""
-				if len(ev.Tool.Input) > 0 {
-					p := string(ev.Tool.Input)
-					if len(p) > 80 {
-						p = p[:77] + "..."
-					}
-					preview = " " + p
-				}
-				fmt.Fprintln(w, "  🔧 "+ev.Tool.Name+preview)
-			}
-		}
+		renderTurnEvent(w, ev, color)
 	}
-	if tf.Usage != nil && tf.Ended != nil {
-		dur := tf.Ended.Sub(tf.Started).Truncate(time.Millisecond * 100)
-		footer := fmt.Sprintf("─── end · %s · %d in · %d out ───",
-			dur, tf.Usage.InputTokens, tf.Usage.OutputTokens)
+
+	if tf.Error != "" {
+		fmt.Fprintln(w, colorize("  ✗ "+tf.Error, ansiRed, color))
+	}
+
+	footer := turnFooter(tf)
+	if footer != "" {
 		fmt.Fprintln(w, colorize(footer, ansiCyan, color))
 	}
+}
+
+// renderTurnEvent writes one entry from TurnFrame.Events. Centralised
+// so the dispatch is testable and so new event kinds can be added in
+// one place when bridle grows them.
+func renderTurnEvent(w io.Writer, ev observability.TurnEvent, color bool) {
+	switch ev.Kind {
+	case observability.TurnEventText:
+		// Indent multi-line text for legibility — keeps the "💭" gutter
+		// alignment intact across line breaks.
+		for i, line := range strings.Split(strings.TrimRight(ev.Text, "\n"), "\n") {
+			prefix := "  💭 "
+			if i > 0 {
+				prefix = "     "
+			}
+			fmt.Fprintln(w, prefix+line)
+		}
+
+	case observability.TurnEventToolCall:
+		renderToolCall(w, ev.Tool, false, color)
+
+	case observability.TurnEventOrphanResult:
+		renderToolCall(w, ev.Tool, true, color)
+
+	case observability.TurnEventStep:
+		fmt.Fprintln(w, colorize(fmt.Sprintf("  ╶─ step %d ─╴", ev.Step), ansiGrey, color))
+	}
+}
+
+// renderToolCall writes a tool call with its result inline. Artifact-
+// bearing calls (Edit/Write/MultiEdit) prefer artifact rendering over
+// raw input JSON.
+func renderToolCall(w io.Writer, tc *observability.ToolCall, isOrphan bool, color bool) {
+	if tc == nil {
+		return
+	}
+	icon := "🔧"
+	if isOrphan {
+		icon = "⚠"
+	}
+	state := toolState(tc, isOrphan)
+	stateColor := toolStateColor(state)
+	preview := toolArgPreview(tc)
+	header := fmt.Sprintf("  %s %s %s%s", icon, tc.Name, colorize("["+state+"]", stateColor, color), preview)
+	fmt.Fprintln(w, header)
+
+	if tc.Artifact != nil {
+		renderArtifact(w, tc.Artifact, color)
+	}
+	if tc.ArtifactParseErr != "" {
+		fmt.Fprintln(w, colorize("     artifact parse failed: "+tc.ArtifactParseErr, ansiYellow, color))
+	}
+	if tc.Result != nil {
+		resColor := ansiGrey
+		label := "→"
+		if tc.Result.IsError {
+			resColor = ansiRed
+			label = "✗"
+		}
+		body := tc.Result.Preview
+		if body == "" {
+			body = "(empty)"
+		}
+		// Indent multi-line preview under the call header so the eye
+		// follows the flow without manually mapping result to call.
+		for i, line := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+			prefix := "     " + label + " "
+			if i > 0 {
+				prefix = "       "
+			}
+			fmt.Fprintln(w, colorize(prefix+line, resColor, color))
+		}
+	}
+}
+
+// renderArtifact writes the structured-edit view. Truncates each side
+// of an Edit/MultiEdit to keep the stream readable; a heavy file
+// rewrite is more useful as a "this happened" signal than a full
+// diff dump in a terminal.
+const artifactPreviewChars = 200
+
+func renderArtifact(w io.Writer, a *observability.Artifact, color bool) {
+	if a == nil {
+		return
+	}
+	fmt.Fprintln(w, colorize("     📄 "+a.FilePath, ansiCyan, color))
+	switch a.Kind {
+	case observability.ArtifactFileEdit, observability.ArtifactNotebookEdit:
+		writeDiffSide(w, "-", a.OldText, ansiRed, color)
+		writeDiffSide(w, "+", a.NewText, ansiGreen, color)
+	case observability.ArtifactFileWrite:
+		writeDiffSide(w, "+", a.NewText, ansiGreen, color)
+	case observability.ArtifactMultiEdit:
+		for i, ep := range a.Edits {
+			fmt.Fprintln(w, colorize(fmt.Sprintf("     edit %d/%d", i+1, len(a.Edits)), ansiGrey, color))
+			writeDiffSide(w, "-", ep.OldText, ansiRed, color)
+			writeDiffSide(w, "+", ep.NewText, ansiGreen, color)
+		}
+	}
+}
+
+func writeDiffSide(w io.Writer, marker, text, lineColor string, color bool) {
+	if text == "" {
+		return
+	}
+	// Truncate by rune count, not byte index — a Go string slice mid-
+	// UTF-8 sequence would emit garbled bytes before the ellipsis,
+	// which a terminal renders as a replacement character. Cheap enough
+	// at preview sizes (≤200 runes) to take the materialised []rune
+	// allocation.
+	shown := text
+	if runes := []rune(text); len(runes) > artifactPreviewChars {
+		shown = string(runes[:artifactPreviewChars]) + "…"
+	}
+	for _, line := range strings.Split(strings.TrimRight(shown, "\n"), "\n") {
+		fmt.Fprintln(w, colorize("       "+marker+" "+line, lineColor, color))
+	}
+}
+
+// toolState reports the rendering-relevant state for a tool call: ok,
+// error, pending (no result yet), orphan (result without prior start).
+func toolState(tc *observability.ToolCall, isOrphan bool) string {
+	switch {
+	case isOrphan:
+		return "orphan"
+	case tc.Result == nil:
+		return "pending"
+	case tc.Result.IsError:
+		return "error"
+	default:
+		return "ok"
+	}
+}
+
+func toolStateColor(state string) string {
+	switch state {
+	case "error", "orphan":
+		return ansiRed
+	case "pending":
+		return ansiYellow
+	case "ok":
+		return ansiGreen
+	default:
+		return ansiGrey
+	}
+}
+
+// toolArgPreview prefers the artifact's file_path when present,
+// otherwise truncates the raw input JSON. Mirrors the dashboard's
+// ToolCall arg-preview heuristic so operators get consistent
+// scanning across the two renderers.
+func toolArgPreview(tc *observability.ToolCall) string {
+	if tc.Artifact != nil && tc.Artifact.FilePath != "" {
+		return " " + tc.Artifact.FilePath
+	}
+	if len(tc.Input) == 0 {
+		return ""
+	}
+	p := string(tc.Input)
+	if len(p) > 80 {
+		p = p[:77] + "..."
+	}
+	return " " + p
+}
+
+// statusColor maps a turn status to the header colour. Cyan for
+// neutral, accent-green while in-flight, red on error.
+func statusColor(status observability.TurnStatus) string {
+	switch status {
+	case observability.TurnInFlight:
+		return ansiGreen
+	case observability.TurnErrored:
+		return ansiRed
+	default:
+		return ansiCyan
+	}
+}
+
+// turnFooter assembles the closing line. Reports cache + cost when
+// non-zero so the operator notices when a turn ran expensive without
+// having to peek at the dashboard.
+func turnFooter(tf observability.TurnFrame) string {
+	if tf.Usage == nil && tf.Ended == nil {
+		return ""
+	}
+	bits := []string{}
+	if tf.Ended != nil {
+		dur := tf.Ended.Sub(tf.Started).Truncate(time.Millisecond * 100)
+		bits = append(bits, dur.String())
+	}
+	if u := tf.Usage; u != nil {
+		bits = append(bits, fmt.Sprintf("%d in", u.InputTokens))
+		bits = append(bits, fmt.Sprintf("%d out", u.OutputTokens))
+		if u.CacheReadInputTokens > 0 {
+			bits = append(bits, fmt.Sprintf("%d cache↺", u.CacheReadInputTokens))
+		}
+		if u.CacheCreationInputTokens > 0 {
+			bits = append(bits, fmt.Sprintf("%d cache+", u.CacheCreationInputTokens))
+		}
+		if u.CostUSD > 0 {
+			bits = append(bits, fmt.Sprintf("$%.4f", u.CostUSD))
+		}
+	}
+	if len(bits) == 0 {
+		return ""
+	}
+	return "─── end · " + strings.Join(bits, " · ") + " ───"
 }
 
 // colorizeFrom picks a stable colour for an aspect name via an
