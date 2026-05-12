@@ -165,12 +165,32 @@ export function ObserveView() {
 }
 
 function renderFrame(frame) {
-  const key = `${frame.aspect}:${frame.seq}`;
   switch (frame.kind) {
-    case 'chat':     return html`<${ChatRow}     key=${key} frame=${frame} />`;
-    case 'presence': return html`<${PresenceMarker} key=${key} aspect=${frame.aspect} payload=${frame.payload || {}} ts=${frame.ts} />`;
-    case 'turn':     return html`<${TurnBlock}      key=${key} payload=${frame.payload || {}} seq=${frame.seq} ts=${frame.ts} />`;
-    default:         return null; // unknown frame kind — drop quietly
+    case 'chat': {
+      // Chat keyed by msg_id so re-renders (e.g. parent state churn)
+      // don't tear down the bubble; seq is also fine but msg_id reads
+      // intent clearer when scanning React devtools.
+      const key = `${frame.aspect}:chat:${frame.payload?.msg_id ?? frame.seq}`;
+      return html`<${ChatRow} key=${key} frame=${frame} />`;
+    }
+    case 'presence': {
+      // Each presence flip is its own event; seq keeps them distinct.
+      const key = `${frame.aspect}:presence:${frame.seq}`;
+      return html`<${PresenceMarker} key=${key} aspect=${frame.aspect} payload=${frame.payload || {}} ts=${frame.ts} />`;
+    }
+    case 'turn': {
+      // Key by turn_id (NOT seq) so consecutive snapshots of the same
+      // turn update the same component instance rather than remounting.
+      // Without this the TurnBlock unmount/remount visibly flickered
+      // on every event and reset child state (e.g. ToolCall expand
+      // toggles). Operator reported the visual churn as the activity
+      // page "shuffling order."
+      const tid = frame.payload?.turn_id || frame.seq;
+      const key = `${frame.aspect}:turn:${tid}`;
+      return html`<${TurnBlock} key=${key} payload=${frame.payload || {}} seq=${frame.seq} ts=${frame.ts} />`;
+    }
+    default:
+      return null; // unknown frame kind — drop quietly
   }
 }
 
