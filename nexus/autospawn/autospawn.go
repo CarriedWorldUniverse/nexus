@@ -57,6 +57,14 @@ type Config struct {
 	// over which harness to use in multi-installation hosts.
 	HarnessPath string
 
+	// KeyfileDir is the directory that holds per-aspect keyfile JSON.
+	// When non-empty, autospawn invokes the harness as
+	// `harness -k <KeyfileDir>/<name>.keyfile.json` (the agentfunnel
+	// contract). When empty, autospawn falls back to the legacy
+	// `-home <aspect-path>` form retained for harness binaries that
+	// resolve identity from the home dir themselves.
+	KeyfileDir string
+
 	// BaseEnv is propagated to every spawned child. NEXUS_UPSTREAM
 	// / NEXUS_OUTPOST / NEXUS_TOKEN live here. Parent's os.Environ
 	// is also inherited so $PATH and basic settings work.
@@ -214,7 +222,13 @@ func Spawn(cfg Config, candidates []Candidate) error {
 	}
 
 	for _, c := range candidates {
-		cmd := exec.Command(cfg.HarnessPath, "-home", c.Path)
+		var cmd *exec.Cmd
+		if cfg.KeyfileDir != "" {
+			keyfilePath := filepath.Join(cfg.KeyfileDir, c.Name+".keyfile.json")
+			cmd = exec.Command(cfg.HarnessPath, "-k", keyfilePath)
+		} else {
+			cmd = exec.Command(cfg.HarnessPath, "-home", c.Path)
+		}
 		cmd.Env = childEnv(os.Environ(), cfg.BaseEnv, cfg.TokenResolver, c.Name)
 
 		stdout, _ := cmd.StdoutPipe()
