@@ -134,6 +134,16 @@ func main() {
 		fail(log, "build provider", err)
 	}
 
+	// 3a. Build the output filter (cheap-judge by default). Mirrors the
+	// Frame's buildOutputFilter but simpler: agentfunnel doesn't have
+	// aspect.json on the host (identity comes from Nexus validation), so
+	// there's no operator-level filter override yet — we default to
+	// hard-rules + cheap-model judge for claude-flavoured providers, and
+	// to hard-rules-only otherwise. Without this every reply through the
+	// funnel hits chat unfiltered (observed 2026-05-12: noisy multi-
+	// aspect threads bypassing the suppression keel's Frame applies).
+	outputFilter := buildAgentFunnelFilter(provider, bridle.ProviderID(res.Provider), res.Model, log)
+
 	// 4. Compose funnel + wsasp client.
 	sessionID := uuid.NewString()
 	cursorFile := wsasp.CursorFileForAspect(resolveCursorDir(*cursorDir))
@@ -220,6 +230,7 @@ func main() {
 		// model output evaporates because the CLI has no MCP-loaded tools
 		// to call. Mirrors cmd/nexus/main.go's Frame funnel wiring.
 		ChatGateway:       gateway,
+		Filter:            outputFilter,
 		PostTurn:          postTurn,
 		ObservabilityHook: obsHook,
 		Logger:            log,
@@ -372,6 +383,54 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 	default:
 		return nil, fmt.Errorf("unsupported provider %q (claude-api and claude-code supported in v1)", provider)
 	}
+}
+
+// buildAgentFunnelFilter constructs the output filter for an agentfunnel
+// aspect. Mirrors the Frame's buildOutputFilter but simpler — no
+// aspect.json on the host means there's no operator-level filter
+// override yet, so we hard-code the cheap-judge default:
+//
+//   - claude-flavoured provider → HardRulesFilter wrapping
+//     CheapModelFilter using the same provider + bare "haiku" model.
+//     Bare "haiku" matches the Frame's choice (cmd/nexus/main.go):
+//     under claude-code (subprocess CLI), the versioned api-style id
+//     "claude-haiku-4-5" makes the CLI run as a full agent instead of
+//     a classifier, so we use the CLI's own default haiku tier.
+//   - non-claude provider → HardRulesFilter only (no usable cheap-tier
+//     judge yet; ollama/openai support comes when the operator gains a
+//     filter override path).
+//
+// Without this every reply through the funnel hits chat unfiltered —
+// observed 2026-05-12 as noisy multi-aspect threads bypassing the
+// suppression the keel Frame applies.
+func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.ProviderID, _ string, log *slog.Logger) funnel.OutputFilter {
+	if !isClaudeFlavor(providerID) {
+		log.Info("agentfunnel: filter=hard (no cheap-judge for non-claude provider)", "provider", providerID)
+		return funnel.HardRulesFilter{}
+	}
+	log.Info("agentfunnel: filter=cheap (hard rules + cheap-model judge)",
+		"judge_provider", providerID, "judge_model", "haiku")
+	return funnel.HardRulesFilter{
+		Inner: funnel.CheapModelFilter{
+			Harness:  bridle.NewHarness(provider),
+			Provider: providerID,
+			Model:    "haiku",
+			Logger:   log,
+		},
+	}
+}
+
+// isClaudeFlavor reports whether providerID is one of the Claude
+// providers. Mirrors the Frame's helper in cmd/nexus/main.go — accepts
+// the canonical IDs ("claude-api", "claude-code") and the validation-
+// response aliases ("claude", "claudecode") so callers don't have to
+// normalise.
+func isClaudeFlavor(id bridle.ProviderID) bool {
+	switch id {
+	case "claude-api", "claude-code", "claude", "claudecode":
+		return true
+	}
+	return false
 }
 
 // resolveClaudePath picks the path to the claude-code CLI. Order:
