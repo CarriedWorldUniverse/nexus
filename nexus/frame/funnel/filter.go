@@ -263,12 +263,12 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 	// surprises and no UUID-gen dep needed. Surfaced 2026-05-12 by the
 	// judge-decision logging — see task #186 for the discovery trail.
 	req := bridle.TurnRequest{
-		AspectID:     in.AspectID,
-		SystemPrompt: filterJudgePrompt,
-		UserMessage:  in.FinalText,
-		Provider:     f.Provider,
-		Model:        f.Model,
-		MaxSteps:     1, // pure text; no tools
+		AspectID:           in.AspectID,
+		AppendSystemPrompt: filterJudgePrompt,
+		UserMessage:        in.FinalText,
+		Provider:           f.Provider,
+		Model:              f.Model,
+		MaxSteps:           1, // pure text; no tools
 	}
 
 	result, err := f.Harness.RunTurn(ctx, req, NullRunner{}, collectSink{})
