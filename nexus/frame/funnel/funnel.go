@@ -226,6 +226,15 @@ type Funnel struct {
 	// recorder writes MsgID=0, which the usage table stores as NULL.
 	triggeringMsgID int64
 
+	// triggeringFrom / triggeringContent mirror triggeringMsgID — the
+	// From and Content of the InboxItem that closed the latency window.
+	// Passed into FilterInput so the cheap-judge can evaluate the
+	// candidate AS A REPLY TO the trigger (not in isolation). Without
+	// this context, short substantive replies routinely got mislabeled
+	// as scratch. Cleared by Deliberate alongside triggeringMsgID.
+	triggeringFrom    string
+	triggeringContent string
+
 	// sessionTail accumulates events across turns. Compacted when
 	// cumulativeTokens crosses the threshold.
 	sessionTail []bridle.SessionEvent
@@ -322,6 +331,12 @@ func (f *Funnel) ReceiveWithMsgID(item bridle.InboxItem, msgID int64) {
 	f.inbox = append(f.inbox, item)
 	if msgID > 0 {
 		f.triggeringMsgID = msgID
+		// Capture from + content for the filter judge (latest wins,
+		// matching triggeringMsgID's LATEST semantics — same message
+		// is the one credited with the turn's tokens and the one the
+		// judge evaluates the candidate against).
+		f.triggeringFrom = item.From
+		f.triggeringContent = item.Content
 	}
 }
 
@@ -364,7 +379,11 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	// this deliberation queue into the next cycle's inbox; their
 	// msg_ids will attribute to the next turn.
 	triggerMsgID := f.triggeringMsgID
+	triggerFrom := f.triggeringFrom
+	triggerContent := f.triggeringContent
 	f.triggeringMsgID = 0
+	f.triggeringFrom = ""
+	f.triggeringContent = ""
 
 	// Work-signal: 👀 on the triggering message means "I saw it, I'm
 	// working on it." Resolved post-filter:
@@ -583,9 +602,11 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		Payload: FilterJudgingPayload{TurnID: turnID},
 	})
 	decision := f.runFilter(ctx, FilterInput{
-		FinalText: result.FinalText,
-		AspectID:  f.cfg.AspectID,
-		TurnID:    turnID,
+		FinalText:   result.FinalText,
+		AspectID:    f.cfg.AspectID,
+		TurnID:      turnID,
+		TriggerFrom: triggerFrom,
+		TriggerText: triggerContent,
 	})
 
 	f.log.Info("funnel: turn complete",
