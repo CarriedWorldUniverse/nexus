@@ -43,6 +43,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -378,16 +379,19 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 //  1. -claude flag (explicit override).
 //  2. CLAUDE_PATH env var (for systemd/launchctl units that can't pass
 //     flags but can set env).
-//  3. Common macOS / Linux install locations checked in order; first
-//     one that exists wins. Catches the case where agentfunnel is
-//     spawned with a stripped PATH (launchctl, IDE, supervisor) and
-//     can't see /opt/homebrew/bin even though `claude` is installed
-//     there.
+//  3. Common per-platform install locations checked in order. Catches
+//     the case where agentfunnel is spawned with a stripped PATH
+//     (launchctl on mac, sandboxed services on Windows) and can't see
+//     /opt/homebrew/bin or %APPDATA%\npm even though claude is there.
+//     Linux's package managers and npm installs already land in PATH
+//     under typical service-account configs, but the fallbacks are
+//     still listed so an unusual host doesn't break.
 //  4. Empty result → caller leaves the provider's default ("claude")
-//     and exec.LookPath does its thing.
+//     and exec.LookPath handles it (Linux's normal path).
 //
-// Skips empty / non-executable matches so a stale dangling symlink
-// in one location doesn't shadow a working install in another.
+// Skips dangling symlinks / directories. Caller decides what empty
+// means; on Linux PATH usually wins so this returns "" and exec
+// does the right thing.
 func resolveClaudePath(flagVal string) string {
 	if flagVal != "" {
 		return flagVal
@@ -395,24 +399,72 @@ func resolveClaudePath(flagVal string) string {
 	if env := os.Getenv("CLAUDE_PATH"); env != "" {
 		return env
 	}
-	home, _ := os.UserHomeDir()
-	candidates := []string{
-		"/opt/homebrew/bin/claude",
-		"/usr/local/bin/claude",
-	}
-	if home != "" {
-		candidates = append(candidates,
-			filepath.Join(home, ".npm-global/bin/claude"),
-			filepath.Join(home, ".bun/bin/claude"),
-			filepath.Join(home, ".local/bin/claude"),
-		)
-	}
-	for _, c := range candidates {
+	for _, c := range claudeCandidates() {
 		if info, err := os.Stat(c); err == nil && !info.IsDir() {
 			return c
 		}
 	}
 	return ""
+}
+
+// claudeCandidates returns the per-OS list of likely claude install
+// locations. Each entry is checked in order; first hit wins. Windows
+// candidates carry the .cmd / .exe shim extensions npm uses; macOS
+// and Linux are plain "claude".
+func claudeCandidates() []string {
+	home, _ := os.UserHomeDir()
+	switch goruntime.GOOS {
+	case "darwin":
+		paths := []string{
+			"/opt/homebrew/bin/claude", // Apple Silicon homebrew
+			"/usr/local/bin/claude",    // Intel homebrew + manual installs
+		}
+		if home != "" {
+			paths = append(paths,
+				filepath.Join(home, ".npm-global/bin/claude"),
+				filepath.Join(home, ".bun/bin/claude"),
+				filepath.Join(home, ".local/bin/claude"),
+			)
+		}
+		return paths
+	case "windows":
+		// npm-global typically lives under %APPDATA%\npm; the shim is a
+		// .cmd that node executes. claude.exe is the bundled standalone
+		// build (rare but possible). Order: appdata first (most
+		// installs), then localappdata variants.
+		var paths []string
+		if appData := os.Getenv("APPDATA"); appData != "" {
+			paths = append(paths,
+				filepath.Join(appData, "npm", "claude.cmd"),
+				filepath.Join(appData, "npm", "claude.exe"),
+			)
+		}
+		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+			paths = append(paths,
+				filepath.Join(localAppData, "Programs", "claude", "claude.exe"),
+				filepath.Join(localAppData, "Microsoft", "WindowsApps", "claude.exe"),
+			)
+		}
+		if home != "" {
+			paths = append(paths,
+				filepath.Join(home, ".bun", "bin", "claude.exe"),
+			)
+		}
+		return paths
+	default: // linux, freebsd, etc
+		paths := []string{
+			"/usr/local/bin/claude",
+			"/usr/bin/claude",
+		}
+		if home != "" {
+			paths = append(paths,
+				filepath.Join(home, ".npm-global/bin/claude"),
+				filepath.Join(home, ".bun/bin/claude"),
+				filepath.Join(home, ".local/bin/claude"),
+			)
+		}
+		return paths
+	}
 }
 
 // resolveCursorDir returns the dir for wsasp's Lock 6 cursor file.
