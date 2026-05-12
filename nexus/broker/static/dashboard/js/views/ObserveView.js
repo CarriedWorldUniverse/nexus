@@ -87,9 +87,31 @@ export function ObserveView() {
         // occasionally re-deliver an old seq). Sequence is monotonic
         // per-aspect on the server side; trust it.
         if (prev.length > 0 && prev[prev.length - 1].seq >= frame.seq) return prev;
-        const next = prev.length >= HISTORY_CAP
-          ? [...prev.slice(prev.length - HISTORY_CAP + 1), frame]
-          : [...prev, frame];
+
+        // Turn-snapshot collapse: per types.go, each TurnFrame is a
+        // full snapshot — every event the Grouper sees re-emits the
+        // whole turn. Rendering each one stacks duplicates ("turn X
+        // appears 4 times"). Replace prior frames of the same turn_id
+        // in place so the operator sees one row per turn that updates
+        // live. Non-turn frames (chat / presence) append normally.
+        const turnID = (frame.kind === 'turn' && frame.payload && frame.payload.turn_id) || null;
+        let next;
+        if (turnID) {
+          const idx = prev.findIndex(f =>
+            f.kind === 'turn' && f.payload && f.payload.turn_id === turnID
+          );
+          if (idx >= 0) {
+            next = prev.slice();
+            next[idx] = frame;
+          } else {
+            next = [...prev, frame];
+          }
+        } else {
+          next = [...prev, frame];
+        }
+        if (next.length > HISTORY_CAP) {
+          next = next.slice(next.length - HISTORY_CAP);
+        }
         return next;
       });
     });
