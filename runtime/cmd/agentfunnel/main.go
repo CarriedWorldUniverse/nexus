@@ -42,6 +42,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -62,6 +63,7 @@ func main() {
 	keyfilePath := flag.String("k", "", "path to the aspect keyfile (required)")
 	cursorDir := flag.String("cursor-dir", "", "directory for the Lock 6 message-cursor file (defaults to <cwd>/cursor)")
 	contextMode := flag.String("context-mode", string(schemas.ContextThread), "context mode: global, thread, or stateless (Nexus does not yet ship context_mode in the validation response)")
+	claudePath := flag.String("claude", "", "path to the claude-code CLI (optional; auto-detects /opt/homebrew/bin/claude, /usr/local/bin/claude, ~/.npm-global/bin/claude, then PATH; also honours CLAUDE_PATH env)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -126,7 +128,7 @@ func main() {
 		"jwt_expires", res.SessionExpiresAt.Format(time.RFC3339))
 
 	// 3. Build provider.
-	provider, err := buildProvider(res.Provider)
+	provider, err := buildProvider(res.Provider, *claudePath)
 	if err != nil {
 		fail(log, "build provider", err)
 	}
@@ -354,17 +356,63 @@ func deliberateLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger) {
 // (set at `nexus aspect mint` time, NOT NULL on the aspects row), so
 // an empty string here means the Nexus returned garbage or the row is
 // corrupt — fail loudly rather than silently picking a default.
-func buildProvider(provider string) (bridle.Provider, error) {
+func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 	switch provider {
 	case "":
 		return nil, errors.New("buildProvider: validation response carried empty provider — Nexus DB row is corrupt; re-mint the aspect with --provider")
 	case "claude-api", "claude":
 		return claudeprovider.New(""), nil
 	case "claude-code", "claudecode":
-		return claudecodeprovider.New(), nil
+		p := claudecodeprovider.New()
+		if resolved := resolveClaudePath(claudePath); resolved != "" {
+			p.ClaudePath = resolved
+		}
+		return p, nil
 	default:
 		return nil, fmt.Errorf("unsupported provider %q (claude-api and claude-code supported in v1)", provider)
 	}
+}
+
+// resolveClaudePath picks the path to the claude-code CLI. Order:
+//
+//  1. -claude flag (explicit override).
+//  2. CLAUDE_PATH env var (for systemd/launchctl units that can't pass
+//     flags but can set env).
+//  3. Common macOS / Linux install locations checked in order; first
+//     one that exists wins. Catches the case where agentfunnel is
+//     spawned with a stripped PATH (launchctl, IDE, supervisor) and
+//     can't see /opt/homebrew/bin even though `claude` is installed
+//     there.
+//  4. Empty result → caller leaves the provider's default ("claude")
+//     and exec.LookPath does its thing.
+//
+// Skips empty / non-executable matches so a stale dangling symlink
+// in one location doesn't shadow a working install in another.
+func resolveClaudePath(flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if env := os.Getenv("CLAUDE_PATH"); env != "" {
+		return env
+	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		"/opt/homebrew/bin/claude",
+		"/usr/local/bin/claude",
+	}
+	if home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, ".npm-global/bin/claude"),
+			filepath.Join(home, ".bun/bin/claude"),
+			filepath.Join(home, ".local/bin/claude"),
+		)
+	}
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() {
+			return c
+		}
+	}
+	return ""
 }
 
 // resolveCursorDir returns the dir for wsasp's Lock 6 cursor file.
