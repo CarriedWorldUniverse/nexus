@@ -441,4 +441,20 @@
   .observe-presence {
     font-size: 12px;
   }
+  /* Phase G mobile polish for turn rendering: turn header bits wrap
+     cleanly on narrow screens, tool-call rows get a 44px touch
+     target on the disclosure button, and diff panes drop their
+     inline max-height so a finger-scroll on the page handles the
+     long content rather than each pane carrying its own scroll
+     island (the desktop tradeoff doesn't apply when the page
+     itself scrolls comfortably). */
+  .observe-turn-head { gap: 6px; font-size: 11px; }
+  .observe-turn-id { font-size: 9px; }
+  .observe-turn-bits { white-space: normal; }
+  .observe-toolcall-head { min-height: 44px; padding: 8px; }
+  .observe-toolcall-args { font-size: 10.5px; }
+  .observe-diff-body { max-height: none; }
+  .observe-toolcall-input pre,
+  .observe-toolcall-result pre { max-height: none; }
+  .observe-diff-toggle { min-height: 36px; padding: 6px 8px; }
 }
