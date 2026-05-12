@@ -59,6 +59,21 @@ type FilterInput struct {
 	// TurnID joins to the Lock 5 lifecycle events for this turn so
 	// telemetry can correlate filter decisions with turn outcomes.
 	TurnID string
+
+	// TriggerFrom is the aspect identity of the message that triggered
+	// this deliberation, when known. Empty for autonomous turns (no
+	// inbound message). Used by the cheap-judge to:
+	//   1. Skip the judge entirely when from=="operator" — operator
+	//      @-mentions are load-bearing; ghost-silence is worse than a
+	//      thin reply (operator-bypass, lifted from agent-network
+	//      #10039/#10040).
+	//   2. Show the judge what the candidate is replying TO, so short
+	//      substantive replies don't read as scratch in isolation.
+	TriggerFrom string
+
+	// TriggerText is the content of the triggering message. Bounded
+	// at the judge boundary to keep prompt cost predictable.
+	TriggerText string
 }
 
 // FilterDecision is the result of Judge.
@@ -249,12 +264,71 @@ Examples (reply → verdict):
 - empty / whitespace only → no empty
 - "{thinking: this is for someone else}" → no internal-thinking`
 
+// maxJudgeTriggerLen / maxJudgeCandidateLen bound the strings the judge
+// sees, mirroring agent-network/code/harness/index.js:501,504. Predictable
+// judge cost: ~1.2k inbound + ~4k candidate. Long candidate replies
+// aren't more meaningful — they're more likely the rambling shape the
+// classifier should catch on the FIRST 4k chars anyway.
+const (
+	maxJudgeTriggerLen   = 1200
+	maxJudgeCandidateLen = 4000
+)
+
+// buildJudgeUserMessage assembles the per-call user message for the cheap
+// judge. Includes the inbound trigger context (what the candidate is
+// replying TO) so short substantive replies don't read as scratch in
+// isolation. When no trigger is known (autonomous turn) says so
+// explicitly so the model doesn't hallucinate one.
+//
+// The system prompt (filterJudgePrompt) tells the model the format —
+// this is just the message body it judges.
+func buildJudgeUserMessage(in FilterInput) string {
+	triggerFrom := strings.TrimSpace(in.TriggerFrom)
+	triggerText := strings.TrimSpace(in.TriggerText)
+	if len(triggerText) > maxJudgeTriggerLen {
+		triggerText = triggerText[:maxJudgeTriggerLen] + "…"
+	}
+	candidate := in.FinalText
+	if len(candidate) > maxJudgeCandidateLen {
+		candidate = candidate[:maxJudgeCandidateLen] + "…"
+	}
+	var triggerBlock string
+	if triggerFrom == "" && triggerText == "" {
+		triggerBlock = "(autonomous turn — no inbound trigger)"
+	} else {
+		triggerBlock = "From: @" + triggerFrom + "\nContent: " + triggerText
+	}
+	return "--- INCOMING MESSAGE ---\n" + triggerBlock +
+		"\n\n--- CANDIDATE OUTPUT (from @" + in.AspectID + ") ---\n" + candidate
+}
+
 // Judge runs the cheap-model judgment. The deadline is enforced by a
 // child context so a slow model call doesn't stall the deliberation
 // past the filter's budget.
+//
+// Operator-message bypass: when the triggering message is FROM the
+// operator, the filter is skipped entirely. Reasoning (ported from
+// agent-network #10039/#10040): operator @-mentions are load-bearing —
+// even a thin "this isn't my lane" reply beats ghost-silence.
+// Suppressing aspect responses to the operator was producing exactly
+// that ghost-silence pattern.
 func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDecision {
 	if strings.TrimSpace(in.FinalText) == "" {
 		return FilterDecision{ShouldPost: false, Reason: FilterReasonEmpty}
+	}
+	// Operator bypass — no model call.
+	if strings.EqualFold(in.TriggerFrom, "operator") {
+		if f.Logger != nil {
+			preview := in.FinalText
+			if len(preview) > 200 {
+				preview = preview[:200] + "…"
+			}
+			f.Logger.Info("filter judge: operator bypass",
+				"aspect", in.AspectID,
+				"turn_id", in.TurnID,
+				"input_preview", preview)
+		}
+		return FilterDecision{ShouldPost: true, Reason: "operator_bypass"}
 	}
 	if f.Harness == nil || f.Provider == "" || f.Model == "" {
 		// Misconfigured — fail open rather than blocking the post.
@@ -281,7 +355,7 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 	req := bridle.TurnRequest{
 		AspectID:           in.AspectID,
 		AppendSystemPrompt: filterJudgePrompt,
-		UserMessage:        in.FinalText,
+		UserMessage:        buildJudgeUserMessage(in),
 		Provider:           f.Provider,
 		Model:              f.Model,
 		MaxSteps:           1, // pure text; no tools
@@ -313,29 +387,43 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 
 	answer := strings.ToLower(strings.TrimSpace(result.FinalText))
 	// Tolerate "no.", "no!", "no\n" by checking prefix on a
-	// pre-trimmed string. The prompt asks for a clean yes/no but
-	// providers don't always cooperate.
+	// pre-trimmed string. The prompt asks for "<yes|no> <reason>" but
+	// providers don't always cooperate. The verdict is the first token;
+	// everything after is the reason, which we extract for the audit log.
 	var decision FilterDecision
+	verdictReason := extractJudgeReason(result.FinalText) // model's stated reason; may be ""
 	switch {
 	case strings.HasPrefix(answer, "no"):
-		decision = FilterDecision{ShouldPost: false, Reason: FilterReasonScratch}
+		// Preserve model's stated reason for audit. Falls back to the
+		// canonical scratch label when the model didn't give one.
+		reason := verdictReason
+		if reason == "" {
+			reason = FilterReasonScratch
+		}
+		decision = FilterDecision{ShouldPost: false, Reason: reason}
 	case strings.HasPrefix(answer, "yes"):
-		decision = FilterDecision{ShouldPost: true}
+		// Even on yes, surface the reason if given — operator can audit
+		// "why did the judge let X through" the same way.
+		decision = FilterDecision{ShouldPost: true, Reason: verdictReason}
 	default:
-		// Unparseable — fail open.
-		decision = FilterDecision{ShouldPost: true}
+		// Unparseable — fail open with explicit reason.
+		decision = FilterDecision{ShouldPost: true, Reason: "parse_failure"}
 	}
 
 	// Always log the judge round-trip so post-hoc analysis can pair
-	// the input text against the model's verdict. Without this, "why
-	// did the filter let X through" requires reproducing the model
-	// call by hand. Truncate the input to keep log lines readable;
-	// the FinalText raw answer is bounded by MaxSteps:1 and short by
-	// construction so it logs in full.
+	// the input text + trigger context against the model's verdict and
+	// stated reason. Without this, "why did the filter suppress X"
+	// requires reproducing the model call by hand. Truncate the input
+	// to keep log lines readable; the FinalText raw answer is bounded
+	// by MaxSteps:1 and short by construction so it logs in full.
 	if f.Logger != nil {
 		preview := in.FinalText
 		if len(preview) > 200 {
 			preview = preview[:200] + "…"
+		}
+		triggerPreview := in.TriggerText
+		if len(triggerPreview) > 120 {
+			triggerPreview = triggerPreview[:120] + "…"
 		}
 		f.Logger.Info("filter judge decision",
 			"aspect", in.AspectID,
@@ -343,7 +431,33 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 			"should_post", decision.ShouldPost,
 			"reason", decision.Reason,
 			"judge_raw", result.FinalText,
+			"trigger_from", in.TriggerFrom,
+			"trigger_preview", triggerPreview,
 			"input_preview", preview)
 	}
 	return decision
+}
+
+// extractJudgeReason pulls the brief reason from a "yes <reason>" or
+// "no <reason>" judge response. Returns the trimmed reason text, or
+// empty if the model only gave a bare verdict. The prompt format is
+// "<verdict> <reason ≤12 words>" so we just take everything after the
+// first whitespace.
+func extractJudgeReason(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	// Find the first whitespace after the verdict.
+	idx := strings.IndexAny(trimmed, " \t\n")
+	if idx < 0 {
+		return ""
+	}
+	reason := strings.TrimSpace(trimmed[idx+1:])
+	// Strip common leading punctuation ("yes — substantive", "no: scratch").
+	reason = strings.TrimLeft(reason, "—-:,.")
+	reason = strings.TrimSpace(reason)
+	// Bound to avoid logging walls of text if the model ignored the
+	// ≤12 word constraint.
+	if len(reason) > 200 {
+		reason = reason[:200] + "…"
+	}
+	return reason
 }
