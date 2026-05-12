@@ -572,7 +572,7 @@ func main() {
 	// Auto-spawn: after the broker has bound its listener (brief
 	// delay), scan the aspect dir and fire off harness children.
 	// Non-blocking; failures are logged per-aspect.
-	go runAutoSpawn(ctx, logger, *aspectDir, *harnessPath, *addr, token,
+	go runAutoSpawn(ctx, logger, *aspectDir, *harnessPath, *dataDir, *addr, token,
 		autospawn.AspectTokenResolverFunc(tokenResolverFunc))
 
 	if err := b.ListenAndServe(ctx); err != nil {
@@ -586,7 +586,7 @@ func main() {
 // NEXUS_ASPECT_DIR env) and spawns a harness for each. Skipped if
 // no dir is configured. Runs after a short delay so the broker's
 // listener has bound before children try to dial in.
-func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessPathFlag, brokerAddr, token string, tokens autospawn.AspectTokenResolver) {
+func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessPathFlag, dataDirFlag, brokerAddr, token string, tokens autospawn.AspectTokenResolver) {
 	dir := aspectDirFlag
 	if dir == "" {
 		dir = os.Getenv("NEXUS_ASPECT_DIR")
@@ -624,9 +624,21 @@ func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessP
 	// store (see `nexus cert init` + the printed trust hint).
 	wsURL := "wss://" + upstream + "/connect"
 
+	// Keyfiles live at <data-dir>/keyfiles/<name>.keyfile.json (Part 8
+	// migration). storage.ResolvePath returns the *db file* path —
+	// strip the filename to get the data dir, then append keyfiles.
+	keyfileDir := filepath.Join(filepath.Dir(storage.ResolvePath(dataDirFlag)), "keyfiles")
+
 	cfg := autospawn.Config{
 		ScanDir:     dir,
 		HarnessPath: harnessPath,
+		// Resolve per-aspect keyfiles from <data-dir>/keyfiles when
+		// autospawning. agentfunnel takes -k <keyfile>; aspect.json on
+		// disk holds only the name, so autospawn maps name → keyfile
+		// path here. Empty data-dir falls through to the legacy -home
+		// form so other harness binaries that resolve identity from the
+		// home dir still work.
+		KeyfileDir: keyfileDir,
 		BaseEnv: []string{
 			"NEXUS_UPSTREAM=" + wsURL,
 			// Legacy NEXUS_TOKEN — used only when TokenResolver returns
