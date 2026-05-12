@@ -181,6 +181,15 @@ type CheapModelFilter struct {
 	Provider bridle.ProviderID
 	Model    string
 
+	// AspectHome is the per-aspect home dir passed as bridle's
+	// TurnRequest.Cwd. The judge runs claude-code subprocess turns and
+	// inherits the same identity-collision risk the main funnel turn
+	// does — without this, the judge subprocess discovers .mcp.json
+	// from whatever cwd nexus.exe was launched with. Operator decision
+	// (#239): filter judge inherits the same Cwd as the main turn so
+	// both subprocesses anchor at the same aspect home.
+	AspectHome string
+
 	// Logger is optional; when set, every Judge() call emits an INFO
 	// log with the input preview + judge raw output + decision. Pair
 	// the input text against the model's verdict for post-hoc analysis
@@ -276,6 +285,7 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 		Provider:           f.Provider,
 		Model:              f.Model,
 		MaxSteps:           1, // pure text; no tools
+		Cwd:                f.AspectHome,
 	}
 
 	// Phase E: bracket the judge turn under "filter-judge" label.

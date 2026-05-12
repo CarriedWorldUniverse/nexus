@@ -84,6 +84,16 @@ type Config struct {
 	AspectID     string // the Frame's name (operator-chosen)
 	SystemPrompt string // composed from NEXUS.md/SOUL.md/PRIMER.md by the caller
 
+	// AspectHome is the filesystem directory the aspect "lives in" —
+	// passed to bridle as TurnRequest.Cwd to anchor subprocess providers
+	// (currently claude-code). claude-code derives both its session
+	// jsonl path and its .mcp.json discovery from process cwd, so this
+	// is what determines per-aspect identity isolation when multiple
+	// aspects share a Harness or when nexus.exe inherits a cwd from
+	// its launcher. Empty falls through to the parent process's cwd —
+	// fine for tests (stubfunnel etc.), wrong for production aspects.
+	AspectHome string
+
 	// SystemPromptFn, when non-nil, is consulted on every turn instead
 	// of SystemPrompt. Lets the caller swap the prompt at runtime
 	// (e.g., Frame personality refresh per spec §11) without rebuilding
@@ -424,6 +434,7 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		Provider:           f.cfg.Provider,
 		Model:              f.cfg.Model,
 		MaxSteps:           f.cfg.MaxStepsPerTurn,
+		Cwd:                f.cfg.AspectHome,
 	}
 
 	turnID := newTurnID()
@@ -707,6 +718,7 @@ func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error 
 		Provider:    f.cfg.Provider,
 		Model:       model,
 		MaxSteps:    1, // pure text; one round is enough
+		Cwd:         f.cfg.AspectHome,
 	}
 
 	// Phase E: surface the compact turn under its own label. Not

@@ -968,7 +968,7 @@ func (a *usageRecorderAdapter) Record(ctx context.Context, msgID int64, turnID, 
 // The cheap-tier judge is operator-configurable so non-Claude deployments
 // can wire their own (ollama, openai, anthropic-api with haiku). Default
 // haiku rather than the Frame's main model so per-turn cost stays bounded.
-func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, frameProviderID bridle.ProviderID, frameModel string, obsHook funnel.ObservabilityHook, log *slog.Logger) funnel.OutputFilter {
+func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, frameProviderID bridle.ProviderID, frameModel string, obsHook funnel.ObservabilityHook, aspectHome string, log *slog.Logger) funnel.OutputFilter {
 	aspectName := cfg.Name
 	choice := strings.ToLower(strings.TrimSpace(cfg.Filter))
 	if choice == "" {
@@ -995,6 +995,7 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 				Harness:           bridle.NewHarness(judgeProvider),
 				Provider:          judgeProviderID,
 				Model:             judgeModel,
+				AspectHome:        aspectHome,
 				Logger:            log,
 				ObservabilityHook: obsHook,
 			},
@@ -1011,6 +1012,7 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 				Harness:           bridle.NewHarness(judgeProvider),
 				Provider:          judgeProviderID,
 				Model:             judgeModel,
+				AspectHome:        aspectHome,
 				Logger:            log,
 				ObservabilityHook: obsHook,
 			},
@@ -1304,34 +1306,45 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		log.Warn("frame threads index seed failed; reply-to-Frame routing limited to this boot",
 			"err", seedErr, "frame", ef.Aspect.Name)
 	}
+	// AspectHome anchors the bridle subprocess (claude-code) cwd so its
+	// session jsonl + .mcp.json discovery land in a per-aspect directory
+	// instead of whatever cwd nexus.exe inherited from its launcher.
+	// Without this, Frame keel's subprocess inherits nexus's cwd, which
+	// inherits the launcher session's cwd, which inherits some external
+	// claude-code session's .mcp.json — and the Frame posts to chat with
+	// the wrong identity. Fixed by the per-request Cwd field in bridle
+	// (PR #4 merged 2026-05-12) + this companion site. frame.Detect
+	// already resolved this path; reuse it.
+	aspectHome := ef.Aspect.Path
+
 	// Phase E: one Grouper per aspect — shared between the funnel and
 	// its cheap-judge filter so the dashboard sees main + filter-judge
 	// turns on the same stream.
 	obsHook := obsHub.GrouperFor(ef.Aspect.Name)
-	outputFilter := buildOutputFilter(ef.Aspect.Config, p, bridle.ProviderID(provider), model, obsHook, log)
+	outputFilter := buildOutputFilter(ef.Aspect.Config, p, bridle.ProviderID(provider), model, obsHook, aspectHome, log)
 	// PostTurn hook resolves the funnel's session id lazily: the
 	// funnel itself doesn't exist yet (we're constructing its config),
 	// so we capture a pointer that gets filled in after funnel.New.
 	// The runner only invokes the closure inside AfterTurn, by which
 	// time the pointer has been assigned.
 	var funnelPtr *funnel.Funnel
-	// claude-code uses the PARENT process's cwd to encode the
-	// projects-directory key (it spawns `claude` with no Dir override).
-	// The Frame is embedded in the nexus process, so its subprocess
-	// inherits the nexus cwd — NOT the aspect home path. Resolve cwd
-	// here so the rewriter looks at the same file claude-code writes.
-	processCwd, _ := os.Getwd()
-	postTurn := buildRewriterRunner(ef.Aspect.Config, processCwd, bridle.ProviderID(provider), p, model, func() string {
+	// Rewriter watches the same path claude-code writes to. claude-code
+	// derives its projects-directory key from process cwd; with the
+	// AspectHome wiring above, that cwd IS aspectHome. So the rewriter
+	// reads from aspectHome too. Pre-AspectHome (legacy) used os.Getwd()
+	// because there was no per-aspect anchor.
+	postTurn := buildRewriterRunner(ef.Aspect.Config, aspectHome, bridle.ProviderID(provider), p, model, func() string {
 		if funnelPtr == nil {
 			return ""
 		}
 		return funnelPtr.SessionID()
 	}, log)
 	f, err := funnel.New(funnel.Config{
-		AspectID: ef.Aspect.Name,
-		Harness:  bridle.NewHarness(p),
-		Provider: bridle.ProviderID(provider),
-		Model:    model,
+		AspectID:   ef.Aspect.Name,
+		AspectHome: aspectHome,
+		Harness:    bridle.NewHarness(p),
+		Provider:   bridle.ProviderID(provider),
+		Model:      model,
 		// SystemPromptFn (not SystemPrompt) so RefreshPersonality on
 		// the EmbeddedFrame is picked up by the next turn without
 		// rebuilding the funnel. Spec §11 in-process refresh path.
