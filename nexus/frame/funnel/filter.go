@@ -298,37 +298,38 @@ func buildJudgeUserMessage(in FilterInput) string {
 	} else {
 		triggerBlock = "From: @" + triggerFrom + "\nContent: " + triggerText
 	}
-	return "--- INCOMING MESSAGE ---\n" + triggerBlock +
-		"\n\n--- CANDIDATE OUTPUT (from @" + in.AspectID + ") ---\n" + candidate
+	// Plain section labels, no leading dashes. claudecode's `-p <prompt>`
+	// passes the prompt as a command-line argument; a leading "---" gets
+	// parsed by the CLI argv parser as an unknown flag and the subprocess
+	// exits 1 (`error: unknown option '--- INCOMING MESSAGE ---'`). The
+	// CheapModelFilter then fails open and the filter is effectively
+	// disabled. Surfaced 2026-05-12 by operator catching that the judge
+	// hadn't actually run during the post-fix conversation — every
+	// non-operator-triggered turn was failing open.
+	return "INCOMING MESSAGE:\n" + triggerBlock +
+		"\n\nCANDIDATE OUTPUT (from @" + in.AspectID + "):\n" + candidate
 }
 
 // Judge runs the cheap-model judgment. The deadline is enforced by a
 // child context so a slow model call doesn't stall the deliberation
 // past the filter's budget.
 //
-// Operator-message bypass: when the triggering message is FROM the
-// operator, the filter is skipped entirely. Reasoning (ported from
-// agent-network #10039/#10040): operator @-mentions are load-bearing —
-// even a thin "this isn't my lane" reply beats ghost-silence.
-// Suppressing aspect responses to the operator was producing exactly
-// that ghost-silence pattern.
+// No operator bypass. An earlier version (af690e9 → 80ff175) skipped
+// the judge entirely when the triggering message was from "operator",
+// reasoning that operator @-mentions are load-bearing and ghost-silence
+// is worse than a thin reply. Two problems with that shape: (1) it gave
+// operator-addressed turns a permanent free pass through the filter, so
+// we never tested the calibration on the traffic the operator can see;
+// (2) it MASKED a separate bug — the judge prompt's "---" separators
+// were being parsed by claudecode's argv as an unknown flag, so every
+// non-operator turn was silently failing open. Both surfaced 2026-05-12
+// when the operator noticed "Not addressed to me — that's for keel-cli"
+// posted via operator_bypass (should have been suppressed). The right
+// shape: judge runs on every reply; if it gets calibration wrong, that's
+// signal we ACT on, not signal we hide behind a bypass.
 func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDecision {
 	if strings.TrimSpace(in.FinalText) == "" {
 		return FilterDecision{ShouldPost: false, Reason: FilterReasonEmpty}
-	}
-	// Operator bypass — no model call.
-	if strings.EqualFold(in.TriggerFrom, "operator") {
-		if f.Logger != nil {
-			preview := in.FinalText
-			if len(preview) > 200 {
-				preview = preview[:200] + "…"
-			}
-			f.Logger.Info("filter judge: operator bypass",
-				"aspect", in.AspectID,
-				"turn_id", in.TurnID,
-				"input_preview", preview)
-		}
-		return FilterDecision{ShouldPost: true, Reason: "operator_bypass"}
 	}
 	if f.Harness == nil || f.Provider == "" || f.Model == "" {
 		// Misconfigured — fail open rather than blocking the post.
