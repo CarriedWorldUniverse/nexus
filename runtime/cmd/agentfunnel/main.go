@@ -134,16 +134,6 @@ func main() {
 		fail(log, "build provider", err)
 	}
 
-	// 3a. Build the output filter (cheap-judge by default). Mirrors the
-	// Frame's buildOutputFilter but simpler: agentfunnel doesn't have
-	// aspect.json on the host (identity comes from Nexus validation), so
-	// there's no operator-level filter override yet — we default to
-	// hard-rules + cheap-model judge for claude-flavoured providers, and
-	// to hard-rules-only otherwise. Without this every reply through the
-	// funnel hits chat unfiltered (observed 2026-05-12: noisy multi-
-	// aspect threads bypassing the suppression keel's Frame applies).
-	outputFilter := buildAgentFunnelFilter(provider, bridle.ProviderID(res.Provider), res.Model, log)
-
 	// 4. Compose funnel + wsasp client.
 	sessionID := uuid.NewString()
 	cursorFile := wsasp.CursorFileForAspect(resolveCursorDir(*cursorDir))
@@ -199,6 +189,17 @@ func main() {
 		res.AspectName,
 		log,
 	)
+
+	// Build the output filter (cheap-judge by default). Mirrors the
+	// Frame's buildOutputFilter but simpler: agentfunnel doesn't have
+	// aspect.json on the host (identity comes from Nexus validation), so
+	// there's no operator-level filter override yet — we default to
+	// hard-rules + cheap-model judge for claude-flavoured providers, and
+	// to hard-rules-only otherwise. Constructed AFTER obsHook so the
+	// CheapModelFilter can publish its judge turn through the same
+	// observability stream as the main turn — otherwise the judge runs
+	// invisibly and operators can't see why a reply was suppressed.
+	outputFilter := buildAgentFunnelFilter(provider, bridle.ProviderID(res.Provider), res.Model, log, obsHook)
 
 	// Rewriter wiring: default-on for claude-code-flavored providers,
 	// no-op otherwise. The session jsonl path is resolved lazily
@@ -403,7 +404,7 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 // Without this every reply through the funnel hits chat unfiltered —
 // observed 2026-05-12 as noisy multi-aspect threads bypassing the
 // suppression the keel Frame applies.
-func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.ProviderID, _ string, log *slog.Logger) funnel.OutputFilter {
+func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.ProviderID, _ string, log *slog.Logger, obsHook funnel.ObservabilityHook) funnel.OutputFilter {
 	if !isClaudeFlavor(providerID) {
 		log.Info("agentfunnel: filter=hard (no cheap-judge for non-claude provider)", "provider", providerID)
 		return funnel.HardRulesFilter{}
@@ -412,10 +413,11 @@ func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.Provider
 		"judge_provider", providerID, "judge_model", "haiku")
 	return funnel.HardRulesFilter{
 		Inner: funnel.CheapModelFilter{
-			Harness:  bridle.NewHarness(bareJudgeProvider(provider, providerID)),
-			Provider: providerID,
-			Model:    "haiku",
-			Logger:   log,
+			Harness:           bridle.NewHarness(bareJudgeProvider(provider, providerID)),
+			Provider:          providerID,
+			Model:             "haiku",
+			Logger:            log,
+			ObservabilityHook: obsHook,
 		},
 	}
 }
