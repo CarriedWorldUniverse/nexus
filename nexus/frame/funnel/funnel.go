@@ -634,6 +634,22 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		},
 	})
 
+	// Synthetic filter-decision turn for the observability stream so
+	// EVERY filter outcome surfaces as a frame — including HardRules
+	// short-circuits that never invoke the cheap judge. Without this,
+	// suppressions from substring/prefix self-suppress and empty-output
+	// rejections are invisible to operators: they see EventFilterJudging
+	// (filter is running) but no decision, no judge turn, and no auto-
+	// post. The synthetic turn carries the verdict, the layer that
+	// produced it, and the reason text so the operator can audit
+	// suppressions without grepping host logs.
+	if f.cfg.ObservabilityHook != nil {
+		f.cfg.ObservabilityHook.BeginTurn(turnID+"-decision", "filter-decision", f.cfg.Model, string(f.cfg.Provider), 0)
+		f.cfg.ObservabilityHook.OnBridleEvent(bridle.ModelChunk{Text: renderFilterVerdict(decision)})
+		f.cfg.ObservabilityHook.OnBridleEvent(bridle.TurnDone{})
+		f.cfg.ObservabilityHook.EndTurn()
+	}
+
 	f.log.Info("funnel: turn complete",
 		"aspect", f.cfg.AspectID,
 		"steps", result.StepCount,
@@ -1055,6 +1071,43 @@ func (f *Funnel) runFilter(ctx context.Context, in FilterInput) FilterDecision {
 // The real number lands in TurnEnd via bridle.Usage. This estimate
 // exists so dashboard panels can show a "going in at ~X tokens" hint
 // before a slow turn completes.
+// filterDecisionLayer reports which filter layer produced a decision
+// based on the Reason. HardRulesFilter sets the canonical
+// FilterReason* constants; CheapModelFilter sets either the canonical
+// scratch/ramble or a free-form 12-word reason from the judge model.
+// Anything not in the canonical hard-rules set is treated as
+// cheap_judge so freeform reasons route correctly.
+func filterDecisionLayer(reason string) string {
+	switch reason {
+	case FilterReasonEmpty, FilterReasonSelfSuppress:
+		return "hard_rules"
+	case "":
+		// AlwaysPostFilter (fallback) leaves reason empty; this also
+		// covers the rare path where the cheap judge returns ShouldPost
+		// without populating Reason. Label generically so the operator
+		// sees the verdict but knows it bypassed real judging.
+		return "always_post"
+	default:
+		return "cheap_judge"
+	}
+}
+
+// renderFilterVerdict formats the FilterDecision as a single text
+// line for the synthetic filter-decision turn frame. Format chosen
+// so the dashboard's existing turn-text renderer surfaces it inline
+// without needing a new TurnEvent kind.
+func renderFilterVerdict(d FilterDecision) string {
+	verdict := "suppress"
+	if d.ShouldPost {
+		verdict = "post"
+	}
+	reason := d.Reason
+	if reason == "" {
+		reason = "(none)"
+	}
+	return "verdict=" + verdict + " layer=" + filterDecisionLayer(d.Reason) + " reason=" + reason
+}
+
 // reconcileTriage walks the inbox items the turn ingested and inserts
 // synthetic skip rows for any whose msg_id wasn't already triaged by
 // the model. Without this the inbox-triage contract collapses to "the
