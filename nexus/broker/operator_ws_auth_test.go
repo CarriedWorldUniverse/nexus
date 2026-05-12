@@ -120,20 +120,36 @@ func TestResolveUpgradeAuth_RejectsBadSignature(t *testing.T) {
 	}
 }
 
-func TestResolveUpgradeAuth_RejectsNonOperatorSub(t *testing.T) {
+func TestResolveUpgradeAuth_AspectJWTResolvesAsAspect(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	clock := func() time.Time { return now }
 	secret := []byte("test-secret-32-bytes-padding-vvvv")
 	b := newBrokerWithOperatorLogin(t, secret, clock)
 
-	// Aspect-issued JWT (sub:"keel") must NOT pass operator fallback —
-	// aspects authenticate via TokenStore, not WS JWT.
+	// Aspect-issued JWT (sub:"keel") MUST resolve — but as an aspect,
+	// not as operator. Cutover 2026-05-11 added tryVerifyAspectJWT to
+	// support the keyfile-flow exchange (/api/aspect/validate issues a
+	// session JWT with sub=aspect_name signed by the same secret as
+	// the operator login). Prior to that, the test name's premise was
+	// correct ("aspects authenticate via TokenStore, not WS JWT"); it
+	// no longer is. Pin the post-cutover semantics: resolves true, AS
+	// the aspect, NOT with operator flags.
 	tok := mintOperatorJWT(t, secret, "keel", now.Add(time.Hour))
 	req := httptest.NewRequest("GET", "/connect", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	if _, ok := b.resolveUpgradeAuth(req); ok {
-		t.Error("JWT with sub:keel must not resolve as operator")
+	info, ok := b.resolveUpgradeAuth(req)
+	if !ok {
+		t.Fatal("aspect JWT must resolve via tryVerifyAspectJWT (cutover path)")
+	}
+	if info.Operator {
+		t.Error("aspect JWT must NOT resolve with Operator=true; that's the operator-only path")
+	}
+	if info.Admin {
+		t.Error("aspect JWT must NOT resolve with Admin=true; only operator gets admin")
+	}
+	if info.AgentID != "keel" {
+		t.Errorf("AgentID = %q; want %q (the sub from the JWT)", info.AgentID, "keel")
 	}
 }
 
