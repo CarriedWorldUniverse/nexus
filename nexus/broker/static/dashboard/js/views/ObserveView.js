@@ -123,7 +123,15 @@ export function ObserveView() {
 
   function selectAspect(id) {
     setAspectState(id);
-    window.location.hash = '#/agents/' + id;
+    // Don't rewrite the hash when ObserveView is hosted inside SplitView
+    // (#/split). The router would interpret an #/agents/<id> hash as
+    // "navigate to full ObserveView" and dismiss the split layout — the
+    // exact bug operators reported as "split resets to fullscreen on
+    // agent change". The hash is for sidebar navigation only; in-view
+    // picker state lives in component state.
+    if (!window.location.hash.startsWith('#/split')) {
+      window.location.hash = '#/agents/' + id;
+    }
   }
 
   return html`
