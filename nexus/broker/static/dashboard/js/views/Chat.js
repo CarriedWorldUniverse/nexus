@@ -353,7 +353,11 @@ export function Chat() {
   useEffect(() => {
     if (!initialized.current) {
       initialized.current = true;
-      loadMessages();
+      // Hydrate messages, then reactions. fetchMessages doesn't include
+      // reactions inline — without this call reactions only appear after
+      // the next live reaction.changed event or a WS reconnect, so a cold
+      // reload shows un-reacted messages until traffic resumes.
+      loadMessages().then(() => refreshReactions());
       loadTopics();
     }
 
