@@ -34,6 +34,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
+	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 	"github.com/CarriedWorldUniverse/nexus/nexus/operator"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
@@ -267,7 +268,13 @@ func main() {
 	chatStore := chat.NewSQLStore(db)
 	triageStore := chat.NewSQLTriageStore(db)
 	knowledgeStore := knowledge.New(db, logger)
-	chatRouter, frameGateway := buildChatRouter(ctx, embeddedFrame, r, chatStore, triageStore, usage.NewSQLStore(db), knowledgeStore, logger)
+	// Phase E: pre-construct the observability Hub so the embedded
+	// Frame's funnel can hold its Grouper at construction time.
+	// onFrame stays nil here; broker.New rewires it once the broker
+	// exists. Until then any emit is a silent drop — safe because no
+	// turns can run before the broker is up.
+	obsHub := observability.NewHub(500, nil)
+	chatRouter, frameGateway := buildChatRouter(ctx, embeddedFrame, r, chatStore, triageStore, usage.NewSQLStore(db), knowledgeStore, obsHub, logger)
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
@@ -451,6 +458,9 @@ func main() {
 		// present — same prerequisite — so the dashboard SPA can
 		// reach /api/operator/* once the broker is up.
 		OperatorLogin: buildOperatorLogin(db, nexusIdentity.NexusID, nexusIdentity.SessionSigningSecret, *addr, logger),
+		// Phase E: adopt the Hub already wired into the funnel so
+		// emitted frames reach the broker's broadcast path.
+		Observability: obsHub,
 	}, r)
 
 	// Wire the embedded Frame's chat gateway to broker.HandleChatSend so
@@ -958,7 +968,7 @@ func (a *usageRecorderAdapter) Record(ctx context.Context, msgID int64, turnID, 
 // The cheap-tier judge is operator-configurable so non-Claude deployments
 // can wire their own (ollama, openai, anthropic-api with haiku). Default
 // haiku rather than the Frame's main model so per-turn cost stays bounded.
-func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, frameProviderID bridle.ProviderID, frameModel string, log *slog.Logger) funnel.OutputFilter {
+func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, frameProviderID bridle.ProviderID, frameModel string, obsHook funnel.ObservabilityHook, log *slog.Logger) funnel.OutputFilter {
 	aspectName := cfg.Name
 	choice := strings.ToLower(strings.TrimSpace(cfg.Filter))
 	if choice == "" {
@@ -982,10 +992,11 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 			"aspect", aspectName, "judge_provider", judgeProviderID, "judge_model", judgeModel)
 		return funnel.HardRulesFilter{
 			Inner: funnel.CheapModelFilter{
-				Harness:  bridle.NewHarness(judgeProvider),
-				Provider: judgeProviderID,
-				Model:    judgeModel,
-				Logger:   log,
+				Harness:           bridle.NewHarness(judgeProvider),
+				Provider:          judgeProviderID,
+				Model:             judgeModel,
+				Logger:            log,
+				ObservabilityHook: obsHook,
 			},
 		}
 	default:
@@ -997,10 +1008,11 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 		}
 		return funnel.HardRulesFilter{
 			Inner: funnel.CheapModelFilter{
-				Harness:  bridle.NewHarness(judgeProvider),
-				Provider: judgeProviderID,
-				Model:    judgeModel,
-				Logger:   log,
+				Harness:           bridle.NewHarness(judgeProvider),
+				Provider:          judgeProviderID,
+				Model:             judgeModel,
+				Logger:            log,
+				ObservabilityHook: obsHook,
 			},
 		}
 	}
@@ -1228,7 +1240,7 @@ func buildRewriterRunner(cfg schemas.AspectConfig, aspectCwd string, frameProvid
 // to the broker after broker.New so in-process Frame posts go through
 // Broker.HandleChatSend (the unified chat-send path). When ef is nil
 // both returns are nil.
-func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.Roster, store chat.Store, triageStore chat.TriageStore, usageStore *usage.SQLStore, knowledgeStore *knowledge.Store, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway) {
+func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.Roster, store chat.Store, triageStore chat.TriageStore, usageStore *usage.SQLStore, knowledgeStore *knowledge.Store, obsHub *observability.Hub, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway) {
 	if ef == nil {
 		return nil, nil
 	}
@@ -1292,7 +1304,11 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		log.Warn("frame threads index seed failed; reply-to-Frame routing limited to this boot",
 			"err", seedErr, "frame", ef.Aspect.Name)
 	}
-	outputFilter := buildOutputFilter(ef.Aspect.Config, p, bridle.ProviderID(provider), model, log)
+	// Phase E: one Grouper per aspect — shared between the funnel and
+	// its cheap-judge filter so the dashboard sees main + filter-judge
+	// turns on the same stream.
+	obsHook := obsHub.GrouperFor(ef.Aspect.Name)
+	outputFilter := buildOutputFilter(ef.Aspect.Config, p, bridle.ProviderID(provider), model, obsHook, log)
 	// PostTurn hook resolves the funnel's session id lazily: the
 	// funnel itself doesn't exist yet (we're constructing its config),
 	// so we capture a pointer that gets filled in after funnel.New.
@@ -1340,7 +1356,12 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		UsageRecorder:  recorder,
 		Triage:         triageStore,
 		PostTurn:       postTurn,
-		Logger:         log,
+		// Phase E: hand the embedded Frame's funnel the per-aspect
+		// Grouper from the broker's observability Hub. Same-process
+		// wiring — broker and funnel share the heap, so the Grouper
+		// satisfies funnel.ObservabilityHook via structural typing.
+		ObservabilityHook: obsHook,
+		Logger:            log,
 	})
 	if err != nil {
 		log.Error("frame funnel: construction failed; deliberation disabled",

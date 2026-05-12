@@ -986,6 +986,12 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 		"context_mode", state.ContextMode,
 		"provider", state.Provider)
 
+	// Phase E: emit a PresenceFrame on the observability stream so
+	// dashboards see the aspect come online.
+	if c.broker.observability != nil {
+		c.broker.observability.GrouperFor(state.Name).OnPresence(true, "registered")
+	}
+
 	ack, _ := frames.NewResponse(frames.KindRegisterAck, env.ID, frames.RegisterAckPayload{
 		HeartbeatIntervalS: c.broker.cfg.HeartbeatIntervalS,
 		StaleAfterS:        int(c.broker.cfg.StaleAfter.Seconds()),
@@ -1077,6 +1083,14 @@ func (c *wsConn) handleDeregisterFrame(env frames.Envelope) {
 	}
 
 	c.log.Info("aspect deregistered via ws", "name", payload.Name, "reason", payload.Reason)
+	// Phase E: presence flip on graceful deregister.
+	if c.broker.observability != nil {
+		reason := payload.Reason
+		if reason == "" {
+			reason = "deregistered"
+		}
+		c.broker.observability.GrouperFor(payload.Name).OnPresence(false, reason)
+	}
 	// Unbind from dispatcher + clear the binding so cleanup() doesn't
 	// try to deregister again.
 	c.broker.dispatcher.unbind(payload.Name, c)
@@ -1132,6 +1146,10 @@ func (c *wsConn) cleanup() {
 	}
 	if c.registeredAs != "" && c.sessionID != "" {
 		c.broker.dispatcher.unbind(c.registeredAs, c)
+		// Phase E: presence flip on ungraceful disconnect.
+		if c.broker.observability != nil {
+			c.broker.observability.GrouperFor(c.registeredAs).OnPresence(false, "ws_closed")
+		}
 		deregErr := c.broker.roster.Deregister(c.registeredAs, c.sessionID)
 		if deregErr != nil && !errors.Is(deregErr, roster.ErrNotRegistered) {
 			c.log.Warn("deregister on disconnect failed",
