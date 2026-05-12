@@ -9,6 +9,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
@@ -257,5 +258,107 @@ func TestObserve_MultiAspectSubscription(t *testing.T) {
 	}
 	if !seen["plumb"] || !seen["keel"] {
 		t.Errorf("expected both aspects in seen set, got %+v", seen)
+	}
+}
+
+// TestObserve_TurnLifecycleEndToEnd is the Phase G smoke test for the
+// turn-side observability pipeline. It exercises everything between the
+// funnel's ObservabilityHook contract and the operator's observe.frame
+// stream:
+//
+//   - BeginTurn opens an in_flight TurnFrame
+//   - OnBridleEvent folds ModelChunk + ToolCallStart + ToolCallResult
+//     into the events list and pre-parses an Edit artifact
+//   - EndTurn flips status to complete and emits the terminal snapshot
+//
+// The operator's WS connection should receive multiple observe.frame
+// envelopes (one per Grouper emission); the smoke test verifies the
+// final frame carries the expected status, label, event ordering, and
+// artifact shape. This is the integration-side cousin to the Grouper
+// unit tests in nexus/observability/.
+func TestObserve_TurnLifecycleEndToEnd(t *testing.T) {
+	srv, b, _, _, tok := newOperatorTestServerFull(t)
+	installObservabilityRecipientPolicy(b)
+
+	c := dialWS(t, srv, tok)
+	subscribeObserve(t, c, "plumb", 0)
+
+	g := b.observability.GrouperFor("plumb")
+	g.BeginTurn("turn-smoke-1", "main", "claude-opus-4-7", "claudecode", 42)
+	g.OnBridleEvent(bridle.ModelChunk{Text: "let me check that file"})
+	g.OnBridleEvent(bridle.ToolCallStart{
+		ID:   "edit-1",
+		Name: "Edit",
+		Args: json.RawMessage(`{"file_path":"main.go","old_string":"old","new_string":"new"}`),
+	})
+	g.OnBridleEvent(bridle.ToolCallResult{
+		ID:     "edit-1",
+		Result: json.RawMessage(`"ok"`),
+	})
+	g.EndTurn()
+
+	// Drain frames until we see a terminal "complete" TurnFrame. The
+	// Grouper emits one snapshot per call (BeginTurn + each event +
+	// EndTurn = 5 emissions), so several arrive on the wire — the
+	// renderer cares about the final one.
+	deadline := time.Now().Add(3 * time.Second)
+	var final observability.TurnFrame
+	gotFinal := false
+	for time.Now().Before(deadline) && !gotFinal {
+		env, ok := recvFrameWithTimeout(t, c, time.Until(deadline))
+		if !ok {
+			break
+		}
+		if env.Kind != frames.KindObserveFrame {
+			continue
+		}
+		_, f := decodeObserveFrame(t, env)
+		if f.Kind != observability.FrameTurn {
+			continue
+		}
+		var tf observability.TurnFrame
+		if err := json.Unmarshal(f.Payload, &tf); err != nil {
+			t.Fatalf("decode TurnFrame: %v", err)
+		}
+		if tf.Status == observability.TurnComplete {
+			final = tf
+			gotFinal = true
+		}
+	}
+	if !gotFinal {
+		t.Fatal("never received a complete TurnFrame")
+	}
+
+	if final.TurnID != "turn-smoke-1" {
+		t.Errorf("TurnID=%q want turn-smoke-1", final.TurnID)
+	}
+	if final.Label != "main" {
+		t.Errorf("Label=%q want main", final.Label)
+	}
+	if final.TriggerMsg != 42 {
+		t.Errorf("TriggerMsg=%d want 42", final.TriggerMsg)
+	}
+
+	// Expected events: one text run + one tool call (with result attached).
+	if len(final.Events) < 2 {
+		t.Fatalf("events=%+v want >=2", final.Events)
+	}
+	if final.Events[0].Kind != observability.TurnEventText ||
+		!strings.Contains(final.Events[0].Text, "let me check") {
+		t.Errorf("events[0]=%+v want text with 'let me check'", final.Events[0])
+	}
+	tc := final.Events[1]
+	if tc.Kind != observability.TurnEventToolCall || tc.Tool == nil ||
+		tc.Tool.Name != "Edit" {
+		t.Errorf("events[1]=%+v want tool_call Edit", tc)
+	}
+	if tc.Tool.Result == nil || tc.Tool.Result.IsError {
+		t.Errorf("tool result missing or errored: %+v", tc.Tool.Result)
+	}
+	if tc.Tool.Artifact == nil || tc.Tool.Artifact.FilePath != "main.go" {
+		t.Errorf("artifact missing or wrong path: %+v", tc.Tool.Artifact)
+	}
+	if tc.Tool.Artifact.OldText != "old" || tc.Tool.Artifact.NewText != "new" {
+		t.Errorf("artifact diff wrong: %+v", tc.Tool.Artifact)
 	}
 }
