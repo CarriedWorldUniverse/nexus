@@ -103,12 +103,18 @@ func TestDeliberate_FiresObservabilityHook(t *testing.T) {
 	hook.mu.Lock()
 	defer hook.mu.Unlock()
 
-	if len(hook.begins) != 1 {
-		t.Fatalf("BeginTurn calls=%d want 1", len(hook.begins))
+	// Two BeginTurn calls: the real "main" turn, then the synthetic
+	// "filter-decision" turn the funnel emits after runFilter so
+	// every filter outcome surfaces as a frame.
+	if len(hook.begins) != 2 {
+		t.Fatalf("BeginTurn calls=%d want 2 (main + filter-decision)", len(hook.begins))
 	}
 	b := hook.begins[0]
 	if b.label != "main" {
-		t.Errorf("BeginTurn label=%q want main", b.label)
+		t.Errorf("BeginTurn[0] label=%q want main", b.label)
+	}
+	if hook.begins[1].label != "filter-decision" {
+		t.Errorf("BeginTurn[1] label=%q want filter-decision", hook.begins[1].label)
 	}
 	if b.model != "test-model" || b.provider != "emitting" {
 		t.Errorf("BeginTurn model/provider=%q/%q want test-model/emitting", b.model, b.provider)
@@ -132,8 +138,8 @@ func TestDeliberate_FiresObservabilityHook(t *testing.T) {
 	if !sawChunk {
 		t.Errorf("hook never saw ModelChunk{Text:hello}; events=%+v", hook.events)
 	}
-	if hook.ends != 1 {
-		t.Errorf("EndTurn calls=%d want 1", hook.ends)
+	if hook.ends != 2 {
+		t.Errorf("EndTurn calls=%d want 2 (main + filter-decision)", hook.ends)
 	}
 }
 
