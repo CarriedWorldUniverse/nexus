@@ -134,10 +134,22 @@ export function ObserveView() {
     }
   }
 
+  // Stable alphabetical order for the aspect picker. The roster.list
+  // response order changes when aspects register / deregister; without
+  // sorting here the chips visibly reshuffle as presence flips, which
+  // makes the picker hard to track while monitoring. Sort by id (case-
+  // insensitive) — same identity regardless of registration order or
+  // online state. Operator's currently-selected chip stays in place.
+  const sortedAgents = [...agentList].sort((a, b) => {
+    const ai = (typeof a === 'string' ? a : a.id || '').toLowerCase();
+    const bi = (typeof b === 'string' ? b : b.id || '').toLowerCase();
+    return ai < bi ? -1 : ai > bi ? 1 : 0;
+  });
+
   return html`
     <div class="observe-view">
       <div class="observe-bar">
-        ${agentList.map(a => {
+        ${sortedAgents.map(a => {
           const id = typeof a === 'string' ? a : a.id;
           const alive = typeof a === 'object' ? a.alive : true;
           const color = colors[id] || '#888';
