@@ -260,6 +260,15 @@ type Config struct {
 	// includes central content, so the future WS broadcast will land
 	// here too (Part 9d). nil callback is a no-op.
 	OnNexusMDChange func(newVersion int64)
+
+	// Observability is a pre-constructed Hub the broker should adopt
+	// instead of building its own. Use case: the embedded Frame's
+	// funnel needs an ObservabilityHook at construction time, which
+	// happens BEFORE broker.New. Pre-construct the Hub with a deferred
+	// onFrame closure, hand it to both the funnel and broker.Config;
+	// broker.New rewires the onFrame to its own broadcaster. Nil
+	// leaves broker.New constructing its own Hub (legacy path).
+	Observability *observability.Hub
 }
 
 // ChatRouterCallbacks wires the broker's chat.send handling to the
@@ -377,9 +386,20 @@ func New(cfg Config, r *roster.Roster) *Broker {
 		connPerIP:  make(map[string]int),
 		operators:  make(map[*wsConn]struct{}),
 	}
-	b.observability = observability.NewHub(500, b.broadcastObserveFrame)
+	if cfg.Observability != nil {
+		b.observability = cfg.Observability
+		b.observability.SetOnFrame(b.broadcastObserveFrame)
+	} else {
+		b.observability = observability.NewHub(500, b.broadcastObserveFrame)
+	}
 	return b
 }
+
+// ObservabilityHub returns the broker's observability Hub. Used by
+// in-process callers (the embedded Frame's funnel) to fetch the
+// per-aspect Grouper they pass as funnel.Config.ObservabilityHook.
+// Remote aspects forward observability frames over WS instead.
+func (b *Broker) ObservabilityHub() *observability.Hub { return b.observability }
 
 // reserveConn accounts a new /connect against the global + per-IP
 // caps. Returns (true, host) on success — caller must call releaseConn

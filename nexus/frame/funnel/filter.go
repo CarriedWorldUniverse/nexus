@@ -186,6 +186,13 @@ type CheapModelFilter struct {
 	// the input text against the model's verdict for post-hoc analysis
 	// ("why did the filter let X through"). nil = silent.
 	Logger *slog.Logger
+
+	// ObservabilityHook, when set, surfaces the judge turn under the
+	// "filter-judge" label so dashboards can show what the filter
+	// actually saw. Nil leaves the judge invisible to observability.
+	// Mirrors funnel.Config.ObservabilityHook — wiring should pass the
+	// same Hub.GrouperFor(aspectID) for the aspect being judged.
+	ObservabilityHook ObservabilityHook
 }
 
 // filterJudgeTimeout is a safety bound for a fully hung judge —
@@ -271,7 +278,19 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 		MaxSteps:           1, // pure text; no tools
 	}
 
-	result, err := f.Harness.RunTurn(ctx, req, NullRunner{}, collectSink{})
+	// Phase E: bracket the judge turn under "filter-judge" label.
+	// Uses the FilterInput.TurnID so observers can correlate the judge
+	// to the main turn it's evaluating. Not deferred — close immediately
+	// after RunTurn so the Grouper's terminal frame settles before any
+	// downstream caller logic.
+	if f.ObservabilityHook != nil {
+		f.ObservabilityHook.BeginTurn(in.TurnID+"-judge", "filter-judge", f.Model, string(f.Provider), 0)
+	}
+	sink := turnSink(f.ObservabilityHook)
+	result, err := f.Harness.RunTurn(ctx, req, NullRunner{}, sink)
+	if f.ObservabilityHook != nil {
+		f.ObservabilityHook.EndTurn()
+	}
 	if err != nil {
 		if f.Logger != nil {
 			f.Logger.Warn("filter judge: harness error — failing open",

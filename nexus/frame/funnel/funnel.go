@@ -183,6 +183,17 @@ type Config struct {
 	// Events; Pulser is the human-visible chat layer).
 	Pulser StatusPulser
 
+	// ObservabilityHook receives bridle's raw event stream plus per-
+	// turn boundary calls (BeginTurn / EndTurn). When set, the funnel
+	// wraps every Harness.RunTurn call site (main turn, compact, and
+	// the post-hoc filter judge) to forward events. Nil disables
+	// observability — the pre-Phase-E no-op path. Production wiring
+	// passes broker's observability.Hub.GrouperFor(aspectID).
+	//
+	// Dual-scoping with Events is intentional; see ObservabilityHook
+	// interface comment and docs/2026-05-12-funnel-observability-audit.md.
+	ObservabilityHook ObservabilityHook
+
 	Logger *slog.Logger
 }
 
@@ -426,12 +437,27 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		},
 	})
 
-	sink := &collectSink{}
+	// Phase E: bracket the turn with ObservabilityHook so Grouper sees
+	// BeginTurn/events/EndTurn. turnSink falls back to collectSink when
+	// the hook is nil, preserving the pre-Phase-E no-op path.
+	//
+	// NOT deferred: the post-hoc filter judge (below) calls BeginTurn
+	// on the same Grouper. A pending defer here would land the filter
+	// inside this turn's lifetime and trigger the Grouper's protocol-
+	// violation recovery (force-close main as errored). Close explicitly
+	// immediately after RunTurn so the main TurnFrame settles cleanly.
+	if f.cfg.ObservabilityHook != nil {
+		f.cfg.ObservabilityHook.BeginTurn(turnID, "main", f.cfg.Model, string(f.cfg.Provider), triggerMsgID)
+	}
+	sink := turnSink(f.cfg.ObservabilityHook)
 	// Tag the context with the turn_id so the triage tool runner
 	// persists rows under the right turn. Required when Triage is
 	// wired; harmless otherwise.
 	turnCtx := WithTurnID(ctx, turnID)
 	result, err := f.cfg.Harness.RunTurn(turnCtx, req, f.cfg.Runner, sink)
+	if f.cfg.ObservabilityHook != nil {
+		f.cfg.ObservabilityHook.EndTurn()
+	}
 	// turn.end must fire whether the turn succeeded or errored — the
 	// Lock 5 spec promises every turn.start has a paired turn.end.
 	// Without this, dashboards listening for paired events would
@@ -683,8 +709,20 @@ func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error 
 		MaxSteps:    1, // pure text; one round is enough
 	}
 
-	sink := &collectSink{}
+	// Phase E: surface the compact turn under its own label. Not
+	// deferred — close immediately after RunTurn so the Grouper's
+	// terminal TurnFrame settles before the downstream EventCompactEnd
+	// emission and session-tail mutation (mirrors the Deliberate
+	// site's reasoning).
+	compactTurnID := newTurnID()
+	if f.cfg.ObservabilityHook != nil {
+		f.cfg.ObservabilityHook.BeginTurn(compactTurnID, "compact", model, string(f.cfg.Provider), 0)
+	}
+	sink := turnSink(f.cfg.ObservabilityHook)
 	result, err := f.cfg.Harness.RunTurn(ctx, req, f.cfg.Runner, sink)
+	if f.cfg.ObservabilityHook != nil {
+		f.cfg.ObservabilityHook.EndTurn()
+	}
 	if err != nil {
 		return err
 	}

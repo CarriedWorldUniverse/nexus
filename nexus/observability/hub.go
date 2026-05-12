@@ -62,6 +62,23 @@ func (h *Hub) GrouperFor(aspect string) *Grouper {
 	return g
 }
 
+// SetOnFrame replaces the broadcast callback. Used by callers that
+// need to construct the Hub before the consumer (e.g. the broker) is
+// available — pass a nil/placeholder closure to NewHub, then call
+// SetOnFrame once the consumer exists.
+//
+// Must be called BEFORE any goroutine can call into a Grouper —
+// emit reads h.onFrame without a lock, so a write here racing a
+// concurrent emit trips `-race`. In practice that means SetOnFrame
+// must complete before the broker's WS listener starts AND before
+// any in-process funnel issues a Deliberate (the embedded Frame
+// could in principle run a proactive turn before any WS connect).
+// Production wiring sequences this on the startup goroutine before
+// ListenAndServe.
+func (h *Hub) SetOnFrame(onFrame func(aspect string, f Frame)) {
+	h.onFrame = onFrame
+}
+
 // Tail returns retained frames for aspect with Sequence > sinceSeq.
 // sinceSeq=0 yields the full retained tail. Delegates to the
 // underlying Buffer.
