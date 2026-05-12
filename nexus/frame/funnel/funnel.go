@@ -601,17 +601,28 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		"filter_post", decision.ShouldPost,
 		"filter_reason", decision.Reason)
 
-	// Resolve the 👀 work-signal based on the filter outcome. Approve →
-	// remove (same-emoji toggle on single-emoji-per-reactor); suppress →
-	// replace with 👍 ("saw it, nothing to add"). The work-signal post
-	// happened earlier under the same gate, so only resolve if we
-	// actually posted it.
+	// Resolve the 👀 work-signal based on the filter outcome. Three
+	// branches under single-emoji-per-reactor semantics:
+	//   - ShouldPost: model's reply will post → toggle 👀 off (re-react
+	//     with the same emoji removes the reactor's row). The posted
+	//     reply is itself the signal that the aspect engaged.
+	//   - !ShouldPost AND non-empty text: filter killed a substantive
+	//     reply → 🙊 (see-no-evil). This is the audit signal: aspect
+	//     had something to say, judge labeled it scratch. Different
+	//     from "nothing to add" — operator should be able to find
+	//     these and inspect the suppressed text in the observability
+	//     stream to calibrate the judge.
+	//   - !ShouldPost AND empty text: model genuinely had nothing →
+	//     👍 ("saw it, nothing to add"). The honest acknowledgement.
 	if triggerMsgID != 0 && f.cfg.ChatGateway != nil {
 		var resolveEmoji string
-		if decision.ShouldPost {
+		switch {
+		case decision.ShouldPost:
 			resolveEmoji = "👀" // toggle off
-		} else {
-			resolveEmoji = "👍" // replaces 👀
+		case strings.TrimSpace(result.FinalText) != "":
+			resolveEmoji = "🙊" // filter ate a substantive reply
+		default:
+			resolveEmoji = "👍" // genuinely nothing to add
 		}
 		if err := f.cfg.ChatGateway.ReactTo(ctx, triggerMsgID, resolveEmoji); err != nil {
 			f.log.Debug("funnel: resolve work-signal failed",

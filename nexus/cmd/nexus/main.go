@@ -470,6 +470,12 @@ func main() {
 	// is embedded, frameGateway is nil and this is a no-op.
 	if frameGateway != nil {
 		frameGateway.Sender = b
+		// ReactBroadcaster: same reason as Sender — in-process Frame
+		// reactions (the funnel's 👀/👍/🙊 work-signal path) must push
+		// chat.reaction.update to operators or the dashboard never
+		// sees them. Without this, Frame keel looks silent even when
+		// the funnel is firing reactions on every turn. See #193.
+		frameGateway.ReactBroadcaster = b
 	}
 
 	// Stale-reap sweep. Runs until ctx cancels. Reaper queries the
