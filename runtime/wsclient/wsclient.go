@@ -85,6 +85,16 @@ type Client struct {
 	pending   map[string]chan frames.Envelope
 	connected bool
 
+	// writeMu serialises conn.Write across all sender goroutines.
+	// coder/websocket does not serialize concurrent writes (it tears
+	// or panics under the race), and three independent paths can
+	// call Send at the same time: chat sends from the deliberation
+	// goroutine via wsasp.queueOrSend, register frames from the
+	// reconnect/awaitReady goroutine, and observability frames from
+	// the funnel hook via wsasp.SendBestEffort. Separate from c.mu
+	// so a slow write doesn't stall the conn-swap path on reconnect.
+	writeMu sync.Mutex
+
 	// connCh broadcasts when a fresh connection becomes ready.
 	// Callers of Send/Request block on it while the client is
 	// reconnecting.
@@ -265,6 +275,8 @@ func (c *Client) Send(ctx context.Context, env frames.Envelope) error {
 	if err != nil {
 		return fmt.Errorf("encode: %w", err)
 	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	return conn.Write(ctx, websocket.MessageText, raw)
 }
 
