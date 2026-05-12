@@ -19,6 +19,7 @@ import (
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 )
 
 // Gateway is the in-process funnel.ChatGateway. It writes via a
@@ -52,10 +53,24 @@ type ChatSender interface {
 	HandleChatSend(ctx context.Context, from, content string, replyTo int64, topic string) (int64, error)
 }
 
+// ReactBroadcaster is the seam Gateway uses to push chat.reaction.update
+// frames to subscribed operators after an in-process toggle. The broker's
+// BroadcastChatReactionUpdate satisfies it. Defined here (not in broker)
+// for the same import-cycle reason as ChatSender — broker imports chat,
+// framecomms imports chat, so framecomms can't import broker. The
+// interface keeps the dependency edge pointing the right way.
+//
+// nil = no broadcast (legacy path / tests). Production wires this from
+// cmd/nexus after broker.New the same way Sender gets wired.
+type ReactBroadcaster interface {
+	BroadcastChatReactionUpdate(payload frames.ChatReactionUpdatePayload)
+}
+
 type Gateway struct {
-	Store    chat.Store // still used for ReactTo / ReadThread / AnnounceFile / ShareFile
-	Sender   ChatSender // canonical SendChat path; nil = legacy direct-Insert fallback
-	AspectID string     // typically the Frame's name; used as the From on sends
+	Store            chat.Store       // still used for ReactTo / ReadThread / AnnounceFile / ShareFile
+	Sender           ChatSender       // canonical SendChat path; nil = legacy direct-Insert fallback
+	ReactBroadcaster ReactBroadcaster // chat.reaction.update fan-out after in-process toggle; nil = silent
+	AspectID         string           // typically the Frame's name; used as the From on sends
 }
 
 // NewGateway wires a Gateway around a Store and aspect identity.
@@ -111,8 +126,44 @@ func (g *Gateway) ReactTo(ctx context.Context, msgID int64, emoji string) error 
 	if g.AspectID == "" {
 		return fmt.Errorf("framecomms.Gateway: AspectID required to react")
 	}
-	_, err := g.Store.ToggleReaction(ctx, msgID, g.AspectID, emoji)
-	return err
+	reacted, err := g.Store.ToggleReaction(ctx, msgID, g.AspectID, emoji)
+	if err != nil {
+		return err
+	}
+
+	// Broadcast chat.reaction.update so the dashboard SPA sees the toggle
+	// without waiting for the next chat.reactions.fetch on reconnect.
+	// Mirrors the post-toggle path in broker/ws.go handleChatReactionFrame.
+	// Without this, in-process Frame reactions (👀/👍/🙊 from the funnel's
+	// work-signal path) land in the DB but never push to operators — so
+	// from the operator's view the Frame looks dead even when it's working.
+	if g.ReactBroadcaster != nil {
+		all, fetchErr := g.Store.GetReactions(ctx, []int64{msgID})
+		if fetchErr != nil {
+			// Best-effort: the toggle succeeded, the broadcast didn't.
+			// Don't surface to the caller — the model can't act on a
+			// post-write fan-out failure. Operator catches it on next
+			// page load via chat.reactions.fetch.
+			return nil
+		}
+		current := all[msgID]
+		rows := make([]frames.ReactionRow, 0, len(current))
+		for _, r := range current {
+			rows = append(rows, frames.ReactionRow{Aspect: r.Aspect, Emoji: r.Emoji})
+		}
+		op := "removed"
+		if reacted {
+			op = "added"
+		}
+		g.ReactBroadcaster.BroadcastChatReactionUpdate(frames.ChatReactionUpdatePayload{
+			MsgID:     int(msgID),
+			Reactor:   g.AspectID,
+			Emoji:     emoji,
+			Op:        op,
+			Reactions: rows,
+		})
+	}
+	return nil
 }
 
 // ReadThread pulls thread history from the store. Lock 2's pull

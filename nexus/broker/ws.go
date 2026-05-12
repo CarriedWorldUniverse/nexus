@@ -817,7 +817,7 @@ func (c *wsConn) handleChatReactionFrame(env frames.Envelope) {
 	if reacted {
 		op = "added"
 	}
-	c.broker.broadcastChatReactionUpdate(frames.ChatReactionUpdatePayload{
+	c.broker.BroadcastChatReactionUpdate(frames.ChatReactionUpdatePayload{
 		MsgID:     p.MsgID,
 		Reactor:   reactor,
 		Emoji:     p.Emoji,

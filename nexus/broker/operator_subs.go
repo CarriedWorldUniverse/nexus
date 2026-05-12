@@ -179,13 +179,16 @@ func (b *Broker) broadcastChatDeliverToOperators(env frames.Envelope) {
 	})
 }
 
-// broadcastChatReactionUpdate pushes a chat.reaction.update frame to
+// BroadcastChatReactionUpdate pushes a chat.reaction.update frame to
 // every operator with subscribedChat true. Piggy-backs the chat
 // subscription rather than introducing a separate subscribe.reactions
 // channel: reactions are part of chat in the operator's mental model,
 // and an operator who wants chat at all wants its reactions live too.
-// Hooked from handleChatReactionFrame after ToggleReaction succeeds.
-func (b *Broker) broadcastChatReactionUpdate(payload frames.ChatReactionUpdatePayload) {
+// Hooked from handleChatReactionFrame after ToggleReaction succeeds,
+// and from framecomms.Gateway.ReactTo so in-process Frame reactions
+// reach the dashboard too — without this second site, embedded Frame
+// reactions land in the DB but never push to the SPA.
+func (b *Broker) BroadcastChatReactionUpdate(payload frames.ChatReactionUpdatePayload) {
 	env, err := frames.New(frames.KindChatReactionUpdate, payload)
 	if err != nil {
 		b.log.Warn("chat.reaction.update build", "err", err, "msg_id", payload.MsgID)
