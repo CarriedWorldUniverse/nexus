@@ -82,7 +82,7 @@ func TestEmit_TurnStartAndEndFireAroundDeliberate(t *testing.T) {
 	}
 
 	got := sink.types()
-	want := []EventType{EventTurnStart, EventTurnEnd, EventFilterJudging}
+	want := []EventType{EventTurnStart, EventTurnEnd, EventFilterJudging, EventFilterJudged}
 	if len(got) != len(want) {
 		t.Fatalf("event count: got %d %v, want %d %v", len(got), got, len(want), want)
 	}
@@ -257,13 +257,13 @@ func TestEmit_CompactStartAndEndFireWhenThresholdCrossed(t *testing.T) {
 
 	got := sink.types()
 	// Expected order:
-	//   turn 1: turn.start turn.end filter.judging
+	//   turn 1: turn.start turn.end filter.judging filter.judged
 	//   turn 2 entry triggers compaction: compact.start compact.end
-	//   turn 2 proper:  turn.start turn.end filter.judging
+	//   turn 2 proper:  turn.start turn.end filter.judging filter.judged
 	want := []EventType{
-		EventTurnStart, EventTurnEnd, EventFilterJudging,
+		EventTurnStart, EventTurnEnd, EventFilterJudging, EventFilterJudged,
 		EventCompactStart, EventCompactEnd,
-		EventTurnStart, EventTurnEnd, EventFilterJudging,
+		EventTurnStart, EventTurnEnd, EventFilterJudging, EventFilterJudged,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("event count: got %d %v, want %d %v", len(got), got, len(want), want)
@@ -431,4 +431,125 @@ func TestEmit_BlockingSinkDoesNotStallDeliberation(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("deliberate stalled by blocking sink — emit() timeout not enforced")
 	}
+}
+
+// TestEmit_FilterJudgedPayload pins #211: the filter verdict is surfaced
+// as a structured event with ShouldPost/Reason/FinalTextLen so non-obs-hook
+// sinks (WS frame relay, etc.) can render the same content the local
+// observability hub renders. Without this event, judge rulings only
+// reached the local dashboard via the bridle event stream and remote
+// dashboards rendered "filter ran, then nothing."
+func TestEmit_FilterJudgedPayload(t *testing.T) {
+	sink := &recordingSink{}
+	f, _ := newTestFunnelWithSink(t, sink,
+		bridle.ProviderResult{
+			FinalText:  "substantive reply here",
+			Usage:      bridle.Usage{InputTokens: 10, OutputTokens: 5},
+			StopReason: bridle.StopReasonModelDone,
+		},
+	)
+
+	if _, err := f.Deliberate(context.Background(), "ping"); err != nil {
+		t.Fatalf("deliberate: %v", err)
+	}
+
+	events := sink.snapshot()
+	// Look for the filter.judged event — order is start, end, judging, judged.
+	var judged Event
+	for _, e := range events {
+		if e.Type == EventFilterJudged {
+			judged = e
+			break
+		}
+	}
+	if judged.Type == "" {
+		t.Fatalf("no filter.judged event emitted; got %v", sink.types())
+	}
+	payload, ok := judged.Payload.(FilterJudgedPayload)
+	if !ok {
+		t.Fatalf("payload type: got %T", judged.Payload)
+	}
+	if !payload.ShouldPost {
+		t.Errorf("ShouldPost: AlwaysPostFilter should yield true; got false")
+	}
+	wantLen := len("substantive reply here")
+	if payload.FinalTextLen != wantLen {
+		t.Errorf("FinalTextLen: got %d, want %d", payload.FinalTextLen, wantLen)
+	}
+	if payload.TurnID == "" {
+		t.Error("TurnID empty — should match the turn it judged")
+	}
+}
+
+// TestEmit_TurnEndErrorClass pins #211 + #219 correlation: when the
+// provider returns StopReasonProcessExit (signaling the bridle #219
+// partial-content path was taken), the funnel must surface that as
+// ErrorClass="subprocess_exit_partial" in TurnEndPayload so dashboards
+// can render the turn as "truncated-but-real" instead of clean.
+func TestEmit_TurnEndErrorClass(t *testing.T) {
+	sink := &recordingSink{}
+	f, _ := newTestFunnelWithSink(t, sink,
+		bridle.ProviderResult{
+			FinalText:  "partial content before exit",
+			Usage:      bridle.Usage{InputTokens: 100, OutputTokens: 7000},
+			StopReason: bridle.StopReasonProcessExit,
+		},
+	)
+
+	if _, err := f.Deliberate(context.Background(), "long prompt"); err != nil {
+		t.Fatalf("deliberate: %v", err)
+	}
+
+	events := sink.snapshot()
+	var end Event
+	for _, e := range events {
+		if e.Type == EventTurnEnd {
+			end = e
+			break
+		}
+	}
+	if end.Type == "" {
+		t.Fatalf("no turn.end event emitted")
+	}
+	payload, ok := end.Payload.(TurnEndPayload)
+	if !ok {
+		t.Fatalf("payload type: got %T", end.Payload)
+	}
+	if payload.ErrorClass != "subprocess_exit_partial" {
+		t.Errorf("ErrorClass: got %q, want %q", payload.ErrorClass, "subprocess_exit_partial")
+	}
+	if payload.StopReason != bridle.StopReasonProcessExit {
+		t.Errorf("StopReason: got %q, want %q", payload.StopReason, bridle.StopReasonProcessExit)
+	}
+}
+
+// TestEmit_TurnEndCleanHasNoErrorClass pins the inverse — a normal
+// model_done turn must NOT carry an ErrorClass label. Without this,
+// the omitempty JSON tag still serialises an empty string and
+// dashboards rendering on "ErrorClass != ''" would mis-flag clean turns.
+func TestEmit_TurnEndCleanHasNoErrorClass(t *testing.T) {
+	sink := &recordingSink{}
+	f, _ := newTestFunnelWithSink(t, sink,
+		bridle.ProviderResult{
+			FinalText:  "all good",
+			Usage:      bridle.Usage{InputTokens: 1, OutputTokens: 1},
+			StopReason: bridle.StopReasonModelDone,
+		},
+	)
+
+	if _, err := f.Deliberate(context.Background(), "ping"); err != nil {
+		t.Fatalf("deliberate: %v", err)
+	}
+
+	for _, e := range sink.snapshot() {
+		if e.Type != EventTurnEnd {
+			continue
+		}
+		payload := e.Payload.(TurnEndPayload)
+		if payload.ErrorClass != "" {
+			t.Errorf("ErrorClass on clean turn: got %q, want empty", payload.ErrorClass)
+		}
+		return
+	}
+	t.Fatal("no turn.end event found")
 }

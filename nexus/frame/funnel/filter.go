@@ -74,6 +74,13 @@ type FilterInput struct {
 	// TriggerText is the content of the triggering message. Bounded
 	// at the judge boundary to keep prompt cost predictable.
 	TriggerText string
+
+	// TriggerMsgID is the chat msg_id that triggered the deliberation,
+	// or 0 for autonomous turns. Forwarded to the judge subprocess's
+	// BeginTurn so the observability hub can correlate the judge tile
+	// back to its originating chat message — without it, judge tiles
+	// orphan in the activity stream.
+	TriggerMsgID int64
 }
 
 // FilterDecision is the result of Judge.
@@ -377,7 +384,7 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 	// after RunTurn so the Grouper's terminal frame settles before any
 	// downstream caller logic.
 	if f.ObservabilityHook != nil {
-		f.ObservabilityHook.BeginTurn(in.TurnID+"-judge", "filter-judge", f.Model, string(f.Provider), 0)
+		f.ObservabilityHook.BeginTurn(in.TurnID+"-judge", "filter-judge", f.Model, string(f.Provider), in.TriggerMsgID)
 	}
 	sink := turnSink(f.ObservabilityHook)
 	result, err := f.Harness.RunTurn(ctx, req, NullRunner{}, sink)

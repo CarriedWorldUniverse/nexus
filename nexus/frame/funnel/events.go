@@ -58,6 +58,13 @@ const (
 	// taxonomy is complete at the F1.2 wire-up.
 	EventFilterJudging EventType = "filter.judging"
 
+	// EventFilterJudged fires after the filter returns its decision.
+	// Carries the verdict (ShouldPost) and reason so non-obs-hook sinks
+	// (e.g. WS frame relays to remote dashboards) can render the same
+	// content the in-process observability hub renders for the local
+	// dashboard. Always paired with a prior EventFilterJudging.
+	EventFilterJudged EventType = "filter.judged"
+
 	// EventProviderRetry fires on retryable provider errors (rate
 	// limit, transient 5xx). Carries attempt count, error class label,
 	// backoff duration. Reserved — bridle owns retry today; funnel
@@ -94,12 +101,27 @@ type TurnToolCallPayload struct {
 }
 
 // TurnEndPayload accompanies EventTurnEnd.
+//
+// ErrorClass is non-empty when the turn ended with a recoverable
+// provider-level fault that produced partial content. Distinct from
+// StopReason — StopReason is the model's reported termination cause
+// (e.g. "model_done", "process_exit"), ErrorClass is a label for the
+// failure mode that led to it. Values today:
+//
+//   - "subprocess_exit_partial": subprocess exited non-zero AFTER
+//     producing parseable content (typically output-token cap hit;
+//     see bridle #219). Funnel still auto-posts the partial result.
+//   - "" (empty): clean turn, no error.
+//
+// New error classes are added by appending here, not at the call site,
+// so dashboards have a closed enum to render against.
 type TurnEndPayload struct {
 	TurnID     string            `json:"turn_id"`
 	Usage      bridle.Usage      `json:"usage"`
 	StopReason bridle.StopReason `json:"stop_reason"`
 	StepCount  int               `json:"step_count"`
 	Duration   time.Duration     `json:"duration"`
+	ErrorClass string            `json:"error_class,omitempty"`
 }
 
 // CompactReason names what triggered compaction. Soft = threshold
@@ -132,6 +154,19 @@ type CompactEndPayload struct {
 // FilterJudgingPayload accompanies EventFilterJudging.
 type FilterJudgingPayload struct {
 	TurnID string `json:"turn_id"`
+}
+
+// FilterJudgedPayload accompanies EventFilterJudged.
+//
+// FinalTextLen is the byte length of the candidate post the judge
+// evaluated. Pairing it with ShouldPost makes "the judge dropped a
+// 7KB substantive reply" immediately visible — without it, a no-post
+// could be a no-op suppression or a 10KB loss.
+type FilterJudgedPayload struct {
+	TurnID       string `json:"turn_id"`
+	ShouldPost   bool   `json:"should_post"`
+	Reason       string `json:"reason,omitempty"`
+	FinalTextLen int    `json:"final_text_len"`
 }
 
 // ProviderRetryPayload accompanies EventProviderRetry.
