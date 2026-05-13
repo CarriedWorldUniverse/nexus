@@ -77,21 +77,38 @@ CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at);
 -- -------------------------------------------------------------------
 -- Chat messages (comms traffic — the network's shared chat feed)
 -- -------------------------------------------------------------------
+-- parent_msg_id + thread_root_msg_id implement the linked-list thread
+-- model (task #226): every msg has at most one parent and exactly one
+-- thread_root. `reply_to` stays as the caller-provided hint of which
+-- thread to continue; the broker resolves the actual parent at INSERT
+-- time as "latest msg in this thread when this row was created" so
+-- concurrent replies-to-the-same-root naturally chain via SQLite's
+-- serialized INSERT order (no DAG branching). thread_root_msg_id is
+-- the canonical thread identity used by aspects to compute per-thread
+-- session IDs (deterministic uuid_v5 of aspect_name + ":" + thread_root).
+-- Top-level msg: parent_msg_id=NULL, thread_root_msg_id=own id.
+-- Reply: parent_msg_id=last-in-thread, thread_root_msg_id=that thread's root.
 CREATE TABLE IF NOT EXISTS chat_messages (
-  id           INTEGER PRIMARY KEY,
-  thread_id    TEXT,
-  from_agent   TEXT NOT NULL,
-  content      TEXT NOT NULL,
-  reply_to     INTEGER,
-  kind         TEXT NOT NULL DEFAULT 'chat',    -- chat | hand | system
-  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE SET NULL,
-  FOREIGN KEY (reply_to)  REFERENCES chat_messages(id) ON DELETE SET NULL
+  id                  INTEGER PRIMARY KEY,
+  thread_id           TEXT,
+  from_agent          TEXT NOT NULL,
+  content             TEXT NOT NULL,
+  reply_to            INTEGER,
+  parent_msg_id       INTEGER,           -- linked-list parent; NULL = thread root
+  thread_root_msg_id  INTEGER,           -- canonical thread identity; NULL for legacy rows pre-#226 migration
+  kind                TEXT NOT NULL DEFAULT 'chat',    -- chat | hand | system
+  created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (thread_id)          REFERENCES threads(id)          ON DELETE SET NULL,
+  FOREIGN KEY (reply_to)           REFERENCES chat_messages(id)   ON DELETE SET NULL,
+  FOREIGN KEY (parent_msg_id)      REFERENCES chat_messages(id)   ON DELETE SET NULL,
+  FOREIGN KEY (thread_root_msg_id) REFERENCES chat_messages(id)   ON DELETE SET NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_chat_thread_id  ON chat_messages(thread_id);
-CREATE INDEX IF NOT EXISTS idx_chat_from_agent ON chat_messages(from_agent);
-CREATE INDEX IF NOT EXISTS idx_chat_created_at ON chat_messages(created_at);
+CREATE INDEX IF NOT EXISTS idx_chat_thread_id          ON chat_messages(thread_id);
+CREATE INDEX IF NOT EXISTS idx_chat_from_agent         ON chat_messages(from_agent);
+CREATE INDEX IF NOT EXISTS idx_chat_created_at         ON chat_messages(created_at);
+CREATE INDEX IF NOT EXISTS idx_chat_parent_msg_id      ON chat_messages(parent_msg_id);
+CREATE INDEX IF NOT EXISTS idx_chat_thread_root_msg_id ON chat_messages(thread_root_msg_id);
 
 -- -------------------------------------------------------------------
 -- Chat reactions (toggle-emoji on a chat message — Lock 3 react_to)
