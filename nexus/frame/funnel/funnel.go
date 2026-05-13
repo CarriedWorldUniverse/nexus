@@ -492,6 +492,14 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	// Lock 5 spec promises every turn.start has a paired turn.end.
 	// Without this, dashboards listening for paired events would
 	// register every provider error as a stuck turn.
+	// Map result.StopReason to an ErrorClass label. Today the only
+	// non-clean StopReason that produces a recoverable partial turn is
+	// process_exit (bridle #219). Add to this mapping when new
+	// recoverable error classes appear.
+	var errorClass string
+	if result.StopReason == bridle.StopReasonProcessExit {
+		errorClass = "subprocess_exit_partial"
+	}
 	f.emit(ctx, Event{
 		Type: EventTurnEnd,
 		Payload: TurnEndPayload{
@@ -500,6 +508,7 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 			StopReason: result.StopReason,
 			StepCount:  result.StepCount,
 			Duration:   time.Since(turnStart),
+			ErrorClass: errorClass,
 		},
 	})
 
@@ -602,11 +611,27 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		Payload: FilterJudgingPayload{TurnID: turnID},
 	})
 	decision := f.runFilter(ctx, FilterInput{
-		FinalText:   result.FinalText,
-		AspectID:    f.cfg.AspectID,
-		TurnID:      turnID,
-		TriggerFrom: triggerFrom,
-		TriggerText: triggerContent,
+		FinalText:    result.FinalText,
+		AspectID:     f.cfg.AspectID,
+		TurnID:       turnID,
+		TriggerFrom:  triggerFrom,
+		TriggerText:  triggerContent,
+		TriggerMsgID: triggerMsgID,
+	})
+
+	// Surface the verdict as a structured Event so non-obs-hook sinks
+	// (WS frame relay, future remote dashboards) see it. The local
+	// observability hub already renders the judge tile from bridle's
+	// BeginTurn/EndTurn pair; this event is for sinks that don't
+	// subscribe to that pipeline.
+	f.emit(ctx, Event{
+		Type: EventFilterJudged,
+		Payload: FilterJudgedPayload{
+			TurnID:       turnID,
+			ShouldPost:   decision.ShouldPost,
+			Reason:       decision.Reason,
+			FinalTextLen: len(result.FinalText),
+		},
 	})
 
 	f.log.Info("funnel: turn complete",
