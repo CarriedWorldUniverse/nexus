@@ -96,6 +96,68 @@ func TestSQLStore_InsertWithReplyTo(t *testing.T) {
 	}
 }
 
+func TestSQLStore_InsertResolvesThreadColumns(t *testing.T) {
+	// #226 linked-list thread model — top-level msg self-roots, and
+	// replies inherit thread_root from their target while chaining
+	// parent_msg_id to the latest msg in the thread at INSERT time.
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	root, err := s.Insert(ctx, "operator", "root", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.ThreadRootMsgID != root.ID {
+		t.Errorf("top-level thread_root: got %d, want self %d", root.ThreadRootMsgID, root.ID)
+	}
+	if root.ParentMsgID != 0 {
+		t.Errorf("top-level parent: got %d, want 0", root.ParentMsgID)
+	}
+
+	r1, err := s.Insert(ctx, "anvil", "r1", root.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r1.ThreadRootMsgID != root.ID {
+		t.Errorf("r1 thread_root: got %d, want %d", r1.ThreadRootMsgID, root.ID)
+	}
+	if r1.ParentMsgID != root.ID {
+		t.Errorf("r1 parent: got %d, want root %d", r1.ParentMsgID, root.ID)
+	}
+
+	// Reply to r1 — parent chains to r1 (the only candidate in thread
+	// after root), thread_root stays at root.
+	r2, err := s.Insert(ctx, "plumb", "r2", r1.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r2.ThreadRootMsgID != root.ID {
+		t.Errorf("r2 thread_root: got %d, want %d", r2.ThreadRootMsgID, root.ID)
+	}
+	if r2.ParentMsgID != r1.ID {
+		t.Errorf("r2 parent: got %d, want r1 %d", r2.ParentMsgID, r1.ID)
+	}
+
+	// Reply targeting root again — parent should be r2 (latest in
+	// thread), not root. Demonstrates the linked-list collapse: even
+	// when reply_to points at root, the broker chains under r2 so the
+	// resulting structure has no DAG branch.
+	r3, err := s.Insert(ctx, "keel", "r3", root.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r3.ThreadRootMsgID != root.ID {
+		t.Errorf("r3 thread_root: got %d, want %d", r3.ThreadRootMsgID, root.ID)
+	}
+	if r3.ParentMsgID != r2.ID {
+		t.Errorf("r3 parent: got %d, want r2 %d (linked-list collapse)", r3.ParentMsgID, r2.ID)
+	}
+	if r3.ReplyTo != root.ID {
+		t.Errorf("r3 reply_to (hint preserved): got %d, want root %d", r3.ReplyTo, root.ID)
+	}
+}
+
+
 func TestSQLStore_FormatRFC3339(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

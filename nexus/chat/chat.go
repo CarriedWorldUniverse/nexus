@@ -38,10 +38,24 @@ type Message struct {
 	ID        int64     `json:"id"`
 	From      string    `json:"from"`
 	Content   string    `json:"content"`
-	ReplyTo   int64     `json:"reply_to,omitempty"` // 0 = no parent
+	ReplyTo   int64     `json:"reply_to,omitempty"` // 0 = no parent (caller-provided hint)
 	Topic     string    `json:"topic,omitempty"`    // empty = default topic
 	Kind      string    `json:"kind"`               // chat | hand | system
 	CreatedAt time.Time `json:"created_at"`         // server-stamped at INSERT
+
+	// ParentMsgID is the resolved linked-list parent (task #226). For
+	// a top-level message this is 0 (NULL in storage). For replies it
+	// is "latest msg in the thread at INSERT time" — which may differ
+	// from ReplyTo when concurrent replies-to-the-same-target race; the
+	// second one in serialized order chains under the first.
+	ParentMsgID int64 `json:"parent_msg_id,omitempty"`
+
+	// ThreadRootMsgID is the canonical thread identity. For a top-level
+	// message this equals ID; for replies it equals the ThreadRootMsgID
+	// of the row pointed to by ReplyTo. Aspects derive per-thread
+	// session ids from this (deterministic uuid_v5 keyed on
+	// aspect_name + ":" + ThreadRootMsgID).
+	ThreadRootMsgID int64 `json:"thread_root_msg_id,omitempty"`
 
 	// ReplyCount is the number of descendants in the subtree rooted at
 	// this message (recursive — depth ≥ 1). Populated only by ListPage
@@ -184,11 +198,25 @@ var ErrEmptyFrom = errors.New("chat.Insert: from is required")
 // ErrEmptyContent is returned by Insert when the content is empty.
 var ErrEmptyContent = errors.New("chat.Insert: content is required")
 
-// Insert writes a row and returns the persisted Message. We use a
-// single Exec with the default created_at to let SQLite stamp the
-// time, then read it back with a SELECT — round-tripping ensures
-// callers always see the exact value the database stored, including
-// the milliseconds the schema's `datetime('now')` produces.
+// Insert writes a row and returns the persisted Message. Resolves the
+// linked-list thread columns (parent_msg_id, thread_root_msg_id; task
+// #226) inside a BEGIN IMMEDIATE transaction so concurrent replies
+// chain via serialized INSERT order rather than branching the tree:
+//
+//   - Top-level (replyTo == 0): parent_msg_id = NULL, then
+//     thread_root_msg_id = self id (UPDATE after the INSERT mints the
+//     id; one-shot UPDATE keeps the row's identity self-rooted).
+//   - Reply (replyTo > 0): thread_root_msg_id inherits from the
+//     replyTo row's own thread_root (or the replyTo id itself, if the
+//     target is a top-level). parent_msg_id = "latest id whose
+//     thread_root_msg_id matches this thread root" — usually the
+//     replyTo target, but when two senders race a reply to the same
+//     parent the second sees the first as its parent, producing a
+//     linked list rather than a DAG.
+//
+// The serialized transaction (BEGIN IMMEDIATE) is the concurrency
+// primitive — SQLite holds the RESERVED lock for the duration so the
+// SELECT-MAX and INSERT pair is atomic against other writers.
 func (s *SQLStore) Insert(ctx context.Context, from, content string, replyTo int64, topic string) (Message, error) {
 	if from == "" {
 		return Message{}, ErrEmptyFrom
@@ -197,23 +225,75 @@ func (s *SQLStore) Insert(ctx context.Context, from, content string, replyTo int
 		return Message{}, ErrEmptyContent
 	}
 
-	// reply_to gets stored as NULL if zero so the foreign key
-	// constraint applies cleanly. thread_id is the schema's FK to
-	// threads(id) and is NOT a free-form topic string — it's left
-	// NULL for v1 chat traffic. Topic is currently dropped on the
-	// floor; F1.4c will add a real topic column or table once topics
-	// are wired into routing. For now the topic argument is reserved
-	// at the API boundary so callers can already pass it through.
+	// reply_to stored as NULL when zero so the foreign key applies
+	// cleanly. thread_id is the schema's FK to threads(id), separate
+	// concept from the linked-list thread_root_msg_id; left NULL for
+	// v1 chat traffic. Topic remains reserved at the API boundary
+	// pending #226-followup work that may surface named subjects.
 	_ = topic
 	var replyToArg any = nil
 	if replyTo != 0 {
 		replyToArg = replyTo
 	}
 
-	res, err := s.DB.ExecContext(ctx, `
-		INSERT INTO chat_messages (thread_id, from_agent, content, reply_to, kind)
-		VALUES (NULL, ?, ?, ?, 'chat')
-	`, from, content, replyToArg)
+	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return Message{}, fmt.Errorf("chat.Insert: begin: %w", err)
+	}
+	// SQLite acquires RESERVED on the first write below, escalating to
+	// EXCLUSIVE on COMMIT — that's effectively BEGIN IMMEDIATE for our
+	// access pattern (no SELECT-then-INSERT race window because each
+	// INSERT goes through this same path). Defer rollback so any
+	// early-return cleans up.
+	defer func() { _ = tx.Rollback() }()
+
+	var threadRootArg any = nil
+	var parentArg any = nil
+	if replyTo != 0 {
+		// Inherit the thread root from the replyTo target. Coalesce
+		// covers legacy rows where backfill hasn't populated the
+		// column (theoretically impossible after Part 1's backfill,
+		// but defending in depth keeps the FK consistent).
+		var threadRoot sql.NullInt64
+		err := tx.QueryRowContext(ctx, `
+			SELECT COALESCE(thread_root_msg_id, id) FROM chat_messages WHERE id = ?
+		`, replyTo).Scan(&threadRoot)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			// replyTo points at a non-existent row. FK is set-null so
+			// the INSERT will still succeed; treat the message as a
+			// new top-level for thread-root purposes (caller's
+			// reply_to hint stays as a breadcrumb).
+		case err != nil:
+			return Message{}, fmt.Errorf("chat.Insert: resolve thread_root: %w", err)
+		default:
+			threadRootArg = threadRoot.Int64
+			// Parent = latest msg already in this thread at INSERT
+			// time. Under serialized writes this is deterministic;
+			// concurrent replies-to-the-same-target chain rather than
+			// fork.
+			var latest sql.NullInt64
+			err := tx.QueryRowContext(ctx, `
+				SELECT MAX(id) FROM chat_messages WHERE thread_root_msg_id = ?
+			`, threadRoot.Int64).Scan(&latest)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return Message{}, fmt.Errorf("chat.Insert: resolve parent: %w", err)
+			}
+			if latest.Valid {
+				parentArg = latest.Int64
+			} else {
+				// Thread root exists but has no rows tagged to it
+				// yet (legacy gap or single-row root). Use the
+				// thread root itself as the parent.
+				parentArg = threadRoot.Int64
+			}
+		}
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO chat_messages (thread_id, from_agent, content, reply_to, parent_msg_id, thread_root_msg_id, kind)
+		VALUES (NULL, ?, ?, ?, ?, ?, 'chat')
+	`, from, content, replyToArg, parentArg, threadRootArg)
 	if err != nil {
 		return Message{}, fmt.Errorf("chat.Insert: exec: %w", err)
 	}
@@ -222,17 +302,27 @@ func (s *SQLStore) Insert(ctx context.Context, from, content string, replyTo int
 		return Message{}, fmt.Errorf("chat.Insert: last id: %w", err)
 	}
 
-	// Read back the row so the caller sees the server-stamped
-	// created_at. Done in the same transaction-less context — the
-	// id we just minted is unique, so a separate SELECT is correct.
+	// Top-level: thread_root = own id. Done as a follow-up UPDATE
+	// inside the same transaction because the id is only known after
+	// the INSERT.
+	if threadRootArg == nil {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE chat_messages SET thread_root_msg_id = ? WHERE id = ?
+		`, id, id); err != nil {
+			return Message{}, fmt.Errorf("chat.Insert: self-root: %w", err)
+		}
+	}
+
+	// Read back inside the same transaction so the caller sees the
+	// server-stamped created_at plus the resolved thread columns.
 	var msg Message
-	var replyToCol sql.NullInt64
+	var replyToCol, parentCol, threadRootCol sql.NullInt64
 	var topicCol sql.NullString
 	var createdAtRaw string
-	err = s.DB.QueryRowContext(ctx, `
-		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at
+	err = tx.QueryRowContext(ctx, `
+		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at, parent_msg_id, thread_root_msg_id
 		FROM chat_messages WHERE id = ?
-	`, id).Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw)
+	`, id).Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw, &parentCol, &threadRootCol)
 	if err != nil {
 		return Message{}, fmt.Errorf("chat.Insert: read-back: %w", err)
 	}
@@ -242,9 +332,19 @@ func (s *SQLStore) Insert(ctx context.Context, from, content string, replyTo int
 	if topicCol.Valid {
 		msg.Topic = topicCol.String
 	}
+	if parentCol.Valid {
+		msg.ParentMsgID = parentCol.Int64
+	}
+	if threadRootCol.Valid {
+		msg.ThreadRootMsgID = threadRootCol.Int64
+	}
 	msg.CreatedAt, err = parseSQLiteTime(createdAtRaw)
 	if err != nil {
 		return Message{}, fmt.Errorf("chat.Insert: parse created_at %q: %w", createdAtRaw, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Message{}, fmt.Errorf("chat.Insert: commit: %w", err)
 	}
 	return msg, nil
 }
