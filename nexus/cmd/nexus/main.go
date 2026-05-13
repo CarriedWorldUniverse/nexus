@@ -1027,7 +1027,7 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 			"aspect", aspectName, "judge_provider", judgeProviderID, "judge_model", judgeModel)
 		return funnel.HardRulesFilter{
 			Inner: funnel.CheapModelFilter{
-				Harness:           bridle.NewHarness(judgeProvider),
+				Harness:           bridle.NewHarness(bareJudgeProvider(judgeProvider, judgeProviderID)),
 				Provider:          judgeProviderID,
 				Model:             judgeModel,
 				AspectHome:        aspectHome,
@@ -1044,7 +1044,7 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 		}
 		return funnel.HardRulesFilter{
 			Inner: funnel.CheapModelFilter{
-				Harness:           bridle.NewHarness(judgeProvider),
+				Harness:           bridle.NewHarness(bareJudgeProvider(judgeProvider, judgeProviderID)),
 				Provider:          judgeProviderID,
 				Model:             judgeModel,
 				AspectHome:        aspectHome,
@@ -1131,6 +1131,36 @@ func buildProviderByName(name string, log *slog.Logger) (bridle.Provider, bridle
 		log.Warn("frame funnel: filter_provider unrecognised", "filter_provider", name)
 		return nil, "", false
 	}
+}
+
+// bareJudgeProvider returns the provider the cheap-judge harness should
+// use. For claude-code the Frame's provider has full CLI surface (hooks,
+// LSP, plugin sync, CLAUDE.md auto-discovery, keychain, attribution) —
+// fine for the deliberation loop, wasteful and contaminating for a
+// short-lived classifier subprocess. We construct a fresh
+// claudecode.Provider with Bare=true so the judge spawns a minimal
+// CLI: no hooks, no plugin sync, no auto-discovery, no memory writes.
+//
+// Reasons to isolate the judge provider rather than mutate the Frame's:
+//   - The Frame still needs hooks/MCP/auto-discovery for its own turn.
+//   - The two providers can hold per-instance state in future (rate
+//     limiters, session caches) without crossing wires.
+//
+// For non-claudecode judges (claude-api today, ollama/openai later)
+// returns the inbound provider unchanged — Bare is a CLI-only knob.
+//
+// Per task #196 — kills the "judge ran as 9-step agent" failure mode
+// where the cheap-judge subprocess auto-discovered CLAUDE.md, picked
+// up the aspect's full toolkit, and did real work instead of saying
+// "yes" or "no".
+func bareJudgeProvider(p bridle.Provider, id bridle.ProviderID) bridle.Provider {
+	switch id {
+	case "claude-code", "claudecode":
+		jp := claudecodeprovider.New()
+		jp.Bare = true
+		return jp
+	}
+	return p
 }
 
 // isClaudeFlavor reports whether providerID is one of the Claude
