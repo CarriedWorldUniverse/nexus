@@ -170,9 +170,13 @@ func main() {
 		Harness:  bridle.NewHarness(provider),
 		Provider: bridle.ProviderID(cfg.Provider),
 		Model:    model,
-		Tools:    funnel.CommsToolDefs(),
-		Runner:   funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
-		Logger:   log,
+		// ContextMode (#226.5): sourced from aspect.json. Values match
+		// the funnel package's ContextMode constants 1:1, so a direct
+		// cast carries it through.
+		ContextMode: funnel.ContextMode(cfg.ContextMode),
+		Tools:       funnel.CommsToolDefs(),
+		Runner:      funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		Logger:      log,
 	})
 	if err != nil {
 		fail(log, "funnel.New", err)
