@@ -341,6 +341,12 @@ func jwtExpiryMonitor(ctx context.Context, expiry time.Time, lead time.Duration,
 // inbox items from chat.deliver get processed. Mirrors the rate from
 // runtime/cmd/aspect (250ms — fast enough for mid-turn comms, slow
 // enough not to busy-loop the LLM when idle).
+//
+// Per #224, each Deliberate call handles ONE inbox message. When a
+// burst arrives, drain the queue within a single tick — looping until
+// ErrEmptyInbox — rather than waiting one tick per item (which would
+// stretch a 5-msg burst to ~1.25s). The inner loop respects ctx
+// cancellation between iterations.
 func deliberateLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger) {
 	t := time.NewTicker(250 * time.Millisecond)
 	defer t.Stop()
@@ -349,15 +355,21 @@ func deliberateLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if _, err := f.Deliberate(ctx, ""); err != nil &&
-				!errors.Is(err, context.Canceled) &&
-				!errors.Is(err, funnel.ErrEmptyInbox) {
-				// ErrEmptyInbox is the normal idle case — the tick fires
-				// 4x/sec regardless of inbox state. Logging it as WARN
-				// floods the log and hides real errors. Surfaced on
-				// 2026-05-11 when anvil came online and produced 4 WARN
-				// lines per second.
-				log.Warn("agentfunnel: deliberate", "err", err)
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				_, err := f.Deliberate(ctx, "")
+				if errors.Is(err, funnel.ErrEmptyInbox) {
+					break
+				}
+				if err != nil {
+					if errors.Is(err, context.Canceled) {
+						return
+					}
+					log.Warn("agentfunnel: deliberate", "err", err)
+					break
+				}
 			}
 		}
 	}

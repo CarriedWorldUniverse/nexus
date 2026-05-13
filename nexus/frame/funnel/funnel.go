@@ -347,20 +347,33 @@ func (f *Funnel) InboxLen() int {
 	return len(f.inbox)
 }
 
-// Deliberate runs one full deliberation cycle: drain inbox → check
-// compaction threshold → bridle.RunTurn → post-hoc filter judges
-// the natural reply (Lock 1.3 / Lock 3). Returns the bridle.TurnResult
-// of the primary turn (compaction's summarize turn isn't surfaced)
-// alongside the FilterDecision the funnel made about whether the
-// reply should post.
+// Deliberate runs one full deliberation cycle for EXACTLY ONE inbox
+// message (FIFO head-pop) → check compaction threshold → bridle.RunTurn
+// → post-hoc filter judges the natural reply. Returns the bridle.TurnResult
+// alongside the FilterDecision.
 //
-// Callers consult FilterDecision.ShouldPost to decide whether to
-// surface result.FinalText to chat. F1.2/F1.4 wire the actual posting
-// path; today's caller in cmd/nexus/main.go just respects the
-// decision implicitly by not having a posting path yet.
+// Per #224 (operator 2026-05-13): the inbox is a FIFO queue and each
+// Deliberate call pops exactly one head item. Cross-thread context
+// folding (the prior "drain all into one prompt" behavior) corrupts
+// reasoning and breaks the thread-targeting invariant — one turn's
+// reasoning happens in the context of ONE msg_id, producing ONE reply,
+// threaded under ONE parent. Cross-thread bursts naturally serialize
+// into N turns.
+//
+// Callers that want to fully drain a burst should loop:
+//
+//	for {
+//	    _, err := f.Deliberate(ctx, "")
+//	    if errors.Is(err, ErrEmptyInbox) { break }
+//	    // handle other errors
+//	}
 //
 // Returns ErrEmptyInbox if no comms are pending and userMessage is
 // empty — a no-op deliberation isn't useful.
+//
+// Callers consult FilterDecision.ShouldPost to decide whether to
+// surface result.FinalText to chat. The funnel's auto-post path uses
+// the popped item's msg_id as reply_to, so threading is intrinsic.
 func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (DeliberateResult, error) {
 	f.mu.Lock()
 	if len(f.inbox) == 0 && userMessage == "" {
@@ -368,19 +381,34 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		return DeliberateResult{}, ErrEmptyInbox
 	}
 
-	// Drain inbox under lock. Mid-deliberation Receive calls will
-	// accumulate into the next cycle's inbox.
-	pending := make([]bridle.InboxItem, len(f.inbox))
-	copy(pending, f.inbox)
-	f.inbox = f.inbox[:0]
+	// FIFO pop: take the HEAD item only. Remaining items stay in
+	// f.inbox for the next Deliberate call. Per #224, this preserves
+	// the thread context invariant — each turn handles one msg in
+	// isolation, queue depth is invisible to the model.
+	var pending []bridle.InboxItem
+	if len(f.inbox) > 0 {
+		head := f.inbox[0]
+		// Shift remaining items down. Copy-then-truncate so the slice's
+		// backing array doesn't pin freed item references.
+		copy(f.inbox, f.inbox[1:])
+		f.inbox = f.inbox[:len(f.inbox)-1]
+		pending = []bridle.InboxItem{head}
+	}
 
-	// Capture and clear the triggering chat msg_id for Lock 4
-	// usage attribution. Subsequent ReceiveWithMsgID calls during
-	// this deliberation queue into the next cycle's inbox; their
-	// msg_ids will attribute to the next turn.
-	triggerMsgID := f.triggeringMsgID
-	triggerFrom := f.triggeringFrom
-	triggerContent := f.triggeringContent
+	// Trigger context comes from the popped item (not from the legacy
+	// "latest Receive wins" path — that conflated multiple msgs into one
+	// trigger). When userMessage drives the turn with no inbox item,
+	// trigger fields stay zero/empty.
+	var triggerMsgID int64
+	var triggerFrom, triggerContent string
+	if len(pending) > 0 {
+		triggerMsgID = pending[0].MsgID
+		triggerFrom = pending[0].From
+		triggerContent = pending[0].Content
+	}
+	// Clear the cached "latest Receive" fields — they're vestigial under
+	// FIFO semantics but kept until ReceiveWithMsgID is refactored to
+	// stop writing them. Reset on every Deliberate for safety.
 	f.triggeringMsgID = 0
 	f.triggeringFrom = ""
 	f.triggeringContent = ""

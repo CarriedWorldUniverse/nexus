@@ -224,8 +224,23 @@ func deliberateLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if _, err := f.Deliberate(ctx, ""); err != nil && !errors.Is(err, context.Canceled) {
-				log.Warn("deliberate", "err", err)
+			// Per #224, each Deliberate handles ONE message. Drain a
+			// burst within a single tick by looping until ErrEmptyInbox.
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				_, err := f.Deliberate(ctx, "")
+				if errors.Is(err, funnel.ErrEmptyInbox) {
+					break
+				}
+				if err != nil {
+					if errors.Is(err, context.Canceled) {
+						return
+					}
+					log.Warn("deliberate", "err", err)
+					break
+				}
 			}
 		}
 	}

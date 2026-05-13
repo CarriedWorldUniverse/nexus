@@ -1531,8 +1531,20 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 				return
 			}
 			f.ReceiveWithMsgID(bridle.InboxItem{From: from, Content: content}, msgID)
-			if _, err := f.Deliberate(rctx, ""); err != nil {
-				log.Warn("frame funnel: deliberation error", "err", err, "msg_id", msgID)
+			// Drain the inbox one msg per turn (#224 FIFO contract).
+			// Loop until ErrEmptyInbox so a burst that arrived while the
+			// previous turn was running gets fully processed before
+			// yielding. Each turn handles one msg in isolation; threads
+			// stay separate by construction.
+			for {
+				_, err := f.Deliberate(rctx, "")
+				if errors.Is(err, funnel.ErrEmptyInbox) {
+					break
+				}
+				if err != nil {
+					log.Warn("frame funnel: deliberation error", "err", err, "msg_id", msgID)
+					break
+				}
 			}
 		},
 	}, gateway
