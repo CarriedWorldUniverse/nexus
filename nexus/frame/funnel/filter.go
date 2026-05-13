@@ -228,41 +228,49 @@ type CheapModelFilter struct {
 const filterJudgeTimeout = 30 * time.Second
 
 // filterJudgePrompt is the system prompt for the cheap-model filter.
-// Optimized for "yes/no with no preamble" — the funnel parses the
-// response with a substring check, so anything but a clean yes/no
-// degrades into the fail-open path.
-const filterJudgePrompt = `You are a chat-meaningfulness judge. You will be shown a single message produced by an aspect (an AI agent) at the end of a turn. Your job: decide whether this message contains meaningful content for the group chat, or whether it is scratch/internal-thinking/empty/non-reply/meta-routing content that should be suppressed.
+// Reply format is "<yes|no> <free-form reason>" — the funnel parses
+// the first token as the verdict; the reason is logged for audit.
+//
+// Design rationale: an earlier version of this prompt asked for a
+// category tag from a named taxonomy (self-suppress / meta-routing /
+// internal-thinking / empty-ack / echo). The cheap model couldn't
+// reliably distinguish "comments on the conversation shape AS A
+// substantive contribution" from "comments on the conversation shape
+// AS routing chatter" — both look like meta-routing tokens, but only
+// the second is suppress-worthy. The model would emit the category
+// name and the verdict independently, producing internally
+// contradictory output like "no meta-routing — addresses message
+// substantively" where the verdict said suppress but the reason said
+// post. Observed 2026-05-13 eating plumb's substantive license
+// analysis. Removing the category slot removes the confabulation;
+// asking only "would the recipient be glad to receive this?"
+// collapses the decision back to one judgement.
+const filterJudgePrompt = `You are a chat-meaningfulness judge for a group chat between AI agents and their operator.
 
-A message is MEANINGFUL only if it contributes something the recipients would want to read: information, a question, a decision, a status update, a substantive opinion, a tool result they need to see, or an emotional/social acknowledgement that's part of an ongoing conversation they're actively in.
+You will be shown a candidate message one agent is about to post. Decide whether the message is worth posting (yes) or whether it should be silently suppressed (no).
 
-A message is NOT meaningful (and should be suppressed) if it falls into any of these patterns — note that these are CATEGORIES, not exhaustive phrasings. Match the intent, not the words:
+The bar: would the recipients be glad to receive this message? "Yes" if it contributes information, a question, a status update, a decision, a recommendation, an analysis, a substantive opinion, a useful acknowledgement that moves the conversation forward, or anything else that meaningfully advances the thread.
 
-  1. Self-suppress / non-reply. The aspect saying it has nothing to add, isn't going to respond, will stay quiet, is observing only. Direct ("I don't have anything to add") and indirect ("Nothing further from me on this") both count.
+"No" only when the message is genuinely empty of contribution: the agent saying it has nothing to add, narrating its own silence, leaking internal thinking ("should I respond?"), bare acknowledgements with no payload ("acknowledged", "noted"), or restating the previous message without adding to it.
 
-  2. Meta-routing commentary. The aspect noticing that a message wasn't addressed to it and narrating that observation. "This isn't for me." / "Addressed to @operator, not me. No action required." / "Still addressed to @X, not me. Silence." / "Routing artifact — ignoring." All of these talk ABOUT being silent instead of being silent. ALL suppress.
+Default to YES when in doubt. Substantive output addressed to operators or peers should land even if its phrasing brushes against meta-territory (e.g. a thoughtful answer that opens with "Good question, here's my read" is YES — the answer IS the contribution). Suppression is reserved for output that is itself the absence of substance.
 
-  3. Internal thinking / scratch. Bracketed thoughts, "(thinking: ...)", "should I respond?", chain-of-reasoning leak.
+Reply format: the literal token "yes" or "no" (lowercase, no leading punctuation), one space, then a brief plain-English reason (≤15 words) explaining the judgement. The parser reads only the first token; the reason is for the operator's audit log.
 
-  4. Empty acknowledgements. "Acknowledged.", "Noted.", "Holding.", "Standing by.", "Copy that." — content-free even when grammatical.
-
-  5. Echo / mirror. A reply that just restates what the previous message said without adding anything ("So you're saying X" where X is verbatim the prior msg).
-
-Reply format: start with EXACTLY "yes" or "no" (lowercase, no punctuation before), then ONE space, then a brief reason (≤12 words) naming the category from the list above. Examples of well-formed replies: "no meta-routing — talks about being silent" / "yes substantive update with concrete numbers" / "no empty acknowledgement". The parser only consumes the first token, but the reason is logged + surfaced in the observability stream so operators can see WHY the judge ruled. Without a reason the operator has no way to tune the prompt when verdicts go wrong.
-
-Examples (reply → verdict):
+Examples:
 - "I'll check the database and report back" → yes commits to action
 - "Looking at the code now" → yes status update
-- "Migration completed — 4.2M rows updated, 0 errors" → yes substantive result
-- "I don't have anything to add to this thread" → no self-suppress
-- "This message is addressed to @operator, not me. No action required." → no meta-routing
-- "Still addressed to @anvil, not me. Silence." → no meta-routing
-- "plumb's message is for the operator — I'll stay out of it." → no meta-routing
-- "(internal: should I respond?)" → no internal-thinking
-- "Holding." → no empty-ack
-- "Acknowledged." → no empty-ack
-- "Noted, will let you know if it changes" → yes commits to action
+- "Migration completed — 4.2M rows updated, 0 errors" → yes substantive result with concrete numbers
+- "Apache-2.0 is the lowest-friction upgrade from MIT — same permissive ethos, NOTICE file mechanism..." → yes substantive analysis answering the operator's question
+- "Good catch — agreed, the inbox-at-send shape is correct" → yes substantive agreement with reasoning
+- "I don't have anything to add to this thread" → no agent stating it won't contribute
+- "This message wasn't addressed to me. No action required." → no narrating own silence
+- "(internal: should I respond?)" → no internal thinking leak
+- "Acknowledged." → no bare acknowledgement with no payload
+- "Holding." → no empty status with no content
+- "Noted, will let you know if it changes" → yes commits to followup
 - empty / whitespace only → no empty
-- "{thinking: this is for someone else}" → no internal-thinking`
+- "So you're saying X" (where X verbatim restates the prior message) → no echo without adding`
 
 // maxJudgeTriggerLen / maxJudgeCandidateLen bound the strings the judge
 // sees, mirroring agent-network/code/harness/index.js:501,504. Predictable
