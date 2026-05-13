@@ -412,12 +412,28 @@ func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.Provider
 		"judge_provider", providerID, "judge_model", "haiku")
 	return funnel.HardRulesFilter{
 		Inner: funnel.CheapModelFilter{
-			Harness:  bridle.NewHarness(provider),
+			Harness:  bridle.NewHarness(bareJudgeProvider(provider, providerID)),
 			Provider: providerID,
 			Model:    "haiku",
 			Logger:   log,
 		},
 	}
+}
+
+// bareJudgeProvider mirrors cmd/nexus/main.go: when the judge runs
+// under claude-code, build a fresh Provider with Bare=true so the
+// cheap-judge subprocess gets the lean CLI surface (no hooks/LSP/
+// plugin sync/auto-discovery/keychain reads/CLAUDE.md). The
+// deliberation provider keeps the full surface — only the judge is
+// stripped down. Per task #196.
+func bareJudgeProvider(p bridle.Provider, id bridle.ProviderID) bridle.Provider {
+	switch id {
+	case "claude-code", "claudecode":
+		jp := claudecodeprovider.New()
+		jp.Bare = true
+		return jp
+	}
+	return p
 }
 
 // isClaudeFlavor reports whether providerID is one of the Claude
