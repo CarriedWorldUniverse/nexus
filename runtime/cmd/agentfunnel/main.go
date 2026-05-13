@@ -220,6 +220,16 @@ func main() {
 		Provider:     bridle.ProviderID(res.Provider),
 		Model:        res.Model,
 		SystemPrompt: systemPrompt,
+		// ContextMode (#226.5): funnel-driven aspects key per-thread
+		// sessions on the chat thread root, so each chat thread keeps
+		// its own claude-code jsonl. schemas.ContextMode and
+		// funnel.ContextMode share their string values ("global" /
+		// "thread" / "stateless"), so a direct cast carries the
+		// --context-mode flag (default "thread") through without
+		// translation. Today the validation response doesn't yet ship
+		// ContextMode, so the flag is the source of truth; when it
+		// does, prefer res.ContextMode over the flag (see flag help).
+		ContextMode: funnel.ContextMode(cm),
 		// Tools field is for direct-API providers; claude-code subprocess
 		// owns its own tool surface natively. Mirrors cmd/nexus/main.go's
 		// toolsForProvider — see #181 for the MCP fix.

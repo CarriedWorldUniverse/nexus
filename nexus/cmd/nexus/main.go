@@ -1442,6 +1442,13 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		Harness:    bridle.NewHarness(p),
 		Provider:   bridle.ProviderID(provider),
 		Model:      model,
+		// ContextMode (#226.5): the Frame is hardcoded to Global. Its
+		// deliberation legitimately spans all incoming chat as one
+		// stream of consciousness — operator routing, multi-aspect
+		// coordination, cross-thread context are first-class for the
+		// Frame. Per-thread isolation belongs to funnel-driven aspects
+		// (agentfunnel, runtime/cmd/aspect).
+		ContextMode: funnel.ContextGlobal,
 		// SystemPromptFn (not SystemPrompt) so RefreshPersonality on
 		// the EmbeddedFrame is picked up by the next turn without
 		// rebuilding the funnel. Spec §11 in-process refresh path.
