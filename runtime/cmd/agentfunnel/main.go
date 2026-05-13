@@ -423,12 +423,21 @@ func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.Provider
 }
 
 // bareJudgeProvider mirrors cmd/nexus/main.go: when the judge runs
-// under claude-code, build a fresh Provider with Bare=true so the
-// cheap-judge subprocess gets the lean CLI surface (no hooks/LSP/
-// plugin sync/auto-discovery/keychain reads/CLAUDE.md). The
-// deliberation provider keeps the full surface — only the judge is
-// stripped down. Per task #196.
+// under claude-code, the original intent (#196) was a fresh Provider
+// with Bare=true for a lean CLI surface. Disabled 2026-05-13 same as
+// the in-process Frame: --bare is API-key-only mode (disables
+// subscription auth entirely), and aspects running this binary run on
+// subscription, so the bare subprocess had no auth path and returned
+// "Not logged in" as every verdict. See main.go bareJudgeProvider for
+// the full incident write-up. Re-enable post-#222 once the credentials
+// store can hand an API key to the bare subprocess.
+//
+// Until then: judge inherits the deliberation provider's surface.
+// Contamination risk #196 was meant to fix is mitigated by #195's
+// prompt hardening + #212's verdict format.
 func bareJudgeProvider(p bridle.Provider, id bridle.ProviderID) bridle.Provider {
+	return p
+	//nolint:gocritic // bare path kept for the post-#222 API-key spawn future
 	switch id {
 	case "claude-code", "claudecode":
 		jp := claudecodeprovider.New()
