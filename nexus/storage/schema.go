@@ -95,7 +95,9 @@ func closeOnError(db *sql.DB, log *slog.Logger, context string) {
 // Bootstrap runs the embedded schema.sql against db. The DDL is
 // idempotent (CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS,
 // CREATE TRIGGER IF NOT EXISTS) so it is safe on an empty database or
-// on an already-bootstrapped one.
+// on an already-bootstrapped one. Conditional column additions live
+// in addMissingColumns below — ALTER TABLE isn't naturally idempotent
+// so we check PRAGMA table_info first.
 func Bootstrap(ctx context.Context, db *sql.DB) error {
 	if db == nil {
 		return errors.New("storage: nil db")
@@ -103,5 +105,78 @@ func Bootstrap(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("exec schema: %w", err)
 	}
+	if err := addMissingColumns(ctx, db); err != nil {
+		return fmt.Errorf("add missing columns: %w", err)
+	}
 	return nil
+}
+
+// columnAddition declares an ALTER TABLE ADD COLUMN we want to run
+// once and only if the column doesn't already exist. SQLite's
+// `ALTER TABLE ADD COLUMN IF NOT EXISTS` doesn't exist; this is the
+// equivalent done in Go.
+type columnAddition struct {
+	table  string
+	column string
+	ddl    string // full ALTER TABLE statement
+}
+
+// columnsToAdd lists every conditional column the running codebase
+// expects. Each entry is checked against PRAGMA table_info on Bootstrap;
+// missing ones are added. Append to this slice rather than editing
+// schema.sql when introducing a new column on an existing table.
+var columnsToAdd = []columnAddition{
+	// Task #218 — per-aspect default credentials so aspects calling
+	// claude.completion() without an explicit credential= arg can be
+	// routed to the right key without per-call configuration.
+	{
+		table:  "aspects",
+		column: "default_anthropic_credential",
+		ddl:    "ALTER TABLE aspects ADD COLUMN default_anthropic_credential TEXT",
+	},
+	{
+		table:  "aspects",
+		column: "default_openai_credential",
+		ddl:    "ALTER TABLE aspects ADD COLUMN default_openai_credential TEXT",
+	},
+}
+
+func addMissingColumns(ctx context.Context, db *sql.DB) error {
+	for _, c := range columnsToAdd {
+		exists, err := columnExists(ctx, db, c.table, c.column)
+		if err != nil {
+			return fmt.Errorf("check column %s.%s: %w", c.table, c.column, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("add column %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	return nil
+}
+
+func columnExists(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+	// PRAGMA table_info returns one row per column. Can't parameterize
+	// the table name in a PRAGMA, but the values come from our own
+	// columnsToAdd slice (compile-time constants), not user input.
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }

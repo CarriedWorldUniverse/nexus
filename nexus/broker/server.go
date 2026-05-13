@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
@@ -260,6 +261,13 @@ type Config struct {
 	// includes central content, so the future WS broadcast will land
 	// here too (Part 9d). nil callback is a no-op.
 	OnNexusMDChange func(newVersion int64)
+
+	// Credentials is the broker-mediated API-credential store (task
+	// #218). When non-nil, /api/admin/credentials/* admin endpoints
+	// register and the proxy tools (claude.completion, openai.chat.
+	// completion) become available. Nil = pre-#218 boot, credentials
+	// surface is absent.
+	Credentials *credentials.Store
 
 	// Observability is a pre-constructed Hub the broker should adopt
 	// instead of building its own. Use case: the embedded Frame's
