@@ -370,7 +370,7 @@ func (s *SQLStore) ListThread(ctx context.Context, threadID, sinceID int64, limi
 			SELECT cm.id FROM chat_messages cm
 			JOIN thread t ON cm.reply_to = t.id
 		)
-		SELECT cm.id, cm.from_agent, cm.content, cm.reply_to, cm.thread_id, cm.kind, cm.created_at
+		SELECT cm.id, cm.from_agent, cm.content, cm.reply_to, cm.thread_id, cm.kind, cm.created_at, cm.parent_msg_id, cm.thread_root_msg_id
 		FROM chat_messages cm
 		JOIN thread t ON cm.id = t.id
 		WHERE cm.id > ?
@@ -392,10 +392,10 @@ func (s *SQLStore) ListThread(ctx context.Context, threadID, sinceID int64, limi
 	var out []Message
 	for rows.Next() {
 		var msg Message
-		var replyToCol sql.NullInt64
+		var replyToCol, parentCol, threadRootCol sql.NullInt64
 		var topicCol sql.NullString
 		var createdAtRaw string
-		if err := rows.Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw, &parentCol, &threadRootCol); err != nil {
 			return nil, fmt.Errorf("chat.ListThread: scan: %w", err)
 		}
 		if replyToCol.Valid {
@@ -403,6 +403,12 @@ func (s *SQLStore) ListThread(ctx context.Context, threadID, sinceID int64, limi
 		}
 		if topicCol.Valid {
 			msg.Topic = topicCol.String
+		}
+		if parentCol.Valid {
+			msg.ParentMsgID = parentCol.Int64
+		}
+		if threadRootCol.Valid {
+			msg.ThreadRootMsgID = threadRootCol.Int64
 		}
 		msg.CreatedAt, err = parseSQLiteTime(createdAtRaw)
 		if err != nil {
@@ -696,7 +702,7 @@ func (s *SQLStore) ShareFile(ctx context.Context, sharedBy, path string, recipie
 // page comes back short of the limit.
 func (s *SQLStore) ListSince(ctx context.Context, sinceID int64, limit int) ([]Message, error) {
 	q := `
-		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at
+		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at, parent_msg_id, thread_root_msg_id
 		FROM chat_messages
 		WHERE id > ?
 		ORDER BY id ASC
@@ -716,10 +722,10 @@ func (s *SQLStore) ListSince(ctx context.Context, sinceID int64, limit int) ([]M
 	var out []Message
 	for rows.Next() {
 		var msg Message
-		var replyToCol sql.NullInt64
+		var replyToCol, parentCol, threadRootCol sql.NullInt64
 		var topicCol sql.NullString
 		var createdAtRaw string
-		if err := rows.Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw, &parentCol, &threadRootCol); err != nil {
 			return nil, fmt.Errorf("chat.ListSince: scan: %w", err)
 		}
 		if replyToCol.Valid {
@@ -727,6 +733,12 @@ func (s *SQLStore) ListSince(ctx context.Context, sinceID int64, limit int) ([]M
 		}
 		if topicCol.Valid {
 			msg.Topic = topicCol.String
+		}
+		if parentCol.Valid {
+			msg.ParentMsgID = parentCol.Int64
+		}
+		if threadRootCol.Valid {
+			msg.ThreadRootMsgID = threadRootCol.Int64
 		}
 		msg.CreatedAt, err = parseSQLiteTime(createdAtRaw)
 		if err != nil {
@@ -746,13 +758,13 @@ func (s *SQLStore) ListSince(ctx context.Context, sinceID int64, limit int) ([]M
 // rather than aborting recipient computation.
 func (s *SQLStore) GetByID(ctx context.Context, id int64) (Message, error) {
 	var msg Message
-	var replyToCol sql.NullInt64
+	var replyToCol, parentCol, threadRootCol sql.NullInt64
 	var topicCol sql.NullString
 	var createdAtRaw string
 	err := s.DB.QueryRowContext(ctx, `
-		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at
+		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at, parent_msg_id, thread_root_msg_id
 		FROM chat_messages WHERE id = ?
-	`, id).Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw)
+	`, id).Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw, &parentCol, &threadRootCol)
 	if err != nil {
 		return Message{}, err
 	}
@@ -761,6 +773,12 @@ func (s *SQLStore) GetByID(ctx context.Context, id int64) (Message, error) {
 	}
 	if topicCol.Valid {
 		msg.Topic = topicCol.String
+	}
+	if parentCol.Valid {
+		msg.ParentMsgID = parentCol.Int64
+	}
+	if threadRootCol.Valid {
+		msg.ThreadRootMsgID = threadRootCol.Int64
 	}
 	msg.CreatedAt, err = parseSQLiteTime(createdAtRaw)
 	if err != nil {
@@ -848,7 +866,7 @@ func (s *SQLStore) ListReplies(ctx context.Context, parentID int64) ([]Message, 
 		return nil, fmt.Errorf("chat.ListReplies: parent_id must be positive")
 	}
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at
+		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at, parent_msg_id, thread_root_msg_id
 		FROM chat_messages
 		WHERE reply_to = ?
 		ORDER BY id ASC
@@ -861,10 +879,10 @@ func (s *SQLStore) ListReplies(ctx context.Context, parentID int64) ([]Message, 
 	var out []Message
 	for rows.Next() {
 		var msg Message
-		var replyToCol sql.NullInt64
+		var replyToCol, parentCol, threadRootCol sql.NullInt64
 		var topicCol sql.NullString
 		var createdAtRaw string
-		if err := rows.Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw, &parentCol, &threadRootCol); err != nil {
 			return nil, fmt.Errorf("chat.ListReplies: scan: %w", err)
 		}
 		if replyToCol.Valid {
@@ -872,6 +890,12 @@ func (s *SQLStore) ListReplies(ctx context.Context, parentID int64) ([]Message, 
 		}
 		if topicCol.Valid {
 			msg.Topic = topicCol.String
+		}
+		if parentCol.Valid {
+			msg.ParentMsgID = parentCol.Int64
+		}
+		if threadRootCol.Valid {
+			msg.ThreadRootMsgID = threadRootCol.Int64
 		}
 		t, err := parseSQLiteTime(createdAtRaw)
 		if err != nil {
@@ -915,7 +939,7 @@ func (s *SQLStore) ListPage(ctx context.Context, beforeID, afterID int64, limit 
 	)
 	switch {
 	case afterID > 0:
-		q = `SELECT id, from_agent, content, reply_to, thread_id, kind, created_at
+		q = `SELECT id, from_agent, content, reply_to, thread_id, kind, created_at, parent_msg_id, thread_root_msg_id
 		     FROM chat_messages WHERE id > ? ORDER BY id ASC LIMIT ?`
 		args = []any{afterID, probe}
 	default:
@@ -924,7 +948,7 @@ func (s *SQLStore) ListPage(ctx context.Context, beforeID, afterID int64, limit 
 		if anchor <= 0 {
 			anchor = 1<<63 - 1 // MaxInt64
 		}
-		q = `SELECT id, from_agent, content, reply_to, thread_id, kind, created_at
+		q = `SELECT id, from_agent, content, reply_to, thread_id, kind, created_at, parent_msg_id, thread_root_msg_id
 		     FROM chat_messages WHERE id < ? ORDER BY id DESC LIMIT ?`
 		args = []any{anchor, probe}
 	}
@@ -938,10 +962,10 @@ func (s *SQLStore) ListPage(ctx context.Context, beforeID, afterID int64, limit 
 	var msgs []Message
 	for rows.Next() {
 		var msg Message
-		var replyToCol sql.NullInt64
+		var replyToCol, parentCol, threadRootCol sql.NullInt64
 		var topicCol sql.NullString
 		var createdAtRaw string
-		if err := rows.Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw, &parentCol, &threadRootCol); err != nil {
 			return nil, false, fmt.Errorf("chat.ListPage: scan: %w", err)
 		}
 		if replyToCol.Valid {
@@ -949,6 +973,12 @@ func (s *SQLStore) ListPage(ctx context.Context, beforeID, afterID int64, limit 
 		}
 		if topicCol.Valid {
 			msg.Topic = topicCol.String
+		}
+		if parentCol.Valid {
+			msg.ParentMsgID = parentCol.Int64
+		}
+		if threadRootCol.Valid {
+			msg.ThreadRootMsgID = threadRootCol.Int64
 		}
 		t, err := parseSQLiteTime(createdAtRaw)
 		if err != nil {

@@ -70,6 +70,28 @@ func TestBridge_ReplayFlagDoesNotCorruptForwarding(t *testing.T) {
 	}
 }
 
+func TestBridge_ThreadRootCarriesThroughToInbox(t *testing.T) {
+	// #226 part 3: thread_root identity must reach bridle.InboxItem so
+	// the funnel can key per-thread session ids. Verify the Bridge
+	// copies DeliveredMessage.ThreadRoot onto InboxItem.ThreadRoot.
+	target := &recordingTarget{}
+	bridge := NewBridge(target)
+
+	bridge.OnDeliver(DeliveredMessage{
+		ID:         101,
+		From:       "shadow",
+		Content:    "thread A msg",
+		ThreadRoot: 99,
+	})
+
+	if len(target.items) != 1 {
+		t.Fatalf("expected 1 forwarded item, got %d", len(target.items))
+	}
+	if target.items[0].ThreadRoot != 99 {
+		t.Errorf("ThreadRoot dropped: got %d, want 99", target.items[0].ThreadRoot)
+	}
+}
+
 func TestBridge_MultipleDeliveriesPreserveOrder(t *testing.T) {
 	target := &recordingTarget{}
 	bridge := NewBridge(target)

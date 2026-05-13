@@ -523,6 +523,7 @@ func (c *wsConn) handleChatReadFrame(env frames.Envelope) {
 			Content:    m.Content,
 			ReplyTo:    int(m.ReplyTo),
 			ReceivedAt: m.CreatedAt.UTC().Format(time.RFC3339),
+			ThreadRoot: int(m.ThreadRootMsgID),
 			// Reason left empty — aspect knows it's a pull, not a push,
 			// from the frame's response correlation. Replay=false
 			// (this is a synchronous read, not Lock 6 replay).
@@ -1046,6 +1047,7 @@ func (c *wsConn) replayAddressedSince(aspect string, since int64) {
 			ReceivedAt: m.CreatedAt.UTC().Format(time.RFC3339),
 			Reason:     "replay",
 			Replay:     true,
+			ThreadRoot: int(m.ThreadRootMsgID),
 		})
 		if err != nil {
 			c.log.Warn("lock-6 replay: build frame", "err", err)
