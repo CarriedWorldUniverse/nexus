@@ -22,6 +22,8 @@ package funnel
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -235,49 +237,39 @@ type CheapModelFilter struct {
 const filterJudgeTimeout = 30 * time.Second
 
 // filterJudgePrompt is the system prompt for the cheap-model filter.
-// Reply format is "<yes|no> <free-form reason>" — the funnel parses
-// the first token as the verdict; the reason is logged for audit.
+// Reply format is a single JSON object: {"post": bool, "reason": string}.
 //
-// Design rationale: an earlier version of this prompt asked for a
-// category tag from a named taxonomy (self-suppress / meta-routing /
-// internal-thinking / empty-ack / echo). The cheap model couldn't
-// reliably distinguish "comments on the conversation shape AS A
-// substantive contribution" from "comments on the conversation shape
-// AS routing chatter" — both look like meta-routing tokens, but only
-// the second is suppress-worthy. The model would emit the category
-// name and the verdict independently, producing internally
-// contradictory output like "no meta-routing — addresses message
-// substantively" where the verdict said suppress but the reason said
-// post. Observed 2026-05-13 eating plumb's substantive license
-// analysis. Removing the category slot removes the confabulation;
-// asking only "would the recipient be glad to receive this?"
-// collapses the decision back to one judgement.
-const filterJudgePrompt = `You are a chat-meaningfulness judge for a group chat between AI agents and their operator.
+// Design rationale: the prior prose-prompt version (multi-rule, expanded
+// yes-list, 14 examples) gave the cheap model rope to find suppression
+// rationales for substantive content — observed 2026-05-13 eating keel's
+// scoping question to operator (#239 audit). Restoring the
+// agent-network shape that calibrated well in production for months:
+// narrow direct question, four specific suppress categories, JSON
+// output for robust parsing. No expanded "yes" examples — anything not
+// matching the four suppress categories defaults to post=true.
+//
+// Symmetric treatment: operator messages are NOT bypassed. Operator is
+// just another peer for filter purposes; aspect-to-aspect calibration
+// should match aspect-to-operator calibration. If the filter
+// mis-suppresses operator-addressed replies, that's signal to fix the
+// filter, not a reason to hide it behind a bypass.
+const filterJudgePrompt = `You are a chat-output filter for an AI agent in a group chat.
 
-You will be shown a candidate message one agent is about to post. Decide whether the message is worth posting (yes) or whether it should be silently suppressed (no).
+Single question: does the candidate output below have meaningful content for the group chat?
 
-The bar: would the recipients be glad to receive this message? "Yes" if it contributes information, a question, a status update, a decision, a recommendation, an analysis, a substantive opinion, a useful acknowledgement that moves the conversation forward, or anything else that meaningfully advances the thread.
+Respond with ONLY valid JSON (no markdown, no explanation):
+{"post": true | false, "reason": "one short phrase"}
 
-"No" only when the message is genuinely empty of contribution: the agent saying it has nothing to add, narrating its own silence, leaking internal thinking ("should I respond?"), bare acknowledgements with no payload ("acknowledged", "noted"), or restating the previous message without adding to it.
+post=false when the candidate is NOT meaningful chat content. Examples:
+- The agent said something like "this isn't for me, I'll stay quiet" or "no response needed" — the agent itself is signaling disengagement; respect it
+- The output is raw JSON / scratch / classification format that leaked from internal reasoning
+- Empty, whitespace-only, or near-empty
+- Tool-call trace or internal protocol output that escaped
 
-Default to YES when in doubt. Substantive output addressed to operators or peers should land even if its phrasing brushes against meta-territory (e.g. a thoughtful answer that opens with "Good question, here's my read" is YES — the answer IS the contribution). Suppression is reserved for output that is itself the absence of substance.
+post=true when the candidate has substantive content for the chat — a real reply, an answer, an ack with content, a question back, work output.
 
-Reply format: the literal token "yes" or "no" (lowercase, no leading punctuation), one space, then a brief plain-English reason (≤15 words) explaining the judgement. The parser reads only the first token; the reason is for the operator's audit log.
-
-Examples:
-- "I'll check the database and report back" → yes commits to action
-- "Looking at the code now" → yes status update
-- "Migration completed — 4.2M rows updated, 0 errors" → yes substantive result with concrete numbers
-- "Apache-2.0 is the lowest-friction upgrade from MIT — same permissive ethos, NOTICE file mechanism..." → yes substantive analysis answering the operator's question
-- "Good catch — agreed, the inbox-at-send shape is correct" → yes substantive agreement with reasoning
-- "I don't have anything to add to this thread" → no agent stating it won't contribute
-- "This message wasn't addressed to me. No action required." → no narrating own silence
-- "(internal: should I respond?)" → no internal thinking leak
-- "Acknowledged." → no bare acknowledgement with no payload
-- "Holding." → no empty status with no content
-- "Noted, will let you know if it changes" → yes commits to followup
-- empty / whitespace only → no empty
-- "So you're saying X" (where X verbatim restates the prior message) → no echo without adding`
+Bias: when in doubt, post=true. A slightly-off real reply is fine; suppressing real content is bad.
+Respond with ONLY the JSON object.`
 
 // maxJudgeTriggerLen / maxJudgeCandidateLen bound the strings the judge
 // sees, mirroring agent-network/code/harness/index.js:501,504. Predictable
@@ -401,28 +393,17 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 		return FilterDecision{ShouldPost: true}
 	}
 
-	answer := strings.ToLower(strings.TrimSpace(result.FinalText))
-	// Tolerate "no.", "no!", "no\n" by checking prefix on a
-	// pre-trimmed string. The prompt asks for "<yes|no> <reason>" but
-	// providers don't always cooperate. The verdict is the first token;
-	// everything after is the reason, which we extract for the audit log.
-	var decision FilterDecision
-	verdictReason := extractJudgeReason(result.FinalText) // model's stated reason; may be ""
-	switch {
-	case strings.HasPrefix(answer, "no"):
-		// Preserve model's stated reason for audit. Falls back to the
-		// canonical scratch label when the model didn't give one.
-		reason := verdictReason
-		if reason == "" {
-			reason = FilterReasonScratch
-		}
-		decision = FilterDecision{ShouldPost: false, Reason: reason}
-	case strings.HasPrefix(answer, "yes"):
-		// Even on yes, surface the reason if given — operator can audit
-		// "why did the judge let X through" the same way.
-		decision = FilterDecision{ShouldPost: true, Reason: verdictReason}
-	default:
-		// Unparseable — fail open with explicit reason.
+	// Parse JSON verdict from model. The prompt asks for a single JSON
+	// object {"post": bool, "reason": string} with no markdown / no
+	// explanation. Tolerate fenced-code wrappers and surrounding
+	// whitespace; anything else falls through to fail-open with an
+	// explicit parse_failure reason.
+	decision, parseErr := parseJudgeJSON(result.FinalText)
+	if parseErr != nil {
+		// Fail open on parse failure — suppressing a real reply
+		// because the cheap model emitted bad JSON is worse than
+		// posting a thin one. Reason surfaces parse_failure so it's
+		// visible in audit logs.
 		decision = FilterDecision{ShouldPost: true, Reason: "parse_failure"}
 	}
 
@@ -454,26 +435,55 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 	return decision
 }
 
-// extractJudgeReason pulls the brief reason from a "yes <reason>" or
-// "no <reason>" judge response. Returns the trimmed reason text, or
-// empty if the model only gave a bare verdict. The prompt format is
-// "<verdict> <reason ≤12 words>" so we just take everything after the
-// first whitespace.
-func extractJudgeReason(raw string) string {
+// parseJudgeJSON extracts the verdict from the cheap-model's JSON
+// response. The prompt asks for `{"post": bool, "reason": string}` with
+// no markdown / no explanation, but cheap models occasionally wrap in
+// code fences or add surrounding whitespace; tolerate those, fail
+// anything else so the caller can fail-open with parse_failure.
+//
+// Returns the FilterDecision when parsing succeeds. On any error
+// (malformed JSON, missing fields, wrong types), returns an empty
+// FilterDecision and a non-nil error — caller is expected to default to
+// ShouldPost=true.
+func parseJudgeJSON(raw string) (FilterDecision, error) {
 	trimmed := strings.TrimSpace(raw)
-	// Find the first whitespace after the verdict.
-	idx := strings.IndexAny(trimmed, " \t\n")
-	if idx < 0 {
-		return ""
+	// Strip leading/trailing ``` or ```json fences if present.
+	if strings.HasPrefix(trimmed, "```") {
+		trimmed = strings.TrimPrefix(trimmed, "```json")
+		trimmed = strings.TrimPrefix(trimmed, "```")
+		trimmed = strings.TrimSuffix(trimmed, "```")
+		trimmed = strings.TrimSpace(trimmed)
 	}
-	reason := strings.TrimSpace(trimmed[idx+1:])
-	// Strip common leading punctuation ("yes — substantive", "no: scratch").
-	reason = strings.TrimLeft(reason, "—-:,.")
-	reason = strings.TrimSpace(reason)
+	// Locate the JSON object boundaries — providers sometimes prepend or
+	// append prose despite the "ONLY JSON" instruction.
+	start := strings.Index(trimmed, "{")
+	end := strings.LastIndex(trimmed, "}")
+	if start < 0 || end < 0 || end < start {
+		return FilterDecision{}, fmt.Errorf("no JSON object in response: %q", trimmed)
+	}
+	objText := trimmed[start : end+1]
+
+	var verdict struct {
+		Post   *bool  `json:"post"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(objText), &verdict); err != nil {
+		return FilterDecision{}, fmt.Errorf("json unmarshal: %w (text=%q)", err, objText)
+	}
+	if verdict.Post == nil {
+		return FilterDecision{}, fmt.Errorf("missing post field: %q", objText)
+	}
+
+	reason := strings.TrimSpace(verdict.Reason)
 	// Bound to avoid logging walls of text if the model ignored the
-	// ≤12 word constraint.
+	// "one short phrase" instruction.
 	if len(reason) > 200 {
 		reason = reason[:200] + "…"
 	}
-	return reason
+	// Map empty-on-suppression to the canonical scratch label so audit
+	// logs always have a populated reason for "no" verdicts.
+	if !*verdict.Post && reason == "" {
+		reason = FilterReasonScratch
+	}
+	return FilterDecision{ShouldPost: *verdict.Post, Reason: reason}, nil
 }

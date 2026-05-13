@@ -2,6 +2,7 @@ package funnel
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,18 +119,16 @@ func TestCheapModelFilter_SuppressesEmpty(t *testing.T) {
 	}
 }
 
-func TestCheapModelFilter_ParsesYesNo(t *testing.T) {
+func TestCheapModelFilter_ParsesJSON(t *testing.T) {
 	tests := []struct {
 		name      string
 		modelText string
 		want      bool
 	}{
-		{"clean yes", "yes", true},
-		{"clean no", "no", false},
-		{"trailing punctuation no", "no.", false},
-		{"trailing newline no", "no\n", false},
-		{"capitalized YES", "YES", true},
-		{"capitalized NO", "NO", false},
+		{"clean post true", `{"post": true, "reason": "ok"}`, true},
+		{"clean post false", `{"post": false, "reason": "scratch"}`, false},
+		{"fenced post false", "```json\n{\"post\": false, \"reason\": \"empty\"}\n```", false},
+		{"prose before json", `My verdict: {"post": true, "reason": "useful"}`, true},
 		{"unparseable falls open", "maybe?", true},
 		{"empty model output falls open", "", true},
 	}
@@ -338,5 +337,49 @@ func TestFunnel_FilterRespectsContextCancellation(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("deliberate didn't return when ctx expired — filter not honoring cancellation")
+	}
+}
+
+func TestParseJudgeJSON(t *testing.T) {
+	cases := []struct {
+		name        string
+		raw         string
+		wantPost    bool
+		wantReason  string
+		wantErr     bool
+	}{
+		{"plain post true", `{"post": true, "reason": "substantive"}`, true, "substantive", false},
+		{"plain post false", `{"post": false, "reason": "self-suppress"}`, false, "self-suppress", false},
+		{"empty reason on suppress maps to scratch", `{"post": false, "reason": ""}`, false, FilterReasonScratch, false},
+		{"empty reason on post stays empty", `{"post": true, "reason": ""}`, true, "", false},
+		{"fenced json", "```json\n{\"post\": true, \"reason\": \"ok\"}\n```", true, "ok", false},
+		{"fenced plain", "```\n{\"post\": false, \"reason\": \"empty\"}\n```", false, "empty", false},
+		{"prose before object", `Here's my answer: {"post": true, "reason": "useful"}`, true, "useful", false},
+		{"prose after object", `{"post": false, "reason": "scratch"} (low confidence)`, false, "scratch", false},
+		{"whitespace surrounding", "  \n{\"post\": true, \"reason\": \"go\"}\n  ", true, "go", false},
+		{"missing post field", `{"reason": "??"}`, false, "", true},
+		{"not json at all", `yes substantive`, false, "", true},
+		{"empty input", ``, false, "", true},
+		{"long reason truncated", `{"post": true, "reason": "` + strings.Repeat("x", 300) + `"}`, true, strings.Repeat("x", 200) + "…", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseJudgeJSON(tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got decision=%+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.ShouldPost != tc.wantPost {
+				t.Errorf("ShouldPost: got %v want %v", got.ShouldPost, tc.wantPost)
+			}
+			if got.Reason != tc.wantReason {
+				t.Errorf("Reason: got %q want %q", got.Reason, tc.wantReason)
+			}
+		})
 	}
 }
