@@ -90,6 +90,10 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 		ReceivedAt: msg.CreatedAt.UTC().Format(time.RFC3339Nano),
 		Reason:     reason,
 		Replay:     false,
+		// ThreadRoot carries the linked-list thread identity (#226)
+		// so the receiving aspect's funnel can key per-thread session
+		// state. Resolved during Insert.
+		ThreadRoot: int(msg.ThreadRootMsgID),
 	})
 	if deliverErr != nil {
 		// Build failure means the per-aspect AND operator paths

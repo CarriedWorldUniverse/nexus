@@ -139,8 +139,9 @@ func NewBridge(target ReceiveTarget) *Bridge {
 // translation grows to forward the flag.
 func (b *Bridge) OnDeliver(msg DeliveredMessage) {
 	item := bridle.InboxItem{
-		From:    msg.From,
-		Content: msg.Content,
+		From:       msg.From,
+		Content:    msg.Content,
+		ThreadRoot: msg.ThreadRoot,
 		// ReplyTo intentionally omitted — bridle.InboxItem doesn't
 		// carry a reply context today (the funnel reconstructs reply
 		// chains via chat.read when the model asks). When InboxItem

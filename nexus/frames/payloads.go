@@ -209,6 +209,14 @@ type ChatDeliverPayload struct {
 	// the "N replies" expander. Live chat.deliver frames leave it
 	// zero — the SPA increments locally on each incoming reply.
 	ReplyCount int `json:"reply_count,omitempty"`
+
+	// ThreadRoot is the canonical thread identity (task #226 linked-
+	// list thread model). Equals the row's own id for top-level
+	// messages; equals the thread-root of the reply target for
+	// replies. Aspects use it to key per-thread session ids
+	// (deterministic uuid_v5 of aspect_name + ":" + ThreadRoot).
+	// Zero for legacy rows pre-#226 migration.
+	ThreadRoot int `json:"thread_root,omitempty"`
 }
 
 // ChatReactionPayload toggles an emoji reaction.

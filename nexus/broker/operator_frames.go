@@ -153,6 +153,7 @@ func (c *wsConn) handleOperatorChatList(env frames.Envelope) {
 			ReplyTo:    int(m.ReplyTo),
 			ReceivedAt: m.CreatedAt.UTC().Format(time.RFC3339),
 			ReplyCount: m.ReplyCount, // ListPage's recursive subtree count
+			ThreadRoot: int(m.ThreadRootMsgID),
 		})
 	}
 	resp, _ := frames.NewResponse(frames.KindChatListResult, env.ID, frames.ChatListResultPayload{
@@ -205,6 +206,7 @@ func (c *wsConn) handleOperatorChatReplies(env frames.Envelope) {
 			Content:    m.Content,
 			ReplyTo:    int(m.ReplyTo),
 			ReceivedAt: m.CreatedAt.UTC().Format(time.RFC3339),
+			ThreadRoot: int(m.ThreadRootMsgID),
 		})
 	}
 	resp, _ := frames.NewResponse(frames.KindChatRepliesResult, env.ID, frames.ChatRepliesResultPayload{

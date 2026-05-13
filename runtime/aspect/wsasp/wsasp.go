@@ -71,6 +71,12 @@ type DeliveredMessage struct {
 	ReceivedAt string // RFC 3339 UTC
 	Replay     bool   // true iff replayed via since_msg_id; false for live
 	Reason     string // mention | reply | thread | all
+
+	// ThreadRoot is the linked-list thread identity (task #226). The
+	// funnel uses it to derive a per-thread session id so each thread
+	// gets its own claude-code jsonl (no SessionTail bleed across
+	// threads). Zero = legacy/pre-#226 row.
+	ThreadRoot int64
 }
 
 // Client is the aspect-side WS aspect-host. Owns the wsclient,
@@ -234,6 +240,7 @@ func (c *Client) onChatDeliver(env frames.Envelope) {
 		ReceivedAt: p.ReceivedAt,
 		Replay:     p.Replay,
 		Reason:     p.Reason,
+		ThreadRoot: int64(p.ThreadRoot),
 	}
 
 	c.advanceCursor(msg.ID)
