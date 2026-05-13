@@ -1154,6 +1154,28 @@ func buildProviderByName(name string, log *slog.Logger) (bridle.Provider, bridle
 // up the aspect's full toolkit, and did real work instead of saying
 // "yes" or "no".
 func bareJudgeProvider(p bridle.Provider, id bridle.ProviderID) bridle.Provider {
+	// 2026-05-13: --bare disabled for the judge, intentionally.
+	//
+	// claude-code's --bare flag is API-key-only — it disables subscription
+	// auth entirely. Our keel runs on subscription (Opus 1M bundled), so
+	// the bare judge subprocess had no auth path: every cheap-judge call
+	// returned "Not logged in · Please run /login" as its verdict, the
+	// parser saw the leading 'n', and every aspect reply got suppressed.
+	//
+	// --bare itself isn't broken — it does what it says, just with an
+	// auth model we can't satisfy from subscription. The capability stays
+	// in bridle for the future path: once #218 (broker-mediated credentials)
+	// can hand a DeepSeek or Anthropic API key to the bare subprocess
+	// via ANTHROPIC_API_KEY env at spawn time, --bare becomes viable
+	// again — and DeepSeek is the planned target (cheap, fast, separate
+	// auth domain from the deliberation model's subscription).
+	//
+	// Until then: judge runs the full claude-code surface (accept the
+	// 9-step-agent contamination risk #196 was meant to fix; #195's
+	// prompt hardening + #212's verdict format are doing the heavy
+	// lifting in the meantime).
+	return p
+	//nolint:gocritic // bare path kept for the post-#218 API-key spawn future
 	switch id {
 	case "claude-code", "claudecode":
 		jp := claudecodeprovider.New()
