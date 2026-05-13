@@ -333,27 +333,48 @@ func TestDeliberate_CompactFailureContinues(t *testing.T) {
 
 // Mid-deliberation Receive calls should accumulate for the NEXT cycle,
 // not interfere with the running one.
-func TestReceive_DuringDeliberate_GoesToNextCycle(t *testing.T) {
+// TestReceive_FIFOOneMessagePerDeliberate pins #224: each Deliberate
+// pops exactly ONE item from the FIFO inbox. Remaining items stay
+// queued for subsequent Deliberate calls. Prior behavior was
+// drain-all-into-one-prompt which collapsed cross-thread context;
+// see #224 for the principle.
+func TestReceive_FIFOOneMessagePerDeliberate(t *testing.T) {
 	f, _ := newTestFunnel(t,
 		bridle.ProviderResult{
-			FinalText: "first",
+			FinalText: "first reply",
+			Usage:     bridle.Usage{InputTokens: 10, OutputTokens: 1},
+		},
+		bridle.ProviderResult{
+			FinalText: "second reply",
 			Usage:     bridle.Usage{InputTokens: 10, OutputTokens: 1},
 		},
 	)
 	f.Receive(bridle.InboxItem{From: "operator", Content: "first"})
-
-	// Prime an additional comm before the deliberation.
 	f.Receive(bridle.InboxItem{From: "operator", Content: "second"})
 
 	if f.InboxLen() != 2 {
 		t.Fatalf("inbox=%d want 2", f.InboxLen())
 	}
 
+	// First Deliberate pops the head, leaving one behind.
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if f.InboxLen() != 1 {
+		t.Errorf("after first Deliberate inbox=%d want 1", f.InboxLen())
+	}
+
+	// Second Deliberate pops the remaining item.
 	if _, err := f.Deliberate(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
 	if f.InboxLen() != 0 {
-		t.Errorf("inbox should be drained, got %d", f.InboxLen())
+		t.Errorf("after second Deliberate inbox=%d want 0", f.InboxLen())
+	}
+
+	// Third Deliberate on empty inbox returns ErrEmptyInbox.
+	if _, err := f.Deliberate(context.Background(), ""); err != ErrEmptyInbox {
+		t.Errorf("third Deliberate err=%v want ErrEmptyInbox", err)
 	}
 }
 

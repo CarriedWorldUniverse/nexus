@@ -174,13 +174,20 @@ func TestUsageRecorder_RecorderErrorDoesNotFailDeliberation(t *testing.T) {
 	}
 }
 
-func TestUsageRecorder_LatestReceiveWithMsgIDWins(t *testing.T) {
-	// Multiple messages arrive before deliberation runs. Latest
-	// triggering msg_id is what gets attributed (per
-	// ReceiveWithMsgID doc).
+// TestUsageRecorder_FIFOOrderAttribution pins #224 attribution semantics:
+// under FIFO, each Deliberate handles ONE message — the queue head.
+// Usage is attributed to that one msg_id. Subsequent Deliberate calls
+// attribute their own usage to the next queue head, in order.
+//
+// Pre-#224 behavior was "latest Receive wins" (all queued msgs
+// attributed to one turn under one msg_id). FIFO is correct: each
+// msg gets its own turn and its own attribution row.
+func TestUsageRecorder_FIFOOrderAttribution(t *testing.T) {
 	rec := &recordingUsage{}
 	prov := &scriptedProvider{results: []bridle.ProviderResult{
-		{FinalText: "ok", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
+		{FinalText: "r1", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
+		{FinalText: "r2", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
+		{FinalText: "r3", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
 	}}
 	f, _ := New(Config{
 		AspectID:      "frame",
@@ -193,10 +200,22 @@ func TestUsageRecorder_LatestReceiveWithMsgIDWins(t *testing.T) {
 	f.ReceiveWithMsgID(bridle.InboxItem{From: "operator", Content: "first"}, 100)
 	f.ReceiveWithMsgID(bridle.InboxItem{From: "operator", Content: "second"}, 200)
 	f.ReceiveWithMsgID(bridle.InboxItem{From: "operator", Content: "third"}, 300)
-	f.Deliberate(context.Background(), "")
 
-	got := rec.snapshot()[0]
-	if got.MsgID != 300 {
-		t.Errorf("latest-wins: got %d, want 300", got.MsgID)
+	// Three Deliberate calls drain the queue in FIFO order.
+	for i := 0; i < 3; i++ {
+		if _, err := f.Deliberate(context.Background(), ""); err != nil {
+			t.Fatalf("Deliberate[%d]: %v", i, err)
+		}
+	}
+
+	snap := rec.snapshot()
+	if len(snap) != 3 {
+		t.Fatalf("recorded %d usage rows, want 3", len(snap))
+	}
+	wantIDs := []int64{100, 200, 300}
+	for i, want := range wantIDs {
+		if snap[i].MsgID != want {
+			t.Errorf("usage row[%d]: got msg_id=%d, want %d", i, snap[i].MsgID, want)
+		}
 	}
 }
