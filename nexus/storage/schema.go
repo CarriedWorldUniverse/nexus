@@ -108,7 +108,82 @@ func Bootstrap(ctx context.Context, db *sql.DB) error {
 	if err := addMissingColumns(ctx, db); err != nil {
 		return fmt.Errorf("add missing columns: %w", err)
 	}
+	if err := backfillChatThreadRoots(ctx, db); err != nil {
+		return fmt.Errorf("backfill chat thread roots: %w", err)
+	}
 	return nil
+}
+
+// backfillChatThreadRoots populates the parent_msg_id + thread_root_msg_id
+// columns added by #226 for pre-existing chat_messages rows. Idempotent —
+// skips rows that already have thread_root_msg_id set. Best-effort on
+// parent: legacy rows use reply_to as parent (we can't reconstruct the
+// "latest msg in thread at insert time" for historical data; reply_to is
+// the closest authoritative parent we have).
+//
+// Thread root is walked via the reply_to chain: top-level msgs (reply_to
+// IS NULL) get thread_root = id. Replies recursively walk reply_to until
+// reaching a top-level; their thread_root becomes that ancestor's id.
+//
+// Cycle safety: SQLite's CTE has implicit recursion depth limits; the
+// walk caps at 1000 iterations to defend against pathological cyclic
+// data (shouldn't exist via the FK, but doesn't hurt).
+func backfillChatThreadRoots(ctx context.Context, db *sql.DB) error {
+	// Skip entirely if the columns don't exist (early-boot path where
+	// addMissingColumns ran but on a fresh DB with no chat_messages
+	// table yet — schema.sql creates the table with the columns, so
+	// the check is for safety not correctness).
+	exists, err := columnExists(ctx, db, "chat_messages", "thread_root_msg_id")
+	if err != nil || !exists {
+		return err
+	}
+
+	// Step 1: top-level msgs (reply_to IS NULL) get thread_root = id.
+	// parent_msg_id stays NULL — they're roots.
+	if _, err := db.ExecContext(ctx, `
+		UPDATE chat_messages
+		   SET thread_root_msg_id = id
+		 WHERE thread_root_msg_id IS NULL
+		   AND reply_to IS NULL
+	`); err != nil {
+		return fmt.Errorf("backfill top-level roots: %w", err)
+	}
+
+	// Step 2: replies walk the reply_to chain up to find their root.
+	// Recursive CTE: start at unresolved rows, climb reply_to until we
+	// hit a row with thread_root_msg_id set. Update each unresolved row
+	// with the root's id and (as best-effort) reply_to as parent.
+	//
+	// Run iteratively: each pass resolves one level. Repeat until no
+	// rows change or we hit the safety cap.
+	const maxIters = 1000
+	for i := 0; i < maxIters; i++ {
+		res, err := db.ExecContext(ctx, `
+			UPDATE chat_messages
+			   SET thread_root_msg_id = (
+				   SELECT parent.thread_root_msg_id
+				     FROM chat_messages parent
+				    WHERE parent.id = chat_messages.reply_to
+				      AND parent.thread_root_msg_id IS NOT NULL
+			   ),
+				   parent_msg_id = reply_to
+			 WHERE thread_root_msg_id IS NULL
+			   AND reply_to IS NOT NULL
+			   AND EXISTS (
+				   SELECT 1 FROM chat_messages parent
+				    WHERE parent.id = chat_messages.reply_to
+				      AND parent.thread_root_msg_id IS NOT NULL
+			   )
+		`)
+		if err != nil {
+			return fmt.Errorf("backfill replies iter %d: %w", i, err)
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return nil // converged
+		}
+	}
+	return fmt.Errorf("backfill chat thread roots: did not converge after %d iterations (possible cycle in reply_to chain)", maxIters)
 }
 
 // columnAddition declares an ALTER TABLE ADD COLUMN we want to run
@@ -138,6 +213,20 @@ var columnsToAdd = []columnAddition{
 		table:  "aspects",
 		column: "default_openai_credential",
 		ddl:    "ALTER TABLE aspects ADD COLUMN default_openai_credential TEXT",
+	},
+	// Task #226 — linked-list thread model. parent_msg_id is the chain
+	// parent (NULL for thread roots). thread_root_msg_id is the
+	// canonical thread identity used by aspects for per-thread session
+	// IDs. Both backfilled by backfillChatThreadRoots for existing rows.
+	{
+		table:  "chat_messages",
+		column: "parent_msg_id",
+		ddl:    "ALTER TABLE chat_messages ADD COLUMN parent_msg_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL",
+	},
+	{
+		table:  "chat_messages",
+		column: "thread_root_msg_id",
+		ddl:    "ALTER TABLE chat_messages ADD COLUMN thread_root_msg_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL",
 	},
 }
 
