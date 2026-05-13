@@ -23,6 +23,7 @@ import (
 	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
 	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
 	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
@@ -200,6 +201,19 @@ func main() {
 		// every refresh. Tightening to <24h breaks the workday session;
 		// loosening to 7d+ stretches blast radius if a token leaks.
 		JWTTTL:               24 * time.Hour,
+	}
+
+	// Broker-mediated credentials store (task #218). Keys are encrypted
+	// at rest with a data key derived from the session signing secret
+	// via HKDF — so the same key material that signs JWTs also gates
+	// access to API credentials. If derivation fails (empty secret,
+	// nil db) we log and continue with a nil store; admin endpoints
+	// gracefully report "credentials store not configured" rather than
+	// taking down the broker.
+	credentialStore, err := credentials.NewStore(db, nexusIdentity.SessionSigningSecret)
+	if err != nil {
+		logger.Warn("credentials store unavailable", "err", err)
+		credentialStore = nil
 	}
 
 	r := roster.New()
@@ -440,6 +454,9 @@ func main() {
 		// uses for aspects (Crossing Part 4); operator reads the same
 		// rows via a different transport.
 		KnowledgeStore: knowledgeStore,
+		// Task #218: broker-mediated credentials. Nil-safe — admin
+		// routes register only when non-nil, otherwise return 503.
+		Credentials: credentialStore,
 		// Spec §11: REST/CLI personality edits trigger an in-process
 		// refresh on the embedded Frame so the new prompt takes effect
 		// on the next deliberation turn. Non-Frame aspects pick up at

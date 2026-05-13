@@ -186,6 +186,22 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 		mux.Handle("PUT /api/admin/nexus-md",
 			b.requireAdmin(http.HandlerFunc(b.handleAdminNexusMDEdit)))
 	}
+
+	// Credentials (task #218). Gate on the Store being configured —
+	// pre-#218 boot paths leave Credentials nil and lose this surface
+	// (correct: no encryption key derived means no credentials API).
+	if b.cfg.Credentials != nil {
+		mux.Handle("GET /api/admin/credentials",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminCredentialsList)))
+		mux.Handle("PUT /api/admin/credentials/{name}",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminCredentialUpsert)))
+		mux.Handle("GET /api/admin/credentials/{name}",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminCredentialGet)))
+		mux.Handle("DELETE /api/admin/credentials/{name}",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminCredentialDelete)))
+		mux.Handle("GET /api/admin/credentials/{name}/audit",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminCredentialAudit)))
+	}
 }
 
 // handleAdminShutdown kicks off a graceful shutdown. Long-running by
