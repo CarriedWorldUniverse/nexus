@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,7 @@ import (
 	"github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
+	"github.com/google/uuid"
 )
 
 // CompactionPolicy tunes the funnel's context-window management.
@@ -75,6 +77,151 @@ func DefaultCompactionPolicy() CompactionPolicy {
 		ThresholdTokens:  125_000,
 		MaxSummaryTokens: 4_096,
 	}
+}
+
+// ContextMode selects how the funnel derives session ids for
+// bridle.TurnRequest.Session. Part of nexus task #226: each chat
+// thread should keep its own claude-code jsonl so SessionTail doesn't
+// bleed across threads.
+type ContextMode string
+
+const (
+	// ContextGlobal keeps one session per funnel lifetime, rotated on
+	// compaction. The historical behaviour — appropriate for the in-
+	// process Frame and any aspect that genuinely deliberates across
+	// all incoming chat as one stream of consciousness.
+	ContextGlobal ContextMode = "global"
+
+	// ContextThreadIsolated derives a deterministic per-thread session
+	// id from (aspect_id, thread_root_msg_id) via uuid_v5. Each chat
+	// thread therefore keeps its own jsonl on the claude-code side, no
+	// cross-thread SessionTail bleed. Falls back to the funnel's
+	// global handle when an inbox item arrives with ThreadRoot == 0
+	// (synthetic / non-chat trigger / pre-#226 row).
+	ContextThreadIsolated ContextMode = "thread"
+
+	// ContextStateless mints a fresh uuid_v4 per turn — every turn
+	// starts cold, no resume, no SessionTail-on-disk reuse. Intended
+	// for eval harnesses, smoke tests, and aspects that genuinely
+	// don't want continuity. Compaction is a no-op under this mode
+	// because there's nothing accumulating to compact.
+	ContextStateless ContextMode = "stateless"
+)
+
+// sessionNamespace is the uuid_v5 namespace under which thread-
+// isolated session ids are derived. Fixed value, never changed —
+// reshuffling the namespace would orphan every existing per-thread
+// jsonl on disk and force a network-wide cold start.
+var sessionNamespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("nexus.funnel.session.v1"))
+
+// SessionResolver maps (ContextMode, thread root) to a bridle session
+// handle, remembering which ids it has already minted so subsequent
+// resolutions of the same id return New=false (the provider should
+// --resume rather than re-create). Safe for concurrent use.
+type SessionResolver struct {
+	mu       sync.Mutex
+	aspectID string
+	mode     ContextMode
+	known    map[string]bool
+
+	// globalHandle is the handle used by ContextGlobal — and the
+	// fallback returned by ContextThreadIsolated when an item arrives
+	// with ThreadRoot == 0. Mutates on compaction-driven rotation
+	// (RotateGlobal). Unused under ContextStateless.
+	globalHandle bridle.SessionHandle
+}
+
+// NewSessionResolver constructs a resolver. AspectID seeds the per-
+// thread uuid_v5 derivation so two aspects in the same thread still
+// get different sessions on disk. Empty aspectID is accepted but the
+// resulting ids will collide across funnels — production wiring must
+// pass the real aspect id.
+func NewSessionResolver(aspectID string, mode ContextMode) *SessionResolver {
+	if mode == "" {
+		mode = ContextGlobal
+	}
+	r := &SessionResolver{
+		aspectID: aspectID,
+		mode:     mode,
+		known:    make(map[string]bool),
+	}
+	// Global/thread modes both lean on globalHandle (latter as the
+	// no-thread fallback). Stateless skips it — every Resolve call
+	// mints a fresh id and never touches globalHandle.
+	if mode != ContextStateless {
+		r.globalHandle = bridle.SessionHandle{ID: newSessionID(), New: true}
+	}
+	return r
+}
+
+// Resolve returns the session handle to use for a turn whose
+// triggering inbox item has the given ThreadRoot. threadRoot==0 means
+// "no thread context" (synthetic / non-chat / legacy) and degrades
+// to the global handle even under ContextThreadIsolated.
+func (r *SessionResolver) Resolve(threadRoot int64) bridle.SessionHandle {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch r.mode {
+	case ContextStateless:
+		id := newSessionID()
+		// Stateless ids are by definition new; we don't track them.
+		return bridle.SessionHandle{ID: id, New: true}
+	case ContextThreadIsolated:
+		if threadRoot == 0 {
+			return r.globalHandle
+		}
+		id := uuid.NewSHA1(sessionNamespace, []byte(r.aspectID+":"+strconv.FormatInt(threadRoot, 10))).String()
+		isNew := !r.known[id]
+		r.known[id] = true
+		return bridle.SessionHandle{ID: id, New: isNew}
+	default: // ContextGlobal
+		return r.globalHandle
+	}
+}
+
+// MarkResumed flips the New flag off for a session id the provider
+// has acknowledged. Called by Deliberate after the first successful
+// turn against a given session id so subsequent turns --resume rather
+// than try to re-create. Idempotent.
+func (r *SessionResolver) MarkResumed(id string) {
+	if id == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.known[id] = true
+	if r.globalHandle.ID == id {
+		r.globalHandle.New = false
+	}
+}
+
+// RotateGlobal mints a fresh global handle. Used by compaction in
+// ContextGlobal mode (and the no-thread fallback path in
+// ContextThreadIsolated). No-op under ContextStateless — there is no
+// persistent handle to rotate.
+func (r *SessionResolver) RotateGlobal() bridle.SessionHandle {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.mode == ContextStateless {
+		// Return a fresh handle without storing; caller can use it
+		// once but it's not retained.
+		return bridle.SessionHandle{ID: newSessionID(), New: true}
+	}
+	r.globalHandle = bridle.SessionHandle{ID: newSessionID(), New: true}
+	return r.globalHandle
+}
+
+// GlobalHandle returns the current global handle (without rotating
+// it). Exposed for tests + observability.
+func (r *SessionResolver) GlobalHandle() bridle.SessionHandle {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.globalHandle
+}
+
+// Mode reports the resolver's configured mode.
+func (r *SessionResolver) Mode() ContextMode {
+	return r.mode
 }
 
 // Config wires the funnel's dependencies. All fields except the
@@ -204,6 +351,14 @@ type Config struct {
 	// interface comment and docs/2026-05-12-funnel-observability-audit.md.
 	ObservabilityHook ObservabilityHook
 
+	// ContextMode controls how session ids are derived per turn (task
+	// #226 session isolation). Defaults to ContextGlobal — one session
+	// per funnel lifetime, rotated on compaction. Set to
+	// ContextThreadIsolated for funnel-driven aspects (agentfunnel,
+	// out-of-process) so each chat thread keeps its own jsonl. See
+	// ContextMode docs.
+	ContextMode ContextMode
+
 	Logger *slog.Logger
 }
 
@@ -244,8 +399,15 @@ type Funnel struct {
 	cumulativeTokens int
 
 	// sessionHandle is the bridle session id used for resume on
-	// subprocess-stream providers. Rotated on compaction.
+	// subprocess-stream providers. Under ContextGlobal it persists
+	// across turns and rotates on compaction. Under other modes it's
+	// overwritten per-Deliberate via the resolver — the field stays
+	// for legacy SessionID() observability callers.
 	sessionHandle bridle.SessionHandle
+
+	// resolver owns the per-Deliberate session id derivation. Always
+	// non-nil after New; see ContextMode.
+	resolver *SessionResolver
 }
 
 // New constructs a Funnel from cfg. Returns an error if required fields
@@ -288,14 +450,12 @@ func New(cfg Config) (*Funnel, error) {
 		cfg.Logger = slog.Default()
 	}
 
+	resolver := NewSessionResolver(cfg.AspectID, cfg.ContextMode)
 	return &Funnel{
-		cfg: cfg,
-		log: cfg.Logger,
-		// New=true so the first deliberation tells the provider this is
-		// a fresh session for this ID. Flipped to false after the first
-		// turn returns successfully (and again on every compaction-driven
-		// session rotation).
-		sessionHandle: bridle.SessionHandle{ID: newSessionID(), New: true},
+		cfg:           cfg,
+		log:           cfg.Logger,
+		resolver:      resolver,
+		sessionHandle: resolver.GlobalHandle(),
 	}, nil
 }
 
@@ -399,12 +559,13 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	// "latest Receive wins" path — that conflated multiple msgs into one
 	// trigger). When userMessage drives the turn with no inbox item,
 	// trigger fields stay zero/empty.
-	var triggerMsgID int64
+	var triggerMsgID, triggerThreadRoot int64
 	var triggerFrom, triggerContent string
 	if len(pending) > 0 {
 		triggerMsgID = pending[0].MsgID
 		triggerFrom = pending[0].From
 		triggerContent = pending[0].Content
+		triggerThreadRoot = pending[0].ThreadRoot
 	}
 	// Clear the cached "latest Receive" fields — they're vestigial under
 	// FIFO semantics but kept until ReceiveWithMsgID is refactored to
@@ -434,7 +595,23 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	shouldCompact := f.cumulativeTokens >= threshold
 
 	tail := append([]bridle.SessionEvent(nil), f.sessionTail...)
-	session := f.sessionHandle
+	f.mu.Unlock()
+
+	// Resolve the session for this turn via the per-mode resolver
+	// (task #226.4). Under ContextGlobal this returns the funnel-wide
+	// handle (rotated by compaction); under ContextThreadIsolated it
+	// returns a deterministic per-thread id; under ContextStateless a
+	// fresh uuid per turn. triggerThreadRoot==0 falls back to the
+	// global handle even in thread-isolated mode, so non-chat
+	// triggers (synthetic injections, userMessage-only turns) stay on
+	// the global session rather than minting a useless one-off.
+	session := f.resolver.Resolve(triggerThreadRoot)
+	// Keep the legacy field in sync for SessionID()/observability
+	// callers that haven't migrated. In thread-isolated mode this
+	// reflects "the last session we deliberated against," which is
+	// the most useful observability answer for that mode.
+	f.mu.Lock()
+	f.sessionHandle = session
 	f.mu.Unlock()
 
 	if shouldCompact {
@@ -444,10 +621,15 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 			// tail and let the provider's auto-compact handle it if
 			// the threshold is also crossed there.
 		} else {
-			// Refresh local view post-compaction.
+			// Refresh local view post-compaction. compact() rotates the
+			// resolver's global handle, so re-resolve to pick up the
+			// fresh id for this turn.
 			f.mu.Lock()
 			tail = append([]bridle.SessionEvent(nil), f.sessionTail...)
-			session = f.sessionHandle
+			f.mu.Unlock()
+			session = f.resolver.Resolve(triggerThreadRoot)
+			f.mu.Lock()
+			f.sessionHandle = session
 			f.mu.Unlock()
 		}
 	}
@@ -576,13 +758,14 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		// is the right place to look if attribution numbers ever
 		// disagree with the provider's billing.
 		//
-		// Flip sessionHandle.New=false even on error. The provider may
-		// have written the underlying session jsonl (claudecode does
-		// this once `--session-id` is accepted, even if a later step
-		// fails), so the next turn MUST resume rather than try to
-		// create the same id again. Without this flip, every error
-		// pins the session in the "new" state and subsequent turns
-		// fail with "Session ID already in use" forever.
+		// Flip the resolver's "known" set for this session id even on
+		// error. The provider may have written the underlying session
+		// jsonl (claudecode does this once `--session-id` is accepted,
+		// even if a later step fails), so the next turn MUST resume
+		// rather than try to create the same id again. Without this
+		// flip, every error pins the session in the "new" state and
+		// subsequent turns fail with "Session ID already in use".
+		f.resolver.MarkResumed(session.ID)
 		f.mu.Lock()
 		f.sessionHandle.New = false
 		f.mu.Unlock()
@@ -591,9 +774,10 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 
 	// Append the turn's session delta + update cumulative tokens. If
 	// the v2 log-decision turn lands, this is where it'd gate the append.
-	// Also flip sessionHandle.New to false: the provider has now created
-	// the underlying session (e.g. claudecode wrote the jsonl), so future
-	// turns should resume rather than re-create.
+	// Also mark the session as resumed in the resolver: the provider has
+	// created the underlying session (e.g. claudecode wrote the jsonl),
+	// so future turns against the same id resume rather than re-create.
+	f.resolver.MarkResumed(session.ID)
 	f.mu.Lock()
 	f.sessionTail = append(f.sessionTail, result.SessionDelta...)
 	f.cumulativeTokens += result.Usage.InputTokens + result.Usage.OutputTokens
@@ -616,11 +800,12 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		// the new session would defeat the purpose (next turn would
 		// inherit the bloat and the rewriter would fail again on the
 		// new file). Better to start fully clean.
+		fresh := f.resolver.RotateGlobal()
 		f.mu.Lock()
 		oldID := f.sessionHandle.ID
 		oldTail := len(f.sessionTail)
 		oldTokens := f.cumulativeTokens
-		f.sessionHandle = bridle.SessionHandle{ID: newSessionID(), New: true}
+		f.sessionHandle = fresh
 		f.sessionTail = nil
 		f.cumulativeTokens = 0
 		newID := f.sessionHandle.ID
@@ -852,13 +1037,14 @@ func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error 
 		Content: result.FinalText,
 	}
 
+	fresh := f.resolver.RotateGlobal()
 	f.mu.Lock()
 	f.sessionTail = []bridle.SessionEvent{summary}
 	f.cumulativeTokens = result.Usage.OutputTokens // the summary itself counts toward the next budget
 	// New session minted by compaction — flag as fresh so the provider
 	// creates the underlying session rather than trying to resume an id
 	// it has never seen.
-	f.sessionHandle = bridle.SessionHandle{ID: newSessionID(), New: true}
+	f.sessionHandle = fresh
 	f.mu.Unlock()
 
 	f.emit(ctx, Event{
