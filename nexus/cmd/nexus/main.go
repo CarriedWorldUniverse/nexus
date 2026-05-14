@@ -1388,7 +1388,9 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		// Subscription-auth path: shells out to the local `claude` CLI.
 		// Default for unset provider since the rebuild deploy runs on
 		// subscription, not API key.
-		p = claudecodeprovider.New()
+		cp := claudecodeprovider.New()
+		cp.DisallowedTools = funnel.DisallowedNativeTools
+		p = cp
 	default:
 		log.Warn("frame funnel: unrecognised provider; deliberation disabled",
 			"provider", provider, "frame", ef.Aspect.Name)
