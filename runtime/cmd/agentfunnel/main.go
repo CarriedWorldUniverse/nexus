@@ -402,6 +402,7 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 		if resolved := resolveClaudePath(claudePath); resolved != "" {
 			p.ClaudePath = resolved
 		}
+		p.DisallowedTools = funnel.DisallowedNativeTools
 		return p, nil
 	default:
 		return nil, fmt.Errorf("unsupported provider %q (claude-api and claude-code supported in v1)", provider)
