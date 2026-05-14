@@ -116,12 +116,17 @@ var _ ReturnHandler = NoopReturnHandler{}
 // userMessage-only path). The zero value's MsgID == 0, so return
 // handlers can use that as the "no trigger" sentinel.
 func triggerFromInboxItem(item bridle.InboxItem) TurnTrigger {
-	source := item.Source
-	if source == "" {
-		// Legacy default — pre-NEX-89 InboxItems had no Source field;
-		// nexus-chat substrate is the assumed origin.
-		source = "chat"
-	}
+	// Source is hard-coded to "chat" for the funnel.Funnel call path —
+	// every InboxItem reaching the funnel today is a chat-substrate
+	// message. The TurnTrigger.Source field exists so callers that
+	// construct TurnTrigger directly (agora-side handlers, future
+	// non-chat sources) can tag a different origin and let
+	// ReturnHandler implementations branch on it. bridle.InboxItem has
+	// no Source field today — if/when chat-vs-non-chat triggers need
+	// to differentiate at the funnel layer, this is the seam to
+	// extend (probably by adding the field on bridle.InboxItem or by
+	// taking a separate per-source funnel.Receive entry point).
+	source := "chat"
 	return TurnTrigger{
 		MsgID:      item.MsgID,
 		From:       item.From,
