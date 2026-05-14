@@ -331,6 +331,45 @@ type KnowledgeHit struct {
 }
 
 // -------------------------------------------------------------------
+// Credentials (NEX-77) — aspect-to-Nexus credential fetch
+// -------------------------------------------------------------------
+
+// CredentialFetchPayload is an aspect requesting a kind-typed
+// credential from the broker's credential store.
+//
+// Kind is required (e.g. "jira", "imap", "provider"). Name is optional:
+//   - Name unset  → broker resolves via the aspect's default for that
+//                   kind (aspects.default_<kind>_credential). Returns
+//                   credentials.ErrNoDefault if no default configured.
+//   - Name set    → broker fetches that named credential, checks the
+//                   aspect is on its allowed_aspects list, audits.
+//
+// The fetched bundle's shape is kind-specific (see credentials package
+// docs). Caller (the MCP) unmarshals based on Kind.
+type CredentialFetchPayload struct {
+	Kind string `json:"kind"`
+	Name string `json:"name,omitempty"`
+}
+
+// CredentialFetchResultPayload returns the decrypted bundle to the
+// aspect. The bundle is JSON-encoded as a free-form object — callers
+// know the shape from Kind. Never logged on the broker side.
+//
+// For kind='provider' the bundle is {api_shape, base_url, key,
+// default_model?}. For kind='jira' it's {atlassian_email,
+// atlassian_token, atlassian_subdomain}. For kind='imap' it's
+// {host, port, user, password, ssl}.
+type CredentialFetchResultPayload struct {
+	Name   string                 `json:"name"`
+	Kind   string                 `json:"kind"`
+	Bundle map[string]any         `json:"bundle"`
+	// ExpiresAt is reserved for future server-side TTL — v1 always
+	// emits empty string (no TTL). MCPs should cache the bundle for
+	// the duration of their process and re-fetch on restart.
+	ExpiresAt string `json:"expires_at,omitempty"`
+}
+
+// -------------------------------------------------------------------
 // Operator dashboard request/response (dashboard-ws-port spec §3.2)
 //
 // All operator frames carry a correlation_id (Envelope.ID); the
