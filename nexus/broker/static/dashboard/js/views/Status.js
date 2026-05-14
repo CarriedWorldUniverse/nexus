@@ -3,6 +3,7 @@ const { html, useState, useEffect } = window.__preact;
 import { fetchAgents, fetchUsage, BASE } from '../api.js';
 import { RegisterDeviceButton } from '../components/Auth.js';
 import { agentColors, usageData } from '../state.js';
+import { listOpenThreads } from '../models/threads.js';
 
 function fmtTokens(n) {
   if (!n || n === 0) return '0';
@@ -44,7 +45,68 @@ async function postAction(path) {
   return res.json().catch(() => ({}));
 }
 
-function renderAgentGroup(title, agents, colors, confirming, request, restartAgent, usage) {
+// computeThreadsByAspect — walk listOpenThreads() once and bucket each
+// thread under every aspect that's a participant. Threads where the
+// aspect was the SENDER of at least one message are tagged 'sender';
+// otherwise the aspect was @-mentioned only (Thread.participants
+// includes both), tagged 'mentioned'. Last activity is the max
+// created_at across messages, used both for sort and tooltip. Result is
+// a Map<aspectId, Array<{thread, role, lastActivity}>> sorted desc by
+// lastActivity and capped at 3 entries per aspect.
+function computeThreadsByAspect() {
+  const byAspect = new Map();
+  for (const thread of listOpenThreads()) {
+    const participants = thread.participants;
+    if (!participants.length) continue;
+    // Senders = anyone whose `from` appears in messages. Cheap O(n).
+    const senders = new Set();
+    let lastActivity = 0;
+    for (const m of thread.messages) {
+      if (m.from) senders.add(m.from);
+      const t = Date.parse(m.created_at || m.at || '') || 0;
+      if (t > lastActivity) lastActivity = t;
+    }
+    for (const aspect of participants) {
+      const role = senders.has(aspect) ? 'sender' : 'mentioned';
+      const arr = byAspect.get(aspect) || [];
+      arr.push({ thread, role, lastActivity });
+      byAspect.set(aspect, arr);
+    }
+  }
+  for (const [aspect, arr] of byAspect) {
+    arr.sort((a, b) => b.lastActivity - a.lastActivity);
+    if (arr.length > 3) arr.length = 3;
+    byAspect.set(aspect, arr);
+  }
+  return byAspect;
+}
+
+function openThread(rootId) {
+  window.location.hash = `#/chat?thread=${rootId}`;
+}
+
+function renderThreadPills(entries) {
+  if (!entries || !entries.length) return null;
+  return html`
+    <div class="card-threads">
+      ${entries.map(({ thread, role, lastActivity }) => {
+        const when = lastActivity ? new Date(lastActivity).toLocaleString() : 'no activity';
+        const hint = thread.roleHint || 'casual';
+        const title = `${hint} · ${role} · last: ${when}`;
+        return html`
+          <button
+            key=${thread.rootId}
+            class=${'thread-pill thread-pill-' + role}
+            title=${title}
+            onClick=${() => openThread(thread.rootId)}
+          >#${thread.rootId}</button>
+        `;
+      })}
+    </div>
+  `;
+}
+
+function renderAgentGroup(title, agents, colors, confirming, request, restartAgent, usage, threadsByAspect) {
   if (!agents || agents.length === 0) return null;
   return html`
     <div class="status-section">
@@ -64,6 +126,7 @@ function renderAgentGroup(title, agents, colors, confirming, request, restartAge
         if (agent.buffer_lines != null) details.push(`buf: ${agent.buffer_lines}`);
         const taskStr = agent.task || '';
         const u = usage?.by_agent?.[id];
+        const threadEntries = threadsByAspect?.get(id);
 
         return html`
           <div class="status-card" key=${id}>
@@ -77,6 +140,7 @@ function renderAgentGroup(title, agents, colors, confirming, request, restartAge
                 ${agent.escalated && html`<span class="badge-escalated">${agent.tier || 'escalated'}</span>`}
               </div>
               ${taskStr && html`<div class="card-task">${taskStr}</div>`}
+              ${renderThreadPills(threadEntries)}
               ${u && html`
                 <div class="card-tokens">
                   <span class="token-stat out" title="Output tokens (7d)">${fmtTokens(u.output)} out</span>
@@ -108,6 +172,7 @@ export function Status() {
   const [lastRefresh, setLastRefresh] = useState(null);
   const [usagePeriod, setUsagePeriod] = useState('7d');
   const [networkMode, setNetworkMode] = useState(null); // { mode, since }
+  const [threadsByAspect, setThreadsByAspect] = useState(() => computeThreadsByAspect());
   const colors = agentColors.value;
   const { confirming, request } = useConfirm(3000);
   const usage = usageData.value;
@@ -143,6 +208,20 @@ export function Status() {
   useEffect(() => {
     refresh();
     const iv = setInterval(refresh, 8000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // listOpenThreads() has no registry-level subscribe today; poll at a
+  // low rate. 10s keeps the cost negligible (a Map walk over <50
+  // threads) while staying responsive enough to reflect FeedView /
+  // Chat-driven thread registrations within an operator's attention
+  // window. New `Thread.messages` mutations happen via chat-ws inside
+  // each Thread, but the pill cluster only cares about participation +
+  // last-activity ordering, both of which are recomputed here.
+  useEffect(() => {
+    const tick = () => setThreadsByAspect(computeThreadsByAspect());
+    tick();
+    const iv = setInterval(tick, 10000);
     return () => clearInterval(iv);
   }, []);
 
@@ -278,10 +357,10 @@ export function Status() {
           </div>
         </div>
 
-        ${renderAgentGroup('The Frame', agentList.filter(a => a.nexus?.classification === 'frame'), colors, confirming, request, restartAgent, usage)}
-        ${renderAgentGroup('Aspects', agentList.filter(a => a.nexus?.classification === 'aspect'), colors, confirming, request, restartAgent, usage)}
-        ${renderAgentGroup('Hands', agentList.filter(a => a.nexus?.classification === 'hand'), colors, confirming, request, restartAgent, usage)}
-        ${renderAgentGroup('Other Agents', agentList.filter(a => !a.nexus), colors, confirming, request, restartAgent, usage)}
+        ${renderAgentGroup('The Frame', agentList.filter(a => a.nexus?.classification === 'frame'), colors, confirming, request, restartAgent, usage, threadsByAspect)}
+        ${renderAgentGroup('Aspects', agentList.filter(a => a.nexus?.classification === 'aspect'), colors, confirming, request, restartAgent, usage, threadsByAspect)}
+        ${renderAgentGroup('Hands', agentList.filter(a => a.nexus?.classification === 'hand'), colors, confirming, request, restartAgent, usage, threadsByAspect)}
+        ${renderAgentGroup('Other Agents', agentList.filter(a => !a.nexus), colors, confirming, request, restartAgent, usage, threadsByAspect)}
 
         ${usage && html`
           <div class="status-section">
