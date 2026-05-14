@@ -447,55 +447,58 @@ CREATE INDEX IF NOT EXISTS idx_inbox_triage_turn
   ON inbox_triage(turn_id);
 
 -- -------------------------------------------------------------------
--- Provider credentials — broker-mediated API key storage.
--- Per agent-network/docs/2026-05-13-broker-credentials-spec.md (task #218).
+-- Broker-mediated credentials — encrypted credential storage for
+-- third-party services aspects need to call.
+--
+-- Originally: provider credentials only (#218; Anthropic/OpenAI API
+-- keys). Extended (#NEX-74/75): kind-typed storage covers provider
+-- creds + jira/imap/gmail/future. The bundle is a per-kind JSON object
+-- encrypted at rest:
+--
+--   kind='provider'  bundle = {api_shape, base_url, key, default_model?}
+--   kind='jira'      bundle = {atlassian_email, atlassian_token, atlassian_subdomain}
+--   kind='imap'      bundle = {host, port, user, password, ssl}
+--   future kinds add their own shape; the schema stays opaque to it.
 --
 -- Aspects on remote/unsafe hosts (forge in WSL, plumb on <operator-host>,
--- future external aspects) need to call APIs requiring keys (Anthropic,
--- OpenAI, DeepSeek, etc). The broker is the credential authority:
--- keys live encrypted here, aspects fetch on demand or use proxy tools,
--- nothing persists on remote disks.
+-- future external aspects) fetch via broker.credential.fetch (#NEX-77).
+-- For provider kinds, the funnel's ProviderEnvResolver auto-injects
+-- API_KEY + BASE_URL into TurnRequest.ProviderEnv per turn — no
+-- per-call configuration needed.
 --
--- The unit is (name, api_shape, base_url, key) — NOT just (name, key).
--- One vendor (DeepSeek) exposes both an Anthropic-Messages and an
--- OpenAI-Chat-Completions endpoint; storing each as a separate
--- credential under different api_shape entries lets aspects route
--- protocol-shape-agnostically while the broker dispatches to the right
--- HTTP target.
+-- Encryption: encrypted_bundle is AES-256-GCM ciphertext of the bundle
+-- JSON. The data key is derived from nexus_identity.session_signing_secret
+-- (already exists, already OS-protected). Per-row nonce. Doesn't
+-- protect against full-DB-plus-nexus_identity compromise — that's an
+-- OS-level concern — but stops disk snapshots from leaking creds in
+-- cleartext.
 --
--- Encryption: encrypted_key is AES-256-GCM. The data key is derived
--- from nexus_identity.session_signing_secret (already exists, already
--- OS-protected). Per-row nonce. Doesn't protect against full-DB-plus-
--- nexus_identity compromise — that's an OS-level concern — but stops
--- disk snapshots from leaking keys in cleartext.
-CREATE TABLE IF NOT EXISTS provider_credentials (
+-- Table name: pre-#NEX-75 was `provider_credentials`. Renamed to
+-- `credentials` once non-provider kinds landed (jira/imap don't fit
+-- the "provider" framing). Existing rows migrate kind='provider' with
+-- their api_shape/base_url/key/default_model packed into bundle JSON.
+CREATE TABLE IF NOT EXISTS credentials (
   name              TEXT PRIMARY KEY,
   description       TEXT NOT NULL DEFAULT '',
-  -- api_shape is the WIRE PROTOCOL the credential speaks, not the
-  -- vendor identity. Values: 'anthropic' | 'openai' | 'ollama' | ...
-  -- Future shapes added without schema change.
-  api_shape         TEXT NOT NULL,
-  -- base_url is the HTTP endpoint root for this shape. Vendor-specific:
-  -- "https://api.anthropic.com", "https://api.openai.com/v1",
-  -- "https://api.deepseek.com/anthropic", "https://api.deepseek.com/v1".
-  base_url          TEXT NOT NULL,
-  -- encrypted_key + encryption_nonce: AES-256-GCM ciphertext + nonce
-  -- of the raw API key. Never logged, never serialized in responses.
-  encrypted_key     BLOB NOT NULL,
+  -- kind is the credential class. Values: 'provider' | 'jira' | 'imap' |
+  -- 'gmail' | ... Future kinds added without schema change. Handlers
+  -- validate the bundle shape per kind.
+  kind              TEXT NOT NULL,
+  -- encrypted_bundle: AES-256-GCM ciphertext of the per-kind JSON bundle.
+  -- Plaintext shape is kind-specific (see header comment). Never logged,
+  -- never serialised in admin responses.
+  encrypted_bundle  BLOB NOT NULL,
   encryption_nonce  BLOB NOT NULL,
-  -- default_model: optional model name used when the caller omits it.
-  -- "claude-opus-4-7", "deepseek-chat", etc. Per-credential because
-  -- different keys may want different defaults (e.g. testing tier vs
-  -- production tier under the same vendor).
-  default_model     TEXT,
   -- allowed_aspects: JSON array of aspect names allowed to use this
   -- credential. Special value '*' means all aspects. Empty array
   -- means no aspect — the credential exists but is parked.
-  allowed_aspects   TEXT NOT NULL DEFAULT '*',
+  allowed_aspects   TEXT NOT NULL DEFAULT '["*"]',
   -- mode: 'proxy' (only via broker proxy tools, key never leaves) |
-  -- 'fetch' (plaintext fetch allowed, aspect handles the key directly)
+  -- 'fetch' (plaintext fetch allowed, aspect handles the cred directly)
   -- | 'both'. Operator opts in to plaintext fetch per credential.
-  -- Defaults to 'proxy' — the safer default.
+  -- Defaults to 'proxy' — the safer default. Note: jira/imap kinds
+  -- are inherently 'fetch' (no broker-side proxy exists for them);
+  -- handler enforces.
   mode              TEXT NOT NULL DEFAULT 'proxy'
                        CHECK (mode IN ('proxy','fetch','both')),
   created_at        TEXT NOT NULL DEFAULT (datetime('now')),
@@ -503,8 +506,8 @@ CREATE TABLE IF NOT EXISTS provider_credentials (
   last_used_at      TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_provider_credentials_shape
-  ON provider_credentials(api_shape);
+CREATE INDEX IF NOT EXISTS idx_credentials_kind
+  ON credentials(kind);
 
 -- credential_audit — one row per use. Operator can answer "who used my
 -- DeepSeek key last week" without spelunking logs. Cheap once the
@@ -515,12 +518,12 @@ CREATE TABLE IF NOT EXISTS credential_audit (
   credential_name TEXT NOT NULL,
   aspect          TEXT NOT NULL,
   action          TEXT NOT NULL
-                     CHECK (action IN ('proxy_call','plaintext_fetch','denied')),
+                     CHECK (action IN ('proxy_call','plaintext_fetch','fetch','denied')),
   ts              TEXT NOT NULL DEFAULT (datetime('now')),
   -- details: free-form JSON. For proxy_call: {model, endpoint, input_tokens, output_tokens}.
-  -- For denied: {reason}. For plaintext_fetch: {ip, ua} if available.
+  -- For fetch / plaintext_fetch: {kind}. For denied: {reason, kind}.
   details         TEXT NOT NULL DEFAULT '{}',
-  FOREIGN KEY (credential_name) REFERENCES provider_credentials(name) ON DELETE CASCADE
+  FOREIGN KEY (credential_name) REFERENCES credentials(name) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_credential_audit_credential_ts
@@ -529,9 +532,12 @@ CREATE INDEX IF NOT EXISTS idx_credential_audit_aspect_ts
   ON credential_audit(aspect, ts);
 
 -- Note: aspects table needs columns for per-aspect default credentials
--- (default_anthropic_credential, default_openai_credential). These are
--- added via a Go-side conditional migration in storage/schema.go because
--- ALTER TABLE ADD COLUMN isn't idempotent and schema.sql runs every boot.
+-- (default_anthropic_credential, default_openai_credential,
+-- default_jira_credential, default_imap_credential). These are added
+-- via a Go-side conditional migration in storage/schema.go because
+-- ALTER TABLE ADD COLUMN isn't idempotent and schema.sql runs every
+-- boot. The provider-shape defaults (anthropic/openai) match the api_shape
+-- enum from #218; the non-provider defaults (jira/imap) match kind.
 
 -- -------------------------------------------------------------------
 -- Schema metadata — marker only. Real migrations defer until first

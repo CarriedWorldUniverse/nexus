@@ -24,6 +24,14 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 )
 
+// adminCredUpsertReq is the backward-compatible provider-only upsert
+// request shape, retained through NEX-75 so existing operator workflows
+// (curl scripts, agent-network admin tooling) keep working unchanged.
+//
+// NEX-76 extends this with a `kind` + `bundle` shape that covers
+// non-provider kinds (jira/imap). This struct stays as the legacy
+// surface — when `kind` is unset / "provider", these top-level fields
+// are packed into the provider bundle before reaching the store.
 type adminCredUpsertReq struct {
 	Description    string   `json:"description"`
 	APIShape       string   `json:"api_shape"`
@@ -39,7 +47,7 @@ func (b *Broker) handleAdminCredentialsList(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusServiceUnavailable, "credentials store not configured")
 		return
 	}
-	ms, err := b.cfg.Credentials.List(r.Context())
+	ms, err := b.cfg.Credentials.List(r.Context(), "")
 	if err != nil {
 		b.log.Error("admin credentials list", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -77,13 +85,25 @@ func (b *Broker) handleAdminCredentialUpsert(w http.ResponseWriter, r *http.Requ
 	if len(allowed) == 0 {
 		allowed = []string{"*"}
 	}
+	// Pack the legacy provider-shape fields into the new bundle shape.
+	// NEX-76 will add a `kind` + `bundle` path on this endpoint to cover
+	// non-provider kinds; until then every upsert through this surface
+	// is provider-kind. Empty api_shape / base_url / key are caught by
+	// validateBundle on the store side and surfaced as the same 400 the
+	// caller used to get from the pre-NEX-75 column-level NOT NULLs.
+	bundle := map[string]any{
+		"api_shape": req.APIShape,
+		"base_url":  req.BaseURL,
+		"key":       req.Key,
+	}
+	if req.DefaultModel != "" {
+		bundle["default_model"] = req.DefaultModel
+	}
 	params := credentials.UpsertParams{
 		Name:           name,
 		Description:    req.Description,
-		APIShape:       credentials.APIShape(req.APIShape),
-		BaseURL:        req.BaseURL,
-		Key:            req.Key,
-		DefaultModel:   req.DefaultModel,
+		Kind:           credentials.KindProvider,
+		Bundle:         bundle,
 		AllowedAspects: allowed,
 		Mode:           mode,
 	}

@@ -8,6 +8,10 @@ import (
 	_ "github.com/ncruces/go-sqlite3/driver"
 )
 
+// newTestStore brings up an in-memory SQLite with the post-NEX-75
+// `credentials` + `credential_audit` schema. Mirror of the live
+// storage/schema.sql definitions — kept inline so the test stays
+// self-contained.
 func newTestStore(t *testing.T) (*Store, *sql.DB) {
 	t.Helper()
 	db, err := sql.Open("sqlite3", ":memory:")
@@ -16,14 +20,12 @@ func newTestStore(t *testing.T) (*Store, *sql.DB) {
 	}
 	t.Cleanup(func() { db.Close() })
 	_, err = db.Exec(`
-		CREATE TABLE provider_credentials (
+		CREATE TABLE credentials (
 			name TEXT PRIMARY KEY,
 			description TEXT NOT NULL DEFAULT '',
-			api_shape TEXT NOT NULL,
-			base_url TEXT NOT NULL,
-			encrypted_key BLOB NOT NULL,
+			kind TEXT NOT NULL,
+			encrypted_bundle BLOB NOT NULL,
 			encryption_nonce BLOB NOT NULL,
-			default_model TEXT,
 			allowed_aspects TEXT NOT NULL DEFAULT '["*"]',
 			mode TEXT NOT NULL DEFAULT 'proxy',
 			created_at TEXT NOT NULL,
@@ -38,6 +40,13 @@ func newTestStore(t *testing.T) (*Store, *sql.DB) {
 			ts TEXT NOT NULL DEFAULT (datetime('now')),
 			details TEXT NOT NULL DEFAULT '{}'
 		);
+		CREATE TABLE aspects (
+			name TEXT PRIMARY KEY,
+			default_anthropic_credential TEXT,
+			default_openai_credential TEXT,
+			default_jira_credential TEXT,
+			default_imap_credential TEXT
+		);
 	`)
 	if err != nil {
 		t.Fatalf("schema: %v", err)
@@ -50,16 +59,26 @@ func newTestStore(t *testing.T) (*Store, *sql.DB) {
 	return s, db
 }
 
-func TestSetGetDecrypt_RoundTrip(t *testing.T) {
+// providerBundle builds the canonical kind='provider' bundle map for
+// tests. Mirrors the shape validateBundle enforces.
+func providerBundle(shape APIShape, baseURL, key string) map[string]any {
+	return map[string]any{
+		"api_shape": string(shape),
+		"base_url":  baseURL,
+		"key":       key,
+	}
+}
+
+func TestSetGetProviderRoundTrip(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
+	bundle := providerBundle(ShapeAnthropic, "https://api.deepseek.com/anthropic", "sk-deepseek-abc123")
+	bundle["default_model"] = "deepseek-chat"
 	err := s.Set(ctx, UpsertParams{
 		Name:           "deepseek-anthropic",
 		Description:    "DeepSeek via Anthropic shape",
-		APIShape:       ShapeAnthropic,
-		BaseURL:        "https://api.deepseek.com/anthropic",
-		Key:            "sk-deepseek-abc123",
-		DefaultModel:   "deepseek-chat",
+		Kind:           KindProvider,
+		Bundle:         bundle,
 		AllowedAspects: []string{"*"},
 		Mode:           ModeProxy,
 	})
@@ -70,36 +89,128 @@ func TestSetGetDecrypt_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if c.APIShape != ShapeAnthropic {
-		t.Errorf("api_shape: got %q", c.APIShape)
+	if c.Kind != KindProvider {
+		t.Errorf("kind: got %q want %q", c.Kind, KindProvider)
 	}
-	if c.BaseURL != "https://api.deepseek.com/anthropic" {
-		t.Errorf("base_url: got %q", c.BaseURL)
-	}
-	plain, err := s.Decrypt(c)
+	pb, err := s.ProviderBundle(c)
 	if err != nil {
-		t.Fatalf("Decrypt: %v", err)
+		t.Fatalf("ProviderBundle: %v", err)
 	}
-	if plain != "sk-deepseek-abc123" {
-		t.Errorf("plaintext mismatch: got %q", plain)
+	if pb.APIShape != ShapeAnthropic {
+		t.Errorf("api_shape: got %q", pb.APIShape)
+	}
+	if pb.BaseURL != "https://api.deepseek.com/anthropic" {
+		t.Errorf("base_url: got %q", pb.BaseURL)
+	}
+	if pb.Key != "sk-deepseek-abc123" {
+		t.Errorf("key: got %q", pb.Key)
+	}
+	if pb.DefaultModel != "deepseek-chat" {
+		t.Errorf("default_model: got %q", pb.DefaultModel)
 	}
 }
 
-func TestSet_Upsert(t *testing.T) {
+func TestSetGetJiraRoundTrip(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	err := s.Set(ctx, UpsertParams{
+		Name: "jira-prod",
+		Kind: KindJira,
+		Bundle: map[string]any{
+			"atlassian_email":     "ops@example.com",
+			"atlassian_token":     "tok-abc-123",
+			"atlassian_subdomain": "myorg",
+		},
+		AllowedAspects: []string{"*"},
+		Mode:           ModeFetch,
+	})
+	if err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	c, err := s.Get(ctx, "jira-prod")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if c.Kind != KindJira {
+		t.Errorf("kind: got %q want %q", c.Kind, KindJira)
+	}
+	jb, err := s.JiraBundle(c)
+	if err != nil {
+		t.Fatalf("JiraBundle: %v", err)
+	}
+	if jb.Email != "ops@example.com" || jb.Token != "tok-abc-123" || jb.Subdomain != "myorg" {
+		t.Errorf("jira bundle round-trip mismatch: %+v", jb)
+	}
+}
+
+func TestSetGetIMAPRoundTrip(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	err := s.Set(ctx, UpsertParams{
+		Name: "mail-default",
+		Kind: KindIMAP,
+		Bundle: map[string]any{
+			"host":     "imap.example.com",
+			"port":     993,
+			"user":     "ops@example.com",
+			"password": "hunter2",
+			"ssl":      true,
+		},
+		AllowedAspects: []string{"*"},
+		Mode:           ModeFetch,
+	})
+	if err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	c, err := s.Get(ctx, "mail-default")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	ib, err := s.IMAPBundle(c)
+	if err != nil {
+		t.Fatalf("IMAPBundle: %v", err)
+	}
+	if ib.Host != "imap.example.com" || ib.Port != 993 || ib.User != "ops@example.com" || ib.Password != "hunter2" || !ib.SSL {
+		t.Errorf("imap bundle round-trip mismatch: %+v", ib)
+	}
+}
+
+func TestKindMismatch(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	err := s.Set(ctx, UpsertParams{
+		Name:           "jira-x",
+		Kind:           KindJira,
+		Bundle:         map[string]any{"atlassian_email": "a@b", "atlassian_token": "t", "atlassian_subdomain": "s"},
+		AllowedAspects: []string{"*"},
+		Mode:           ModeFetch,
+	})
+	if err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	c, _ := s.Get(ctx, "jira-x")
+	if _, err := s.ProviderBundle(c); err == nil {
+		t.Error("ProviderBundle on a jira credential should return ErrKindMismatch")
+	}
+	if _, err := s.IMAPBundle(c); err == nil {
+		t.Error("IMAPBundle on a jira credential should return ErrKindMismatch")
+	}
+}
+
+func TestSetUpsert(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 	p := UpsertParams{
 		Name:           "k",
-		APIShape:       ShapeOpenAI,
-		BaseURL:        "https://api.example.com",
-		Key:            "v1",
+		Kind:           KindProvider,
+		Bundle:         providerBundle(ShapeOpenAI, "https://api.example.com", "v1"),
 		AllowedAspects: []string{"keel"},
 		Mode:           ModeProxy,
 	}
 	if err := s.Set(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	p.Key = "v2"
+	p.Bundle["key"] = "v2"
 	p.Description = "updated"
 	if err := s.Set(ctx, p); err != nil {
 		t.Fatal(err)
@@ -108,16 +219,16 @@ func TestSet_Upsert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain, _ := s.Decrypt(c)
-	if plain != "v2" {
-		t.Errorf("expected key v2, got %q", plain)
+	pb, _ := s.ProviderBundle(c)
+	if pb.Key != "v2" {
+		t.Errorf("expected key v2, got %q", pb.Key)
 	}
 	if c.Description != "updated" {
 		t.Errorf("description not updated: %q", c.Description)
 	}
 }
 
-func TestGet_NotFound(t *testing.T) {
+func TestGetNotFound(t *testing.T) {
 	s, _ := newTestStore(t)
 	_, err := s.Get(context.Background(), "nope")
 	if err != ErrNotFound {
@@ -128,25 +239,57 @@ func TestGet_NotFound(t *testing.T) {
 func TestList(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
-	for _, n := range []string{"b", "a", "c"} {
-		_ = s.Set(ctx, UpsertParams{Name: n, APIShape: ShapeOpenAI, BaseURL: "x", Key: "k", AllowedAspects: []string{"*"}, Mode: ModeProxy})
+	// Mix of kinds; List should return all without filter, filtered by kind otherwise.
+	for _, n := range []string{"b-prov", "a-prov", "c-prov"} {
+		_ = s.Set(ctx, UpsertParams{
+			Name: n, Kind: KindProvider, Bundle: providerBundle(ShapeOpenAI, "x", "k"),
+			AllowedAspects: []string{"*"}, Mode: ModeProxy,
+		})
 	}
-	ms, err := s.List(ctx)
+	_ = s.Set(ctx, UpsertParams{
+		Name: "d-jira", Kind: KindJira,
+		Bundle:         map[string]any{"atlassian_email": "a@b", "atlassian_token": "t", "atlassian_subdomain": "s"},
+		AllowedAspects: []string{"*"}, Mode: ModeFetch,
+	})
+
+	ms, err := s.List(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ms) != 3 {
-		t.Fatalf("len: %d", len(ms))
+	if len(ms) != 4 {
+		t.Fatalf("list-all len: got %d want 4", len(ms))
 	}
-	if ms[0].Name != "a" || ms[1].Name != "b" || ms[2].Name != "c" {
-		t.Errorf("order: %+v", ms)
+	// alphabetical order by name
+	want := []string{"a-prov", "b-prov", "c-prov", "d-jira"}
+	for i, m := range ms {
+		if m.Name != want[i] {
+			t.Errorf("[%d] got %q want %q", i, m.Name, want[i])
+		}
+	}
+
+	provs, err := s.List(ctx, KindProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provs) != 3 {
+		t.Errorf("provider filter len: got %d want 3", len(provs))
+	}
+	jiras, err := s.List(ctx, KindJira)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jiras) != 1 || jiras[0].Name != "d-jira" {
+		t.Errorf("jira filter: got %+v", jiras)
 	}
 }
 
 func TestDelete(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
-	_ = s.Set(ctx, UpsertParams{Name: "k", APIShape: ShapeOpenAI, BaseURL: "x", Key: "v", AllowedAspects: []string{"*"}, Mode: ModeProxy})
+	_ = s.Set(ctx, UpsertParams{
+		Name: "k", Kind: KindProvider, Bundle: providerBundle(ShapeOpenAI, "x", "v"),
+		AllowedAspects: []string{"*"}, Mode: ModeProxy,
+	})
 	if err := s.Delete(ctx, "k"); err != nil {
 		t.Fatal(err)
 	}
@@ -170,18 +313,22 @@ func TestAllowedFor(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
+	good := providerBundle(ShapeOpenAI, "x", "k")
 	cases := []struct {
 		name string
 		p    UpsertParams
 		ok   bool
 	}{
-		{"empty name", UpsertParams{APIShape: ShapeOpenAI, BaseURL: "x", Key: "k", AllowedAspects: []string{"*"}, Mode: ModeProxy}, false},
-		{"bad shape", UpsertParams{Name: "n", APIShape: "bogus", BaseURL: "x", Key: "k", AllowedAspects: []string{"*"}, Mode: ModeProxy}, false},
-		{"no base url", UpsertParams{Name: "n", APIShape: ShapeOpenAI, Key: "k", AllowedAspects: []string{"*"}, Mode: ModeProxy}, false},
-		{"no key", UpsertParams{Name: "n", APIShape: ShapeOpenAI, BaseURL: "x", AllowedAspects: []string{"*"}, Mode: ModeProxy}, false},
-		{"bad mode", UpsertParams{Name: "n", APIShape: ShapeOpenAI, BaseURL: "x", Key: "k", AllowedAspects: []string{"*"}, Mode: "weird"}, false},
-		{"no aspects", UpsertParams{Name: "n", APIShape: ShapeOpenAI, BaseURL: "x", Key: "k", Mode: ModeProxy}, false},
-		{"ok", UpsertParams{Name: "n", APIShape: ShapeOpenAI, BaseURL: "x", Key: "k", AllowedAspects: []string{"*"}, Mode: ModeProxy}, true},
+		{"empty name", UpsertParams{Kind: KindProvider, Bundle: good, AllowedAspects: []string{"*"}, Mode: ModeProxy}, false},
+		{"unknown kind", UpsertParams{Name: "n", Kind: "weird", Bundle: good, AllowedAspects: []string{"*"}, Mode: ModeProxy}, false},
+		{"nil bundle", UpsertParams{Name: "n", Kind: KindProvider, Bundle: nil, AllowedAspects: []string{"*"}, Mode: ModeProxy}, false},
+		{"bad provider shape", UpsertParams{Name: "n", Kind: KindProvider, Bundle: providerBundle("bogus", "x", "k"), AllowedAspects: []string{"*"}, Mode: ModeProxy}, false},
+		{"missing provider key", UpsertParams{Name: "n", Kind: KindProvider, Bundle: map[string]any{"api_shape": "openai", "base_url": "x"}, AllowedAspects: []string{"*"}, Mode: ModeProxy}, false},
+		{"missing jira field", UpsertParams{Name: "n", Kind: KindJira, Bundle: map[string]any{"atlassian_email": "a@b", "atlassian_token": "t"}, AllowedAspects: []string{"*"}, Mode: ModeFetch}, false},
+		{"bad mode", UpsertParams{Name: "n", Kind: KindProvider, Bundle: good, AllowedAspects: []string{"*"}, Mode: "weird"}, false},
+		{"no aspects", UpsertParams{Name: "n", Kind: KindProvider, Bundle: good, Mode: ModeProxy}, false},
+		{"ok provider", UpsertParams{Name: "n", Kind: KindProvider, Bundle: good, AllowedAspects: []string{"*"}, Mode: ModeProxy}, true},
+		{"ok jira", UpsertParams{Name: "n", Kind: KindJira, Bundle: map[string]any{"atlassian_email": "a@b", "atlassian_token": "t", "atlassian_subdomain": "s"}, AllowedAspects: []string{"*"}, Mode: ModeFetch}, true},
 	}
 	for _, tc := range cases {
 		err := validateUpsert(tc.p)
@@ -226,5 +373,52 @@ func TestEncryptIsNondeterministic(t *testing.T) {
 	}
 	if string(c1) == string(c2) || string(n1) == string(n2) {
 		t.Error("encrypt should be nondeterministic (different nonces)")
+	}
+}
+
+func TestEnvForCredential_ProviderShapes(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	_ = s.Set(ctx, UpsertParams{
+		Name: "anth", Kind: KindProvider,
+		Bundle:         providerBundle(ShapeAnthropic, "https://api.anthropic.com", "sk-ant"),
+		AllowedAspects: []string{"*"}, Mode: ModeProxy,
+	})
+	_ = s.Set(ctx, UpsertParams{
+		Name: "oai", Kind: KindProvider,
+		Bundle:         providerBundle(ShapeOpenAI, "https://api.openai.com/v1", "sk-oai"),
+		AllowedAspects: []string{"*"}, Mode: ModeProxy,
+	})
+
+	a, _ := s.Get(ctx, "anth")
+	env, err := s.EnvForCredential(a)
+	if err != nil {
+		t.Fatalf("EnvForCredential anth: %v", err)
+	}
+	if env["ANTHROPIC_API_KEY"] != "sk-ant" || env["ANTHROPIC_BASE_URL"] != "https://api.anthropic.com" {
+		t.Errorf("anthropic env: %+v", env)
+	}
+
+	o, _ := s.Get(ctx, "oai")
+	env2, err := s.EnvForCredential(o)
+	if err != nil {
+		t.Fatalf("EnvForCredential oai: %v", err)
+	}
+	if env2["OPENAI_API_KEY"] != "sk-oai" || env2["OPENAI_BASE_URL"] != "https://api.openai.com/v1" {
+		t.Errorf("openai env: %+v", env2)
+	}
+}
+
+func TestEnvForCredential_NonProviderKindFails(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	_ = s.Set(ctx, UpsertParams{
+		Name: "j", Kind: KindJira,
+		Bundle:         map[string]any{"atlassian_email": "a@b", "atlassian_token": "t", "atlassian_subdomain": "s"},
+		AllowedAspects: []string{"*"}, Mode: ModeFetch,
+	})
+	c, _ := s.Get(ctx, "j")
+	if _, err := s.EnvForCredential(c); err == nil {
+		t.Error("EnvForCredential on jira kind should fail with ErrKindMismatch")
 	}
 }
