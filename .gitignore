@@ -43,3 +43,7 @@ tmp/
 agents/*/cursor
 *.exe~
 
+
+nexus-imap-mcp
+nexus-jira-mcp
+.worktree/
