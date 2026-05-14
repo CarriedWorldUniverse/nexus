@@ -359,7 +359,36 @@ type Config struct {
 	// ContextMode docs.
 	ContextMode ContextMode
 
+	// ProviderEnvResolver is consulted on every TurnRequest to fetch
+	// the auth/routing env the provider should use for THAT turn
+	// (task #218 credential-store routing). Returns (env, true) when a
+	// credential is resolved; (nil, false) when the funnel should fall
+	// through to the provider's own defaults (subscription claude-code,
+	// process-env API keys, --bare-style flags).
+	//
+	// kind names the call-site that's about to fire — main, compact,
+	// or filter — so the resolver can route different lanes to
+	// different credentials (e.g. main turn against operator's
+	// Anthropic credit pool, judge against DeepSeek-via-Anthropic-shape
+	// credential). Nil = no resolution; provider runs unchanged.
+	ProviderEnvResolver ProviderEnvResolver
+
 	Logger *slog.Logger
+}
+
+// ProviderEnvResolver returns the per-turn auth/routing env the
+// funnel should overlay onto bridle.TurnRequest.ProviderEnv. Implementations
+// usually wrap nexus/credentials.Store.ResolveDefaultForAspect plus a
+// fallback policy (which shape to use, when to return no env so the
+// provider falls through to subscription/process-env).
+type ProviderEnvResolver interface {
+	// Resolve returns the env map for the upcoming turn. kind is one
+	// of "main", "compact", "filter". aspectID is the funnel's
+	// configured AspectID. Returning (nil, false, nil) means "no env
+	// overlay, let provider use its own auth"; (env, true, nil) means
+	// "overlay these onto ProviderEnv"; non-nil err propagates as a
+	// turn error.
+	Resolve(ctx context.Context, aspectID, kind string) (env map[string]string, ok bool, err error)
 }
 
 // Funnel is the deliberation engine. One Funnel per Frame; the Frame
@@ -651,6 +680,10 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	if f.cfg.Provider == "claudecode" {
 		systemPrompt = appendToolkitBlurb(systemPrompt)
 	}
+	providerEnv, err := f.resolveProviderEnv(ctx, "main")
+	if err != nil {
+		f.log.Warn("funnel: provider env resolution failed; falling through to provider defaults", "err", err)
+	}
 	req := bridle.TurnRequest{
 		AspectID:           f.cfg.AspectID,
 		AppendSystemPrompt: systemPrompt,
@@ -664,6 +697,7 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		Model:              f.cfg.Model,
 		MaxSteps:           f.cfg.MaxStepsPerTurn,
 		Cwd:                f.cfg.AspectHome,
+		ProviderEnv:        providerEnv,
 	}
 
 	turnID := newTurnID()
@@ -993,6 +1027,10 @@ func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error 
 	}
 
 	summarizePrompt := summarizationPrompt
+	compactEnv, err := f.resolveProviderEnv(ctx, "compact")
+	if err != nil {
+		f.log.Warn("funnel: provider env resolution failed for compact; falling through to provider defaults", "err", err)
+	}
 	req := bridle.TurnRequest{
 		AspectID:           f.cfg.AspectID,
 		AppendSystemPrompt: summarizePrompt,
@@ -1005,6 +1043,7 @@ func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error 
 		Model:       model,
 		MaxSteps:    1, // pure text; one round is enough
 		Cwd:         f.cfg.AspectHome,
+		ProviderEnv: compactEnv,
 	}
 
 	// Phase E: surface the compact turn under its own label. Not
@@ -1088,6 +1127,30 @@ func (f *Funnel) SessionID() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sessionHandle.ID
+}
+
+// resolveProviderEnv consults the configured ProviderEnvResolver and
+// returns the env overlay for an upcoming turn of the given kind
+// ("main" | "compact" | "filter"). Nil resolver, nil env, or a "no
+// default configured" result all flow back as (nil, nil) so the
+// caller's TurnRequest leaves ProviderEnv unset and the provider runs
+// against whatever auth it would normally use (subscription claude-
+// code, process-env API keys, --bare flags). Genuine resolver errors
+// (DB failures, decryption failures) propagate so the funnel can log
+// them — turns still fire with no env overlay, fail-open rather than
+// fail-closed.
+func (f *Funnel) resolveProviderEnv(ctx context.Context, kind string) (map[string]string, error) {
+	if f.cfg.ProviderEnvResolver == nil {
+		return nil, nil
+	}
+	env, ok, err := f.cfg.ProviderEnvResolver.Resolve(ctx, f.cfg.AspectID, kind)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	return env, nil
 }
 
 // ErrEmptyInbox is returned by Deliberate when there's nothing to
