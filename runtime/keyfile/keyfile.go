@@ -83,6 +83,36 @@ type Keyfile struct {
 	Format           string   `json:"format"`
 	Envelope         Envelope `json:"envelope"`
 	EncryptedPayload string   `json:"encrypted_payload"`
+
+	// Jira is an optional per-aspect Atlassian/Jira credential block.
+	// Pure aspect-side config; never sent to nexus. nexus-jira-mcp
+	// reads it from the same keyfile so the operator stores one file
+	// per aspect instead of two. When the aspect isn't using Jira the
+	// block stays absent.
+	Jira *JiraConfig `json:"jira,omitempty"`
+}
+
+// JiraConfig carries the Atlassian Cloud credentials an aspect uses
+// to interact with the issue tracker over REST. Plaintext at rest
+// alongside the rest of the keyfile; rotate by re-minting the token
+// in id.atlassian.com and editing the keyfile.
+type JiraConfig struct {
+	// Site is the Atlassian Cloud hostname (e.g.
+	// "carriedworlduniverse.atlassian.net"). Without scheme.
+	Site string `json:"site"`
+
+	// Email is the Atlassian account email paired with APIToken for
+	// Basic-auth REST calls.
+	Email string `json:"email"`
+
+	// APIToken is a personal API token minted at
+	// id.atlassian.com/manage-profile/security/api-tokens. Treated
+	// as a bearer secret.
+	APIToken string `json:"api_token"`
+
+	// ProjectKey is the default Jira project key (e.g. "NEX") used
+	// when an MCP tool call doesn't specify one. Optional.
+	ProjectKey string `json:"project_key,omitempty"`
 }
 
 // PersonalityBundle is what the validation response delivers. Wire
