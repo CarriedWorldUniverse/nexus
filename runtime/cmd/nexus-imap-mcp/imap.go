@@ -172,7 +172,10 @@ func (c *Client) FetchRecent(ctx context.Context, folder string, limit int, from
 		if subjectFilter != "" {
 			criteria.Header = append(criteria.Header, imap.SearchCriteriaHeaderField{Key: "Subject", Value: subjectFilter})
 		}
-		searchData, err := cl.Search(criteria, nil).Wait()
+		// UIDSearch (not Search) so AllUIDs() returns populated UID
+		// list; plain Search returns MSN-keyed results that don't line
+		// up with the UID-set FETCH we issue below.
+		searchData, err := cl.UIDSearch(criteria, nil).Wait()
 		if err != nil {
 			return fmt.Errorf("SEARCH: %w", err)
 		}
