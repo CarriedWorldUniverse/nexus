@@ -437,6 +437,14 @@ func CursorFileForAspect(home string) string {
 	return filepath.Join(home, "cursor")
 }
 
+// Connected reports whether the underlying WS is currently open.
+// Surfaces wsclient.Connected for callers that want to render a
+// connection state (agora's status line, observability counters,
+// etc.). Cheap; no locks beyond what wsclient itself takes.
+func (c *Client) Connected() bool {
+	return c.ws.Connected()
+}
+
 // Compile-time check that DeliveredMessage round-trips into a
 // funnel.ChatMessage via the trivial mapping below. Out-of-process
 // aspects that build a ChatGateway against this client convert
