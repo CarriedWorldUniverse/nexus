@@ -90,6 +90,14 @@ type Keyfile struct {
 	// per aspect instead of two. When the aspect isn't using Jira the
 	// block stays absent.
 	Jira *JiraConfig `json:"jira,omitempty"`
+
+	// IMAP is an optional per-aspect mailbox credential block read by
+	// nexus-imap-mcp. Holds the aspect's mailbox-side credentials (host,
+	// port, username, password) so the aspect can read, move, and
+	// expunge mail. Today only shadow uses this — for driving OTP-
+	// gated flows on behalf of other aspects — but the schema lives on
+	// every keyfile so future aspect-owned mailboxes are zero-friction.
+	IMAP *IMAPConfig `json:"imap,omitempty"`
 }
 
 // JiraConfig carries the Atlassian Cloud credentials an aspect uses
@@ -113,6 +121,31 @@ type JiraConfig struct {
 	// ProjectKey is the default Jira project key (e.g. "NEX") used
 	// when an MCP tool call doesn't specify one. Optional.
 	ProjectKey string `json:"project_key,omitempty"`
+}
+
+// IMAPConfig carries the credentials an aspect uses to read + manage
+// its mailbox via IMAP. Plaintext at rest alongside the rest of the
+// keyfile; the trust boundary is the keyfile itself.
+type IMAPConfig struct {
+	// Host is the IMAP server hostname (e.g. "mail.darksoft.co.nz").
+	// Without scheme; the client adds TLS based on Port.
+	Host string `json:"host"`
+
+	// Port defaults to 993 (IMAP+TLS) when zero. 143 (STARTTLS) is
+	// supported but discouraged for production.
+	Port int `json:"port,omitempty"`
+
+	// Username is the full mailbox address (e.g.
+	// "nexus@darksoft.co.nz").
+	Username string `json:"username"`
+
+	// Password is the mailbox password (or app-password for providers
+	// that support them).
+	Password string `json:"password"`
+
+	// DefaultFolder is the folder used when an MCP tool call doesn't
+	// specify one. Empty → "INBOX".
+	DefaultFolder string `json:"default_folder,omitempty"`
 }
 
 // PersonalityBundle is what the validation response delivers. Wire
