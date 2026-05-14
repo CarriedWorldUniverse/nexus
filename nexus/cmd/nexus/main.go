@@ -36,6 +36,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
+	"github.com/CarriedWorldUniverse/nexus/nexus/observability/jsonlsink"
 	"github.com/CarriedWorldUniverse/nexus/nexus/operator"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
@@ -479,6 +480,33 @@ func main() {
 		// emitted frames reach the broker's broadcast path.
 		Observability: obsHub,
 	}, r)
+
+	// Activity log persistence: chain a jsonlsink writer onto the Hub's
+	// fan-out alongside the live broker broadcast. Co-exists with
+	// in-memory tail (Hub.Buffer) — adds a durable file-per-aspect-
+	// per-day record so post-incident debugging has evidence to read.
+	// Writes happen on background goroutines per aspect; channel-full
+	// drops with logged warning rather than blocking emit. Closed by
+	// the cleanup goroutine on shutdown.
+	activityLogDir := filepath.Join(*dataDir, "activity")
+	activitySink, err := jsonlsink.New(activityLogDir, logger)
+	if err != nil {
+		logger.Warn("activity-log sink disabled", "err", err)
+	} else {
+		brokerBroadcast := b.BroadcastObserveFrame
+		obsHub.SetOnFrame(func(aspect string, f observability.Frame) {
+			brokerBroadcast(aspect, f)
+			activitySink.OnFrame(aspect, f)
+		})
+		logger.Info("activity log persistence enabled", "dir", activityLogDir)
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := activitySink.Close(closeCtx); err != nil {
+				logger.Warn("activity-log sink: close failed", "err", err)
+			}
+		}()
+	}
 
 	// Wire the embedded Frame's chat gateway to broker.HandleChatSend so
 	// in-process Frame posts persist + fan-out via the same canonical

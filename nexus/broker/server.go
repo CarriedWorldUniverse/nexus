@@ -347,7 +347,7 @@ type Broker struct {
 	// observability is the Phase B observability Hub: per-aspect
 	// Groupers + a shared Buffer for tail-replay on subscribe. Chat
 	// pipeline emissions land here (chat_send.go); fan-out to
-	// subscribed operators flows through broadcastObserveFrame.
+	// subscribed operators flows through BroadcastObserveFrame.
 	observability *observability.Hub
 }
 
@@ -396,9 +396,9 @@ func New(cfg Config, r *roster.Roster) *Broker {
 	}
 	if cfg.Observability != nil {
 		b.observability = cfg.Observability
-		b.observability.SetOnFrame(b.broadcastObserveFrame)
+		b.observability.SetOnFrame(b.BroadcastObserveFrame)
 	} else {
-		b.observability = observability.NewHub(500, b.broadcastObserveFrame)
+		b.observability = observability.NewHub(500, b.BroadcastObserveFrame)
 	}
 	return b
 }
