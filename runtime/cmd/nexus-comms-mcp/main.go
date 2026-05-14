@@ -476,6 +476,44 @@ func newMCPServer(b *wsBridge, log *slog.Logger) *mcpserver.MCPServer {
 		b.handleReactTo,
 	)
 
+	srv.AddTool(
+		mcpgo.NewTool("search_knowledge",
+			mcpgo.WithDescription("Search the nexus knowledge store via FTS5 keyword retrieval. Returns ranked hits with id, topic, content excerpt, and score. Scope defaults to your own entries + operator-curated 'shared' entries; pass explicit own_agent / shared / peers to refine. Synchronous WS round-trip via knowledge.search."),
+			mcpgo.WithString("text",
+				mcpgo.Required(),
+				mcpgo.Description("Search query — FTS5 syntax. Plain words work; combine with AND/OR/NOT for boolean."),
+			),
+			mcpgo.WithBoolean("own_agent",
+				mcpgo.Description("Include your own knowledge entries (default true when no scope specified)."),
+			),
+			mcpgo.WithBoolean("shared",
+				mcpgo.Description("Include operator-curated 'shared' entries (default true when no scope specified)."),
+			),
+			mcpgo.WithNumber("top_k",
+				mcpgo.Description("Max hits to return (default 5, max 50)."),
+			),
+		),
+		b.handleSearchKnowledge,
+	)
+
+	srv.AddTool(
+		mcpgo.NewTool("store_knowledge",
+			mcpgo.WithDescription("Upsert a knowledge entry under (your-identity, topic). Re-using the same topic updates the row in place. Use for durable cross-session notes you want to retrieve via search_knowledge later. Pass shared=true to mark as operator-curated (visible to all aspects searching with shared scope)."),
+			mcpgo.WithString("topic",
+				mcpgo.Required(),
+				mcpgo.Description("Topic slug — short identifier (e.g. 'cairn-spec' or 'morph-bug-i3'). Re-used to update existing entries."),
+			),
+			mcpgo.WithString("content",
+				mcpgo.Required(),
+				mcpgo.Description("Entry body. Markdown OK. Searched via FTS5."),
+			),
+			mcpgo.WithBoolean("shared",
+				mcpgo.Description("Mark as operator-curated / visible to all aspects via shared scope. Default false (your entry only)."),
+			),
+		),
+		b.handleStoreKnowledge,
+	)
+
 	return srv
 }
 
@@ -708,6 +746,123 @@ func (b *wsBridge) handleReactTo(ctx context.Context, req mcpgo.CallToolRequest)
 
 	b.log.Debug("react_to: posted", "from", from, "msg_id", msgID, "emoji", emoji)
 	return mcpgo.NewToolResultText("ok"), nil
+}
+
+// handleSearchKnowledge issues a knowledge.search Request over WS and
+// formats the result for the model. Aspect-side path; broker scopes
+// the search to the bound aspect identity. Operator-curated entries
+// surface when shared=true.
+func (b *wsBridge) handleSearchKnowledge(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	text := strings.TrimSpace(req.GetString("text", ""))
+	if text == "" {
+		return mcpgo.NewToolResultError("text is required and must be non-empty"), nil
+	}
+	ownAgent := req.GetBool("own_agent", false)
+	shared := req.GetBool("shared", false)
+	topK := req.GetInt("top_k", 5)
+	if topK <= 0 {
+		topK = 5
+	}
+
+	if r, down := b.brokerDown(); down {
+		return r, nil
+	}
+	payload := frames.KnowledgeSearchPayload{
+		Text:     text,
+		OwnAgent: ownAgent,
+		Shared:   shared,
+		TopK:     topK,
+	}
+	env, err := frames.NewRequest(frames.KindKnowledgeSearch, payload)
+	if err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("encode frame: %v", err)), nil
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	resp, err := b.ws.Request(reqCtx, env)
+	if err != nil {
+		b.log.Warn("search_knowledge: request failed", "err", err, "text", text)
+		return mcpgo.NewToolResultError(fmt.Sprintf("knowledge.search: %v", err)), nil
+	}
+
+	// knowledge.search.error returns {"error": "..."} — surface to the
+	// model as a tool error so it can adjust the query or scope.
+	if string(resp.Kind) == string(frames.KindKnowledgeSearch)+".error" {
+		var errPayload map[string]string
+		_ = json.Unmarshal(resp.Payload, &errPayload)
+		return mcpgo.NewToolResultError(fmt.Sprintf("knowledge.search: %s", errPayload["error"])), nil
+	}
+
+	var result frames.KnowledgeSearchResultPayload
+	if err := json.Unmarshal(resp.Payload, &result); err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("decode result: %v", err)), nil
+	}
+	if len(result.Hits) == 0 {
+		return mcpgo.NewToolResultText("(no matches)"), nil
+	}
+	var sb strings.Builder
+	for _, h := range result.Hits {
+		fmt.Fprintf(&sb, "#%d [from=%s topic=%q score=%.3f%s]\n%s\n\n",
+			h.ID, h.FromAgent, h.Topic, h.Score,
+			func() string {
+				if h.Shared {
+					return " shared"
+				}
+				return ""
+			}(),
+			h.Content)
+	}
+	return mcpgo.NewToolResultText(strings.TrimRight(sb.String(), "\n")), nil
+}
+
+// handleStoreKnowledge issues a knowledge.store Request over WS. The
+// broker stamps from_agent with the bound aspect identity; aspects
+// can't impersonate via this path.
+func (b *wsBridge) handleStoreKnowledge(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	topic := strings.TrimSpace(req.GetString("topic", ""))
+	if topic == "" {
+		return mcpgo.NewToolResultError("topic is required and must be non-empty"), nil
+	}
+	content := req.GetString("content", "")
+	if content == "" {
+		return mcpgo.NewToolResultError("content is required and must be non-empty"), nil
+	}
+	shared := req.GetBool("shared", false)
+
+	if r, down := b.brokerDown(); down {
+		return r, nil
+	}
+	payload := frames.KnowledgeStorePayload{
+		Topic:   topic,
+		Content: content,
+		Shared:  shared,
+	}
+	env, err := frames.NewRequest(frames.KindKnowledgeStore, payload)
+	if err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("encode frame: %v", err)), nil
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	resp, err := b.ws.Request(reqCtx, env)
+	if err != nil {
+		b.log.Warn("store_knowledge: request failed", "err", err, "topic", topic)
+		return mcpgo.NewToolResultError(fmt.Sprintf("knowledge.store: %v", err)), nil
+	}
+
+	if string(resp.Kind) == string(frames.KindKnowledgeStore)+".error" {
+		var errPayload map[string]string
+		_ = json.Unmarshal(resp.Payload, &errPayload)
+		return mcpgo.NewToolResultError(fmt.Sprintf("knowledge.store: %s", errPayload["error"])), nil
+	}
+
+	var result frames.KnowledgeStoreResultPayload
+	if err := json.Unmarshal(resp.Payload, &result); err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("decode result: %v", err)), nil
+	}
+	b.log.Debug("store_knowledge: ok", "topic", topic, "id", result.ID, "shared", shared)
+	return mcpgo.NewToolResultText(fmt.Sprintf("ok id=%d", result.ID)), nil
 }
 
 // sendRegister emits the post-connect register frame so the broker

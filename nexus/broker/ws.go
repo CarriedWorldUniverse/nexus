@@ -458,6 +458,10 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleObserveEvent(env)
 	case frames.KindObserveEnd:
 		c.handleObserveEnd(env)
+	case frames.KindKnowledgeSearch:
+		c.handleAspectKnowledgeSearch(env)
+	case frames.KindKnowledgeStore:
+		c.handleAspectKnowledgeStore(env)
 	default:
 		c.log.Info("frame kind not yet handled", "kind", env.Kind)
 	}
