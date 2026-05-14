@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	filippo.io/edwards25519 v1.2.0
-	github.com/CarriedWorldUniverse/bridle v0.0.0-20260514175107-29d890893223
+	github.com/CarriedWorldUniverse/bridle v0.0.0-20260514182908-930939f0a390
 	github.com/anthropics/anthropic-sdk-go v1.38.0
 	github.com/google/uuid v1.6.0
 	github.com/ncruces/go-sqlite3 v0.34.0
