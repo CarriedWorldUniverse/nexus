@@ -1,6 +1,6 @@
-# work-routing policy (v1)
+# work-routing policy (v1.1)
 
-**Status:** v1 — incorporated review from keel-cli (#999), anvil (#988/#998), plumb (#989/#994/#996), harrow (#987/#990). Pending operator approval.
+**Status:** v1.1 — folded operator clarification on Jira state-vs-comment (#1007) and second-round review from keel-cli (#1009), anvil (#1001/#1005), plumb (#1002/#1006/#1008), harrow (#1004). Pending operator approval.
 **Canonical location:** Drive — `~/Google Drive/My Drive/nexus/policies/work-routing.md`. This repo copy is a mirror; edit Drive, not here.
 **Drafted:** shadow. **Operator:** jacinta.
 
@@ -23,16 +23,20 @@ Class is a per-aspect property anchored in the aspect's keyfile + aspect.json. S
 
 The canonical roster lives in nexus's aspect store. This policy refers to "planner" and "worker" rather than naming aspects so it survives roster changes.
 
-### Jira ownership
+### Jira ownership — split by lane
 
 Planners manage Jira (filing tickets, prioritization, hygiene, closing stale items). Workers operate on assigned tickets — claim, comment, update state — but don't drive the backlog.
 
-**Open question (v1):** with two planners (shadow + keel-cli) running concurrently, which is primary Jira owner? Three possible shapes:
-- **shadow primary** — shadow drives the backlog for nexus / OSS lanes; keel-cli files into it as needed.
-- **keel-cli primary** — keel-cli drives; shadow files as needed.
-- **split by lane** — each planner owns their lane's tickets (e.g. shadow owns agora/runtime, keel-cli owns Frame/nexus internals); cross-lane tickets go to whichever planner is closest.
+With two planners running concurrently (shadow + keel-cli), ownership splits by lane:
 
-Resolve before v1.1 of this doc.
+| owner | lane |
+|---|---|
+| **shadow** | agora, runtime/bridle providers, cross-aspect coordination, interchange-class work, worker-side workflow concerns |
+| **keel-cli** | Frame internals, funnel, broker, comms substrate, dashboard SPA, knowledge store, chat substrate |
+
+Cross-lane work files into whichever lane is closer; the lane-owner closes. If the planner roster changes in future, the lane split adjusts to fit — this isn't a permanent allocation, just the current operating shape (per keel-cli #1009).
+
+When a worker doesn't know which lane a ticket falls under, they ping the closer planner; if it's truly ambiguous, ping either and the planners route between themselves.
 
 ---
 
@@ -58,24 +62,62 @@ Workers don't need to ask permission to do the work assigned to them. A delegati
 
 **Rule of thumb:** if the work is "this thing, now, you" — chat. If the work is "this thing, by then, someone with capacity" — Jira.
 
-Both surfaces use the same task-shape (§4 worker contract) and the same reply-shape (§5 reply contract). The difference is only WHERE the task lives.
+**The chat-vs-Jira choice is a COST decision, not a tidiness decision** (per harrow #1004). Jira has ticket-overhead — filing, claiming, status transitions, multiple round-trips. That overhead should be paid only when the durability is actually worth something. A 90-second lookup that gets filed as a ticket because Jira "feels more organized" pays the overhead and gets nothing back. Default to chat; escalate to Jira when the durability argument is real.
 
-### Worker Jira workflow (when delegated via Jira)
+Both surfaces use the same task-shape (§4 worker contract). Reply shape differs slightly — see §5.
+
+### Discovery convention — chat-ping when filing a ticket
+
+Chat-as-dispatch has automatic notification via `@mention`. Jira-as-dispatch requires the worker to *check* their queue, which doesn't happen reliably for aspects that don't have a background poll (per plumb #1006).
+
+Convention: **when a planner files a ticket for a specific worker, the planner also pings them in chat with the key.** Example: `@plumb filed NEX-123 for you, no rush.` Gives the worker the notification AND the durable ticket. Combines surfaces; cheap; standardized.
+
+Tickets filed without an assignee (backlog / unclaimed) don't need a chat ping — they're queue items, not direct delegations.
+
+### Jira workflow states
+
+The standard workflow uses these states (this list is canonical; new states get added here when a real failure mode demands it, not speculatively):
+
+| state | meaning | who transitions |
+|---|---|---|
+| **To Do** | filed, waiting for a worker | planner files; worker claims to move out |
+| **In Progress** | worker is actively on it | worker via `jira_claim` (atomically sets assignee + status) |
+| **In Review** | work submitted, planner reviewing | worker on completion if review applies |
+| **Done** | accepted | worker on completion (if no review needed) or planner on review accept |
+| **Blocked** | worker hit a task-level wall (cannot complete; retry might help) | worker; planner reads comment + decides retry/replan |
+| **Needs Replanning** | worker hit a decomposition wall (task as written isn't doable; planner must re-decompose) | worker; planner reads + redecomposes |
+
+The Blocked and Needs Replanning states correspond to §5's `Status: blocked` and `Status: needs-replanning` respectively. On chat these go in the reply text; on Jira they go in the ticket state. (See §5 below.)
+
+**Note on workflow availability:** Blocked and Needs Replanning may not exist as Jira workflow states yet on the NEX project. If a worker needs them and they're not configured, comment with the Status line and ping the planner — meta-work to add the states is keel-cli's lane (broker/admin).
+
+### Worker Jira workflow
 
 When a planner files a ticket with `assignee = <worker-aspect>` and/or pings the worker referencing the key:
 
 1. Worker reads the ticket (`jira_get <key>`).
-2. Worker claims it: `jira_claim <key>` — atomically sets assignee=self + status=In Progress.
+2. Worker claims it: `jira_claim <key>` — atomically sets assignee=self + status=In Progress.[^claim-atomic]
 3. Worker does the work.
-4. Worker comments progress on the ticket (`jira_comment`) — same §5 reply shape: Status / Result / Notes lines. Multiple comments fine; the last one is canonical.
-5. Worker updates state on completion (`jira_update_status` → Done, or back to To Do with `Status: blocked` comment, etc.).
-6. If the worker `refused` or `redirect`s, they comment the reason and either un-claim (set status back to To Do, clear assignee) or reassign to the appropriate worker.
+4. Worker comments progress on the ticket (`jira_comment`) — narrative + evidence + PR refs. **Drop the `Status:` line; the ticket state carries that.** See §5 for the chat-vs-Jira reply distinction.
+5. Worker updates state on completion (`jira_update_status` → Done, or appropriate non-done state with a comment explaining why).
 
-### Planner Jira workflow
+[^claim-atomic]: `jira_claim` is documented as atomic (assignee + status set in one operation). If two workers ever appear to claim the same ticket simultaneously, treat it as a bug and file it — don't paper over with retry logic in worker code.
 
-- File tickets with the same five required fields as the chat contract (§4): task / success / in-scope / out-of-scope / return-shape.
-- Either assign directly to the worker aspect (preferred for unambiguous routing) OR file and `@mention` in chat with the issue key (when routing is uncertain or the planner wants discussion before assigning).
-- Review the ticket's last comment for the canonical Status before closing or replanning.
+### Worker-discovers-blocking-ticket
+
+If a worker, mid-ticket, discovers the work depends on un-filed work that's not theirs:
+
+**Surface to the planner in chat** (per anvil #1005). Don't unilaterally file a new ticket or extend your ticket's scope. The planner decides: file a separate ticket as blocker, adjust the original ticket's scope, or replan entirely. Workers shouldn't be creating Jira state because backlog management is planner-lane.
+
+Concrete shape:
+```
+@<planner> NEX-123 blocked: depends on un-filed work — <one-sentence description>.
+Need a new ticket or scope adjustment?
+```
+
+### Worker bounce-to-chat
+
+If a worker reads a ticket and concludes the task was the wrong surface (genuinely a 30-second lookup that should have been a chat question), they close as `Status: refused — wrong surface` with the answer or a short note, and reply in chat (per harrow #1004). Mirrors §5's redirect convention. This is feedback to the planner — over time it surfaces over-ticketing as a pattern, which is what self-corrects the chat-vs-Jira decision.
 
 ### When both surfaces apply
 
@@ -165,7 +207,11 @@ A worker should not have to play 20 questions to figure out the task. If the pla
 
 ## 5. Worker reply contract
 
-Workers reply in the same thread (so the planner sees the result in-context). Use prose with section headers, not structured fields — nothing downstream parses it, and the chat-as-dispatch surface reads as human conversation (per plumb #989/#996):
+The reply shape differs slightly by dispatch surface, because Jira's workflow state already carries the status that chat replies have to express in prose (per operator #1007, plumb #1008).
+
+### Chat replies
+
+Use prose with section headers, not structured fields — nothing downstream parses it, and the chat-as-dispatch surface reads as human conversation (per plumb #989/#996):
 
 ```
 **Status:** done | partial | blocked | needs-replanning | redirect | refused
@@ -173,16 +219,40 @@ Workers reply in the same thread (so the planner sees the result in-context). Us
 **Notes:** <free-form: anything learned the planner didn't ask for but should know — rate limits, assumptions that turned out wrong, scope creep flagged, redirect reasons, refusal reasons>
 ```
 
-**Status values:**
+The `Status` line is the load-bearing field — it lets planners grep for non-done replies when scanning long threads.
+
+### Jira comments
+
+Drop the `Status:` line — the ticket workflow state carries that load (per operator #1007). Comments are evidence and narrative: what was actually done, PR refs, caveats, learnings. Free prose or:
+
+```
+**Result:** <primary output>
+**Notes:** <free-form>
+```
+
+is fine. Non-done outcomes are workflow-state transitions, not comment content:
+
+| §5 status | Jira workflow state |
+|---|---|
+| done | Done |
+| partial | In Progress + comment explaining partial state (or Blocked if stuck) |
+| blocked | Blocked + comment with what blocked |
+| needs-replanning | Needs Replanning + comment with what's wrong |
+| redirect | un-claim (set assignee=null), comment with "→ @aspect" and reason |
+| refused | un-claim (set assignee=null) + Blocked or back to To Do, comment with reason |
+
+The worker writes the comment for narrative (the **why**); the workflow state carries the gate (the **what**).
+
+### Status value definitions (apply to both surfaces)
 
 - **done** — task completed successfully.
 - **partial** — some delivered, some not. Notes describe which.
 - **blocked** — couldn't complete; **task-level failure** (per anvil #998). The work itself failed; retry might help.
 - **needs-replanning** — couldn't complete; **decomposition failure**. The task as written wasn't doable as scoped (missing context, conflicting constraints, scope wrong). Planner re-decomposes, doesn't retry.
-- **redirect** — wrong worker for this task; pointing the planner at the right one. Include a one-sentence reason in Notes (e.g. "design decision not a fact lookup", "out of my domain") so the planner can re-route faster (per harrow #990, plumb #994).
+- **redirect** — wrong worker for this task; pointing the planner at the right one. Include a one-sentence reason (e.g. "design decision not a fact lookup", "out of my domain") so the planner can re-route faster (per harrow #990, plumb #994).
 - **refused** — delegation is mis-scoped (not in lane, missing critical info, contradicts an earlier instruction). Worker bounces with reasoning. Sanctioned action, not a failure (per anvil #988/#998, plumb #989, harrow #990).
 
-The `Status` line is the load-bearing field — it lets planners grep for non-done replies when scanning long threads.
+The status enum is closed at six values (per anvil #1001). New failure modes get folded into existing values or trigger a refactor of the enum — not appended ad-hoc. At seven values planners start coin-flipping between similar statuses and the signal dies.
 
 ---
 
@@ -238,7 +308,19 @@ For v2 (per anvil #998), the minimal useful instrumentation:
 
 ---
 
-## 9. What this policy does NOT cover
+## 9. v2 considerations — known imprecisions
+
+Telemetry-driven refinements deferred to v2 rather than churning v1 (per anvil #1001, plumb #1002):
+
+- **§3.1 trivial test prong 4 — wall-clock vs generation time.** "Under ~5s wall-clock" conflates tool latency (free; no tokens generated while a tool runs) and Opus generation time (burns tokens). If telemetry shows planners using slow-tool-wait as a smuggle for inline execution, the right refinement is "under ~5s of generation regardless of tool wait." Bright-line clarity matters more for v1; precision comes later.
+- **§5 disagree (§6) vs refused — boundary blur.** "I'll do it but I think you're wrong" and "I won't do it" are clean in concept, blurry in practice. If telemetry shows planners getting confused signals between them, that's the seam to look at — possibly merging or sharpening definitions.
+- **Authorization-marker structured prefix.** Free-text "inline ok" is canonical greppable phrase for v1; if mis-routing patterns actually emerge in audit, a structured prefix may be worth adopting.
+
+These are imprecisions known and deliberately not fixed in v1. Don't fix them speculatively.
+
+---
+
+## 10. What this policy does NOT cover
 
 - **Cross-cluster work-routing.** Single-nexus only. Frame-to-Frame work (interchange) has its own rules; see the interchange spec.
 - **Operator-initiated execution.** When the operator directly drives a turn (e.g. via agora's tty input), the routing decision is the operator's, not the planner's. The planner can still suggest delegation when it sees inline work as wasteful.
@@ -246,7 +328,7 @@ For v2 (per anvil #998), the minimal useful instrumentation:
 
 ---
 
-## 10. Implementation / activation
+## 11. Implementation / activation
 
 **Today (v1, doc-only):** Planners and workers read this doc, internalize, and apply. Reviewers (operator, peer aspects) point at it when work was routed wrong. The policy is enforced by discipline.
 
