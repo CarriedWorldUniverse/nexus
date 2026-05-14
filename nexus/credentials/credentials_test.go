@@ -3,6 +3,7 @@ package credentials
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 
 	_ "github.com/ncruces/go-sqlite3/driver"
@@ -406,6 +407,103 @@ func TestEnvForCredential_ProviderShapes(t *testing.T) {
 	}
 	if env2["OPENAI_API_KEY"] != "sk-oai" || env2["OPENAI_BASE_URL"] != "https://api.openai.com/v1" {
 		t.Errorf("openai env: %+v", env2)
+	}
+}
+
+func TestAspectDefaults_RoundTrip(t *testing.T) {
+	s, db := newTestStore(t)
+	ctx := context.Background()
+	// Insert an aspect row + two provider creds.
+	if _, err := db.Exec(`INSERT INTO aspects(name) VALUES ('keel')`); err != nil {
+		t.Fatalf("seed aspect: %v", err)
+	}
+	_ = s.Set(ctx, UpsertParams{
+		Name: "anth-prod", Kind: KindProvider,
+		Bundle:         providerBundle(ShapeAnthropic, "https://api.anthropic.com", "sk-ant"),
+		AllowedAspects: []string{"*"}, Mode: ModeProxy,
+	})
+	_ = s.Set(ctx, UpsertParams{
+		Name: "oai-prod", Kind: KindProvider,
+		Bundle:         providerBundle(ShapeOpenAI, "https://api.openai.com/v1", "sk-oai"),
+		AllowedAspects: []string{"*"}, Mode: ModeProxy,
+	})
+
+	// Initial read: all unset.
+	ad, err := s.GetAspectDefaults(ctx, "keel")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if ad.AnthropicDefault != nil || ad.OpenAIDefault != nil || ad.JiraDefault != nil || ad.IMAPDefault != nil {
+		t.Errorf("expected all defaults nil, got %+v", ad)
+	}
+
+	// Set anthropic.
+	if err := s.SetAspectDefault(ctx, "keel", "anthropic", "anth-prod"); err != nil {
+		t.Fatalf("set anthropic: %v", err)
+	}
+	if err := s.SetAspectDefault(ctx, "keel", "openai", "oai-prod"); err != nil {
+		t.Fatalf("set openai: %v", err)
+	}
+	ad, err = s.GetAspectDefaults(ctx, "keel")
+	if err != nil {
+		t.Fatalf("get after sets: %v", err)
+	}
+	if ad.AnthropicDefault == nil || *ad.AnthropicDefault != "anth-prod" {
+		t.Errorf("anthropic default: got %v", ad.AnthropicDefault)
+	}
+	if ad.OpenAIDefault == nil || *ad.OpenAIDefault != "oai-prod" {
+		t.Errorf("openai default: got %v", ad.OpenAIDefault)
+	}
+
+	// Clear anthropic (empty string).
+	if err := s.SetAspectDefault(ctx, "keel", "anthropic", ""); err != nil {
+		t.Fatalf("clear anthropic: %v", err)
+	}
+	ad, err = s.GetAspectDefaults(ctx, "keel")
+	if err != nil {
+		t.Fatalf("get after clear: %v", err)
+	}
+	if ad.AnthropicDefault != nil {
+		t.Errorf("anthropic default should be cleared, got %v", *ad.AnthropicDefault)
+	}
+	if ad.OpenAIDefault == nil || *ad.OpenAIDefault != "oai-prod" {
+		t.Errorf("openai default lost during anthropic clear: %v", ad.OpenAIDefault)
+	}
+}
+
+func TestSetAspectDefault_UnknownColumn(t *testing.T) {
+	s, db := newTestStore(t)
+	if _, err := db.Exec(`INSERT INTO aspects(name) VALUES ('keel')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	err := s.SetAspectDefault(context.Background(), "keel", "weird", "x")
+	if err == nil || !strings.Contains(err.Error(), "unknown default-column") {
+		t.Errorf("expected unknown-column error, got %v", err)
+	}
+}
+
+func TestSetAspectDefault_UnknownCredential(t *testing.T) {
+	s, db := newTestStore(t)
+	if _, err := db.Exec(`INSERT INTO aspects(name) VALUES ('keel')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	err := s.SetAspectDefault(context.Background(), "keel", "anthropic", "does-not-exist")
+	if err == nil {
+		t.Error("expected error setting default to nonexistent credential")
+	}
+}
+
+func TestSetAspectDefault_UnknownAspect(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	_ = s.Set(ctx, UpsertParams{
+		Name: "x", Kind: KindProvider,
+		Bundle:         providerBundle(ShapeOpenAI, "u", "k"),
+		AllowedAspects: []string{"*"}, Mode: ModeProxy,
+	})
+	err := s.SetAspectDefault(ctx, "no-such-aspect", "openai", "x")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected aspect-not-found error, got %v", err)
 	}
 }
 
