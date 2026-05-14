@@ -92,21 +92,29 @@ Audit log: `skill_fetches` table mirroring the credentials audit pattern. `(aspe
 
 Two new MCP tools served by a new `nexus-skills-mcp` server (analogous to `nexus-comms-mcp`):
 
-### `nexus_skills.list`
+### `nexus_skills.list` (search-capable)
 
 ```
-input: { aspect?: string }    -- defaults to self; ops may query other aspects' catalogs
+input: {
+  aspect?: string,    -- defaults to self; ops may query other aspects' catalogs
+  query?: string      -- natural-language intent ("about to write a security spec")
+}
 output: [
   {
     name: string,
     version: int,
     description: string,
-    intended_use: string
+    intended_use: string,
+    relevance?: float  -- when query supplied, ranked match score
   }
 ]
 ```
 
-Returns the skills the calling aspect (or queried aspect, if permitted) can fetch. Lightweight — no bodies.
+Returns the skills the calling aspect (or queried aspect, if permitted) can fetch. Lightweight — no bodies. When `query` is supplied, results are ranked by relevance.
+
+**Search implementation (v1):** keyword match against `description + intended_use` fields, ranked by hit count. Cheap, no infra. **Future:** embedding/semantic search if telemetry shows keyword matching missing relevant skills (e.g. operator searches "security review" but the skill is described as "threat-modeling"). Add when needed.
+
+This is the **ToolFinder** pattern from claude-code's local skill system: the model doesn't memorize what's available; it queries by intent before committing to an approach. Reduces context cost (no need to paste-load skill descriptions into every system prompt) AND raises hit-rate on actually-relevant skills.
 
 ### `nexus_skills.fetch`
 
@@ -180,9 +188,42 @@ Today's skills live in `~/.claude/plugins/superpowers/skills/*.md` and similar. 
 
 ---
 
+## What skills actually contain
+
+Skills are **markdown recipes**, not code. A skill body explains:
+
+- **When this applies** — situations where the recipe is relevant.
+- **The approach** — the sequence of reasoning / steps.
+- **Which tools to use** — names of existing tools (MCP-loaded or claude-native) the recipe leverages. Skills don't ship their own tool implementations; they're recipes pointing at the agent's already-available tool surface.
+- **Quality gates** — checks to apply before considering the work done.
+
+Example: a `thorough-code-review` skill might say: "Use Read on each changed file. Use Grep to find call-sites of modified functions. Walk the diff once for correctness, once for style. Apply the work-routing policy when judging severity. Surface findings as a structured list with confidence markers."
+
+The skill makes the agent BETTER at code review without adding new tools — same surface, structured guidance.
+
+This matches claude-code's skill model exactly. We're centralizing the catalog + making it discoverable, not changing what a skill IS.
+
+---
+
+## Discovery & planner prompt integration
+
+The discovery problem: the model has to call `list` to know skills exist. If it doesn't think to look, it never uses them.
+
+**Mitigation 1 — planner soul prompt.** Use the system-prompt extension path (same surface as the notify-operator convention and the work-routing policy):
+
+> "When approaching a task you don't immediately know how to do well — code review, security analysis, spec writing, complex decomposition, anything with quality gates — before committing to an approach, call `nexus_skills.list` with a short intent description. Read returned skills' intended-use; fetch and apply any that fit. Skills are network-maintained recipes from peer aspects who've solved similar problems before."
+
+Costs ~150 tokens in the system prompt; substantial behavior change.
+
+**Mitigation 2 — soul-side category hints.** Planner soul enumerates skill *categories* without paste-loading their bodies: "Planning, code review, security analysis, research synthesis, decomposition, spec-drafting — all have nexus-skills catalogs. Query before starting." Sets up the discovery reflex.
+
+**Mitigation 3 — auto-list on planner-class turns** (heavier, defer): every planner turn's TurnRequest auto-prepends a `nexus_skills.list` result as inbox context. Removes the discovery step entirely; cost is the list payload per turn. Use only if Mitigations 1+2 prove insufficient.
+
+---
+
 ## Open questions
 
-1. **Discovery problem.** The model has to call `list` to know skills exist. If it doesn't think to look, it never uses them. Mitigation: the planner soul prompt enumerates available skill *categories* ("when X situation, consider fetching a skill") without paste-inlining all of them. Or: `list` is auto-called at the start of every turn (cheap, returns names + descriptions only).
+1. **(superseded by Discovery section above)** — kept as a slot so question numbering doesn't shift.
 
 2. **Shape B + claude-code subprocess.** claude-code under `claude -p` runs its own agent loop; can it call `nexus_skills.fetch` mid-turn and incorporate the result in the same turn? Probably yes via MCP tool calls, but worth verifying.
 
