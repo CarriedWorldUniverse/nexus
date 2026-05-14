@@ -16,12 +16,23 @@ The network has two operational classes:
 
 | class | aspects (v1) | provider | what they do |
 |---|---|---|---|
-| **planner / control plane** | shadow, keel | Opus 4.7 (subscription where possible) | spec, decomposition, code review, architecture, operator coordination |
+| **planner / control plane** | shadow, keel | Opus 4.7 (subscription where possible) | spec, decomposition, code review, architecture, operator coordination, **Jira management** |
 | **worker** | anvil, plumb, harrow, wren, maren, forge | DeepSeek / OpenAI / appropriate-per-aspect | bounded execution, build, test, file ops, research, art, AI tooling |
 
 Class is a per-aspect property anchored in the aspect's keyfile + aspect.json. Same aspect doesn't change class turn-to-turn (no role-per-turn machinery in v1).
 
 The canonical roster lives in nexus's aspect store. This policy refers to "planner" and "worker" rather than naming aspects so it survives roster changes.
+
+### Jira ownership
+
+Planners manage Jira (filing tickets, prioritization, hygiene, closing stale items). Workers operate on assigned tickets — claim, comment, update state — but don't drive the backlog.
+
+**Open question (v1):** with two planners (shadow + keel-cli) running concurrently, which is primary Jira owner? Three possible shapes:
+- **shadow primary** — shadow drives the backlog for nexus / OSS lanes; keel-cli files into it as needed.
+- **keel-cli primary** — keel-cli drives; shadow files as needed.
+- **split by lane** — each planner owns their lane's tickets (e.g. shadow owns agora/runtime, keel-cli owns Frame/nexus internals); cross-lane tickets go to whichever planner is closest.
+
+Resolve before v1.1 of this doc.
 
 ---
 
@@ -29,9 +40,46 @@ The canonical roster lives in nexus's aspect store. This policy refers to "plann
 
 **Planners delegate. Workers execute.**
 
-When a planner receives a task that involves bounded execution — building, testing, mutating files, running scripts, scanning structured data, fetching, transforming — the default action is to `@`-mention the appropriate worker aspect via chat and let the worker handle it. The planner stays in coordination mode.
+When a planner receives a task that involves bounded execution — building, testing, mutating files, running scripts, scanning structured data, fetching, transforming — the default action is to delegate to the appropriate worker aspect.
 
-Workers don't need to ask permission to do the work assigned to them. The chat-mention IS the work order.
+There are two sanctioned dispatch surfaces (see §2.5 below): **chat** for ephemeral / conversational work, **Jira** for discrete trackable work that should outlive a chat thread.
+
+Workers don't need to ask permission to do the work assigned to them. A delegation IS the work order.
+
+## 2.5 Dispatch surfaces — chat vs Jira
+
+| use chat (`@mention`) when... | use Jira (assign ticket) when... |
+|---|---|
+| work is conversational / discoverable mid-thread | work is discrete and pre-decomposed |
+| short turnaround (minutes, not hours) | crosses session boundaries; needs durable tracking |
+| context is in the thread already (warm) | the record should outlive the chat (visible to future operators, agents) |
+| operator may want to interject mid-flight | structured workflow with status states matters |
+| no other reviewer expected | reviewable / auditable by anyone with the issue key |
+
+**Rule of thumb:** if the work is "this thing, now, you" — chat. If the work is "this thing, by then, someone with capacity" — Jira.
+
+Both surfaces use the same task-shape (§4 worker contract) and the same reply-shape (§5 reply contract). The difference is only WHERE the task lives.
+
+### Worker Jira workflow (when delegated via Jira)
+
+When a planner files a ticket with `assignee = <worker-aspect>` and/or pings the worker referencing the key:
+
+1. Worker reads the ticket (`jira_get <key>`).
+2. Worker claims it: `jira_claim <key>` — atomically sets assignee=self + status=In Progress.
+3. Worker does the work.
+4. Worker comments progress on the ticket (`jira_comment`) — same §5 reply shape: Status / Result / Notes lines. Multiple comments fine; the last one is canonical.
+5. Worker updates state on completion (`jira_update_status` → Done, or back to To Do with `Status: blocked` comment, etc.).
+6. If the worker `refused` or `redirect`s, they comment the reason and either un-claim (set status back to To Do, clear assignee) or reassign to the appropriate worker.
+
+### Planner Jira workflow
+
+- File tickets with the same five required fields as the chat contract (§4): task / success / in-scope / out-of-scope / return-shape.
+- Either assign directly to the worker aspect (preferred for unambiguous routing) OR file and `@mention` in chat with the issue key (when routing is uncertain or the planner wants discussion before assigning).
+- Review the ticket's last comment for the canonical Status before closing or replanning.
+
+### When both surfaces apply
+
+For discrete work that's also actively being discussed in chat, prefer Jira. Reference the key in chat; let the canonical record live in Jira. Chat is for coordination ABOUT the ticket, not the work itself.
 
 ---
 
