@@ -288,7 +288,7 @@ func main() {
 	// exists. Until then any emit is a silent drop — safe because no
 	// turns can run before the broker is up.
 	obsHub := observability.NewHub(500, nil)
-	chatRouter, frameGateway := buildChatRouter(ctx, embeddedFrame, r, chatStore, triageStore, usage.NewSQLStore(db), knowledgeStore, obsHub, logger)
+	chatRouter, frameGateway := buildChatRouter(ctx, embeddedFrame, r, chatStore, triageStore, usage.NewSQLStore(db), knowledgeStore, obsHub, credentialStore, logger)
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
@@ -1339,7 +1339,7 @@ func buildRewriterRunner(cfg schemas.AspectConfig, aspectCwd string, frameProvid
 // to the broker after broker.New so in-process Frame posts go through
 // Broker.HandleChatSend (the unified chat-send path). When ef is nil
 // both returns are nil.
-func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.Roster, store chat.Store, triageStore chat.TriageStore, usageStore *usage.SQLStore, knowledgeStore *knowledge.Store, obsHub *observability.Hub, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway) {
+func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.Roster, store chat.Store, triageStore chat.TriageStore, usageStore *usage.SQLStore, knowledgeStore *knowledge.Store, obsHub *observability.Hub, credentialStore *credentials.Store, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway) {
 	if ef == nil {
 		return nil, nil
 	}
@@ -1478,7 +1478,14 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		// wiring — broker and funnel share the heap, so the Grouper
 		// satisfies funnel.ObservabilityHook via structural typing.
 		ObservabilityHook: obsHook,
-		Logger:            log,
+		// #218: route every Frame turn through the credential store so
+		// aspects.default_anthropic_credential overlays
+		// ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL onto bridle's
+		// ProviderEnv. Nil store (legacy / dev) cleanly falls back to
+		// the resolver returning (nil, false) → no overlay, subscription
+		// / process-env auth wins.
+		ProviderEnvResolver: newCredentialEnvResolver(credentialStore, bridle.ProviderID(provider)),
+		Logger:              log,
 	})
 	if err != nil {
 		log.Error("frame funnel: construction failed; deliberation disabled",

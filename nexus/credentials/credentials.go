@@ -338,6 +338,89 @@ func (s *Store) Decrypt(c Credential) (string, error) {
 	return string(plaintext), nil
 }
 
+// EnvForCredential builds the {API_KEY, BASE_URL} env-var pair a
+// provider would consume to authenticate against this credential's
+// upstream. Per-shape: Anthropic credentials emit ANTHROPIC_API_KEY +
+// ANTHROPIC_BASE_URL (URL omitted when empty so the provider falls
+// back to its default endpoint); OpenAI credentials emit OPENAI_API_KEY
+// + OPENAI_BASE_URL. Future shapes register their own canonical env
+// names here.
+//
+// Returned map is fresh and caller-owned — safe to merge into a
+// bridle.TurnRequest.ProviderEnv without copy.
+func (s *Store) EnvForCredential(c Credential) (map[string]string, error) {
+	key, err := s.Decrypt(c)
+	if err != nil {
+		return nil, err
+	}
+	env := make(map[string]string, 2)
+	switch c.APIShape {
+	case ShapeAnthropic:
+		env["ANTHROPIC_API_KEY"] = key
+		if c.BaseURL != "" {
+			env["ANTHROPIC_BASE_URL"] = c.BaseURL
+		}
+	case ShapeOpenAI:
+		env["OPENAI_API_KEY"] = key
+		if c.BaseURL != "" {
+			env["OPENAI_BASE_URL"] = c.BaseURL
+		}
+	default:
+		// Unknown shape — surface as error rather than silently emit
+		// nothing; the funnel's auth would otherwise fall through to
+		// whatever process env has, masking misconfiguration.
+		return nil, fmt.Errorf("credentials: no env mapping for api_shape %q", c.APIShape)
+	}
+	return env, nil
+}
+
+// ResolveDefaultForAspect looks up the aspect's default credential
+// for the given shape via aspects.default_{anthropic,openai}_credential,
+// loads the matching credential, verifies the aspect is allowed to use
+// it, and returns a ready-to-overlay env map. Returns ErrNoDefault
+// when the aspect has no default configured for the requested shape
+// (caller can fall through to process-env / --bare-style behaviour).
+func (s *Store) ResolveDefaultForAspect(ctx context.Context, aspect string, shape APIShape) (Credential, map[string]string, error) {
+	col := ""
+	switch shape {
+	case ShapeAnthropic:
+		col = "default_anthropic_credential"
+	case ShapeOpenAI:
+		col = "default_openai_credential"
+	default:
+		return Credential{}, nil, fmt.Errorf("credentials: no default-column mapping for api_shape %q", shape)
+	}
+	var name sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT `+col+` FROM aspects WHERE name = ?`, aspect).Scan(&name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Credential{}, nil, ErrNoDefault
+		}
+		return Credential{}, nil, fmt.Errorf("lookup aspect default: %w", err)
+	}
+	if !name.Valid || name.String == "" {
+		return Credential{}, nil, ErrNoDefault
+	}
+	c, err := s.Get(ctx, name.String)
+	if err != nil {
+		return Credential{}, nil, fmt.Errorf("resolve credential %q for aspect %q: %w", name.String, aspect, err)
+	}
+	if !c.AllowedFor(aspect) {
+		return Credential{}, nil, fmt.Errorf("credentials: aspect %q not allowed for credential %q", aspect, name.String)
+	}
+	env, err := s.EnvForCredential(c)
+	if err != nil {
+		return Credential{}, nil, err
+	}
+	return c, env, nil
+}
+
+// ErrNoDefault is returned by ResolveDefaultForAspect when the aspect
+// has no default credential configured for the requested shape.
+// Callers should treat this as "fall through to existing behaviour"
+// — usually that means subscription-auth claude-code or process-env
+// API keys — not as an error condition.
+var ErrNoDefault = errors.New("credentials: aspect has no default for this api shape")
+
 // List returns every credential's metadata. Never includes key material.
 func (s *Store) List(ctx context.Context) ([]Metadata, error) {
 	rows, err := s.db.QueryContext(ctx, `
