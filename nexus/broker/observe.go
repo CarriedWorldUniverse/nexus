@@ -3,7 +3,7 @@
 // subscribe.observe enrolls an operator's WS connection in one
 // aspect's observability stream; live frames produced by the
 // observability Hub fan out to enrolled operators through
-// broadcastObserveFrame. Subscription state is per-aspect (a map on
+// BroadcastObserveFrame. Subscription state is per-aspect (a map on
 // wsConn), distinct from the global subscribedChat flag — operators
 // commonly want to watch one or two aspects in detail without
 // drinking the whole firehose.
@@ -40,7 +40,7 @@ func (c *wsConn) handleSubscribeObserve(env frames.Envelope) {
 	c.log.Info("observability subscribe", "aspect", payload.Aspect, "since_seq", payload.SinceSeq)
 
 	// Order matters: drain the tail FIRST (while subscribedObserve is
-	// still false for this aspect → broadcastObserveFrame cannot pick
+	// still false for this aspect → BroadcastObserveFrame cannot pick
 	// us up as a live target), THEN flip the subscription flag, THEN
 	// ack. The earlier flag-first ordering let a concurrent chat.send
 	// race a live frame in ahead of the historical tail, breaking the
@@ -106,17 +106,23 @@ func (c *wsConn) sendObserveFrame(aspect string, f observability.Frame) {
 	c.send(env)
 }
 
-// broadcastObserveFrame is the Hub's onFrame callback: every Grouper
+// BroadcastObserveFrame is the Hub's onFrame callback: every Grouper
 // emission lands here, the broker walks live operators, and pushes
 // the frame to any with this aspect in their subscribedObserve set.
 // Mirrors the fanOutToOperators predicate pattern but reads from the
 // per-aspect map instead of a single flag.
 //
+// Exported so callers (cmd/nexus/main.go) can chain it with other
+// onFrame subscribers — e.g. the jsonlsink persistent writer — by
+// composing a closure that calls multiple sinks and re-installing it
+// via Hub.SetOnFrame. The broker constructor still installs this
+// directly as the default; main.go overrides during wiring.
+//
 // Invariant: called from Grouper.emit without the Hub lock held —
 // must not re-enter Hub.GrouperFor or it'll deadlock with the Hub
 // mutex acquisition order. Likewise must not call back into the
 // same Grouper (Grouper.mu is held across emit).
-func (b *Broker) broadcastObserveFrame(aspect string, f observability.Frame) {
+func (b *Broker) BroadcastObserveFrame(aspect string, f observability.Frame) {
 	b.opMu.RLock()
 	targets := make([]*wsConn, 0, len(b.operators))
 	for c := range b.operators {
