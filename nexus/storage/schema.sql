@@ -107,8 +107,11 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 CREATE INDEX IF NOT EXISTS idx_chat_thread_id          ON chat_messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_chat_from_agent         ON chat_messages(from_agent);
 CREATE INDEX IF NOT EXISTS idx_chat_created_at         ON chat_messages(created_at);
-CREATE INDEX IF NOT EXISTS idx_chat_parent_msg_id      ON chat_messages(parent_msg_id);
-CREATE INDEX IF NOT EXISTS idx_chat_thread_root_msg_id ON chat_messages(thread_root_msg_id);
+-- Indexes for parent_msg_id + thread_root_msg_id are created in
+-- schema.go's Bootstrap step AFTER addMissingColumns runs (the
+-- columns are added by ALTER TABLE migration on pre-#226 databases,
+-- so a CREATE INDEX here would fail on legacy DBs because schema.sql
+-- runs before the column migrations).
 
 -- -------------------------------------------------------------------
 -- Chat reactions (toggle-emoji on a chat message — Lock 3 react_to)
