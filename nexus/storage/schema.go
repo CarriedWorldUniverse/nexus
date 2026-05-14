@@ -114,6 +114,11 @@ func Bootstrap(ctx context.Context, db *sql.DB) error {
 	if err := backfillChatThreadRoots(ctx, db); err != nil {
 		return fmt.Errorf("backfill chat thread roots: %w", err)
 	}
+	// Note: provider_credentials → credentials data migration (#NEX-75)
+	// lives in the credentials package (it needs the data-encryption key
+	// derived from session_signing_secret to re-encrypt rows into the
+	// new opaque-bundle shape). Caller invokes credentials.MigrateLegacyTable
+	// after storage.Bootstrap and credentials.NewStore.
 	return nil
 }
 
@@ -236,6 +241,21 @@ var columnsToAdd = []columnAddition{
 		table:  "aspects",
 		column: "default_openai_credential",
 		ddl:    "ALTER TABLE aspects ADD COLUMN default_openai_credential TEXT",
+	},
+	// Task #NEX-74/75 — per-aspect default credentials for non-provider
+	// kinds (jira, imap). Parallel shape to the provider defaults above:
+	// aspects calling broker.credential.fetch with no explicit name get
+	// routed to these. Operator wires via `nexus credential aspect-default`
+	// or admin REST (#NEX-76).
+	{
+		table:  "aspects",
+		column: "default_jira_credential",
+		ddl:    "ALTER TABLE aspects ADD COLUMN default_jira_credential TEXT",
+	},
+	{
+		table:  "aspects",
+		column: "default_imap_credential",
+		ddl:    "ALTER TABLE aspects ADD COLUMN default_imap_credential TEXT",
 	},
 	// Task #226 — linked-list thread model. parent_msg_id is the chain
 	// parent (NULL for thread roots). thread_root_msg_id is the

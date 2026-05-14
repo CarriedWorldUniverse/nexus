@@ -216,6 +216,17 @@ func main() {
 		logger.Warn("credentials store unavailable", "err", err)
 		credentialStore = nil
 	}
+	// Migrate the legacy `provider_credentials` table into the post-NEX-75
+	// `credentials` table on first boot after the schema rename. No-op on
+	// fresh DBs and on already-migrated DBs. Failure here is fatal: we'd
+	// rather not boot than silently lose stored credentials. See
+	// credentials/migrate.go for the idempotency guards.
+	if credentialStore != nil {
+		if err := credentialStore.MigrateLegacyTable(ctx); err != nil {
+			logger.Error("credentials legacy-table migration failed", "err", err)
+			os.Exit(1)
+		}
+	}
 
 	r := roster.New()
 	proj := sessions.New(db)
