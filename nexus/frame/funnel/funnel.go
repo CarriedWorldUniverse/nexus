@@ -37,7 +37,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -258,19 +257,36 @@ type Config struct {
 	Tools    []bridle.ToolDef        // explicit in-process tool defs (incl. send_comms)
 	Runner   bridle.ToolRunner       // executes Tools
 
-	// ChatGateway is the chat-posting seam used to auto-post the model's
-	// natural reply at end-of-turn when the post-hoc filter approves
-	// (Filter.ShouldPost). Optional — when nil, the funnel still runs
-	// turns but FinalText doesn't reach chat. Production wiring sets
-	// this to the same ChatGateway the CommsRunner uses, so the
-	// auto-post and explicit send_chat tool calls converge on the same
-	// path (Broker.HandleChatSend → persistence + fan-out).
+	// ChatGateway is the chat-posting seam used by the default
+	// NexusChatReturnHandler to auto-post the model's natural reply at
+	// end-of-turn when the post-hoc filter approves. Optional — when
+	// nil, the default return handler is a no-op and FinalText doesn't
+	// reach chat. Production wiring sets this to the same ChatGateway
+	// the CommsRunner uses, so the auto-post and explicit send_chat
+	// tool calls converge on the same path (Broker.HandleChatSend →
+	// persistence + fan-out).
 	//
-	// Without this, providers that don't expose custom tools to the
-	// model (e.g. claudecode in subprocess mode) have no way to surface
-	// model output: the model produces FinalText, the filter approves,
-	// but nobody acts on the decision.
+	// As of NEX-82 this field is consulted only to build the default
+	// Return handler when Return is left nil. Callers that pass an
+	// explicit Return handler can leave ChatGateway nil — the handler
+	// owns its own posting surface.
 	ChatGateway ChatGateway
+
+	// Return is the post-deliberation routing seam (NEX-82). The
+	// engine calls Return.OnTurnStart at turn pickup and Return.Handle
+	// at turn end. Implementations decide what to do with the result
+	// given the trigger context (chat reply for nexus, panel-state for
+	// agora, etc.).
+	//
+	// nil = funnel.New picks a default based on ChatGateway:
+	//   - ChatGateway non-nil → NexusChatReturnHandler{Gateway: ChatGateway}
+	//     (the pre-NEX-82 behavior: 👀/👍/🙊 reactions + auto-post).
+	//   - ChatGateway nil    → NoopReturnHandler (headless paths —
+	//     operator REST eval, funnel_test in-memory).
+	//
+	// Explicit Return overrides the default. agora-side composes its
+	// own Source-tagged ReturnHandler to route chat-vs-tty.
+	Return ReturnHandler
 
 	// Compaction
 	Compaction CompactionPolicy
@@ -478,6 +494,23 @@ func New(cfg Config) (*Funnel, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	// Default ReturnHandler wiring (NEX-82). Pre-split callers wired
+	// ChatGateway and the funnel internalised the 👀/auto-post calls;
+	// preserve that by building the default NexusChatReturnHandler
+	// when Return is nil and ChatGateway is present. Headless callers
+	// (no gateway, no explicit handler) get the noop. Explicit Return
+	// values override both — agora's two-channel handler lands here.
+	if cfg.Return == nil {
+		if cfg.ChatGateway != nil {
+			cfg.Return = &NexusChatReturnHandler{
+				Gateway:  cfg.ChatGateway,
+				AspectID: cfg.AspectID,
+				Logger:   cfg.Logger,
+			}
+		} else {
+			cfg.Return = NoopReturnHandler{}
+		}
+	}
 
 	resolver := NewSessionResolver(cfg.AspectID, cfg.ContextMode)
 	return &Funnel{
@@ -603,19 +636,22 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	f.triggeringFrom = ""
 	f.triggeringContent = ""
 
-	// Work-signal: 👀 on the triggering message means "I saw it, I'm
-	// working on it." Resolved post-filter:
-	//   - filter approves → reply posts → remove 👀 (same-emoji toggle).
-	//   - filter suppresses → replace with 👍 ("saw it, nothing to add").
-	// Gated on having a real trigger msg + a chat gateway; non-chat-
-	// triggered deliberations (operator REST, eval) have no msg to react
-	// to. Per #189 — single-emoji-per-reactor makes this an ambient
-	// observability layer the operator can scan across all aspects.
-	if triggerMsgID != 0 && f.cfg.ChatGateway != nil {
-		if err := f.cfg.ChatGateway.ReactTo(ctx, triggerMsgID, "👀"); err != nil {
-			f.log.Debug("funnel: 👀 work-signal failed",
-				"aspect", f.cfg.AspectID, "trigger_msg_id", triggerMsgID, "err", err)
-		}
+	// Build the typed TurnTrigger from the popped item (or zero-value
+	// for non-inbox-driven turns). Single source of truth for the
+	// return-side context; both OnTurnStart and Handle receive it.
+	var trigger TurnTrigger
+	if len(pending) > 0 {
+		trigger = triggerFromInboxItem(pending[0])
+	}
+
+	// NEX-82: Return.OnTurnStart fires the "picking it up" pulse.
+	// Default impl (NexusChatReturnHandler) writes 👀 on the trigger
+	// msg via ChatGateway. Noop for headless callers. Errors are
+	// logged but never abort the turn — failed start-pulse shouldn't
+	// kill substantive work.
+	if err := f.cfg.Return.OnTurnStart(ctx, trigger); err != nil {
+		f.log.Debug("funnel: return handler OnTurnStart failed",
+			"aspect", f.cfg.AspectID, "trigger_msg_id", trigger.MsgID, "err", err)
 	}
 
 	// Check compaction threshold before running the turn. If we'd cross
@@ -910,65 +946,22 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		"filter_post", decision.ShouldPost,
 		"filter_reason", decision.Reason)
 
-	// Resolve the 👀 work-signal based on the filter outcome. Three
-	// branches under single-emoji-per-reactor semantics:
-	//   - ShouldPost: model's reply will post → toggle 👀 off (re-react
-	//     with the same emoji removes the reactor's row). The posted
-	//     reply is itself the signal that the aspect engaged.
-	//   - !ShouldPost AND non-empty text: filter killed a substantive
-	//     reply → 🙊 (see-no-evil). This is the audit signal: aspect
-	//     had something to say, judge labeled it scratch. Different
-	//     from "nothing to add" — operator should be able to find
-	//     these and inspect the suppressed text in the observability
-	//     stream to calibrate the judge.
-	//   - !ShouldPost AND empty text: model genuinely had nothing →
-	//     👍 ("saw it, nothing to add"). The honest acknowledgement.
-	if triggerMsgID != 0 && f.cfg.ChatGateway != nil {
-		var resolveEmoji string
-		switch {
-		case decision.ShouldPost:
-			resolveEmoji = "👀" // toggle off
-		case strings.TrimSpace(result.FinalText) != "":
-			resolveEmoji = "🙊" // filter ate a substantive reply
-		default:
-			resolveEmoji = "👍" // genuinely nothing to add
-		}
-		if err := f.cfg.ChatGateway.ReactTo(ctx, triggerMsgID, resolveEmoji); err != nil {
-			f.log.Debug("funnel: resolve work-signal failed",
-				"aspect", f.cfg.AspectID,
-				"trigger_msg_id", triggerMsgID,
-				"emoji", resolveEmoji,
-				"err", err)
-		}
+	// NEX-82: hand the result off to Return.Handle. The default
+	// NexusChatReturnHandler does what the inline pre-split code did:
+	// resolve-emoji (👀 toggle-off / 🙊 / 👍 based on filter+text) and
+	// auto-post FinalText when filter ShouldPost. agora-side handlers
+	// route Source-tagged. Errors are logged but don't fail the turn —
+	// Deliberate's caller already has the result; return-side failures
+	// are observability concerns.
+	deliberate := DeliberateResult{TurnResult: result, Filter: decision}
+	if err := f.cfg.Return.Handle(ctx, deliberate, trigger); err != nil {
+		f.log.Debug("funnel: return handler Handle failed",
+			"aspect", f.cfg.AspectID,
+			"trigger_msg_id", trigger.MsgID,
+			"err", err)
 	}
 
-	// Auto-post the model's natural reply when the filter approves and a
-	// gateway is wired. This closes the gap left when providers don't
-	// expose chat tools to the model (claudecode's subprocess mode):
-	// without this, the model produces FinalText, the filter says
-	// ShouldPost, but nobody calls SendChat — the reply never reaches
-	// chat. ReplyTo threads the post under the message that triggered
-	// the deliberation when one exists; non-triggered turns post
-	// top-level.
-	if decision.ShouldPost && f.cfg.ChatGateway != nil {
-		text := strings.TrimSpace(result.FinalText)
-		if text != "" {
-			if msgID, err := f.cfg.ChatGateway.SendChat(ctx, text, triggerMsgID, ""); err != nil {
-				f.log.Warn("funnel: auto-post failed",
-					"aspect", f.cfg.AspectID,
-					"trigger_msg_id", triggerMsgID,
-					"err", err)
-			} else {
-				f.log.Info("funnel: auto-posted",
-					"aspect", f.cfg.AspectID,
-					"msg_id", msgID,
-					"reply_to", triggerMsgID,
-					"chars", len(text))
-			}
-		}
-	}
-
-	return DeliberateResult{TurnResult: result, Filter: decision}, nil
+	return deliberate, nil
 }
 
 // DeliberateResult is the funnel-level outcome of one deliberation
