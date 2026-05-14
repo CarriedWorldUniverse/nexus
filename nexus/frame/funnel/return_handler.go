@@ -116,11 +116,17 @@ var _ ReturnHandler = NoopReturnHandler{}
 // userMessage-only path). The zero value's MsgID == 0, so return
 // handlers can use that as the "no trigger" sentinel.
 func triggerFromInboxItem(item bridle.InboxItem) TurnTrigger {
+	source := item.Source
+	if source == "" {
+		// Legacy default — pre-NEX-89 InboxItems had no Source field;
+		// nexus-chat substrate is the assumed origin.
+		source = "chat"
+	}
 	return TurnTrigger{
 		MsgID:      item.MsgID,
 		From:       item.From,
 		Content:    item.Content,
 		ThreadRoot: item.ThreadRoot,
-		Source:     "chat", // legacy default; future agora trigger paths set this
+		Source:     source,
 	}
 }
