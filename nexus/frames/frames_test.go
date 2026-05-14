@@ -288,6 +288,29 @@ func TestPayloadJSONTags(t *testing.T) {
 			}},
 			[]string{`"messages":[`, `"id":1`},
 		},
+		{
+			"CredentialFetch_ByName",
+			CredentialFetchPayload{Kind: "jira", Name: "jira-prod"},
+			[]string{`"kind":"jira"`, `"name":"jira-prod"`},
+		},
+		{
+			"CredentialFetch_ByDefault",
+			CredentialFetchPayload{Kind: "imap"},
+			// Name should be omitted when unset (omitempty).
+			[]string{`"kind":"imap"`},
+		},
+		{
+			"CredentialFetchResult",
+			CredentialFetchResultPayload{
+				Name: "jira-prod", Kind: "jira",
+				Bundle: map[string]any{
+					"atlassian_email":     "ops@example.com",
+					"atlassian_token":     "tok-abc",
+					"atlassian_subdomain": "myorg",
+				},
+			},
+			[]string{`"name":"jira-prod"`, `"kind":"jira"`, `"atlassian_subdomain":"myorg"`},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

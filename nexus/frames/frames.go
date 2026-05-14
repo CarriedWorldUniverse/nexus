@@ -86,6 +86,19 @@ const (
 	KindKnowledgeSearch       Kind = "knowledge.search"
 	KindKnowledgeSearchResult Kind = "knowledge.search.result"
 
+	// Credentials — aspect-to-Nexus credential fetch. NEX-77.
+	// Aspects fetch kind-typed credentials (jira/imap/provider) from
+	// the broker's credential store via WS. Authentication is JWT
+	// (the conn's authenticated registeredAs); aspects can't fetch
+	// credentials they're not on the allowed_aspects list for.
+	// Provider creds are usually consumed via ProviderEnv resolution
+	// in the funnel — this frame exists for non-provider kinds (jira/
+	// imap) where the MCP needs the bundle directly, and for provider-
+	// kind plaintext-fetch (mode=fetch|both) when the aspect needs the
+	// raw API key for a non-proxy code path.
+	KindCredentialFetch       Kind = "credential.fetch"
+	KindCredentialFetchResult Kind = "credential.fetch.result"
+
 	// Session observability — projection upward for dashboard view.
 	// Local aspect JSONL is source of truth; Nexus keeps a read-only
 	// mirror for rendering.
@@ -271,6 +284,7 @@ func IsKnown(k Kind) bool {
 		KindChatReadResult, KindAnnounceFile, KindShareFile, KindFileResult,
 		KindAspectActivity,
 		KindKnowledgeStore, KindKnowledgeSearch, KindKnowledgeSearchResult,
+		KindCredentialFetch, KindCredentialFetchResult,
 		KindSessionEntryAppended, KindSessionRewind, KindSessionFork,
 		KindShutdown,
 		// Operator dashboard (dashboard-ws-port 5c)
