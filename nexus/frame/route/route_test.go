@@ -50,21 +50,26 @@ func TestIsAddressed(t *testing.T) {
 	}
 }
 
-// Rule 1 — un-addressed always routes to the Frame regardless of sender.
-func TestShouldRoute_UnAddressedFromAnyone(t *testing.T) {
+// Rule update (2026-05-14): un-addressed no longer routes to the
+// Frame. Frame is a peer aspect for routing purposes; un-addressed
+// traffic between aspects shouldn't reach the Frame unless they're
+// already a participant. Operator @-addresses explicitly via the UI
+// (which enforces "must address an aspect or be a reply" at input).
+func TestShouldRoute_UnAddressedDoesNotRoute(t *testing.T) {
 	cases := []struct {
 		from    string
 		content string
 	}{
-		{"operator", "broadcast to everyone"},
 		{"wren", "thinking out loud"},
-		{"anchor", "self-narrating"},
 		{"system", "alarm fired at 02:00"},
+		// NB: from=anchor (frameName) is excluded — rule 2b still routes
+		// when Frame is the sender (no-op delivery, for participation
+		// recording).
 	}
 	for _, tc := range cases {
 		msg := Message{From: tc.from, Content: tc.content}
-		if !ShouldRouteToFrame(msg, frameName, testRoster, NewThreadIndex()) {
-			t.Errorf("from=%q content=%q: expected route to frame", tc.from, tc.content)
+		if ShouldRouteToFrame(msg, frameName, testRoster, NewThreadIndex()) {
+			t.Errorf("from=%q content=%q: expected NO route (un-addressed should not catch Frame)", tc.from, tc.content)
 		}
 	}
 }
@@ -158,9 +163,9 @@ func TestShouldRoute_AspectToAspect_NoFrameMembership(t *testing.T) {
 
 // Nil ThreadIndex behaves as empty index.
 func TestShouldRoute_NilIndex(t *testing.T) {
-	// Un-addressed still routes (rule 1 doesn't need an index).
-	if !ShouldRouteToFrame(Message{From: "operator", Content: "hi"}, frameName, testRoster, nil) {
-		t.Error("nil-idx + un-addressed: expected route")
+	// Un-addressed no longer routes (rule 1 removed 2026-05-14).
+	if ShouldRouteToFrame(Message{From: "operator", Content: "hi"}, frameName, testRoster, nil) {
+		t.Error("nil-idx + un-addressed: expected NO route (rule 1 removed)")
 	}
 	// Addressed-to-frame still routes (rule 2a doesn't need an index).
 	if !ShouldRouteToFrame(Message{From: "operator", Content: "@anchor hi"}, frameName, testRoster, nil) {
@@ -270,10 +275,10 @@ func TestShouldRoute_ContentEdgeCases(t *testing.T) {
 		content string
 		want    bool // true = route to frame
 	}{
-		{"empty content", "", true},                                // un-addressed, routes
-		{"whitespace-only", "   \n  ", true},                       // un-addressed, routes
-		{"@-symbol-no-name", "@", true},                            // not a valid mention; un-addressed
-		{"frame-name-not-mention", frameName, true},                // bare word, no @
+		{"empty content", "", false},                               // un-addressed, NO route post-2026-05-14
+		{"whitespace-only", "   \n  ", false},                      // un-addressed, NO route
+		{"@-symbol-no-name", "@", false},                           // not a valid mention; un-addressed
+		{"frame-name-not-mention", frameName, false},               // bare word, no @
 		{"frame-name-as-substring", "anchorman @wren said", false}, // not @anchor, addressed @wren
 	}
 	for _, tc := range cases {

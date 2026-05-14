@@ -1,20 +1,25 @@
-// Package route codifies the Frame's chat-routing rules per §6.5 P8 and
-// the #80 lock (docs/2026-05-01-frame-stop-decisions.md).
+// Package route codifies the Frame's chat-routing rules.
 //
-// The rules — Frame receives a message iff one of:
+// Original rules came from §6.5 P8 / #80 lock (docs/2026-05-01-frame-
+// stop-decisions.md). Updated 2026-05-14 (operator directive): Frame is
+// no longer the un-addressed catch-all. Keel is just another harness
+// from a routing perspective — sees only what they're included in.
+// Frame's "special" axis is ContextMode (global vs per-thread), not
+// routing.
 //
-//  1. Un-addressed traffic: content contains no @<aspect> mention.
-//     Applies regardless of sender. This is the routing-awareness role —
-//     the Frame may need to surface, route, or act on un-addressed
-//     traffic even when not the originator.
+// The rules — Frame receives a message iff:
 //
-//  2. Frame is a participant in addressed traffic:
-//     a. content @-mentions the Frame, OR
-//     b. message is FROM the Frame (no-op delivery; recorded for symmetry), OR
-//     c. ReplyTo refers to a message the Frame previously authored, OR
-//     d. Topic matches a topic the Frame has previously posted in, OR
-//     e. ThreadRoot matches a message the Frame has previously authored or
-//     replied within (best-effort transitive — see ThreadIndex).
+//  1. content @-mentions the Frame (rule 2a), OR
+//  2. @all broadcast (rule 2a-bis), OR
+//  3. message is FROM the Frame — no-op delivery, recorded for symmetry
+//     so reply chains the Frame started match in 2c/2e (rule 2b), OR
+//  4. ReplyTo refers to a message the Frame previously authored (2c), OR
+//  5. Topic matches a topic the Frame has previously posted in (2d), OR
+//  6. ThreadRoot matches a message the Frame has previously authored or
+//     replied within (rule 2e, best-effort transitive — see ThreadIndex).
+//
+// Un-addressed traffic no longer routes here. Operators must address
+// the Frame explicitly (@keel) to get a response, same as any aspect.
 //
 // What this package is NOT:
 //   - A chat bus. The Nexus broker doesn't yet host a chat surface; this
@@ -208,18 +213,17 @@ func isNameByte(b byte) bool {
 	return false
 }
 
-// ShouldRouteToFrame applies the §6.5 P8 / #80 routing rules using the
-// roster-aware addressing check.
+// ShouldRouteToFrame applies the routing rules using the roster-aware
+// addressing check. Frame is treated as a peer aspect for routing
+// purposes — only sees what they're explicitly included in.
 //
-// frameName is the operator-chosen Frame identity (from EmbeddedFrame.Name).
-// roster is the set of OTHER addressable aspect names — used to decide
-// whether the message is "addressed to someone" so rule 1 can fire.
-// idx may be nil — a nil index treats the Frame as having no participation
-// history, so only rules 1 and 2a–2b can match.
-//
-// The roster MUST include the Frame's own name plus every other live
-// aspect. Without the Frame in the roster, rule 1 ("addressed to nobody")
-// would fire for messages addressed only to the Frame.
+// frameName is the Frame identity (from EmbeddedFrame.Aspect.Name).
+// roster is retained as a parameter for ABI compatibility but is no
+// longer consulted directly — un-addressed traffic no longer auto-routes
+// to the Frame as of 2026-05-14 (operator directive: "keel works just
+// like any other harness").
+// idx may be nil — a nil index treats the Frame as having no
+// participation history, so only rules 2a / 2a-bis / 2b can match.
 //
 // Pure: does NOT mutate idx. Callers integrating with a chat bus are
 // responsible for calling idx.RecordPost(msgID, topic) after the Frame
@@ -227,12 +231,7 @@ func isNameByte(b byte) bool {
 // participation. Likewise idx.RecordParticipation is the caller's call,
 // not this function's.
 func ShouldRouteToFrame(msg Message, frameName string, roster []string, idx *ThreadIndex) bool {
-	// Rule 1: un-addressed traffic always routes to the Frame. "Addressed"
-	// means addressing a known aspect or @all — random @-tokens that
-	// don't match an aspect aren't real addressing.
-	if !IsAddressedToAny(msg.Content, roster) {
-		return true
-	}
+	_ = roster // intentionally unused post-2026-05-14; retained for ABI
 
 	// Rule 2a: Frame is the addressee. Roster-aware match handles
 	// hyphens, case, punctuation correctly.
@@ -240,12 +239,9 @@ func ShouldRouteToFrame(msg Message, frameName string, roster []string, idx *Thr
 		return true
 	}
 
-	// Rule 2a-bis: @all is broadcast and includes the Frame. Without
-	// this, "@all <announcement>" reaches every aspect EXCEPT the
-	// Frame, which is exactly backwards — the Frame is the network
-	// coordinator and the operator's partner; broadcast traffic is
-	// the one thing it must see. Pre-cutover diligence missed this
-	// because @all wasn't exercised; surfaced on 2026-05-11 cutover.
+	// Rule 2a-bis: @all is broadcast — every aspect sees it, including
+	// the Frame. Operator broadcasts that should reach the whole network
+	// must use @all.
 	if mentionContains(strings.ToLower(msg.Content), "@all") {
 		return true
 	}
