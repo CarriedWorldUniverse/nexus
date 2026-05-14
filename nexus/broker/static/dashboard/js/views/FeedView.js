@@ -1,316 +1,361 @@
-const { h, html, signal, useEffect, useRef } = window.__preact;
+// FeedView.js — thread-centric feed (NEX-246 Part 4a).
+//
+// Pre-NEX-246 shape: a flat firehose of #general messages with a
+// sender-filter dropdown (agent chips) and inline expandable replies.
+// The unit of attention was the message, and the only "where am I in
+// the network" lens was "who sent this?". That model came from
+// agent-network where aspects were the substrate; under the peer
+// substrate the substrate IS the thread.
+//
+// Now: each row is a Thread. The operator scans for active threads,
+// filters by role hint or "mentions me", clicks through to ChatView
+// for the full conversation. Live updates land via Thread.subscribe —
+// no local thread bookkeeping, no replyMap, no msgCache.
+//
+// What's preserved:
+//   - Route mount points (#/feed, #/chat, default) keep working.
+//   - WS-driven liveness — new top-level messages prepend, replies
+//     re-render their row.
+//   - Channel scope: #general only (matches the legacy behaviour).
+//   - ChatInput at the bottom so the operator can still post a new
+//     top-level message without leaving the feed.
+//
+// What's replaced:
+//   - Agent-filter dropdown → role-hint filter + mentions-me toggle.
+//   - Flat message list → thread row list with participants, role
+//     chip, reply count, last-activity stamp.
+//   - Inline reply expansion (ThreadView nested under MessageBubble)
+//     → click-through to ChatView via #/chat?thread=<rootId>.
+//     Chat.js doesn't yet consume the ?thread= query (Part 4b/4c);
+//     this PR sets the affordance, the consumer lands later.
+//   - Local replyMap / msgCache → Thread instances from the registry.
+//     Each thread owns its own state.
 
-import { currentChannel, messages, lastMessageId, replyTo, agents, agentColors } from '../state.js';
-import { fetchMessages, fetchReactionsForIds } from '../api.js';
-import { checkForMentions } from '../notifications.js';
+import { fetchMessages } from '../api.js';
 import { chatWS } from '../chat-ws.js';
-import { MessageBubble } from '../components/MessageBubble.js';
+import { getOrCreateThread, peekThread } from '../models/threads.js';
+import { agentColors } from '../state.js';
 import { ChatInput } from '../components/ChatInput.js';
-import { ThreadView } from '../components/ThreadView.js';
 
-const expandedThreads = signal({});
-const selectedAgent = signal(null);
+const { html, useState, useEffect } = window.__preact;
 
-const msgCache = {};
+const ROLE_LABELS = {
+  '':                  'All',
+  'planner-dispatch':  'Planner dispatch',
+  'worker-execution':  'Worker execution',
+  'operator-drive':    'Operator drive',
+  'casual':            'Casual',
+};
 
-async function loadMessages() {
-  try {
-    // fetchMessages returns {messages, has_more}; agent-network's
-    // version returned the array directly. Unwrap so the rest of this
-    // function (which iterates `rows`) works against the new shape.
-    // Without this unwrap the early-return on `!rows.length` always
-    // fired (length undefined on the object) and the SPA showed an
-    // empty chat history on every load.
-    const result = await fetchMessages('general', lastMessageId.value);
-    const rows = Array.isArray(result) ? result : (result && result.messages) || [];
-    if (!rows.length) return;
-    rows.forEach(m => { msgCache[m.id] = m; });
+// Order the chip row deterministically — All on the left, then the
+// canonical role progression (planner → worker → operator → casual).
+const ROLE_ORDER = ['', 'planner-dispatch', 'worker-execution', 'operator-drive', 'casual'];
 
-    // Deduplicate — only add messages we haven't seen
-    const existingIds = new Set(messages.value.map(m => m.id));
-    const newRows = rows.filter(m => !existingIds.has(m.id));
-    if (newRows.length === 0) return;
-
-    checkForMentions(newRows);
-
-    const maxId = newRows.reduce((max, m) => Math.max(max, m.id), lastMessageId.value);
-    lastMessageId.value = maxId;
-
-    // Update reply_count on parent messages when new replies arrive
-    const updated = [...messages.value];
-    let changed = false;
-    for (const m of newRows) {
-      if (m.reply_to) {
-        const idx = updated.findIndex(p => p.id === m.reply_to);
-        if (idx !== -1) {
-          updated[idx] = { ...updated[idx], reply_count: (updated[idx].reply_count || 0) + 1 };
-          changed = true;
-        }
-      }
-    }
-    messages.value = [...(changed ? updated : messages.value), ...newRows];
-
-    // Auto-scroll: always on first load, then only if near bottom
-    const el = document.querySelector('.chat-messages');
-    if (el) {
-      const isFirstLoad = el.scrollTop === 0 && el.scrollHeight > el.clientHeight;
-      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
-      if (isFirstLoad || nearBottom) {
-        requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
-      }
-    }
-  } catch (e) {
-    console.error('[FeedView] loadMessages failed', e);
+// Match Thread.roleHint's mention vocabulary. The operator is a
+// participant when they sent, were @-mentioned, or the message
+// @-mentions @all. Thread.participants already folds @-mentions in;
+// this helper additionally treats @all as an operator mention since
+// @all is "everyone including the operator".
+function threadMentionsOperator(thread) {
+  const parts = thread.participants;
+  if (parts.includes('operator')) return true;
+  for (const m of thread.messages) {
+    const c = (m.content || '').toLowerCase();
+    if (c.includes('@all')) return true;
   }
+  return false;
 }
 
-// Batch-refresh reactions for all currently-rendered messages. Called after
-// WS reconnect because loadMessages() uses ?after=lastId and can't recover
-// reaction changes on already-rendered rows.
-async function refreshReactions() {
-  try {
-    const ids = messages.value.map(m => m.id).filter(n => typeof n === 'number');
-    if (!ids.length) return;
-    const map = await fetchReactionsForIds(ids);
-    if (!map) return;
-    const next = messages.value.map(m => {
-      const r = map[m.id];
-      if (r === undefined) return m;
-      return { ...m, reactions: r };
-    });
-    for (const m of next) msgCache[m.id] = m;
-    messages.value = next;
-  } catch (e) {
-    console.error('[FeedView] refreshReactions failed', e);
-  }
+// Prefer thread_root / thread_root_msg_id when the broker stamps it;
+// fall back to reply_to chain head (which for a top-level message is
+// just the message id). Mirrors the matching logic in Thread._wireChatWS.
+function rootIdOf(msg) {
+  if (!msg) return 0;
+  const r =
+    Number(msg.thread_root) ||
+    Number(msg.thread_root_msg_id) ||
+    Number(msg.reply_to) ||
+    Number(msg.id);
+  return r > 0 ? r : 0;
 }
 
-// FeedView only shows #general (no topic / topic === 'general').
-function onWsMessageCreated(ev) {
-  const msg = ev && ev.msg;
-  if (!msg || typeof msg.id !== 'number') return;
-  if (msg.topic && msg.topic !== 'general') return;
-  msgCache[msg.id] = msg;
-  if (messages.value.some(m => m.id === msg.id)) return;
-
-  checkForMentions([msg]);
-  lastMessageId.value = Math.max(lastMessageId.value, msg.id);
-
-  let updated = messages.value;
-  if (msg.reply_to) {
-    const idx = updated.findIndex(p => p.id === msg.reply_to);
-    if (idx !== -1) {
-      updated = [...updated];
-      updated[idx] = { ...updated[idx], reply_count: (updated[idx].reply_count || 0) + 1 };
-    }
-  }
-  messages.value = [...updated, msg];
-
-  const el = document.querySelector('.chat-messages');
-  if (el) {
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
-    if (nearBottom) {
-      requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
-    }
-  }
+// msgAt — same tolerant timestamp read as the rest of the SPA. The
+// broker emits created_at; older paths used received_at / `at`.
+function msgAt(msg) {
+  return (msg && (msg.created_at || msg.received_at || msg.at)) || '';
 }
 
-function onWsReactionChanged(ev) {
-  if (!ev || typeof ev.msg_id !== 'number') return;
-  const id = ev.msg_id;
-  const reactions = ev.reactions || {};
-  if (msgCache[id]) msgCache[id] = { ...msgCache[id], reactions };
-  const idx = messages.value.findIndex(m => m.id === id);
-  if (idx === -1) return;
-  const next = [...messages.value];
-  next[idx] = { ...next[idx], reactions };
-  messages.value = next;
+// Truncate the root preview to ~120 chars for the row. Strips leading
+// whitespace and collapses runs of newlines so the preview stays on
+// one visual line even when the source has hard breaks.
+function previewOf(content) {
+  if (!content) return '';
+  const flat = String(content).replace(/\s+/g, ' ').trim();
+  if (flat.length <= 120) return flat;
+  return flat.slice(0, 117) + '...';
 }
 
-function getTopLevelMessages() {
-  const topLevel = [];
-  const replyMap = {};
-  for (const m of messages.value) {
-    if (m.reply_to) {
-      if (!replyMap[m.reply_to]) replyMap[m.reply_to] = [];
-      replyMap[m.reply_to].push(m);
-    } else {
-      topLevel.push(m);
-    }
-  }
-  // Broker doesn't surface reply_count today — derive it from the page
-  // we already loaded so the thread expander shows up. The WS-bump path
-  // above also touches reply_count when a fresh reply arrives, so max()
-  // keeps that explicit value if it's higher than what we can see.
-  const decorated = topLevel.map(t => {
-    const replies = replyMap[t.id]?.length || 0;
-    const existing = t.reply_count || 0;
-    if (replies <= existing) return t;
-    return { ...t, reply_count: replies };
-  });
-  return { topLevel: decorated, replyMap };
-}
-
-function dayLabel(dateStr) {
+// Relative-time pretty-print, hour-floor. Mirrors the dashboard's
+// existing time vocabulary loosely — exact format isn't load-bearing,
+// just needs to be glanceable.
+function relTime(dateStr) {
   if (!dateStr) return '';
-  // formatTime in MessageBubble does the same dance: nexus emits RFC 3339
-  // (already terminated with Z), agent-network's legacy shape was naive
-  // UTC needing Z appended. Tolerate both.
   const isISO = /Z$|[+-]\d\d:?\d\d$/.test(dateStr);
   const d = new Date(isISO ? dateStr : dateStr + 'Z');
   if (isNaN(d.getTime())) return '';
-  return d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+  const diffMs = Date.now() - d.getTime();
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 45) return 'just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d ago`;
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-// chat.list normalizes timestamps to created_at; chat.deliver carries
-// received_at; legacy code paths used `at`. Read whichever exists.
-function msgAt(msg) {
-  return msg && (msg.created_at || msg.received_at || msg.at) || '';
+// Navigate to the thread in ChatView. Chat.js doesn't yet read the
+// ?thread= query (Part 4b/4c will wire that), but setting the hash
+// here means the affordance is correct from this PR's side; the
+// receiver lands later. Today the click effectively returns the
+// operator to the chat firehose — acceptable degraded behaviour.
+function openThread(rootId) {
+  window.location.hash = `#/chat?thread=${rootId}`;
 }
 
-function handleMessageTap(e) {
-  if (window.innerWidth > 768) return;
-  if (e.target.closest('.msg-actions')) return;
-
-  const msg = e.target.closest('.msg');
-  if (!msg) return;
-
-  const wasTapped = msg.classList.contains('tapped');
-  document.querySelectorAll('.msg.tapped').forEach(m => m.classList.remove('tapped'));
-  if (!wasTapped) msg.classList.add('tapped');
+// Pull a row state shape off a Thread. Computed once per render per
+// thread; cheap given participants/roleHint are O(messages).
+function snapshotThread(thread) {
+  const msgs = thread.messages;
+  const root = msgs[0];
+  const last = msgs[msgs.length - 1] || root;
+  return {
+    rootId: thread.rootId,
+    preview: previewOf(root && root.content),
+    from: (root && (root.from_agent || root.from)) || '',
+    participants: thread.participants,
+    roleHint: thread.roleHint,
+    replyCount: Math.max(0, msgs.length - 1),
+    lastAt: msgAt(last),
+    lastSortKey: (last && Number(last.id)) || thread.rootId,
+  };
 }
 
 export function FeedView() {
-  const initialized = useRef(false);
+  // Map of rootId → snapshot. Using an object keyed by rootId so
+  // Thread.subscribe callbacks can patch a single row without
+  // rebuilding the full list.
+  const [rows, setRows] = useState({});
+  const [roleFilter, setRoleFilter] = useState('');
+  const [mentionsMe, setMentionsMe] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!initialized.current) {
-      initialized.current = true;
-      // Hydrate messages then reactions. fetchMessages doesn't include
-      // reactions inline — without this call reactions only appear after
-      // the next live reaction.changed event or a WS reconnect, so a
-      // cold reload shows un-reacted messages until traffic resumes.
-      loadMessages().then(() => refreshReactions());
+    let cancelled = false;
+    const unsubs = new Map(); // rootId → unsubscribe fn
+
+    // Subscribe a Thread into the rows map. Re-subscribing the same
+    // rootId is a no-op (idempotent on the registry side, and we
+    // skip if we've already wired it).
+    function adopt(thread, seedSnapshot) {
+      if (unsubs.has(thread.rootId)) {
+        if (seedSnapshot) {
+          setRows((cur) => ({ ...cur, [thread.rootId]: seedSnapshot }));
+        }
+        return;
+      }
+      const sync = (t) => {
+        if (cancelled) return;
+        setRows((cur) => ({ ...cur, [t.rootId]: snapshotThread(t) }));
+      };
+      unsubs.set(thread.rootId, thread.subscribe(sync));
+      // Seed immediately so the row renders before load() resolves.
+      if (seedSnapshot) {
+        setRows((cur) => ({ ...cur, [thread.rootId]: seedSnapshot }));
+      } else {
+        sync(thread);
+      }
+      // Lazy load the rest of the subtree so reply_count + participants
+      // reflect the full thread, not just the seed root.
+      thread.load().catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error('[FeedView] thread.load failed', thread.rootId, err);
+      });
     }
 
-    // Scroll to bottom on every mount (including tab re-entry)
-    requestAnimationFrame(() => {
-      const el = document.querySelector('.chat-messages');
-      if (el) el.scrollTop = el.scrollHeight;
-    });
+    // Initial hydration: pull a recent page of #general, group by
+    // thread root, create/seed Threads for each.
+    (async () => {
+      try {
+        const result = await fetchMessages('general', 0);
+        const msgs = Array.isArray(result) ? result : (result && result.messages) || [];
+        // Group by root. Earliest-known msg in each group becomes the
+        // seed if the root id itself isn't in the page.
+        const rootSeeds = new Map();
+        for (const m of msgs) {
+          const root = rootIdOf(m);
+          if (!root) continue;
+          if (m.id === root) {
+            rootSeeds.set(root, m);
+          } else if (!rootSeeds.has(root)) {
+            // Placeholder seed; will be replaced if the real root shows
+            // up later in the same page.
+            rootSeeds.set(root, null);
+          }
+        }
+        // Second pass: if we have the actual root msg, prefer it over
+        // null placeholder.
+        for (const m of msgs) {
+          const root = rootIdOf(m);
+          if (m.id === root) rootSeeds.set(root, m);
+        }
+        if (cancelled) return;
+        for (const [rootId, seed] of rootSeeds.entries()) {
+          const thread = getOrCreateThread(rootId, seed || undefined);
+          adopt(thread, snapshotThread(thread));
+        }
+        setLoading(false);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error('[FeedView] initial load failed', e);
+        setLoading(false);
+      }
+    })();
 
-    // WS live updates — unsubscribe on unmount so stale handlers don't fire.
+    // Live: every new chat message either belongs to an existing
+    // thread (Thread.subscribe handles it) or kicks off a new one
+    // (we adopt it here). Topic-filter to #general to match the
+    // legacy scope.
     chatWS.start();
-    const offMsg = chatWS.on('message.created', onWsMessageCreated);
-    const offReact = chatWS.on('reaction.changed', onWsReactionChanged);
-    const offReconnect = chatWS.on('reconnect', () => {
-      loadMessages();
-      refreshReactions();
+    const offMsg = chatWS.on('message.created', (ev) => {
+      const m = ev && ev.msg;
+      if (!m || typeof m.id !== 'number') return;
+      if (m.topic && m.topic !== 'general') return;
+      const root = rootIdOf(m);
+      if (!root) return;
+      const existing = peekThread(root);
+      if (existing) {
+        // Thread's own chat-ws subscription will push this into its
+        // messages[] and fire its listeners; nothing for us to do.
+        return;
+      }
+      // Brand new thread — only adopt top-level messages (root === id).
+      // Reply-into-unknown-root is rare and the parent will surface
+      // on next poll/reconnect; skipping it avoids creating Threads
+      // that lack their root preview.
+      if (m.id !== root) return;
+      const thread = getOrCreateThread(root, m);
+      adopt(thread, snapshotThread(thread));
     });
 
-    // Polling kept as a 30s safety net (was 3s).
-    const msgInterval = setInterval(loadMessages, 30000);
+    const offReconnect = chatWS.on('reconnect', () => {
+      // Refetch the recent page so anything we missed during the
+      // disconnect window surfaces. Existing Threads pick up their
+      // own replies via reload-on-subscribe semantics in Thread.
+      fetchMessages('general', 0).then((result) => {
+        const msgs = Array.isArray(result) ? result : (result && result.messages) || [];
+        for (const m of msgs) {
+          const root = rootIdOf(m);
+          if (!root || m.id !== root) continue;
+          if (peekThread(root)) continue;
+          const thread = getOrCreateThread(root, m);
+          adopt(thread, snapshotThread(thread));
+        }
+      }).catch(() => {});
+    });
+
     return () => {
-      clearInterval(msgInterval);
+      cancelled = true;
       offMsg();
-      offReact();
       offReconnect();
+      for (const off of unsubs.values()) off();
     };
   }, []);
 
-  const { topLevel, replyMap } = getTopLevelMessages();
-
-  // Build operator-involved thread set for agent-only collapsing
-  const opThreads = new Set();
-  for (const m of messages.value) {
-    const isOp = m.from === 'operator' || m.type === 'input';
-    const mentionsOp = (m.content || '').toLowerCase().includes('@operator') || (m.content || '').toLowerCase().includes('@all');
-    if (isOp || mentionsOp) {
-      opThreads.add(m.id);
-      if (m.reply_to) opThreads.add(m.reply_to);
+  // Render: rows → array, filter, sort by last activity desc.
+  const all = Object.values(rows);
+  const filtered = all.filter((r) => {
+    if (roleFilter && r.roleHint !== roleFilter) return false;
+    if (mentionsMe) {
+      // Re-derive from the live Thread (participants list lives on
+      // the Thread, not the snapshot, to keep snapshots cheap).
+      const t = peekThread(r.rootId);
+      if (!t || !threadMentionsOperator(t)) return false;
     }
-    if (m.reply_to && opThreads.has(m.reply_to)) {
-      opThreads.add(m.id);
-    }
-  }
-  // Propagate: if any reply in a thread involves operator, mark the parent
-  for (const [pid, reps] of Object.entries(replyMap)) {
-    const parentId = Number(pid);
-    for (const rep of reps) {
-      if (opThreads.has(rep.id)) opThreads.add(parentId);
-    }
-    if (opThreads.has(parentId)) {
-      for (const rep of reps) opThreads.add(rep.id);
-    }
-  }
-
-  // Apply agent filter
-  const agentFilter = selectedAgent.value;
-  const filteredTopLevel = agentFilter
-    ? topLevel.filter(msg =>
-        msg.from === agentFilter ||
-        (msg.content || '').includes('@' + agentFilter)
-      )
-    : topLevel;
-
-  let lastFrom = null;
-  let lastDay = null;
-
-  function toggleThread(msg) {
-    const cur = expandedThreads.value;
-    expandedThreads.value = { ...cur, [msg.id]: !cur[msg.id] };
-  }
+    return true;
+  });
+  filtered.sort((a, b) => b.lastSortKey - a.lastSortKey);
 
   return html`
-    <div class="chat-view">
-      <div class="feed-agent-filter">
-        <button
-          class=${'feed-filter-btn' + (!selectedAgent.value ? ' active' : '')}
-          onClick=${() => selectedAgent.value = null}
-        >All</button>
-        ${agents.value.map(agent => {
-          const id = typeof agent === 'string' ? agent : agent.id;
-          const color = (agentColors.value || {})[id] || '#888';
-          return html`<button
-            key=${id}
-            class=${'feed-filter-btn' + (selectedAgent.value === id ? ' active' : '')}
-            style=${{ '--agent-color': color }}
-            onClick=${() => selectedAgent.value = id}
-          >@${id}</button>`;
-        })}
+    <div class="chat-view feed-thread-view">
+      <div class="feed-thread-filters">
+        <div class="feed-thread-filter-group">
+          ${ROLE_ORDER.map((role) => html`
+            <button
+              key=${role || 'all'}
+              class=${'feed-filter-btn' + (roleFilter === role ? ' active' : '')}
+              onClick=${() => setRoleFilter(role)}
+            >${ROLE_LABELS[role]}</button>
+          `)}
+        </div>
+        <label class="feed-thread-mentions">
+          <input
+            type="checkbox"
+            checked=${mentionsMe}
+            onChange=${(e) => setMentionsMe(e.target.checked)}
+          />
+          <span>Mentions me</span>
+        </label>
       </div>
 
-      <div class="chat-messages" onclick=${handleMessageTap}>
-        ${filteredTopLevel.map(msg => {
-          const day = dayLabel(msgAt(msg));
-          const showDay = day !== lastDay;
-          const compact = !showDay && msg.from === lastFrom;
-          lastFrom = msg.from;
-          lastDay = day;
-
-          const parentMsg = msg.reply_to ? msgCache[msg.reply_to] : null;
-          const threadMsgs = replyMap[msg.id] || [];
-          const threadOpen = !!expandedThreads.value[msg.id];
-
-          const isAgentOnly = msg.from !== 'operator' && msg.type !== 'input'
-            && !(m => (m.content || '').toLowerCase().includes('@operator') || (m.content || '').toLowerCase().includes('@all'))(msg)
-            && !opThreads.has(msg.id);
-
+      <div class="chat-messages feed-thread-list">
+        ${loading && !filtered.length && html`
+          <div class="feed-thread-empty">Loading threads...</div>
+        `}
+        ${!loading && !filtered.length && html`
+          <div class="feed-thread-empty">No threads match.</div>
+        `}
+        ${filtered.map((r) => {
+          const fromColor = (agentColors.value || {})[r.from] || '#888';
           return html`
-            ${showDay && html`<div class="day-sep">${day}</div>`}
-            <${MessageBubble}
-              key=${msg.id}
-              msg=${msg}
-              compact=${compact}
-              parentMsg=${parentMsg}
-              onReply=${toggleThread}
-              agentOnly=${isAgentOnly}
-            />
-            ${threadOpen && html`<${ThreadView} parentId=${msg.id} />`}
+            <div
+              key=${r.rootId}
+              class="feed-thread-row"
+              onClick=${() => openThread(r.rootId)}
+              role="button"
+              tabIndex=${0}
+              onKeyDown=${(e) => { if (e.key === 'Enter' || e.key === ' ') openThread(r.rootId); }}
+            >
+              <div class="feed-thread-row-head">
+                <span class="feed-thread-from" style=${{ '--agent-color': fromColor }}>
+                  ${r.from || '(unknown)'}
+                </span>
+                ${r.roleHint && html`
+                  <span class=${'feed-thread-role feed-thread-role-' + r.roleHint}>
+                    ${ROLE_LABELS[r.roleHint] || r.roleHint}
+                  </span>
+                `}
+                <span class="feed-thread-time">${relTime(r.lastAt)}</span>
+              </div>
+              <div class="feed-thread-preview">${r.preview || '(empty)'}</div>
+              <div class="feed-thread-row-foot">
+                <span class="feed-thread-participants">
+                  ${r.participants.length
+                    ? r.participants.map((p) => `@${p}`).join(' ')
+                    : '(no participants)'}
+                </span>
+                <span class="feed-thread-replies">
+                  ${r.replyCount === 0 ? 'no replies' :
+                    r.replyCount === 1 ? '1 reply' :
+                    `${r.replyCount} replies`}
+                </span>
+              </div>
+            </div>
           `;
         })}
       </div>
-      <${ChatInput} onSent=${loadMessages} />
+      <${ChatInput} />
     </div>
   `;
 }
