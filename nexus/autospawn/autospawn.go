@@ -229,6 +229,21 @@ func Spawn(cfg Config, candidates []Candidate) error {
 		} else {
 			cmd = exec.Command(cfg.HarnessPath, "-home", c.Path)
 		}
+		// Anchor cwd to the aspect's home directory. Without this every
+		// spawned agentfunnel inherits the broker's cwd, which means
+		// claude-code subprocesses (which derive their session jsonl
+		// path from cwd) write every aspect's sessions to the SAME
+		// projects/<broker-cwd-slug>/ dir — mixed across all aspects.
+		// Surfaced 2026-05-14 (operator).
+		//
+		// This makes per-aspect Cwd actually work end-to-end. funnel/
+		// bridle code already passes req.Cwd to claudecode.cmd.Dir, but
+		// only when the funnel knows the aspect home — and agentfunnel
+		// didn't set AspectHome on funnel.Config. Fixing at the spawn
+		// layer (here) is the smallest correct change: the child's
+		// os.Getwd() now returns the aspect dir, so even paths that
+		// don't go through req.Cwd land in the right place.
+		cmd.Dir = c.Path
 		cmd.Env = childEnv(os.Environ(), cfg.BaseEnv, cfg.TokenResolver, c.Name)
 
 		stdout, _ := cmd.StdoutPipe()
