@@ -1,6 +1,10 @@
 // Command nexus-imap-mcp bridges an aspect's IMAP mailbox to stdio
-// MCP. Credentials come from the same keyfile nexus-comms-mcp and
-// nexus-jira-mcp read (the .imap block). One process per aspect.
+// MCP. Credentials are fetched from the Nexus broker via the
+// credential.fetch WS frame (NEX-77); the keyfile is still required
+// because it provides the JWT auth path and the optional
+// .imap.default_folder for tools that don't pass an explicit folder,
+// but mailbox secrets (host, port, username, password) no longer live
+// on the remote host's disk.
 //
 // Tools exposed:
 //
@@ -13,17 +17,19 @@
 //
 // Today only shadow uses this — to drive Atlassian first-login OTP
 // flows on behalf of other aspects — but every aspect's keyfile can
-// carry its own .imap block.
+// resolve its own broker-side IMAP credential.
 
 package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -34,15 +40,21 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/runtime/brokercreds"
 	"github.com/CarriedWorldUniverse/nexus/runtime/keyfile"
+	"github.com/CarriedWorldUniverse/nexus/runtime/wsclient"
 )
 
 func main() {
 	var (
-		keyfilePath = flag.String("keyfile", "", "Path to the aspect keyfile JSON. The .imap block carries mailbox credentials.")
-		logLevel    = flag.String("log-level", "info", "slog level: debug|info|warn|error")
-		logFile     = flag.String("log-file", "", "Write logs here instead of stderr; stdout is reserved for the MCP protocol stream.")
-		probe       = flag.Bool("probe", false, "Don't start MCP — connect, login, SELECT INBOX, and exit. Useful for credential smoke tests.")
+		keyfilePath    = flag.String("keyfile", "", "Path to the aspect keyfile JSON. Required: provides JWT auth to Nexus + optional .imap block for non-secret config (default_folder).")
+		credentialName = flag.String("credential-name", "", "Specific imap credential name to fetch from the broker. Empty (default) → broker resolves the aspect's default imap credential.")
+		nexusURLFlag   = flag.String("nexus-url", "", "Override the WS URL (default: derived from keyfile envelope, with scheme rewritten and /connect appended).")
+		insecureSkip   = flag.Bool("insecure-skip-verify", false, "Skip TLS cert verification for the validate handshake (dev/self-signed only).")
+		logLevel       = flag.String("log-level", "info", "slog level: debug|info|warn|error")
+		logFile        = flag.String("log-file", "", "Write logs here instead of stderr; stdout is reserved for the MCP protocol stream.")
+		probe          = flag.Bool("probe", false, "Don't start MCP — connect, login, SELECT INBOX, and exit. Useful for credential smoke tests.")
 	)
 	flag.Parse()
 
@@ -62,44 +74,174 @@ func main() {
 		log.Error("keyfile load failed", "err", err, "path", *keyfilePath)
 		os.Exit(2)
 	}
-	if kf.IMAP == nil {
-		log.Error("keyfile has no .imap block — add host/port/username/password to enable", "path", *keyfilePath)
-		os.Exit(2)
-	}
-
-	client := NewClient(kf.IMAP.Host, kf.IMAP.Port, kf.IMAP.Username, kf.IMAP.Password)
-	defaultFolder := kf.IMAP.DefaultFolder
-	if defaultFolder == "" {
-		defaultFolder = "INBOX"
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	auth, err := validateKeyfile(ctx, kf, *nexusURLFlag, *insecureSkip, log)
+	if err != nil {
+		log.Error("keyfile validate failed", "err", err)
+		os.Exit(2)
+	}
+
+	wsCli, err := wsclient.New(wsclient.Config{
+		URL:              auth.wsURL,
+		AuthToken:        auth.jwt,
+		Handler:          wsclient.HandlerFunc(func(frames.Envelope) {}),
+		Logger:           log,
+		FailFirstConnect: true,
+	})
+	if err != nil {
+		log.Error("wsclient.New", "err", err)
+		os.Exit(2)
+	}
+	wsErrCh := make(chan error, 1)
+	go func() { wsErrCh <- wsCli.Run(ctx) }()
+
+	if err := waitConnected(ctx, wsCli, 10*time.Second); err != nil {
+		log.Error("ws never connected", "err", err)
+		stop()
+		<-wsErrCh
+		os.Exit(2)
+	}
+
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, 15*time.Second)
+	credName, bundle, err := brokercreds.FetchIMAP(fetchCtx, wsCli, *credentialName)
+	fetchCancel()
+	if err != nil {
+		log.Error("credential.fetch imap failed", "err", err, "credential_name", *credentialName)
+		stop()
+		<-wsErrCh
+		os.Exit(3)
+	}
+
+	// Non-secret config (default_folder) still comes from the keyfile.
+	// Per NEX-88 follow-up tracking: bundle extension to carry per-aspect
+	// config is deferred; keyfile keeps that role for now.
+	defaultFolder := "INBOX"
+	if kf.IMAP != nil && kf.IMAP.DefaultFolder != "" {
+		defaultFolder = kf.IMAP.DefaultFolder
+	}
+
+	client := NewClient(bundle.Host, bundle.Port, bundle.User, bundle.Password)
+
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	if err := client.Probe(probeCtx); err != nil {
 		cancel()
-		log.Error("imap credential probe failed", "err", err)
+		log.Error("imap credential probe failed", "err", err, "credential_name", credName)
+		stop()
+		<-wsErrCh
 		os.Exit(3)
 	}
 	cancel()
-	log.Info("nexus-imap-mcp ready",
-		"host", kf.IMAP.Host,
-		"username", kf.IMAP.Username,
-		"default_folder", defaultFolder)
+	log.Info("nexus-imap-mcp ready (fetched 1 credential from broker for "+auth.aspect+")",
+		"host", bundle.Host,
+		"port", bundle.Port,
+		"username", bundle.User,
+		"default_folder", defaultFolder,
+		"credential_name", credName,
+		"aspect", auth.aspect)
 
 	if *probe {
+		stop()
+		<-wsErrCh
 		return
 	}
 
-	srv := mcpserver.NewMCPServer("nexus-imap", "0.1.0",
+	srv := mcpserver.NewMCPServer("nexus-imap", "0.2.0",
 		mcpserver.WithToolCapabilities(true),
 	)
 	registerTools(srv, client, defaultFolder, log)
 
-	if err := mcpserver.ServeStdio(srv); err != nil {
-		if !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "EOF") {
+	mcpErrCh := make(chan error, 1)
+	go func() { mcpErrCh <- mcpserver.ServeStdio(srv) }()
+
+	select {
+	case err := <-mcpErrCh:
+		if err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "EOF") {
 			log.Error("MCP stdio loop ended", "err", err)
+		}
+	case err := <-wsErrCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Warn("ws client exited", "err", err)
+		}
+	}
+	stop()
+	select {
+	case <-wsErrCh:
+	default:
+	}
+}
+
+// authInfo mirrors the jira-mcp shape — local type so the two MCPs
+// stay independently editable.
+type authInfo struct {
+	aspect    string
+	jwt       string
+	wsURL     string
+	expiresAt time.Time
+}
+
+func validateKeyfile(ctx context.Context, kf *keyfile.Keyfile, urlOverride string, insecureSkip bool, log *slog.Logger) (*authInfo, error) {
+	tlsCfg := &tls.Config{InsecureSkipVerify: insecureSkip} //nolint:gosec // operator opt-in for dev cert
+	client := keyfile.NewClient()
+	client.HTTP = &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+	}
+
+	vctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	res, err := client.Validate(vctx, kf)
+	if err != nil {
+		return nil, fmt.Errorf("validate keyfile against nexus: %w", err)
+	}
+
+	wsURL := urlOverride
+	if wsURL == "" {
+		wsURL = res.NexusURL
+	}
+	wsURL = toWSURL(wsURL)
+
+	log.Info("keyfile validation succeeded",
+		"aspect", res.AspectName,
+		"nexus_id", res.NexusID)
+
+	return &authInfo{
+		aspect:    res.AspectName,
+		jwt:       res.SessionJWT,
+		wsURL:     wsURL,
+		expiresAt: res.SessionExpiresAt,
+	}, nil
+}
+
+func toWSURL(in string) string {
+	out := strings.TrimRight(in, "/")
+	switch {
+	case strings.HasPrefix(out, "https://"):
+		out = "wss://" + strings.TrimPrefix(out, "https://")
+	case strings.HasPrefix(out, "http://"):
+		out = "ws://" + strings.TrimPrefix(out, "http://")
+	}
+	if !strings.HasSuffix(out, "/connect") && !strings.HasSuffix(out, "/connect/") {
+		out += "/connect"
+	}
+	return out
+}
+
+func waitConnected(ctx context.Context, wsCli *wsclient.Client, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if wsCli.Connected() {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("ws did not connect within timeout")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
 }
