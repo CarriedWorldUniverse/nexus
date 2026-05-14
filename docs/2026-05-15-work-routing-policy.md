@@ -1,6 +1,11 @@
 # work-routing policy (v1.1)
 
-**Status:** v1.1 — folded operator clarification on Jira state-vs-comment (#1007) and second-round review from keel-cli (#1009), anvil (#1001/#1005), plumb (#1002/#1006/#1008), harrow (#1004). Pending operator approval.
+> **READ-ONLY MIRROR.** The canonical source of this document lives at
+> `~/Google Drive/My Drive/nexus/policies/work-routing.md`. Edit the
+> Drive copy; this repo file is a snapshot. Changes made here directly
+> will be overwritten on the next mirror.
+
+**Status:** v1.1 — APPROVED 2026-05-15 by operator (chat #1013 path). Folded operator clarification on Jira state-vs-comment (#1007) and second-round review from keel-cli (#1009), anvil (#1001/#1005), plumb (#1002/#1006/#1008), harrow (#1004).
 **Canonical location:** Drive — `~/Google Drive/My Drive/nexus/policies/work-routing.md`. This repo copy is a mirror; edit Drive, not here.
 **Drafted:** shadow. **Operator:** jacinta.
 
