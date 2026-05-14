@@ -1,11 +1,11 @@
-# work-routing policy (v1.1)
+# work-routing policy (v1.2)
 
 > **READ-ONLY MIRROR.** The canonical source of this document lives at
 > `~/Google Drive/My Drive/nexus/policies/work-routing.md`. Edit the
 > Drive copy; this repo file is a snapshot. Changes made here directly
 > will be overwritten on the next mirror.
 
-**Status:** v1.1 — APPROVED 2026-05-15 by operator (chat #1013 path). Folded operator clarification on Jira state-vs-comment (#1007) and second-round review from keel-cli (#1009), anvil (#1001/#1005), plumb (#1002/#1006/#1008), harrow (#1004).
+**Status:** v1.2 — APPROVED 2026-05-15 by operator. v1.2 adjusts §1 + §2.5 for the reality that keel-cli (and most aspects) don't currently have Jira access; shadow is sole Jira operator for now. v1.1 review history preserved; the cross-aspect convergence on the rest of the doc still stands.
 **Canonical location:** Drive — `~/Google Drive/My Drive/nexus/policies/work-routing.md`. This repo copy is a mirror; edit Drive, not here.
 **Drafted:** shadow. **Operator:** jacinta.
 
@@ -28,20 +28,24 @@ Class is a per-aspect property anchored in the aspect's keyfile + aspect.json. S
 
 The canonical roster lives in nexus's aspect store. This policy refers to "planner" and "worker" rather than naming aspects so it survives roster changes.
 
-### Jira ownership — split by lane
+### Jira ownership — shadow as sole Jira operator (v1.2)
 
-Planners manage Jira (filing tickets, prioritization, hygiene, closing stale items). Workers operate on assigned tickets — claim, comment, update state — but don't drive the backlog.
+**Current reality (operator confirmed 2026-05-15):** keel-cli and most other aspects don't have Jira access today. Provisioning broader access is its own work; until then, the policy fits what aspects can actually do.
 
-With two planners running concurrently (shadow + keel-cli), ownership splits by lane:
+**v1.2 model:**
 
-| owner | lane |
-|---|---|
-| **shadow** | agora, runtime/bridle providers, cross-aspect coordination, interchange-class work, worker-side workflow concerns |
-| **keel-cli** | Frame internals, funnel, broker, comms substrate, dashboard SPA, knowledge store, chat substrate |
+- **shadow is sole Jira operator.** All ticket filing, status transitions, comments, prioritization, hygiene, closing — shadow does it.
+- **keel-cli identifies work in chat or in memos**; shadow turns those into tickets if they warrant tracking. keel-cli stays a co-planner for non-Jira surfaces: chat coordination, code review, decomposition, operator-facing planning.
+- **Lane split for non-Jira planning** stays as previously written:
+  - shadow: agora, runtime/bridle providers, cross-aspect coordination, interchange-class, worker-side workflow concerns.
+  - keel-cli: Frame internals, funnel, broker, comms substrate, dashboard SPA, knowledge store, chat substrate.
+  - This is what each planner thinks about / pushes back on / reviews. Tickets for both lanes file through shadow.
 
-Cross-lane work files into whichever lane is closer; the lane-owner closes. If the planner roster changes in future, the lane split adjusts to fit — this isn't a permanent allocation, just the current operating shape (per keel-cli #1009).
+**Workers with Jira access** (the few that have it) operate as §2.5's worker workflow describes — read, claim, comment, update state.
 
-When a worker doesn't know which lane a ticket falls under, they ping the closer planner; if it's truly ambiguous, ping either and the planners route between themselves.
+**Workers without Jira access** only see chat-as-dispatch. For those workers, Jira is planner-side bookkeeping — shadow files tickets to track what was dispatched, but the worker themselves doesn't interact with the ticket. Dispatch happens via `@mention` in chat exclusively.
+
+This is a v1.2 shape, not the end state. Once broader Jira access is provisioned (see §9), planners-other-than-shadow and workers-with-durable-needs can adopt the full §2.5 workflow.
 
 ---
 
@@ -77,6 +81,8 @@ Chat-as-dispatch has automatic notification via `@mention`. Jira-as-dispatch req
 
 Convention: **when a planner files a ticket for a specific worker, the planner also pings them in chat with the key.** Example: `@plumb filed NEX-123 for you, no rush.` Gives the worker the notification AND the durable ticket. Combines surfaces; cheap; standardized.
 
+**Under v1.2** (most aspects lack Jira access), the chat ping is the PRIMARY notification — workers without access can't read the ticket directly. The planner should include enough of the task in the chat message that the worker can act without needing to view the ticket. The Jira ticket exists for the planner's tracking; the chat message exists for the worker's action.
+
 Tickets filed without an assignee (backlog / unclaimed) don't need a chat ping — they're queue items, not direct delegations.
 
 ### Jira workflow states
@@ -96,15 +102,17 @@ The Blocked and Needs Replanning states correspond to §5's `Status: blocked` an
 
 **Note on workflow availability:** Blocked and Needs Replanning may not exist as Jira workflow states yet on the NEX project. If a worker needs them and they're not configured, comment with the Status line and ping the planner — meta-work to add the states is keel-cli's lane (broker/admin).
 
-### Worker Jira workflow
+### Worker Jira workflow (only for workers with Jira access)
 
-When a planner files a ticket with `assignee = <worker-aspect>` and/or pings the worker referencing the key:
+When a planner files a ticket with `assignee = <worker-aspect>` and/or pings the worker referencing the key, AND the worker has Jira access:
 
 1. Worker reads the ticket (`jira_get <key>`).
 2. Worker claims it: `jira_claim <key>` — atomically sets assignee=self + status=In Progress.[^claim-atomic]
 3. Worker does the work.
 4. Worker comments progress on the ticket (`jira_comment`) — narrative + evidence + PR refs. **Drop the `Status:` line; the ticket state carries that.** See §5 for the chat-vs-Jira reply distinction.
 5. Worker updates state on completion (`jira_update_status` → Done, or appropriate non-done state with a comment explaining why).
+
+**Workers without Jira access** skip this entirely — they receive dispatches via chat only and reply via chat (full §5 chat-reply shape). The planner (shadow) is the one mirroring relevant state into the ticket for tracking.
 
 [^claim-atomic]: `jira_claim` is documented as atomic (assignee + status set in one operation). If two workers ever appear to claim the same ticket simultaneously, treat it as a bug and file it — don't paper over with retry logic in worker code.
 
@@ -313,13 +321,18 @@ For v2 (per anvil #998), the minimal useful instrumentation:
 
 ---
 
-## 9. v2 considerations — known imprecisions
+## 9. v2 considerations — known imprecisions + provisioning gaps
 
 Telemetry-driven refinements deferred to v2 rather than churning v1 (per anvil #1001, plumb #1002):
 
 - **§3.1 trivial test prong 4 — wall-clock vs generation time.** "Under ~5s wall-clock" conflates tool latency (free; no tokens generated while a tool runs) and Opus generation time (burns tokens). If telemetry shows planners using slow-tool-wait as a smuggle for inline execution, the right refinement is "under ~5s of generation regardless of tool wait." Bright-line clarity matters more for v1; precision comes later.
 - **§5 disagree (§6) vs refused — boundary blur.** "I'll do it but I think you're wrong" and "I won't do it" are clean in concept, blurry in practice. If telemetry shows planners getting confused signals between them, that's the seam to look at — possibly merging or sharpening definitions.
 - **Authorization-marker structured prefix.** Free-text "inline ok" is canonical greppable phrase for v1; if mis-routing patterns actually emerge in audit, a structured prefix may be worth adopting.
+
+**Provisioning gaps (separate from the imprecisions above):**
+
+- **Broader Jira access.** v1.2 assumes shadow is sole Jira operator because keel-cli and most workers don't have Jira access today. Provisioning more aspects (broker creds, keyfile updates, possibly Atlassian seats) unlocks the original v1.1 model: keel-cli managing their own lane's backlog, workers reading and updating tickets directly. Worth doing when the workflow strain from shadow-as-bottleneck becomes visible.
+- **Workflow states.** Blocked + Needs Replanning may not be configured on the NEX project Jira workflow yet. Adding them is broker/admin work — keel-cli's lane. Until configured, workers and shadow use comments + standard states (In Progress / To Do) to convey those.
 
 These are imprecisions known and deliberately not fixed in v1. Don't fix them speculatively.
 
