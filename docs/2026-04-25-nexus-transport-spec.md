@@ -1,10 +1,18 @@
-# Nexus Transport & Dispatch Spec — v0.1
+# Nexus Transport & Dispatch Spec — v0.2
 
-**Date:** 2026-04-25
-**Status:** Draft
-**Owner:** keel (spec)
+**Date:** 2026-04-25 (v0.1) · 2026-05-14 (v0.2 amendment)
+**Status:** Draft — v0.2 adds the Outpost deploy plane (§13), local mailbox property (§8.2), and resolved per-aspect auth (§12).
+**Owner:** keel (v0.1 spec), shadow (v0.2 amendment)
 **Companion to:** [`2026-04-22-nexus-registration-spec.md`](2026-04-22-nexus-registration-spec.md) (partially supersedes §4 registration endpoints)
 **Companion to:** [`2026-04-24-provider-adapter-spec.md`](2026-04-24-provider-adapter-spec.md)
+
+## v0.2 amendment summary
+
+Added to v0.1:
+- **§8.2 Outpost mailbox.** Outpost gains a per-local-aspect mailbox so messages survive aspect restarts and reach claude-code-session-style clients that don't hold a persistent WS. Bounded local durability; Nexus remains the source of truth.
+- **§13 Deploy plane.** Binary update delivery (`binary.advertise` / `binary.fetch`), restart signalling (`aspect.restart`), lifecycle reporting (`aspect.lifecycle`), push-event delivery to non-WS consumers. Replaces today's ad-hoc out-of-band agentfunnel-linux shipping + manual restarts.
+- **§7.3 narrowed.** "Outpost doesn't supervise" rule now applies only to crash-respawn; binary-update + operator-driven restart are first-class.
+- **§12 resolved.** Per-aspect auth is no longer "future" — `AspectTokens` map on Outpost is the v1 shape (`#33`), with keyfile-derived JWTs the production path.
 
 ## 1. Scope
 
@@ -263,13 +271,16 @@ An aspect.json field `auto_spawn: false` opts out — the aspect can still be st
 5. For each candidate, spawns `harness <home>` with env set (`NEXUS_OUTPOST` pointing at parent's listener for Outposts; `NEXUS_UPSTREAM` pointing at Nexus for direct-Nexus spawns; `NEXUS_TOKEN` inherited).
 6. Parent does not monitor. Children dial in, register, run. If they crash, they stay crashed until container orchestration restarts the parent.
 
-### 7.3 What parent does NOT do
+### 7.3 What parent does NOT do (narrowed in v0.2)
 
-- Does not supervise: no respawn, no restart-on-crash, no backoff.
-- Does not track pid state: the child is on its own OS process, OS handles reaping.
-- Does not expose a lifecycle API: no "start/stop/restart aspect X" WS frame. Operators restart the container if they want that.
+- Does not supervise crashes: no respawn-on-crash, no backoff, no health-driven restart.
+- Does not track pid state for crash detection: the child is on its own OS process, OS handles reaping.
 
-Rationale: container orchestration (Docker, k8s, nomad, systemd) already does process management. Duplicating it in Nexus/Outpost adds complexity without benefit.
+What it now DOES do (v0.2 §13):
+- Performs operator-driven restart (`aspect.restart` frame) for binary updates and deploys.
+- Captures lifecycle transitions for reporting upward (`aspect.lifecycle` frames).
+
+Rationale (unchanged for crash supervision): container orchestration (Docker, k8s, nomad, systemd) already does crash recovery. Duplicating that in Nexus/Outpost adds complexity without benefit. But the deploy plane — "operator pushed a new build, restart aspects to pick it up" — is not crash recovery; it's a coordinated action that nothing else in the stack does for us, so the Outpost owns it.
 
 ### 7.4 Logging
 
@@ -287,8 +298,34 @@ Parent captures child stdout/stderr and forwards to its own log stream with a `[
 | Session projection              | Nexus (read-only view)               | Observability for dashboard                      |
 | Aspect home (aspect.json, creds)| Local to aspect's host               | Per-host filesystem, credentials don't travel    |
 | Outpost aspect table            | In-memory on Outpost                 | Rebuildable from aspect reconnects; no durability needed |
+| Outpost mailbox cache (v0.2)    | Local SQLite on Outpost (bounded)    | Smooths aspect-restart re-attach; serves non-WS consumers like shadow's claude-code session at local-host latency |
+| Outpost installed binaries (v0.2)| Local filesystem on Outpost          | Per-host binary cache; checksums verified before swap; old generation retained for rollback |
 
-Outpost holds **no** SQLite, no durable state. It's a pure relay + queue + spawner. This is deliberate: no distributed-database reconciliation, no cross-node schema migrations, no sync protocol.
+Outpost holds **no** authoritative state — Nexus is the source of truth. The v0.2 mailbox cache and binary cache are *both* derived state: the mailbox can be rebuilt from Nexus's chat store, and the binaries are fetched from Nexus on demand. Losing either is recoverable (re-sync from Nexus); neither breaks the network. This preserves the v0.1 "no distributed-database reconciliation, no cross-node schema migrations, no sync protocol" property while still letting the Outpost do useful local work.
+
+### 8.2 Outpost mailbox (v0.2)
+
+The Outpost now holds a **per-local-aspect mailbox** — a bounded local store of inbound `chat.deliver` frames addressed to aspects whose home host is this Outpost.
+
+**Why it's needed:**
+- Aspects restart for binary updates (§13). Without a local buffer, every restart races chat traffic — frames in flight during the restart window are dropped at the WS layer and must be replayed from Nexus on reconnect, paying full round-trip latency.
+- Non-WS consumers like shadow's claude-code session don't hold a persistent WS connection. They poll an MCP server (`nexus-comms-mcp`) which today connects directly to Nexus over the tailnet. A local mailbox lets that MCP poll the Outpost over loopback, dropping per-poll latency from network round-trip to IPC.
+- The Outpost can push wake events to non-WS consumers when new mail arrives (filesystem touch, named-pipe write, SIGUSR1) — removes polling latency entirely for clients that opt in.
+
+**Mechanism:**
+- Outpost subscribes to `chat.deliver` frames for every locally-registered aspect.
+- Frames are persisted to a small SQLite at `<outpost-dir>/mailbox.db` with `(aspect_id, msg_id, payload, received_at)`. Bounded by `OUTPOST_MAILBOX_MAX_PER_ASPECT` (default 500) on a FIFO drop policy.
+- When a local aspect reconnects (post-restart, or first connect), the Outpost replays the relevant mailbox rows before flowing live frames.
+- When an MCP / IPC client polls (`outpost.mailbox.read?aspect=<id>&since=<msg_id>`), the Outpost serves from the local SQLite — no network round-trip.
+- When new mail arrives, the Outpost optionally signals registered local consumers (`OUTPOST_PUSH_<aspect>` config: filesystem path to touch, named pipe to write to, signal to send) so polling cadence can drop to "wake on push."
+
+**Consistency:**
+- Nexus still owns the canonical chat store. Mailbox at Outpost is a write-through cache of `chat.deliver`s the Outpost saw; if it's missing, the consumer can fall back to Nexus over tailnet (the `nexus-comms-mcp` route works today, would remain the fallback).
+- Outpost prunes its local mailbox per the FIFO bound + on graceful `aspect.deregister`. Rebuilding from Nexus's `since_msg_id` replay on reconnect is the recovery path.
+
+**Not in scope here:**
+- Outpost storing `chat.send` outbound — that path already queues on the Outpost during Nexus-link partition (§9.1). The mailbox property is purely inbound.
+- Mailbox for non-chat frames (knowledge.search.result, hand.result, etc.) — these are request/response, not unsolicited push, so the persistent-WS reconnect-and-retry model is sufficient. Mailbox is specifically for *unsolicited inbound to long-lived aspect identities*.
 
 ### 8.1 Session projection upward
 
@@ -355,12 +392,131 @@ Session tree storage, knowledge store, provider adapters, compaction — all unc
 
 ## 12. Open questions
 
-- **WS library**: Go stdlib doesn't include WebSocket. Use `github.com/coder/websocket` (modern, clean API) or `github.com/gorilla/websocket` (mature, widely used). Lean: coder/websocket. Decide at implementation time.
+- **WS library**: Go stdlib doesn't include WebSocket. Use `github.com/coder/websocket` (modern, clean API) or `github.com/gorilla/websocket` (mature, widely used). Lean: coder/websocket. **Resolved:** `coder/websocket` shipped.
 - **Frame encoding**: JSON is v1. MessagePack / CBOR for efficiency is a future option.
-- **Per-aspect auth**: v1 uses one shared bearer token for all clients. Per-aspect tokens are a hardening step later.
+- **Per-aspect auth**: ~~v1 uses one shared bearer token for all clients. Per-aspect tokens are a hardening step later.~~ **Resolved in v0.2:** `Outpost.Config.AspectTokens` maps inbound aspect-name → per-aspect bearer (`#33`). Production wiring uses keyfile-derived JWTs minted by Nexus on validation; legacy shared-token mode persists as a back-compat path for in-development setups but is not production.
 - **Multi-tier Outposts**: v1 forbids dispatcher-of-dispatcher. If ever needed (deep federation), revisit.
-- **Durable outbox**: v1 in-memory queue on Outposts. If reliability matters for specific frame types, add a per-aspect durable outbox on Nexus.
+- **Durable outbox**: v1 in-memory queue on Outposts. v0.2 adds a bounded mailbox cache (§8.2) for inbound `chat.deliver`. If wider reliability matters for additional frame types, a per-aspect durable outbox on Nexus is the add-on.
 
-## 13. Status
+## 13. Deploy plane (v0.2)
 
-v0.1 draft. Locks the WS-first shape, Outpost topology, aspect/dispatcher config model, frame catalogue, data-ownership split, partition behaviour, HTTP surface, and migration plan. Implementation decomposition against this spec is the next step (§6.4 work plan).
+The Outpost owns three coordinated lifecycle actions that nothing else in the stack does for us: distributing new binaries to per-host caches, restarting aspects to pick them up, and reporting the resulting lifecycle transitions back to Nexus so the operator can see what happened.
+
+### 13.1 Why the Outpost (not Nexus, not the OS)
+
+- **Container orchestration doesn't help.** Docker/systemd restart on crash, but they don't know about "Nexus pushed a new agentfunnel-linux build; restart the linux-shaped aspects on this host to pick it up." That's a coordinated network-driven action.
+- **Nexus can't reach into hosts directly.** Aspects live wherever their operators put them — little-blue (macOS), dMon (Windows), nexus-cw-ec2 (Linux), forge's WSL/Ubuntu. Nexus has no inventory of those hosts beyond "an Outpost identifies as being on host X."
+- **The Outpost is the natural agent.** It's the per-host process that already (a) holds an authenticated WS to Nexus, (b) knows what aspects run on its host, (c) can spawn them. Adding "fetch a binary, swap it, restart the affected aspects" is the next natural responsibility.
+
+### 13.2 Binary update delivery
+
+**Catalogue:**
+
+- **`binary.advertise`** (Nexus → Outpost) — Nexus has a new build available. Payload: `{ name: "agentfunnel-linux" | "agentfunnel.exe" | "nexus.exe", version: <semver-or-sha>, sha256: <hex>, size_bytes, download_url, applies_to: {os, arch}, signed_by: <nexus-key-id>, signature: <ed25519> }`. Outposts subscribe at register-time to advertisements matching their host's `{os, arch}`.
+- **`binary.fetch`** (Outpost → Nexus) — request the bytes. Nexus responds with the binary over the WS in chunked frames, OR with a redirect to an HTTPS download URL signed for short expiry. Default: HTTPS redirect (WS frames don't multiplex well for multi-MB transfers).
+- **`binary.fetched`** (Outpost → Nexus) — Outpost confirms it received and verified the binary. Payload: `{ name, version, sha256, fetched_at }`. Verification = sha256 match + signature check against Nexus's published key.
+
+**Local cache shape:**
+
+```
+<outpost-dir>/
+  bin/
+    agentfunnel-linux@<sha>
+    agentfunnel-linux@<sha>.prev   # last generation, retained for rollback
+    agentfunnel-linux              # symlink → current generation
+```
+
+The Outpost holds the **current** + **previous** generation only. Older generations are gc'd. Rollback = relink to `.prev`.
+
+**The Outpost does NOT auto-swap.** A new binary lands in the cache as a candidate; switching the symlink + restarting the aspect requires an explicit `aspect.restart` (§13.3). This is the operator's safety valve: a bad binary push doesn't take down the network.
+
+**Signature verification:**
+
+The Nexus instance key (already used for `PublicProjectionAdvance` records in the Cairn delay-policy spec) signs binary advertisements. The Outpost validates against the published key at boot. A binary that fails sig-check is logged loudly and discarded — never installed, never advertised as available.
+
+### 13.3 Restart signalling
+
+**Catalogue:**
+
+- **`aspect.restart`** (operator → Nexus → Outpost) — please restart aspect X on this host. Payload: `{ aspect_id, target_binary: <name@version>, grace_period_s: 30, reason: <human-string> }`. `target_binary` lets the operator pin which generation to swap to (defaults to the most-recently-fetched).
+- **`aspect.restart.ack`** (Outpost → Nexus) — accepted; restart in progress. Carries `{ aspect_id, old_pid, expected_new_pid_known: false }`.
+- **`aspect.restart.done`** (Outpost → Nexus) — aspect is back up. Payload: `{ aspect_id, new_pid, new_binary_version, restart_duration_ms, mailbox_drained_count }`.
+
+**Restart sequence (Outpost-side):**
+
+1. Receive `aspect.restart`, ack immediately.
+2. Send `shutdown` frame to the local aspect with the requested `grace_period_s`. Aspect's funnel uses the grace window to finish its current turn + flush outbound frames.
+3. Wait up to `grace_period_s`. If the aspect's WS doesn't close in that window, SIGTERM the process; another `grace_period_s/2` later, SIGKILL.
+4. Swap the binary symlink to `target_binary`'s generation.
+5. Spawn the aspect via the existing §7 auto-spawn machinery (same env, same home, same WS-back-to-this-outpost route).
+6. Wait for the new aspect's `register` frame to arrive.
+7. On register, drain mailbox (§8.2) to the new aspect: replay any `chat.deliver` frames that landed during the restart window.
+8. Send `aspect.restart.done` upward with the lifecycle summary.
+
+**Failure modes:**
+
+- Aspect refuses to shut down within `grace_period_s` → escalate to SIGTERM/SIGKILL. Logged. Restart-done frame carries `forced: true`.
+- New binary fails to start → relink symlink to `.prev`, spawn previous generation, send `aspect.restart.done` with `rolled_back: true` and an error string. Operator sees the rollback in the activity feed.
+- Aspect re-registers under a different identity than expected → reject the connection; flag the Outpost as compromised (the new spawn should have produced exactly `<aspect_id>`).
+
+### 13.4 Lifecycle reporting
+
+**Catalogue:**
+
+- **`aspect.lifecycle`** (Outpost → Nexus) — proactive notification of any state transition for a locally-managed aspect. Payload: `{ aspect_id, transition: "spawned" | "shutdown_signalled" | "exited" | "registered" | "deregistered" | "rolled_back", at, details: { pid, exit_code?, binary_version?, signal? } }`.
+
+Sent for both operator-driven restarts (so Nexus can correlate with the `aspect.restart` it issued) AND unplanned exits (crash, OS kill). For the unplanned case the Outpost still doesn't *respawn* (§7.3) — it just reports the exit. The operator decides whether to restart.
+
+Lifecycle frames feed the operator dashboard's activity stream the same way chat does. If forge crashes on its WSL host, the operator sees it in chat-bus visibility within milliseconds.
+
+### 13.5 Push-event delivery to non-WS consumers
+
+Some clients don't hold a persistent WS to the Outpost. Shadow's claude-code session connects via the `nexus-comms-mcp` stdio MCP — that MCP doesn't run a daemon; it polls.
+
+**Per-aspect push config** (in `<aspect-home>/aspect.json` or via env):
+
+```
+push_targets:
+  - kind: file_touch
+    path: "/tmp/nexus-comms.wake"
+  - kind: named_pipe
+    path: "/tmp/nexus-comms.pipe"
+  - kind: signal
+    pid_file: "/var/run/nexus-comms-mcp.pid"
+    signal: "SIGUSR1"
+```
+
+On every new `chat.deliver` landing in the local mailbox for that aspect, the Outpost fires every registered push target. Consumers (the MCP, a dashboard tail, a CLI watcher) handle them as wake events and poll the mailbox immediately, dropping latency from the polling cadence to ~IPC-roundtrip.
+
+This is **optional**. Aspects that don't declare push targets just have their messages buffered in the mailbox and consumers fall back to polling cadence.
+
+### 13.6 Connection topology with the deploy plane
+
+The pre-v0.2 topology (§2) is unchanged: aspect ↔ Outpost ↔ Nexus. The deploy-plane additions are all carried over the same WS, just new frame kinds.
+
+The shadow / claude-code shape is new:
+
+```
+              ┌──────────────┐
+              │    Nexus     │
+              └──────┬───────┘
+                     │ WS (single)
+              ┌──────┴───────┐
+              │   Outpost    │
+              │ - mailbox    │
+              │ - binary cache│
+              └──┬──────┬────┘
+                 │      │
+       WS (local)│      │ stdio MCP + mailbox poll over loopback
+                 ▼      ▼
+            ┌────────┐  ┌─────────────────────────┐
+            │ aspect │  │ claude-code session     │
+            │ (push) │  │ (shadow, plumb-cli, etc)│
+            └────────┘  └─────────────────────────┘
+```
+
+Persistent-WS aspects connect to the Outpost as before. Non-WS clients (CC sessions) talk to a local MCP server (`nexus-comms-mcp`) that opens its own short-lived WS or — in the post-v0.2 shape — uses an Outpost-local API instead. Either way the mailbox state lives next to them; no tailnet round-trip per poll.
+
+## 14. Status
+
+v0.2 draft. v0.1 locks the WS-first shape, Outpost topology, aspect/dispatcher config model, frame catalogue, data-ownership split, partition behaviour, HTTP surface, and migration plan. v0.2 adds the Outpost deploy plane (binary delivery, restart signalling, lifecycle reporting, push delivery to non-WS consumers) and the local mailbox property that makes restarts and CC-session-style consumers cheap. Implementation against v0.2 is filed as NEX-20 / NEX-25 children in Jira.
