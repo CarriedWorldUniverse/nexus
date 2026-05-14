@@ -108,8 +108,31 @@ func Bootstrap(ctx context.Context, db *sql.DB) error {
 	if err := addMissingColumns(ctx, db); err != nil {
 		return fmt.Errorf("add missing columns: %w", err)
 	}
+	if err := createPostMigrationIndexes(ctx, db); err != nil {
+		return fmt.Errorf("create post-migration indexes: %w", err)
+	}
 	if err := backfillChatThreadRoots(ctx, db); err != nil {
 		return fmt.Errorf("backfill chat thread roots: %w", err)
+	}
+	return nil
+}
+
+// createPostMigrationIndexes creates indexes that depend on columns
+// added by addMissingColumns. Cannot live in schema.sql because that
+// runs BEFORE the column migrations — on a pre-#226 database, the
+// schema.sql CREATE INDEX would fail because the columns don't exist
+// yet. By running after addMissingColumns, we guarantee the referenced
+// columns are present. All statements use IF NOT EXISTS so this is
+// safe to call on every boot.
+func createPostMigrationIndexes(ctx context.Context, db *sql.DB) error {
+	stmts := []string{
+		`CREATE INDEX IF NOT EXISTS idx_chat_parent_msg_id      ON chat_messages(parent_msg_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_chat_thread_root_msg_id ON chat_messages(thread_root_msg_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return fmt.Errorf("exec %q: %w", s, err)
+		}
 	}
 	return nil
 }
