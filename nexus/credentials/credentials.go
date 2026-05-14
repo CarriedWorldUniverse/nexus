@@ -585,6 +585,115 @@ func (s *Store) ResolveDefaultBundle(ctx context.Context, aspect string, kind Ki
 	return c, nil
 }
 
+// AspectDefaults describes the per-aspect default-credential
+// configuration. Used by admin REST and CLI to read/write the
+// columns on the aspects table without callers knowing the
+// per-kind column names. Empty string in any field means "unset"
+// (no default for that shape/kind).
+type AspectDefaults struct {
+	Aspect             string  `json:"aspect"`
+	AnthropicDefault   *string `json:"default_anthropic_credential,omitempty"`
+	OpenAIDefault      *string `json:"default_openai_credential,omitempty"`
+	JiraDefault        *string `json:"default_jira_credential,omitempty"`
+	IMAPDefault        *string `json:"default_imap_credential,omitempty"`
+}
+
+// GetAspectDefaults reads the per-aspect default-credential columns
+// for `aspect`. Returns zero-value AspectDefaults with all-nil
+// pointers if the aspect row doesn't exist (idempotent read — the
+// caller can treat absence and all-unset the same).
+func (s *Store) GetAspectDefaults(ctx context.Context, aspect string) (AspectDefaults, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT default_anthropic_credential,
+		       default_openai_credential,
+		       default_jira_credential,
+		       default_imap_credential
+		  FROM aspects WHERE name = ?
+	`, aspect)
+	var ad AspectDefaults
+	ad.Aspect = aspect
+	var anth, oai, jira, imap sql.NullString
+	if err := row.Scan(&anth, &oai, &jira, &imap); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ad, nil
+		}
+		return ad, fmt.Errorf("scan aspect defaults: %w", err)
+	}
+	if anth.Valid {
+		v := anth.String
+		ad.AnthropicDefault = &v
+	}
+	if oai.Valid {
+		v := oai.String
+		ad.OpenAIDefault = &v
+	}
+	if jira.Valid {
+		v := jira.String
+		ad.JiraDefault = &v
+	}
+	if imap.Valid {
+		v := imap.String
+		ad.IMAPDefault = &v
+	}
+	return ad, nil
+}
+
+// SetAspectDefault sets one default-credential column for `aspect`.
+// `kind` selects which column (provider's anthropic/openai shapes
+// are addressed via APIShape; non-provider kinds via Kind):
+//
+//	column                          → DefaultColumn value
+//	default_anthropic_credential    → "anthropic"
+//	default_openai_credential       → "openai"
+//	default_jira_credential         → "jira"
+//	default_imap_credential         → "imap"
+//
+// Pass credentialName="" to clear the default (NULL in the column).
+// Returns an error if the named credential doesn't exist (and
+// credentialName != ""), or if the aspect row doesn't exist.
+//
+// Note: this doesn't validate that the credential's stored kind
+// matches the requested default-column kind. Callers (admin REST,
+// CLI) should do that check themselves before invoking — it gives
+// them a chance to surface a clean 400 to the operator rather than
+// silently letting a mis-shaped default sit on the row.
+func (s *Store) SetAspectDefault(ctx context.Context, aspect, defaultColumn, credentialName string) error {
+	col := ""
+	switch defaultColumn {
+	case "anthropic":
+		col = "default_anthropic_credential"
+	case "openai":
+		col = "default_openai_credential"
+	case "jira":
+		col = "default_jira_credential"
+	case "imap":
+		col = "default_imap_credential"
+	default:
+		return fmt.Errorf("credentials: unknown default-column key %q (want anthropic|openai|jira|imap)", defaultColumn)
+	}
+	// Verify the credential exists if we're setting (not clearing).
+	if credentialName != "" {
+		if _, err := s.Get(ctx, credentialName); err != nil {
+			return fmt.Errorf("credentials: cannot set default %q for aspect %q: %w", credentialName, aspect, err)
+		}
+	}
+	var arg any
+	if credentialName == "" {
+		arg = nil
+	} else {
+		arg = credentialName
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE aspects SET `+col+` = ? WHERE name = ?`, arg, aspect)
+	if err != nil {
+		return fmt.Errorf("update aspect default: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("credentials: aspect %q not found (cannot set default)", aspect)
+	}
+	return nil
+}
+
 // resolveAspectDefault is the shared lookup-and-allow-check for both
 // provider and non-provider default-credential resolution.
 func (s *Store) resolveAspectDefault(ctx context.Context, aspect, col string) (Credential, error) {
