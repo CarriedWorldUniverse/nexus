@@ -176,7 +176,11 @@ func main() {
 		ContextMode: funnel.ContextMode(cfg.ContextMode),
 		Tools:       funnel.CommsToolDefs(),
 		Runner:      funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
-		Logger:      log,
+		// NEX-96: persist the seen-msg-id set under aspect home so the
+		// idempotency guard survives aspect restart. Sits beside the
+		// wsasp cursor file under <home>/.
+		IdempotencyFile: filepath.Join(absHome, "funnel-seen.json"),
+		Logger:          log,
 	})
 	if err != nil {
 		fail(log, "funnel.New", err)

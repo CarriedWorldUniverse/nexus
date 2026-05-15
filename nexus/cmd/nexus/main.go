@@ -1529,7 +1529,12 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		// the resolver returning (nil, false) → no overlay, subscription
 		// / process-env auth wins.
 		ProviderEnvResolver: newCredentialEnvResolver(credentialStore, bridle.ProviderID(provider)),
-		Logger:              log,
+		// NEX-96: persist the seen-msg-id set under AspectHome so the
+		// idempotency guarantee survives nexus restart / redeploy.
+		// Without this, broker re-delivery after a stale-cursor crash
+		// causes duplicate deliberation of already-handled messages.
+		IdempotencyFile: filepath.Join(aspectHome, "funnel-seen.json"),
+		Logger:          log,
 	})
 	if err != nil {
 		log.Error("frame funnel: construction failed; deliberation disabled",

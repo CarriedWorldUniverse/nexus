@@ -244,7 +244,11 @@ func main() {
 		Filter:            outputFilter,
 		PostTurn:          postTurn,
 		ObservabilityHook: obsHook,
-		Logger:            log,
+		// NEX-96: persist the seen-msg-id set alongside the wsasp cursor
+		// so the idempotency guard survives agentfunnel restart. Same
+		// dir resolution as the cursor file (--cursor-dir / cwd).
+		IdempotencyFile: filepath.Join(resolveCursorDir(*cursorDir), "funnel-seen.json"),
+		Logger:          log,
 	})
 	if err != nil {
 		fail(log, "funnel.New", err)
