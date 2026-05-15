@@ -68,6 +68,7 @@ nav:
     - agora: repos/agora.md
     - acp-claude-pty: repos/acp-claude-pty.md
     - interchange: repos/interchange.md
+    - cairn: repos/cairn.md
     - casket-go: repos/casket-go.md
     - casket-ts: repos/casket-ts.md
     - casket-dotnet: repos/casket-dotnet.md

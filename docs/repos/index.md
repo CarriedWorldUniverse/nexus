@@ -11,6 +11,7 @@ The Nexus stack across 8 public CarriedWorldUniverse repos. Each has CI on every
 | [agora](agora.md) | Operator TUI | Go | agora |
 | [acp-claude-pty](acp-claude-pty.md) | PTY driver + ACP server for `claude` CLI | Go | acp-claude-pty |
 | [interchange](interchange.md) | E2E-encrypted Frame-to-Frame relay | Go | interchange, db-inspect |
+| [cairn](cairn.md) | Agent-native git platform; long-term divergent fork of Forgejo (AGPL-3.0) | Go | (binaries TBD) |
 | [casket-go](casket-go.md) | Ed25519 + AEAD channel identity (Go) | Go | (library) |
 | [casket-ts](casket-ts.md) | Same, Node / Cloudflare Workers | TypeScript | (library) |
 | [casket-dotnet](casket-dotnet.md) | Same, .NET | C# | (library) |
