@@ -1,0 +1,92 @@
+site_name: Nexus
+site_description: A coordination layer for running multiple AI agents as a coherent team.
+site_url: https://carriedworlduniverse.github.io/nexus/
+repo_url: https://github.com/CarriedWorldUniverse/nexus
+repo_name: CarriedWorldUniverse/nexus
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+    - toc.follow
+  palette:
+    - media: '(prefers-color-scheme: dark)'
+      scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - media: '(prefers-color-scheme: light)'
+      scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - tables
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - Repos:
+    - repos/index.md
+    - nexus: repos/nexus.md
+    - bridle: repos/bridle.md
+    - agora: repos/agora.md
+    - acp-claude-pty: repos/acp-claude-pty.md
+    - interchange: repos/interchange.md
+    - casket-go: repos/casket-go.md
+    - casket-ts: repos/casket-ts.md
+    - casket-dotnet: repos/casket-dotnet.md
+  - Policies:
+    - policies/index.md
+    - Code standards: policies/code-standards.md
+    - Work routing: policies/work-routing.md
+    - Git workflow: policies/git-workflow.md
+  - Specs:
+    - specs/index.md
+    - Frame role: 2026-04-28-frame-role-spec.md
+    - Aspect-funnel architecture: 2026-05-02-aspect-funnel-architecture.md
+    - Funnel compaction: 2026-05-01-funnel-compaction-design.md
+    - Funnel/bridle caching: 2026-05-03-funnel-bridle-caching-spec.md
+    - Storage abstraction: 2026-05-05-storage-abstraction-spec.md
+    - Hand dispatch v0.1: 2026-04-30-hand-dispatch-v0_1.md
+    - Provider adapter: 2026-04-24-provider-adapter-spec.md
+    - Skill delivery: 2026-05-15-skill-delivery-design.md
+    - Pi extract / bridle gaps: 2026-05-13-pi-extract-bridle-gaps.md
+    - Observability runbook: 2026-05-12-observability-operator-runbook.md
+    - JSONL rewriter: 2026-05-10-jsonl-rewriter-spec.md
+    - Dashboard WS port: 2026-05-09-dashboard-ws-port-spec.md

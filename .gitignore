@@ -47,3 +47,4 @@ agents/*/cursor
 nexus-imap-mcp
 nexus-jira-mcp
 .worktree/
+/site/
