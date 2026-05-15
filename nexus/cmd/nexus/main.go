@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -637,12 +638,27 @@ func main() {
 
 	// Auto-spawn: after the broker has bound its listener (brief
 	// delay), scan the aspect dir and fire off harness children.
-	// Non-blocking; failures are logged per-aspect.
+	// Non-blocking; failures are logged per-aspect. The supervisor
+	// pointer is populated once Spawn returns so the parent can kill
+	// the children on shutdown (otherwise Windows leaks one funnel
+	// per aspect per nexus run).
+	var supervisor atomic.Pointer[autospawn.Supervisor]
 	go runAutoSpawn(ctx, logger, *aspectDir, *harnessPath, *dataDir, *addr, token,
-		autospawn.AspectTokenResolverFunc(tokenResolverFunc))
+		autospawn.AspectTokenResolverFunc(tokenResolverFunc), &supervisor)
 
-	if err := b.ListenAndServe(ctx); err != nil {
-		logger.Error("broker exited with error", "err", err)
+	serveErr := b.ListenAndServe(ctx)
+
+	// Kill any spawned harnesses before exit so Task Manager doesn't
+	// accumulate orphans across nexus restarts. 5s grace gives the
+	// reaper goroutines time to drain cmd.Wait + log pipes.
+	if sup := supervisor.Load(); sup != nil {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sup.Shutdown(shutCtx)
+		cancel()
+	}
+
+	if serveErr != nil {
+		logger.Error("broker exited with error", "err", serveErr)
 		os.Exit(1)
 	}
 	logger.Info("nexus stopped")
@@ -652,7 +668,7 @@ func main() {
 // NEXUS_ASPECT_DIR env) and spawns a harness for each. Skipped if
 // no dir is configured. Runs after a short delay so the broker's
 // listener has bound before children try to dial in.
-func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessPathFlag, dataDirFlag, brokerAddr, token string, tokens autospawn.AspectTokenResolver) {
+func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessPathFlag, dataDirFlag, brokerAddr, token string, tokens autospawn.AspectTokenResolver, supOut *atomic.Pointer[autospawn.Supervisor]) {
 	dir := aspectDirFlag
 	if dir == "" {
 		dir = os.Getenv("NEXUS_ASPECT_DIR")
@@ -724,8 +740,13 @@ func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessP
 		log.Info("auto-spawn: no aspect homes found", "dir", dir)
 		return
 	}
-	if err := autospawn.Spawn(cfg, candidates); err != nil {
+	sup, err := autospawn.Spawn(cfg, candidates)
+	if err != nil {
 		log.Error("auto-spawn failed", "err", err)
+		return
+	}
+	if supOut != nil {
+		supOut.Store(sup)
 	}
 }
 
