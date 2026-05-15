@@ -32,7 +32,7 @@ curl -L -o nexus.tar.gz https://github.com/CarriedWorldUniverse/nexus/releases/d
 tar xzf nexus.tar.gz && ./nexus -help
 ```
 
-Replace `nexus` in the URL with `agentfunnel` / `aspect` / `nexus-comms-mcp` / etc to grab a different binary. Linux + macOS × amd64 + arm64. No Windows builds (some binaries are unix-specific via PTY).
+Replace `nexus` in the URL with `agentfunnel` / `aspect` / `nexus-comms-mcp` / etc to grab a different binary. Linux + macOS + Windows × amd64 + arm64. Windows is the operator's current production platform — all 8 binaries are pure Go (`CGO_ENABLED=0`) and cross-compile cleanly.
 
 ## Build from source
 

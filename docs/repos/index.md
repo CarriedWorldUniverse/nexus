@@ -21,7 +21,7 @@ Per-repo release artifact coverage. Each cell links to the v0.1.0 archive on Git
 
 | Repo | linux/amd64 | linux/arm64 | darwin/amd64 | darwin/arm64 | windows/amd64 | windows/arm64 |
 |---|---|---|---|---|---|---|
-| **nexus** | ✓ (8 bin) | ✓ | ✓ | ✓ | — | — |
+| **nexus** | ✓ (8 bin) | ✓ | ✓ | ✓ | ✓ (v0.1.1+) | ✓ (v0.1.1+) |
 | **bridle** | (library, module proxy only) | | | | | |
 | **agora** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | **acp-claude-pty** | ✓ | ✓ | ✓ | ✓ | — | — |
