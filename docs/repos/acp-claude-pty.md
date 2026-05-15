@@ -32,5 +32,5 @@ Linux + macOS × amd64 + arm64. Windows is gated behind ConPTY v2 work.
 
 ## Where to dig deeper
 
-- [NEX-83 epic](https://carriedworlduniverse.atlassian.net) — claude-pty multi-protocol adapter
+- NEX-83 epic (internal) — claude-pty multi-protocol adapter
 - Internal `docs/` in the repo

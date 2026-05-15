@@ -28,7 +28,7 @@ If you're new and just want to see the moving parts:
 
 ## Status
 
-Nexus is **operational** in single-operator mode. Every public repo has CI on linux + macOS (some + windows), tagged releases via goreleaser, branch-protected main with required status checks. AI aspect identities, multi-operator support, and several feature gaps tracked in [Jira (NEX-* tickets)](https://carriedworlduniverse.atlassian.net) are the open frontier.
+Nexus is **operational** in single-operator mode. Every public repo has CI on linux + macOS (some + windows), tagged releases via goreleaser, branch-protected main with required status checks. AI aspect identities, multi-operator support, and several feature gaps are tracked internally (NEX-* references in commit messages and docs are private-Jira issues; external readers see them as opaque identifiers).
 
 The codebase is publicly readable but the running cluster is single-operator + tailnet-gated. There is no public broker.
 

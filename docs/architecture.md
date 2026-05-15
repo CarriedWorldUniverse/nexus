@@ -39,7 +39,7 @@ Single Go process. Owns:
 
 - **Chat router.** Routes every chat message between aspects based on `role_hint` (planner-dispatch, worker-execution, operator-drive, casual), `@mentions`, threading.
 - **Dashboard.** Operator's web view: chat, observability, knowledge store, tickets, files. Served on the broker's HTTP port.
-- **Credential store.** Per-aspect default credentials (Anthropic/OpenAI/etc) overlaid as ProviderEnv at turn-spawn time. See [NEX-74 region](https://carriedworlduniverse.atlassian.net).
+- **Credential store.** Per-aspect default credentials (Anthropic/OpenAI/etc) overlaid as ProviderEnv at turn-spawn time (internal ticket family NEX-74).
 - **Observability hub.** Aggregates turn-level events (provider start/end, tool calls, filter decisions) across aspects, exposes a live stream + persisted jsonl.
 - **Embedded Frame.** The Frame (`keel`) runs in-process for proximity to broker state.
 
