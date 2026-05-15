@@ -17,14 +17,20 @@ import (
 type RegisterPayload struct {
 	schemas.RegisterRequest
 
-	// SinceMsgID, when non-zero, requests Lock 6 replay: Nexus
-	// queries the chat DB for messages addressed to this aspect
-	// with msg_id > SinceMsgID and emits each as its own
-	// ChatDeliverPayload (with Replay=true) before resuming live
-	// delivery. Aspects with no persisted state file (cold start,
-	// state file lost) leave this 0; they get only live frames
-	// going forward — acceptable degradation per Lock 6.
+	// SinceMsgID, when non-zero, identifies the consumer's last seen
+	// msg_id. The broker uses it as the lower bound for replay (see
+	// RequestReplay). Sending SinceMsgID alone no longer triggers
+	// replay — explicit RequestReplay opt-in is required. Aspects
+	// with no persisted cursor leave this 0.
 	SinceMsgID int64 `json:"since_msg_id,omitempty"`
+
+	// RequestReplay opts the consumer into Lock 6 replay-on-connect.
+	// Default false — disconnect is a clean boundary, anything sent
+	// during the gap stays in chat history but does NOT auto-push on
+	// reconnect (NEX-131). Set true only for genuine catch-up cases
+	// (debugging, late-spawn aspects that want full backlog). Live
+	// frames after Register always flow regardless of this flag.
+	RequestReplay bool `json:"request_replay,omitempty"`
 }
 
 // RegisterAckPayload tells the client what cadence to heartbeat at
@@ -80,6 +86,10 @@ type ForwardedRegisterPayload struct {
 	// aspect set it. Lock 6 replay applies regardless of whether the
 	// connection is direct or routed via an Outpost.
 	SinceMsgID int64 `json:"since_msg_id,omitempty"`
+
+	// RequestReplay mirrors RegisterPayload.RequestReplay. Outposts
+	// MUST propagate. Default false per NEX-131 — replay is opt-in.
+	RequestReplay bool `json:"request_replay,omitempty"`
 }
 
 // -------------------------------------------------------------------

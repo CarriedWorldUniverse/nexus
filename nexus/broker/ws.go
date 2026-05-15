@@ -1011,13 +1011,18 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 	})
 	c.send(ack)
 
-	// Lock 6 replay: if the aspect's register frame carried a non-zero
-	// since_msg_id, query chat history for messages addressed to this
-	// aspect since the cursor and emit each as its own chat.deliver
-	// with Replay=true. Goroutine so the read loop isn't blocked.
-	// Failures are logged and do not propagate — replay is best-effort
-	// per Lock 6's graceful-degradation framing.
-	if payload.SinceMsgID > 0 && c.broker.cfg.Replayer != nil {
+	// Lock 6 replay: replay-on-connect is now opt-in (NEX-131).
+	// Sending since_msg_id alone no longer triggers replay; consumers
+	// must explicitly set request_replay=true. Default behavior is
+	// "disconnect is a clean boundary" — anything pushed during the
+	// gap stays in chat history but does NOT auto-push on reconnect.
+	// Eliminates the replay-storm noise that fired on broker reboot
+	// and cursor-stale reconnects.
+	//
+	// Live frames after Register always flow regardless of this flag.
+	// Genuine catch-up cases (debugging, late-spawn aspects, audit
+	// tooling) opt in explicitly.
+	if payload.RequestReplay && payload.SinceMsgID > 0 && c.broker.cfg.Replayer != nil {
 		go c.replayAddressedSince(state.Name, int64(payload.SinceMsgID))
 	}
 }
