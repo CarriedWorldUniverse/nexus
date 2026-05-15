@@ -11,7 +11,7 @@ builds:
     main: ./nexus/cmd/nexus
     binary: nexus
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
@@ -21,7 +21,7 @@ builds:
     main: ./runtime/cmd/agentfunnel
     binary: agentfunnel
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
@@ -31,7 +31,7 @@ builds:
     main: ./runtime/cmd/aspect
     binary: aspect
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
@@ -41,7 +41,7 @@ builds:
     main: ./runtime/cmd/nexus-comms-mcp
     binary: nexus-comms-mcp
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
@@ -51,7 +51,7 @@ builds:
     main: ./runtime/cmd/nexus-imap-mcp
     binary: nexus-imap-mcp
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
@@ -61,7 +61,7 @@ builds:
     main: ./runtime/cmd/nexus-jira-mcp
     binary: nexus-jira-mcp
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
@@ -71,7 +71,7 @@ builds:
     main: ./runtime/cmd/nexus-watch
     binary: nexus-watch
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
@@ -81,7 +81,7 @@ builds:
     main: ./nexus/cmd/outpost
     binary: outpost
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w
