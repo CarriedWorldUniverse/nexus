@@ -76,10 +76,12 @@ func runAspectMint(args []string) int {
 	fs := flag.NewFlagSet("aspect mint", flag.ContinueOnError)
 	out := fs.String("out", "", "path to write the keyfile JSON (required)")
 	force := fs.Bool("force", false, "re-mint even if a current keyfile may be in use (invalidates the previous one)")
-	dataDir := fs.String("data-dir", "", "data directory holding nexus.db (falls back to NEXUS_DATA_DIR env, then ./data)")
+	dataDir := fs.String("data-dir", "", "data directory holding nexus.db (falls back to NEXUS_DATA_DIR env, then ./data). Ignored when --via is set.")
 	provider := fs.String("provider", "", "AI provider for new aspect rows (e.g. claude-api, claude-code). Ignored on re-mint.")
 	model := fs.String("model", "", "model name for new aspect rows (e.g. claude-opus-4-7). Ignored on re-mint.")
 	nexusURL := fs.String("nexus-url", "", "wss:// URL agentfunnel uses to dial this Nexus (required)")
+	via := fs.String("via", "", "broker URL (https://...) to mint through. NEX-134: when set, this CLI generates the aspect keypair locally and POSTs the pubkey + metadata to the broker — broker is the single writer. Required if the broker is running; direct-DB path remains for offline first-bootstrap.")
+	adminToken := fs.String("admin-token", "", "admin bearer token for --via. If empty, reads from NEXUS_ADMIN_TOKEN env.")
 	// Positional <name> must come first: `mint <name> [flags]`. Standard
 	// CLI shape; avoids the ambiguity of a permissive parser stealing a
 	// space-separated flag value (e.g. `--out plumb` would otherwise be
@@ -103,6 +105,22 @@ func runAspectMint(args []string) int {
 	if *nexusURL == "" {
 		fmt.Fprintln(os.Stderr, "aspect mint: --nexus-url is required (the wss:// URL agentfunnel will dial)")
 		return 2
+	}
+
+	// NEX-134: --via routes the mint through the running broker's admin
+	// REST surface. Aspect keypair is still generated client-side; broker
+	// records the pubkey + assigned version and returns the server pubkey
+	// for sealing. Direct-DB path below stays for offline first-bootstrap.
+	if *via != "" {
+		tok := *adminToken
+		if tok == "" {
+			tok = os.Getenv("NEXUS_ADMIN_TOKEN")
+		}
+		if tok == "" {
+			fmt.Fprintln(os.Stderr, "aspect mint: --via set but no admin token (use --admin-token or NEXUS_ADMIN_TOKEN env)")
+			return 2
+		}
+		return runAspectMintViaBroker(name, *out, *nexusURL, *via, tok, *provider, *model, *force)
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))

@@ -168,6 +168,9 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 	mux.Handle("POST /api/admin/rewind", b.requireAdmin(http.HandlerFunc(b.handleAdminRewind)))
 	mux.Handle("GET /api/admin/dispatch-status", b.requireAdmin(http.HandlerFunc(b.handleAdminDispatchStatus)))
 	mux.Handle("GET /api/admin/roster", b.requireAdmin(http.HandlerFunc(b.handleAdminRoster)))
+	// NEX-134: online-safe aspect minting. CLI generates the keypair
+	// locally, posts the pubkey, broker is the single DB writer.
+	mux.Handle("POST /api/admin/aspects/mint", b.requireAdmin(http.HandlerFunc(b.handleAdminAspectMint)))
 	mux.Handle("GET /api/admin/op/{id}", b.requireAdmin(http.HandlerFunc(b.handleAdminOp)))
 
 	// Personality edit (Part 7b). Wires via KeyfileValidator.Store
