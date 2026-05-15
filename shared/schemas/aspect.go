@@ -76,6 +76,21 @@ type AspectConfig struct {
 	// otherwise to the aspect's main Model.
 	FilterProviderConfig map[string]any `json:"filter_provider_config,omitempty"`
 
+	// FilterCredential names a provider credential (in the broker's
+	// credential store) whose env overlay (ANTHROPIC_API_KEY +
+	// ANTHROPIC_BASE_URL for Anthropic-shape) is injected into the
+	// judge subprocess at spawn. Lets the operator route the cheap-
+	// judge to a separate auth domain (DeepSeek's Anthropic-compatible
+	// endpoint, an API-key Anthropic account, etc) without affecting
+	// the main deliberation provider. Empty = filter inherits the
+	// main provider's auth (subscription claudecode, process-env keys).
+	//
+	// Pairs naturally with FilterProvider="claude-code" + bare judge:
+	// the bare subprocess wants explicit API-key auth, which this
+	// credential supplies. NEX-103 tracks per-kind dispatch through
+	// ProviderEnvResolver; until then this is a static per-aspect knob.
+	FilterCredential string `json:"filter_credential,omitempty"`
+
 	// Rewriter configures the per-turn session-jsonl rewriter (see
 	// nexus/frame/funnel/rewriter). Only meaningful for claude-code-
 	// backed aspects — direct-API providers don't replay a jsonl, so

@@ -223,9 +223,22 @@ type CheapModelFilter struct {
 	// ObservabilityHook, when set, surfaces the judge turn under the
 	// "filter-judge" label so dashboards can show what the filter
 	// actually saw. Nil leaves the judge invisible to observability.
-	// Mirrors funnel.Config.ObservabilityHook — wiring should pass the
-	// same Hub.GrouperFor(aspectID) for the aspect being judged.
+	// Mirrors funnel.Config.ObservabilityHook — pass the same
+	// Hub.GrouperFor(aspectID) for the aspect being judged.
 	ObservabilityHook ObservabilityHook
+
+	// ProviderEnv overlays env vars onto each judge TurnRequest —
+	// e.g. ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL pointing at a
+	// cheap-tier endpoint (DeepSeek's Anthropic-compatible API)
+	// so the bare claude-code subprocess routes the classifier
+	// call to a separate auth domain from the main turn. Empty
+	// map / nil = inherit ambient process env (subscription auth).
+	//
+	// Pre-NEX-103 (per-kind credential dispatch through
+	// ProviderEnvResolver): the filter is statically configured at
+	// construction time. Resolver-driven per-call dispatch lands
+	// when NEX-103's schema migration lands.
+	ProviderEnv map[string]string
 }
 
 // filterJudgeTimeout is a safety bound for a fully hung judge —
@@ -368,6 +381,7 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 		Model:              f.Model,
 		MaxSteps:           1, // pure text; no tools
 		Cwd:                f.AspectHome,
+		ProviderEnv:        f.ProviderEnv,
 	}
 
 	// Phase E: bracket the judge turn under "filter-judge" label.

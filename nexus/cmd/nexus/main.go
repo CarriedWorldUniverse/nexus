@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -1045,7 +1046,7 @@ func (a *usageRecorderAdapter) Record(ctx context.Context, msgID int64, turnID, 
 // The cheap-tier judge is operator-configurable so non-Claude deployments
 // can wire their own (ollama, openai, anthropic-api with haiku). Default
 // haiku rather than the Frame's main model so per-turn cost stays bounded.
-func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, frameProviderID bridle.ProviderID, frameModel string, obsHook funnel.ObservabilityHook, aspectHome string, log *slog.Logger) funnel.OutputFilter {
+func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, frameProviderID bridle.ProviderID, frameModel string, obsHook funnel.ObservabilityHook, aspectHome string, credentialStore *credentials.Store, log *slog.Logger) funnel.OutputFilter {
 	aspectName := cfg.Name
 	choice := strings.ToLower(strings.TrimSpace(cfg.Filter))
 	if choice == "" {
@@ -1065,8 +1066,10 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 				"aspect", aspectName, "filter_provider", cfg.FilterProvider)
 			return funnel.HardRulesFilter{}
 		}
+		judgeEnv := resolveFilterCredentialEnv(cfg, credentialStore, log)
 		log.Info("frame funnel: filter=cheap (hard rules + cheap-model judge)",
-			"aspect", aspectName, "judge_provider", judgeProviderID, "judge_model", judgeModel)
+			"aspect", aspectName, "judge_provider", judgeProviderID, "judge_model", judgeModel,
+			"filter_credential", cfg.FilterCredential, "judge_env_keys", envKeys(judgeEnv))
 		return funnel.HardRulesFilter{
 			Inner: funnel.CheapModelFilter{
 				Harness:           bridle.NewHarness(bareJudgeProvider(judgeProvider, judgeProviderID)),
@@ -1075,6 +1078,7 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 				AspectHome:        aspectHome,
 				Logger:            log,
 				ObservabilityHook: obsHook,
+				ProviderEnv:       judgeEnv,
 			},
 		}
 	default:
@@ -1092,9 +1096,52 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 				AspectHome:        aspectHome,
 				Logger:            log,
 				ObservabilityHook: obsHook,
+				ProviderEnv:       resolveFilterCredentialEnv(cfg, credentialStore, log),
 			},
 		}
 	}
+}
+
+// resolveFilterCredentialEnv looks up the named filter credential and
+// returns its env overlay (typically ANTHROPIC_API_KEY +
+// ANTHROPIC_BASE_URL for Anthropic-shape providers). Empty
+// FilterCredential or nil store → returns nil so the judge inherits
+// the ambient process env. Errors are logged + swallowed; failing
+// open is the right shape (the worst case is the bare subprocess
+// finds no API key and fails its turn, which the filter handles by
+// failing open already).
+func resolveFilterCredentialEnv(cfg schemas.AspectConfig, store *credentials.Store, log *slog.Logger) map[string]string {
+	if cfg.FilterCredential == "" || store == nil {
+		return nil
+	}
+	c, err := store.Get(context.Background(), cfg.FilterCredential)
+	if err != nil {
+		log.Warn("filter credential: lookup failed; judge inherits ambient env",
+			"aspect", cfg.Name, "credential", cfg.FilterCredential, "err", err)
+		return nil
+	}
+	env, err := store.EnvForCredential(c)
+	if err != nil {
+		log.Warn("filter credential: env materialization failed; judge inherits ambient env",
+			"aspect", cfg.Name, "credential", cfg.FilterCredential, "err", err)
+		return nil
+	}
+	return env
+}
+
+// envKeys returns the env map's keys (sorted) for logging — never the
+// values, which carry the API key. Lets the operator confirm the env
+// got resolved without leaking secrets to stdout.
+func envKeys(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // resolveJudgeProviderAndModel picks the cheap-tier provider+model for
@@ -1196,28 +1243,19 @@ func buildProviderByName(name string, log *slog.Logger) (bridle.Provider, bridle
 // up the aspect's full toolkit, and did real work instead of saying
 // "yes" or "no".
 func bareJudgeProvider(p bridle.Provider, id bridle.ProviderID) bridle.Provider {
-	// 2026-05-13: --bare disabled for the judge, intentionally.
+	// --bare is API-key-only: disables subscription auth and reads only
+	// ANTHROPIC_API_KEY (or apiKeyHelper via --settings). Pair with
+	// AspectConfig.FilterCredential so the bare subprocess gets an
+	// explicit ANTHROPIC_API_KEY env at spawn — points at a cheap
+	// classifier endpoint (DeepSeek Anthropic-shape) without touching
+	// the main turn's subscription auth.
 	//
-	// claude-code's --bare flag is API-key-only — it disables subscription
-	// auth entirely. Our keel runs on subscription (Opus 1M bundled), so
-	// the bare judge subprocess had no auth path: every cheap-judge call
-	// returned "Not logged in · Please run /login" as its verdict, the
-	// parser saw the leading 'n', and every aspect reply got suppressed.
-	//
-	// --bare itself isn't broken — it does what it says, just with an
-	// auth model we can't satisfy from subscription. The capability stays
-	// in bridle for the future path: once #218 (broker-mediated credentials)
-	// can hand a DeepSeek or Anthropic API key to the bare subprocess
-	// via ANTHROPIC_API_KEY env at spawn time, --bare becomes viable
-	// again — and DeepSeek is the planned target (cheap, fast, separate
-	// auth domain from the deliberation model's subscription).
-	//
-	// Until then: judge runs the full claude-code surface (accept the
-	// 9-step-agent contamination risk #196 was meant to fix; #195's
-	// prompt hardening + #212's verdict format are doing the heavy
-	// lifting in the meantime).
-	return p
-	//nolint:gocritic // bare path kept for the post-#218 API-key spawn future
+	// Re-enabled 2026-05-15 (NEX-103 Phase 1a). Prior block-comment in
+	// git history at f10d060 explains the 2026-05-13 disable: bare
+	// without a credential silently routes "Not logged in" through the
+	// judge parser as 'n' (suppress everything). Caller MUST set
+	// FilterCredential before enabling FilterProvider=claude-code +
+	// cheap-judge under bare.
 	switch id {
 	case "claude-code", "claudecode":
 		jp := claudecodeprovider.New()
@@ -1462,7 +1500,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 	// its cheap-judge filter so the dashboard sees main + filter-judge
 	// turns on the same stream.
 	obsHook := obsHub.GrouperFor(ef.Aspect.Name)
-	outputFilter := buildOutputFilter(ef.Aspect.Config, p, bridle.ProviderID(provider), model, obsHook, aspectHome, log)
+	outputFilter := buildOutputFilter(ef.Aspect.Config, p, bridle.ProviderID(provider), model, obsHook, aspectHome, credentialStore, log)
 	// PostTurn hook resolves the funnel's session id lazily: the
 	// funnel itself doesn't exist yet (we're constructing its config),
 	// so we capture a pointer that gets filled in after funnel.New.
