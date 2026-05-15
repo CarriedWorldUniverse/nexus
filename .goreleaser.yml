@@ -1,0 +1,124 @@
+version: 2
+
+project_name: nexus
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: nexus
+    main: ./nexus/cmd/nexus
+    binary: nexus
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/CarriedWorldUniverse/nexus/internal/version.Version={{.Version}}
+
+  - id: agentfunnel
+    main: ./runtime/cmd/agentfunnel
+    binary: agentfunnel
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/CarriedWorldUniverse/nexus/internal/version.Version={{.Version}}
+
+  - id: aspect
+    main: ./runtime/cmd/aspect
+    binary: aspect
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/CarriedWorldUniverse/nexus/internal/version.Version={{.Version}}
+
+  - id: nexus-comms-mcp
+    main: ./runtime/cmd/nexus-comms-mcp
+    binary: nexus-comms-mcp
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/CarriedWorldUniverse/nexus/internal/version.Version={{.Version}}
+
+  - id: nexus-imap-mcp
+    main: ./runtime/cmd/nexus-imap-mcp
+    binary: nexus-imap-mcp
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/CarriedWorldUniverse/nexus/internal/version.Version={{.Version}}
+
+  - id: nexus-jira-mcp
+    main: ./runtime/cmd/nexus-jira-mcp
+    binary: nexus-jira-mcp
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/CarriedWorldUniverse/nexus/internal/version.Version={{.Version}}
+
+  - id: nexus-watch
+    main: ./runtime/cmd/nexus-watch
+    binary: nexus-watch
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/CarriedWorldUniverse/nexus/internal/version.Version={{.Version}}
+
+  - id: outpost
+    main: ./nexus/cmd/outpost
+    binary: outpost
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/CarriedWorldUniverse/nexus/internal/version.Version={{.Version}}
+
+archives:
+  - id: default
+    # One archive per binary × os × arch. Easier to install individual
+    # binaries without lugging the whole toolkit; checksums per archive.
+    name_template: >-
+      {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format: tar.gz
+    files:
+      - README*
+      - LICENSE*
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: '{{ incpatch .Version }}-next'
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: CarriedWorldUniverse
+    name: nexus
+  draft: false
+  prerelease: auto
+  name_template: '{{ .ProjectName }} {{ .Tag }}'

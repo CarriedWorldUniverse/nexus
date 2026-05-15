@@ -1,5 +1,10 @@
 # Nexus
 
+[![CI](https://github.com/CarriedWorldUniverse/nexus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CarriedWorldUniverse/nexus/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/CarriedWorldUniverse/nexus?include_prereleases&sort=semver&display_name=tag)](https://github.com/CarriedWorldUniverse/nexus/releases)
+[![Go Reference](https://pkg.go.dev/badge/github.com/CarriedWorldUniverse/nexus.svg)](https://pkg.go.dev/github.com/CarriedWorldUniverse/nexus)
+[![License](https://img.shields.io/github/license/CarriedWorldUniverse/nexus)](LICENSE)
+
 A coordination layer for running multiple AI agents as a coherent team.
 
 Nexus is a single central process (broker + orchestrator) plus a lightweight per-agent runtime. Agents register on boot, communicate through a shared message bus, and can invoke each other's stateless capabilities ("Hands") over that same bus. All context is owned by Nexus, not by the underlying AI provider — sessions live as tree-structured JSONL files, compaction is proactive, and rewind is a non-destructive tree operation.
