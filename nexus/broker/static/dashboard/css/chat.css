@@ -834,3 +834,166 @@
 
 .feed-filter-btn:hover { color: var(--text-secondary); border-color: var(--text-muted); }
 .feed-filter-btn.active { color: var(--agent-color, var(--view-accent)); border-color: var(--agent-color, var(--view-accent)); background: var(--bg-elevated); }
+
+/* ──────────────────────────────────────────────────────────────
+   Feed Thread View (NEX-246 Parts 4a) — chat root view rewritten
+   to show one row per thread rather than one row per message.
+   FeedView.js emits the .feed-thread-* class family; these are
+   the matching rules. Roles get accent chips drawn from the
+   palette tokens (planner=silver, worker=moss, operator=ember,
+   casual=gold) so the operator can scan by lane.
+   ────────────────────────────────────────────────────────────── */
+
+.feed-thread-view { /* inherits .chat-view */ }
+
+.feed-thread-filters {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-deep);
+  flex-shrink: 0;
+}
+
+.feed-thread-filter-group {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+}
+
+.feed-thread-mentions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.feed-thread-mentions input[type="checkbox"] {
+  margin: 0;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--view-accent);
+  cursor: pointer;
+}
+
+.feed-thread-list {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.feed-thread-empty {
+  padding: var(--space-xl) var(--space-md);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.feed-thread-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-left: 2px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.feed-thread-row:hover {
+  background: var(--bg-raised);
+  border-color: var(--border-default);
+  border-left-color: var(--view-accent-dim);
+}
+
+.feed-thread-row:focus {
+  outline: none;
+  border-color: var(--view-accent);
+  border-left-color: var(--view-accent);
+}
+
+.feed-thread-row-head {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.feed-thread-from {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--agent-color, var(--text-primary));
+}
+
+.feed-thread-role {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  opacity: 0.85;
+}
+
+.feed-thread-role-planner-dispatch  { color: var(--color-silver); }
+.feed-thread-role-worker-execution  { color: var(--color-moss); }
+.feed-thread-role-operator-drive    { color: var(--color-ember); }
+.feed-thread-role-casual            { color: var(--color-gold); }
+
+.feed-thread-time {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.feed-thread-preview {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.feed-thread-row-foot {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.feed-thread-participants {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feed-thread-replies {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
