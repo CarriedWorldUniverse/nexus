@@ -463,8 +463,12 @@ func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.Provider
 // Contamination risk #196 was meant to fix is mitigated by #195's
 // prompt hardening + #212's verdict format.
 func bareJudgeProvider(p bridle.Provider, id bridle.ProviderID) bridle.Provider {
-	return p
-	//nolint:gocritic // bare path kept for the post-#222 API-key spawn future
+	// NEX-103 Phase 1a parity with cmd/nexus/main.go: bare branch
+	// re-enabled. Caller (Frame buildOutputFilter) supplies the
+	// ANTHROPIC_API_KEY via filter credential lookup; this side
+	// (agentfunnel) doesn't yet have brokercreds wired in — still
+	// returns p unchanged for non-claude-code providers and skips
+	// bare unless the credential plumbing lands first.
 	switch id {
 	case "claude-code", "claudecode":
 		jp := claudecodeprovider.New()

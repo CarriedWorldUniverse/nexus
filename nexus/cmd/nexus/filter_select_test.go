@@ -38,14 +38,14 @@ func cfgWith(filter, filterProvider, filterModel string) schemas.AspectConfig {
 }
 
 func TestBuildOutputFilter_DefaultIsCheap(t *testing.T) {
-	got := buildOutputFilter(cfgWith("", "", ""), stubProvider{}, "stub", "stub-model", nil, "", quietLogger())
+	got := buildOutputFilter(cfgWith("", "", ""), stubProvider{}, "stub", "stub-model", nil, "", nil, quietLogger())
 	if _, ok := got.(funnel.HardRulesFilter); !ok {
 		t.Fatalf("default: expected HardRulesFilter, got %T", got)
 	}
 }
 
 func TestBuildOutputFilter_Cheap_InheritsFrameProvider(t *testing.T) {
-	got := buildOutputFilter(cfgWith("cheap", "", ""), stubProvider{}, "stub", "stub-model", nil, "", quietLogger())
+	got := buildOutputFilter(cfgWith("cheap", "", ""), stubProvider{}, "stub", "stub-model", nil, "", nil, quietLogger())
 	hr, ok := got.(funnel.HardRulesFilter)
 	if !ok {
 		t.Fatalf("cheap: expected HardRulesFilter wrapper, got %T", got)
@@ -65,7 +65,7 @@ func TestBuildOutputFilter_Cheap_InheritsFrameProvider(t *testing.T) {
 
 func TestBuildOutputFilter_Cheap_ClaudeFrameDefaultsToHaiku(t *testing.T) {
 	for _, id := range []bridle.ProviderID{"claude-code", "claudecode", "claude-api", "claude"} {
-		got := buildOutputFilter(cfgWith("cheap", "", ""), stubProvider{}, id, "claude-opus-4-7", nil, "", quietLogger())
+		got := buildOutputFilter(cfgWith("cheap", "", ""), stubProvider{}, id, "claude-opus-4-7", nil, "", nil, quietLogger())
 		hr := got.(funnel.HardRulesFilter)
 		cmf := hr.Inner.(funnel.CheapModelFilter)
 		// Bare "haiku" rather than a versioned api-style id — under
@@ -78,7 +78,7 @@ func TestBuildOutputFilter_Cheap_ClaudeFrameDefaultsToHaiku(t *testing.T) {
 }
 
 func TestBuildOutputFilter_Cheap_OperatorOverridesProvider(t *testing.T) {
-	got := buildOutputFilter(cfgWith("cheap", "claude-api", "claude-haiku-4-5"), stubProvider{}, "claude-code", "claude-opus-4-7", nil, "", quietLogger())
+	got := buildOutputFilter(cfgWith("cheap", "claude-api", "claude-haiku-4-5"), stubProvider{}, "claude-code", "claude-opus-4-7", nil, "", nil, quietLogger())
 	hr := got.(funnel.HardRulesFilter)
 	cmf, ok := hr.Inner.(funnel.CheapModelFilter)
 	if !ok {
@@ -93,7 +93,7 @@ func TestBuildOutputFilter_Cheap_OperatorOverridesProvider(t *testing.T) {
 }
 
 func TestBuildOutputFilter_Cheap_OverrideProviderWithoutModelFallsToHaiku(t *testing.T) {
-	got := buildOutputFilter(cfgWith("cheap", "claude-api", ""), stubProvider{}, "stub", "stub-model", nil, "", quietLogger())
+	got := buildOutputFilter(cfgWith("cheap", "claude-api", ""), stubProvider{}, "stub", "stub-model", nil, "", nil, quietLogger())
 	hr := got.(funnel.HardRulesFilter)
 	cmf := hr.Inner.(funnel.CheapModelFilter)
 	if cmf.Provider != "claude-api" {
@@ -105,7 +105,7 @@ func TestBuildOutputFilter_Cheap_OverrideProviderWithoutModelFallsToHaiku(t *tes
 }
 
 func TestBuildOutputFilter_Cheap_UnknownOverrideProviderDowngrades(t *testing.T) {
-	got := buildOutputFilter(cfgWith("cheap", "voodoo-llm", ""), stubProvider{}, "stub", "stub-model", nil, "", quietLogger())
+	got := buildOutputFilter(cfgWith("cheap", "voodoo-llm", ""), stubProvider{}, "stub", "stub-model", nil, "", nil, quietLogger())
 	hr, ok := got.(funnel.HardRulesFilter)
 	if !ok {
 		t.Fatalf("expected HardRulesFilter (downgrade), got %T", got)
@@ -116,7 +116,7 @@ func TestBuildOutputFilter_Cheap_UnknownOverrideProviderDowngrades(t *testing.T)
 }
 
 func TestBuildOutputFilter_Hard(t *testing.T) {
-	got := buildOutputFilter(cfgWith("hard", "", ""), stubProvider{}, "stub", "stub-model", nil, "", quietLogger())
+	got := buildOutputFilter(cfgWith("hard", "", ""), stubProvider{}, "stub", "stub-model", nil, "", nil, quietLogger())
 	hr, ok := got.(funnel.HardRulesFilter)
 	if !ok {
 		t.Fatalf("hard: expected HardRulesFilter, got %T", got)
@@ -127,28 +127,28 @@ func TestBuildOutputFilter_Hard(t *testing.T) {
 }
 
 func TestBuildOutputFilter_Always(t *testing.T) {
-	got := buildOutputFilter(cfgWith("always", "", ""), stubProvider{}, "stub", "stub-model", nil, "", quietLogger())
+	got := buildOutputFilter(cfgWith("always", "", ""), stubProvider{}, "stub", "stub-model", nil, "", nil, quietLogger())
 	if _, ok := got.(funnel.AlwaysPostFilter); !ok {
 		t.Fatalf("always: expected AlwaysPostFilter, got %T", got)
 	}
 }
 
 func TestBuildOutputFilter_Off(t *testing.T) {
-	got := buildOutputFilter(cfgWith("off", "", ""), stubProvider{}, "stub", "stub-model", nil, "", quietLogger())
+	got := buildOutputFilter(cfgWith("off", "", ""), stubProvider{}, "stub", "stub-model", nil, "", nil, quietLogger())
 	if _, ok := got.(funnel.AlwaysPostFilter); !ok {
 		t.Fatalf("off: expected AlwaysPostFilter, got %T", got)
 	}
 }
 
 func TestBuildOutputFilter_UnknownFallsBackToCheap(t *testing.T) {
-	got := buildOutputFilter(cfgWith("nonsense", "", ""), stubProvider{}, "stub", "stub-model", nil, "", quietLogger())
+	got := buildOutputFilter(cfgWith("nonsense", "", ""), stubProvider{}, "stub", "stub-model", nil, "", nil, quietLogger())
 	if _, ok := got.(funnel.HardRulesFilter); !ok {
 		t.Fatalf("unknown: expected fallback to HardRulesFilter, got %T", got)
 	}
 }
 
 func TestBuildOutputFilter_CaseInsensitive(t *testing.T) {
-	got := buildOutputFilter(cfgWith("HARD", "", ""), stubProvider{}, "stub", "stub-model", nil, "", quietLogger())
+	got := buildOutputFilter(cfgWith("HARD", "", ""), stubProvider{}, "stub", "stub-model", nil, "", nil, quietLogger())
 	hr, ok := got.(funnel.HardRulesFilter)
 	if !ok {
 		t.Fatalf("HARD: expected HardRulesFilter, got %T", got)
