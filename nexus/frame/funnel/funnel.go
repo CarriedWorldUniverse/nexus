@@ -389,6 +389,20 @@ type Config struct {
 	// credential). Nil = no resolution; provider runs unchanged.
 	ProviderEnvResolver ProviderEnvResolver
 
+	// IdempotencyFile, if set, is the path where the funnel persists
+	// its seen-msg_id set so duplicate-delivery dropping survives
+	// process restart (NEX-96). Empty disables persistence — in-memory
+	// only; acceptable for short-lived test funnels. Production funnels
+	// should set this alongside the wsasp cursor file so at-least-once
+	// delivery + funnel idempotency = effectively exactly-once.
+	IdempotencyFile string
+
+	// IdempotencyCap caps the in-memory seen-msg_id set. Older entries
+	// are evicted FIFO when the cap is reached. 0 = default (1000),
+	// which covers any plausible disconnect-window backlog without
+	// unbounded memory.
+	IdempotencyCap int
+
 	Logger *slog.Logger
 }
 
@@ -413,11 +427,20 @@ type Funnel struct {
 	cfg Config
 	log *slog.Logger
 
-	mu sync.Mutex // guards inbox, sessionTail, cumulativeTokens, sessionHandle
+	mu sync.Mutex // guards inbox, sessionTail, cumulativeTokens, sessionHandle, seenMsgIDs
 
 	// inbox holds comms that arrived since the last deliberation. Folded
 	// into the next bridle.RunTurn call. Drained at deliberation start.
 	inbox []bridle.InboxItem
+
+	// seenMsgIDs records msg_ids the funnel has already deliberated on
+	// (NEX-96). Broker delivers at-least-once per Lock 6; on reconnect
+	// with a stale cursor, already-handled messages can re-arrive.
+	// Receive checks this set and drops duplicates rather than appending
+	// them to the inbox. Bounded FIFO via seenOrder; persisted to
+	// cfg.IdempotencyFile so the guarantee survives restart.
+	seenMsgIDs map[int64]struct{}
+	seenOrder  []int64
 
 	// triggeringMsgID is the chat msg_id that prompted the next
 	// deliberation. Set by ReceiveWithMsgID; consumed and cleared
@@ -512,21 +535,47 @@ func New(cfg Config) (*Funnel, error) {
 		}
 	}
 
+	if cfg.IdempotencyCap == 0 {
+		cfg.IdempotencyCap = 1000
+	}
+
 	resolver := NewSessionResolver(cfg.AspectID, cfg.ContextMode)
-	return &Funnel{
+	f := &Funnel{
 		cfg:           cfg,
 		log:           cfg.Logger,
 		resolver:      resolver,
 		sessionHandle: resolver.GlobalHandle(),
-	}, nil
+		seenMsgIDs:    make(map[int64]struct{}),
+	}
+	// Hydrate the seen-set from disk if a persistence file is configured.
+	// Best-effort: parse failure logs + continues with an empty set
+	// (degrades to in-memory only for this process; production wiring
+	// catches this in observability + the operator can re-mint the file).
+	if err := f.loadSeenMsgIDs(); err != nil {
+		f.log.Warn("funnel: idempotency hydrate failed",
+			"path", cfg.IdempotencyFile, "err", err)
+	}
+	return f, nil
 }
 
 // Receive enqueues an inbound comm for the next deliberation. Mid-turn
 // comms-inbox-as-array per #81: anything received during a running
 // deliberation accumulates and folds into the next turn.
+//
+// Drops items whose MsgID is already in the seen-set (NEX-96 idempotency
+// guard). Broker delivers at-least-once per Lock 6; if a reconnect with a
+// stale cursor re-pushes already-deliberated messages, the funnel skips
+// them rather than re-running the turn.
 func (f *Funnel) Receive(item bridle.InboxItem) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if item.MsgID > 0 {
+		if _, seen := f.seenMsgIDs[item.MsgID]; seen {
+			f.log.Debug("funnel: dropping duplicate inbox item",
+				"aspect", f.cfg.AspectID, "msg_id", item.MsgID)
+			return
+		}
+	}
 	f.inbox = append(f.inbox, item)
 }
 
@@ -550,6 +599,14 @@ func (f *Funnel) ReceiveWithMsgID(item bridle.InboxItem, msgID int64) {
 	// supply one (e.g. synthetic injection); triage contract treats
 	// MsgID==0 as not-applicable per bridle.InboxItem docs.
 	item.MsgID = msgID
+	// NEX-96 idempotency: drop already-deliberated msg_ids.
+	if msgID > 0 {
+		if _, seen := f.seenMsgIDs[msgID]; seen {
+			f.log.Debug("funnel: dropping duplicate inbox item (with-msgid)",
+				"aspect", f.cfg.AspectID, "msg_id", msgID)
+			return
+		}
+	}
 	f.inbox = append(f.inbox, item)
 	if msgID > 0 {
 		f.triggeringMsgID = msgID
@@ -615,6 +672,14 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		copy(f.inbox, f.inbox[1:])
 		f.inbox = f.inbox[:len(f.inbox)-1]
 		pending = []bridle.InboxItem{head}
+
+		// NEX-96 idempotency: record the popped msg_id so any future
+		// duplicate-delivery (broker re-push after reconnect with stale
+		// cursor) gets dropped at Receive rather than re-deliberated.
+		// markSeenLocked maintains FIFO eviction at IdempotencyCap.
+		if head.MsgID > 0 {
+			f.markSeenLocked(head.MsgID)
+		}
 	}
 
 	// Trigger context comes from the popped item (not from the legacy
