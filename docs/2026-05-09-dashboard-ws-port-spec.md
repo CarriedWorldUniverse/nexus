@@ -35,7 +35,7 @@ capabilities: ["chat-send", "chat-read", "knowledge-rw", "admin"]
 A separate operator identity (vs. reusing `frame` or `admin`) means:
 - `from: "operator"` posts in chat are properly attributed (today this is implicit; with a real identity it's explicit and verifiable).
 - Operator can hold its own knowledge entries (`from_agent="operator"`) — the operator's curated facts are first-class.
-- Future: multiple operators on the same Nexus get distinct identities (`operator:jacinta`, `operator:colleague`) without protocol changes.
+- Future: multiple operators on the same Nexus get distinct identities (`operator:alice`, `operator:colleague`) without protocol changes.
 
 ### 2.2 Passkey → keyfile flow
 
@@ -337,7 +337,7 @@ Parts 5a–5d are pure backend; 5e is pure frontend. 5e depends on all backend p
 
 ## 9. Open questions for operator
 
-1. **Operator handle.** Memory says operator handle is "operator" (`from: "operator"` in chat). Confirm this stays as the WS-side identity name, vs. adopting "jacinta" or similar. Spec defaults to "operator".
+1. **Operator handle.** Memory says operator handle is "operator" (`from: "operator"` in chat). Confirm this stays as the WS-side identity name, vs. adopting a personal handle. Spec defaults to "operator".
 2. **Sign-out semantics.** Page refresh forces re-login. Acceptable, or should the dashboard offer "stay signed in for X hours" with a longer JWT TTL?
 3. **Tailnet binding.** Should the `/api/operator/login` endpoint refuse non-tailnet origins? Tailnet binding is already enforced for some endpoints; broadening to login adds defense-in-depth at the cost of locking out non-tailnet browsers (not currently a use case).
 4. **Admin views in dashboard.** The current SPA has admin affordances (personality edit, etc.). Confirm those stay backed by REST `/api/admin/*` (per §3.4), with operator JWT as the bearer.

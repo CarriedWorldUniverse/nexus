@@ -4,7 +4,7 @@
 **Status:** Draft for anvil — build brief
 **Scope:** Provision a single AWS EC2 instance running Forgejo (private git host) + interchange (carried-world relay) + Litestream replication to S3, joined to the operator's existing Tailscale tailnet.
 **Repo:** `nexus-cw/interchange` (binary lives at `cmd/interchange`); operator uses Forgejo upstream binary.
-**AWS account:** <operator-aws-account-id> (operator); IAM users `<operator-admin-user>`/`nexus-cw`/`nexus-ops` provisioned 2026-05-01.
+**AWS account:** `<operator-aws-account-id>` (operator); IAM users `<operator-admin-user>`/`nexus-cw`/`nexus-ops` provisioned 2026-05-01.
 
 ---
 

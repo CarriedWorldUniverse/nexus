@@ -7,7 +7,7 @@
 
 **Status:** v1.2 — APPROVED 2026-05-15 by operator. v1.2 adjusts §1 + §2.5 for the reality that keel-cli (and most aspects) don't currently have Jira access; shadow is sole Jira operator for now. v1.1 review history preserved; the cross-aspect convergence on the rest of the doc still stands.
 **Canonical location:** Drive — `~/Google Drive/My Drive/nexus/policies/work-routing.md`. This repo copy is a mirror; edit Drive, not here.
-**Drafted:** shadow. **Operator:** jacinta.
+**Drafted:** shadow. **Operator:** `<operator>`.
 
 **Purpose.** When the nexus network is running a hybrid provider model — planners on Opus (expensive, smart) and workers on cheaper providers — work has to land in the right lane or the cost win evaporates. This is the standard planners and workers follow so that doesn't happen.
 
