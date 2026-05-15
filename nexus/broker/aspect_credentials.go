@@ -46,8 +46,22 @@ func (c *wsConn) handleAspectCredentialFetch(env frames.Envelope) {
 		c.operatorError(env, "credentials store not configured")
 		return
 	}
-	if c.registeredAs == "" {
-		c.operatorError(env, "credential.fetch: connection not registered")
+	// Resolve aspect identity from the connection. Two paths produce
+	// it: (a) register frame sets c.registeredAs (the legacy chat-MCP
+	// path that holds the WS open for push frames), and (b) JWT auth
+	// at upgrade time sets c.auth.AgentID (the request/response-only
+	// path the NEX-79/80 MCPs use — nexus-jira-mcp + nexus-imap-mcp
+	// dial the WS for a single credential.fetch round-trip and never
+	// register). Either identity is authoritative. The original gate
+	// required c.registeredAs, which broke the MCP startup probe
+	// (NEX-74 epic verification, 2026-05-15) — that's what this fix
+	// addresses.
+	aspect := c.registeredAs
+	if aspect == "" {
+		aspect = c.auth.AgentID
+	}
+	if aspect == "" {
+		c.operatorError(env, "credential.fetch: no aspect identity (neither registered nor JWT-bound)")
 		return
 	}
 	var p frames.CredentialFetchPayload
@@ -86,10 +100,10 @@ func (c *wsConn) handleAspectCredentialFetch(env frames.Envelope) {
 		// lacks.
 		if kind == credentials.KindProvider {
 			c.operatorError(env, "credential.fetch: name required for kind=provider (provider default resolution happens in the funnel turn path)")
-			c.recordCredentialAuditDenied(ctx, "", kindStr, "provider-default-via-fetch-not-supported")
+			c.recordCredentialAuditDenied(ctx, aspect, "", kindStr, "provider-default-via-fetch-not-supported")
 			return
 		}
-		cred, err = cstore.ResolveDefaultBundle(ctx, c.registeredAs, kind)
+		cred, err = cstore.ResolveDefaultBundle(ctx, aspect, kind)
 		if err != nil {
 			if errors.Is(err, credentials.ErrNoDefault) {
 				c.operatorError(env, "no default credential configured for aspect for kind="+kindStr)
@@ -97,11 +111,11 @@ func (c *wsConn) handleAspectCredentialFetch(env frames.Envelope) {
 			}
 			if errors.Is(err, credentials.ErrPermission) {
 				c.operatorError(env, "aspect not allowed for resolved default credential")
-				c.recordCredentialAuditDenied(ctx, "", kindStr, "not-allowed-for-default")
+				c.recordCredentialAuditDenied(ctx, aspect, "", kindStr, "not-allowed-for-default")
 				return
 			}
 			c.log.Warn("credential.fetch: resolve default failed",
-				"aspect", c.registeredAs, "kind", kindStr, "err", err)
+				"aspect", aspect, "kind", kindStr, "err", err)
 			c.operatorError(env, "internal error resolving default credential")
 			return
 		}
@@ -110,22 +124,22 @@ func (c *wsConn) handleAspectCredentialFetch(env frames.Envelope) {
 		if err != nil {
 			if errors.Is(err, credentials.ErrNotFound) {
 				c.operatorError(env, "credential not found: "+p.Name)
-				c.recordCredentialAuditDenied(ctx, p.Name, kindStr, "not-found")
+				c.recordCredentialAuditDenied(ctx, aspect, p.Name, kindStr, "not-found")
 				return
 			}
 			c.log.Warn("credential.fetch: get failed",
-				"aspect", c.registeredAs, "name", p.Name, "err", err)
+				"aspect", aspect, "name", p.Name, "err", err)
 			c.operatorError(env, "internal error fetching credential")
 			return
 		}
-		if !cred.AllowedFor(c.registeredAs) {
+		if !cred.AllowedFor(aspect) {
 			c.operatorError(env, "aspect not allowed for credential "+p.Name)
-			c.recordCredentialAuditDenied(ctx, p.Name, kindStr, "not-allowed")
+			c.recordCredentialAuditDenied(ctx, aspect, p.Name, kindStr, "not-allowed")
 			return
 		}
 		if cred.Kind != kind {
 			c.operatorError(env, "credential kind mismatch (requested "+kindStr+", stored "+string(cred.Kind)+")")
-			c.recordCredentialAuditDenied(ctx, p.Name, kindStr, "kind-mismatch")
+			c.recordCredentialAuditDenied(ctx, aspect, p.Name, kindStr, "kind-mismatch")
 			return
 		}
 	}
@@ -140,14 +154,14 @@ func (c *wsConn) handleAspectCredentialFetch(env frames.Envelope) {
 	// should be fetch or both. Enforce both rules here.
 	if cred.Mode != credentials.ModeFetch && cred.Mode != credentials.ModeBoth {
 		c.operatorError(env, "credential mode forbids fetch (mode="+string(cred.Mode)+")")
-		c.recordCredentialAuditDenied(ctx, cred.Name, kindStr, "mode-forbids-fetch")
+		c.recordCredentialAuditDenied(ctx, aspect, cred.Name, kindStr, "mode-forbids-fetch")
 		return
 	}
 
 	bundle, err := cstore.Bundle(cred)
 	if err != nil {
 		c.log.Warn("credential.fetch: decrypt failed",
-			"aspect", c.registeredAs, "name", cred.Name, "err", err)
+			"aspect", aspect, "name", cred.Name, "err", err)
 		c.operatorError(env, "internal error decrypting credential")
 		return
 	}
@@ -156,16 +170,16 @@ func (c *wsConn) handleAspectCredentialFetch(env frames.Envelope) {
 	// shouldn't block the legitimate fetch from succeeding.
 	if err := cstore.RecordAudit(ctx, credentials.AuditEvent{
 		CredentialName: cred.Name,
-		Aspect:         c.registeredAs,
+		Aspect:         aspect,
 		Action:         credentials.AuditFetch,
 		Details:        map[string]any{"kind": kindStr},
 	}); err != nil {
 		c.log.Warn("credential.fetch: audit write failed",
-			"aspect", c.registeredAs, "name", cred.Name, "err", err)
+			"aspect", aspect, "name", cred.Name, "err", err)
 	}
 	if err := cstore.TouchLastUsed(ctx, cred.Name); err != nil {
 		c.log.Debug("credential.fetch: touch last_used failed",
-			"aspect", c.registeredAs, "name", cred.Name, "err", err)
+			"aspect", aspect, "name", cred.Name, "err", err)
 	}
 
 	resp, err := frames.NewResponse(frames.KindCredentialFetchResult, env.ID, frames.CredentialFetchResultPayload{
@@ -184,18 +198,23 @@ func (c *wsConn) handleAspectCredentialFetch(env frames.Envelope) {
 // Best-effort: if the store write fails we log and move on — the
 // denial itself has already been signalled to the caller via
 // operatorError, so this is purely audit-trail hygiene.
-func (c *wsConn) recordCredentialAuditDenied(ctx context.Context, name, kind, reason string) {
+//
+// aspect is passed explicitly (rather than read from c.registeredAs)
+// because callers may have resolved identity via c.auth.AgentID when
+// the connection didn't register — see handleAspectCredentialFetch's
+// identity-resolution comment for context.
+func (c *wsConn) recordCredentialAuditDenied(ctx context.Context, aspect, name, kind, reason string) {
 	cstore := c.broker.cfg.Credentials
 	if cstore == nil {
 		return
 	}
 	if err := cstore.RecordAudit(ctx, credentials.AuditEvent{
 		CredentialName: name,
-		Aspect:         c.registeredAs,
+		Aspect:         aspect,
 		Action:         credentials.AuditDenied,
 		Details:        map[string]any{"kind": kind, "reason": reason},
 	}); err != nil {
 		c.log.Debug("credential.fetch: audit-denied write failed",
-			"aspect", c.registeredAs, "kind", kind, "reason", reason, "err", err)
+			"aspect", aspect, "kind", kind, "reason", reason, "err", err)
 	}
 }
