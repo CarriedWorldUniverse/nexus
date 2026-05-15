@@ -88,22 +88,23 @@ func TestWatchFileReplacement_DetectsReplacement(t *testing.T) {
 		atomic.AddInt32(&onReplacedCount, 1)
 	}
 
-	// Replace the file shortly after the watcher starts. Use a short
-	// interval so the test runs quickly. Need to actually delete + recreate
-	// so the inode/FileInfo identity changes; an in-place write would not
-	// trip os.SameFile. The replace goroutine reports failures via a
-	// channel rather than calling t.Errorf directly — the watcher may
-	// detect the os.Remove and return before os.WriteFile runs, ending
-	// the test before this goroutine finishes; calling t.Errorf on a
-	// finished test panics under -race.
-	replaceErr := make(chan error, 2)
+	// Replace the file shortly after the watcher starts via atomic
+	// rename: POSIX rename(2) guarantees the destination is the source
+	// inode, distinct from the watcher's baseline inode. A naive
+	// remove + recreate is unreliable on linux — the kernel may reuse
+	// the same inode if no other handle is open during the gap, and
+	// os.SameFile then returns true (test passes on macOS, fails on
+	// linux CI). Rename is the portable way to guarantee identity
+	// change.
+	replaceErr := make(chan error, 1)
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		if err := os.Remove(path); err != nil {
+		tmp := path + ".new"
+		if err := os.WriteFile(tmp, []byte("replacement"), 0o644); err != nil {
 			replaceErr <- err
 			return
 		}
-		if err := os.WriteFile(path, []byte("replacement"), 0o644); err != nil {
+		if err := os.Rename(tmp, path); err != nil {
 			replaceErr <- err
 		}
 	}()
