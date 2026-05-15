@@ -88,15 +88,50 @@ builds:
       - -X github.com/CarriedWorldUniverse/nexus/internal/version.Version={{.Version}}
 
 archives:
-  - id: default
-    # One archive per binary × os × arch. Easier to install individual
-    # binaries without lugging the whole toolkit; checksums per archive.
-    name_template: >-
-      {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+  # One archive per binary per platform. Each `archives` entry filters
+  # to a single build id so the file name is stable and unambiguous —
+  # the previous `.Binary` template resolved inconsistently across
+  # platforms and dropped some nexus/windows artifacts.
+  - id: nexus
+    builds: [nexus]
+    name_template: 'nexus_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
     format: tar.gz
-    files:
-      - README*
-      - LICENSE*
+    files: [README*, LICENSE*]
+  - id: agentfunnel
+    builds: [agentfunnel]
+    name_template: 'agentfunnel_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    format: tar.gz
+    files: [README*, LICENSE*]
+  - id: aspect
+    builds: [aspect]
+    name_template: 'aspect_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    format: tar.gz
+    files: [README*, LICENSE*]
+  - id: nexus-comms-mcp
+    builds: [nexus-comms-mcp]
+    name_template: 'nexus-comms-mcp_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    format: tar.gz
+    files: [README*, LICENSE*]
+  - id: nexus-imap-mcp
+    builds: [nexus-imap-mcp]
+    name_template: 'nexus-imap-mcp_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    format: tar.gz
+    files: [README*, LICENSE*]
+  - id: nexus-jira-mcp
+    builds: [nexus-jira-mcp]
+    name_template: 'nexus-jira-mcp_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    format: tar.gz
+    files: [README*, LICENSE*]
+  - id: nexus-watch
+    builds: [nexus-watch]
+    name_template: 'nexus-watch_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    format: tar.gz
+    files: [README*, LICENSE*]
+  - id: outpost
+    builds: [outpost]
+    name_template: 'outpost_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    format: tar.gz
+    files: [README*, LICENSE*]
 
 checksum:
   name_template: 'checksums.txt'
