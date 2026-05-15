@@ -18,6 +18,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -277,6 +279,14 @@ type Config struct {
 	// broker.New rewires the onFrame to its own broadcaster. Nil
 	// leaves broker.New constructing its own Hub (legacy path).
 	Observability *observability.Hub
+
+	// DashboardDir, when set, makes the broker serve the dashboard SPA
+	// from this on-disk directory instead of the binary's embedded copy.
+	// Path should point at the `static/dashboard` tree (the one
+	// containing index.html, css/, js/, fonts/). Intended for dev: edit
+	// CSS/JS, refresh the browser — no rebuild. When empty, the
+	// embedded copy is served (production path).
+	DashboardDir string
 }
 
 // ChatRouterCallbacks wires the broker's chat.send handling to the
@@ -544,27 +554,60 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 		http.Redirect(w, r, "/dashboard/", http.StatusFound)
 	})
 
-	dashboardSub, dashErr := fs.Sub(dashboardFS, "static/dashboard")
-	if dashErr == nil {
-		fileSrv := http.FileServer(http.FS(dashboardSub))
+	// Dev override: when DashboardDir is set, serve the SPA from disk
+	// so CSS/JS edits land on browser refresh without a rebuild. The
+	// directory should be the dashboard root (contains index.html, css/,
+	// js/, fonts/). When empty, fall back to the embedded copy — the
+	// production path.
+	var (
+		dashboardRoot fs.FS
+		dashboardJS   fs.FS
+		dashErr       error
+	)
+	if b.cfg.DashboardDir != "" {
+		abs, absErr := filepath.Abs(b.cfg.DashboardDir)
+		if absErr != nil {
+			abs = b.cfg.DashboardDir
+		}
+		if st, statErr := os.Stat(filepath.Join(abs, "index.html")); statErr != nil || st.IsDir() {
+			b.log.Warn("dashboard: --dashboard-dir set but index.html not found; falling back to embedded",
+				"dir", abs, "err", statErr)
+		} else {
+			dashboardRoot = os.DirFS(abs)
+			dashboardJS = os.DirFS(filepath.Join(abs, "js"))
+			b.log.Info("dashboard: serving from disk (dev override)", "dir", abs)
+		}
+	}
+	if dashboardRoot == nil {
+		dashboardRoot, dashErr = fs.Sub(dashboardFS, "static/dashboard")
+		if dashErr == nil {
+			dashboardJS, _ = fs.Sub(dashboardFS, "static/dashboard/js")
+		}
+	}
+
+	if dashboardRoot != nil {
+		// Disk-served (dev) skips the long-cache rule for vendor files —
+		// they're not content-hashed on disk so an immutable cache would
+		// defeat the override.
+		dashFromDisk := b.cfg.DashboardDir != ""
+		fileSrv := http.FileServer(http.FS(dashboardRoot))
 		mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
 		})
-		mux.Handle("GET /dashboard/", http.StripPrefix("/dashboard/", dashboardCacheHandler(fileSrv)))
+		mux.Handle("GET /dashboard/", http.StripPrefix("/dashboard/", dashboardCacheHandler(fileSrv, dashFromDisk)))
 		// SPA's index.html and components import vendor scripts via
 		// absolute paths (`/js/vendor/preact.js`, `/js/vendor/htm.js`,
 		// etc.) — a holdover from agent-network where the broker served
 		// `/js` at the root. Without this alias the SPA loads index
 		// from /dashboard/ but the import resolver misses every vendor
 		// module and the page renders a black screen.
-		// Aliasing /js/* → static/dashboard/js/* keeps the SPA portable
+		// Aliasing /js/* → <dashboard-root>/js/* keeps the SPA portable
 		// without rewriting every import.
-		jsSub, jsErr := fs.Sub(dashboardFS, "static/dashboard/js")
-		if jsErr == nil {
-			jsSrv := http.FileServer(http.FS(jsSub))
-			mux.Handle("GET /js/", http.StripPrefix("/js/", dashboardCacheHandler(jsSrv)))
+		if dashboardJS != nil {
+			jsSrv := http.FileServer(http.FS(dashboardJS))
+			mux.Handle("GET /js/", http.StripPrefix("/js/", dashboardCacheHandler(jsSrv, dashFromDisk)))
 		} else {
-			b.log.Warn("dashboard: js subFS failed; vendor scripts will 404", "err", jsErr)
+			b.log.Warn("dashboard: js subFS unavailable; vendor scripts will 404")
 		}
 	} else {
 		b.log.Warn("dashboard: embed sub failed; SPA not served", "err", dashErr)
@@ -737,14 +780,19 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // never picks up a stale shell after a deploy; vendor files (preact,
 // htm, xterm, webauthn helpers, fonts) get a long max-age because
 // they're versioned by content-hash via embed.
-func dashboardCacheHandler(next http.Handler) http.Handler {
+func dashboardCacheHandler(next http.Handler, fromDisk bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-		if path == "" || strings.HasSuffix(path, "/") || path == "index.html" || path == "js/app.js" {
+		switch {
+		case fromDisk:
+			// Dev override: nothing is content-hashed on disk, so an
+			// immutable cache would defeat live-edit. Always no-cache.
 			w.Header().Set("Cache-Control", "no-cache")
-		} else if strings.HasPrefix(path, "js/vendor/") || strings.HasPrefix(path, "fonts/") || strings.HasPrefix(path, "vendor/") {
+		case path == "" || strings.HasSuffix(path, "/") || path == "index.html" || path == "js/app.js":
+			w.Header().Set("Cache-Control", "no-cache")
+		case strings.HasPrefix(path, "js/vendor/") || strings.HasPrefix(path, "fonts/") || strings.HasPrefix(path, "vendor/"):
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		} else {
+		default:
 			w.Header().Set("Cache-Control", "no-cache")
 		}
 		// Explicit MIME map for the extensions Go gets wrong on Windows.

@@ -27,6 +27,53 @@ const loadingOlder = signal(false);
 const msgCache = {};
 if (typeof window !== 'undefined') window.__msgCache = msgCache;
 
+// Active thread filter — when set, Chat renders only the root message
+// and its descendants (the conversation tree rooted at this id). Driven
+// by `#/chat?thread=<rootId>` in the URL hash; FeedView sets this when
+// the operator drills into a thread row. Zero = no filter (firehose).
+const threadRoot = signal(0);
+
+// Parse the `thread=<rootId>` query from the URL hash. Treats malformed
+// or missing values as "no filter".
+function parseThreadFromHash() {
+  const hash = window.location.hash || '';
+  const q = hash.indexOf('?');
+  if (q === -1) return 0;
+  const params = new URLSearchParams(hash.slice(q + 1));
+  const n = Number(params.get('thread'));
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+// Pick the thread root for a message — same tolerant lookup FeedView
+// uses. For a top-level message the root is its own id.
+function rootIdOf(msg) {
+  if (!msg) return 0;
+  const r =
+    Number(msg.thread_root) ||
+    Number(msg.thread_root_msg_id) ||
+    Number(msg.reply_to) ||
+    Number(msg.id);
+  return r > 0 ? r : 0;
+}
+
+// Walk the reply chain to find the ultimate root of a message. The
+// thread_root field is canonical when present; when missing (older
+// rows that only carry reply_to), follow reply_to upward using the
+// msgCache. Bounded to avoid loops on bad data.
+function resolveRootId(msg) {
+  if (!msg) return 0;
+  const direct = Number(msg.thread_root) || Number(msg.thread_root_msg_id);
+  if (direct > 0) return direct;
+  let cur = msg;
+  for (let i = 0; i < 64 && cur; i++) {
+    if (!cur.reply_to) return Number(cur.id) || 0;
+    const parent = msgCache[cur.reply_to];
+    if (!parent) return Number(cur.reply_to) || 0;
+    cur = parent;
+  }
+  return Number(msg.id) || 0;
+}
+
 async function loadMessages() {
   try {
     // fetchMessages returns {messages, has_more}; pull the array.
@@ -361,6 +408,13 @@ export function Chat() {
       loadTopics();
     }
 
+    // Seed thread filter from the current hash, then track future
+    // hashchange events so a click on a different thread row swaps the
+    // filter without remounting Chat.
+    threadRoot.value = parseThreadFromHash();
+    const onHashChange = () => { threadRoot.value = parseThreadFromHash(); };
+    window.addEventListener('hashchange', onHashChange);
+
     // Wire WS handlers — unsubscribe on unmount so FeedView / AgentsView
     // don't inherit Chat's handlers when the route changes.
     chatWS.start();
@@ -382,68 +436,108 @@ export function Chat() {
       offMsg();
       offReact();
       offReconnect();
+      window.removeEventListener('hashchange', onHashChange);
     };
   }, []);
 
   const ch = currentChannel.value;
+  const root = threadRoot.value;
 
   // Flat chronological render — every message visible, replies shown in
   // order with the inherited quote-bar pointing at their parent.
   // agentOnly is now a subtle visual hint for "not involving operator",
-  // not a hide. Only computed for #general where mixed traffic happens.
-  const opIds = ch === 'general' ? computeOpInvolvedSet() : null;
+  // not a hide. Only computed for #general where mixed traffic happens
+  // (and only when no thread filter is active — thread mode is already
+  // op-scoped enough by being a single conversation).
+  const opIds = (!root && ch === 'general') ? computeOpInvolvedSet() : null;
+
+  // Thread-mode filter: render only the root message + descendants.
+  // The full signal keeps every message; we just narrow the rendered
+  // slice. resolveRootId walks reply_to via msgCache so older rows
+  // without thread_root still group correctly.
+  const visibleMessages = root > 0
+    ? messages.value.filter((m) => Number(m.id) === root || resolveRootId(m) === root)
+    : messages.value;
+
+  // Thread header: pull the root msg if we have it, fall back to a
+  // bare "#<root>" label so the operator still sees what they clicked
+  // even before the row hydrates.
+  const rootMsg = root > 0 ? msgCache[root] : null;
+
+  function backToFeed(e) {
+    e.preventDefault();
+    window.location.hash = '#/feed';
+  }
 
   let lastFrom = null;
   let lastDay = null;
 
   return html`
-    <div class="chat-view">
-      <div class="chat-header">
-        <span class="chat-header-title">${channelLabel(ch)}</span>
-        <span class="chat-header-desc">${channelDesc(ch)}</span>
-      </div>
+    <div class=${'chat-view' + (root ? ' chat-view-thread' : '')}>
+      ${root > 0
+        ? html`
+          <div class="chat-header chat-thread-header">
+            <a href="#/feed" class="chat-thread-back" onClick=${backToFeed} title="Back to feed">←</a>
+            <span class="chat-header-title">
+              Thread #${root}
+              ${rootMsg && rootMsg.from && html`
+                <span class="chat-thread-from">· @${rootMsg.from}</span>
+              `}
+            </span>
+            <span class="chat-header-desc">
+              ${visibleMessages.length === 1
+                ? '1 message'
+                : `${visibleMessages.length} messages`}
+            </span>
+          </div>
+        `
+        : html`
+          <div class="chat-header">
+            <span class="chat-header-title">${channelLabel(ch)}</span>
+            <span class="chat-header-desc">${channelDesc(ch)}</span>
+          </div>
 
-      <div class="chat-channels">
-        <button
-          class=${'chat-tab' + (ch === 'general' ? ' active' : '')}
-          onClick=${() => switchChannel('general')}
-        >#general</button>
-
-        ${topics.value
-          .filter(t => {
-            const name = t.topic || t.name || t;
-            return !String(name).startsWith('dm:');
-          })
-          .map(t => {
-          const key = `topic:${t.topic || t.name || t}`;
-          return html`
+          <div class="chat-channels">
             <button
-              key=${key}
-              class=${'chat-tab' + (ch === key ? ' active' : '')}
-              onClick=${() => switchChannel(key)}
-            >#${t.topic || t.name || t}</button>
-          `;
-        })}
+              class=${'chat-tab' + (ch === 'general' ? ' active' : '')}
+              onClick=${() => switchChannel('general')}
+            >#general</button>
 
-        <span style="width:1px;height:16px;background:#333;margin:0 4px;flex-shrink:0;align-self:center;"></span>
+            ${topics.value
+              .filter(t => {
+                const name = t.topic || t.name || t;
+                return !String(name).startsWith('dm:');
+              })
+              .map(t => {
+              const key = `topic:${t.topic || t.name || t}`;
+              return html`
+                <button
+                  key=${key}
+                  class=${'chat-tab' + (ch === key ? ' active' : '')}
+                  onClick=${() => switchChannel(key)}
+                >#${t.topic || t.name || t}</button>
+              `;
+            })}
 
-        ${agents.value.map(agent => {
-          const id = typeof agent === 'string' ? agent : agent.id;
-          const color = (agentColors.value || {})[id] || '#888';
-          return html`
-            <button
-              key=${`dm:${id}`}
-              class=${'chat-tab' + (ch === id ? ' active' : '')}
-              style=${{ color: ch === id ? color : undefined }}
-              onClick=${() => switchChannel(id)}
-            >@${id}</button>
-          `;
-        })}
+            <span style="width:1px;height:16px;background:#333;margin:0 4px;flex-shrink:0;align-self:center;"></span>
 
-      </div>
+            ${agents.value.map(agent => {
+              const id = typeof agent === 'string' ? agent : agent.id;
+              const color = (agentColors.value || {})[id] || '#888';
+              return html`
+                <button
+                  key=${`dm:${id}`}
+                  class=${'chat-tab' + (ch === id ? ' active' : '')}
+                  style=${{ color: ch === id ? color : undefined }}
+                  onClick=${() => switchChannel(id)}
+                >@${id}</button>
+              `;
+            })}
+          </div>
+        `}
 
       <div class="chat-messages" onclick=${handleMsgRefClick}>
-        ${oldestLoadedId.value > 0 && hasMoreOlder.value && html`
+        ${!root && oldestLoadedId.value > 0 && hasMoreOlder.value && html`
           <div class="chat-load-older">
             <button
               type="button"
@@ -454,10 +548,16 @@ export function Chat() {
             </button>
           </div>
         `}
-        ${oldestLoadedId.value > 0 && !hasMoreOlder.value && messages.value.length > 0 && html`
+        ${!root && oldestLoadedId.value > 0 && !hasMoreOlder.value && messages.value.length > 0 && html`
           <div class="chat-load-older chat-load-older-end">Start of history</div>
         `}
-        ${messages.value.map(msg => {
+        ${root > 0 && visibleMessages.length === 0 && html`
+          <div class="chat-thread-empty">
+            Thread #${root} not loaded yet — try “Load older messages” from #general,
+            or wait for the next refresh.
+          </div>
+        `}
+        ${visibleMessages.map(msg => {
           const day = dayLabel(msgAt(msg));
           const showDay = day !== lastDay;
           const compact = !showDay && msg.from === lastFrom;
@@ -469,7 +569,9 @@ export function Chat() {
           const parentMsg = msg.reply_to ? msgCache[msg.reply_to] : null;
 
           // agentOnly is now a faint-but-visible hint. Only marks messages
-          // that are NOT part of any operator-touched chain in #general.
+          // that are NOT part of any operator-touched chain in #general
+          // (suppressed in thread mode — every message in the thread is
+          // relevant by definition).
           const isAgentOnly = opIds !== null && !opIds.has(msg.id)
             && msg.from !== 'operator' && msg.type !== 'input';
 

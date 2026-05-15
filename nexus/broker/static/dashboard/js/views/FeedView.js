@@ -34,10 +34,11 @@
 import { fetchMessages } from '../api.js';
 import { chatWS } from '../chat-ws.js';
 import { getOrCreateThread, peekThread } from '../models/threads.js';
-import { agentColors } from '../state.js';
+import { agentColors, replyTo } from '../state.js';
 import { ChatInput } from '../components/ChatInput.js';
+import { MessageBubble } from '../components/MessageBubble.js';
 
-const { html, useState, useEffect } = window.__preact;
+const { html, useState, useEffect, useRef } = window.__preact;
 
 const ROLE_LABELS = {
   '':                  'All',
@@ -115,13 +116,30 @@ function relTime(dateStr) {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-// Navigate to the thread in ChatView. Chat.js doesn't yet read the
-// ?thread= query (Part 4b/4c will wire that), but setting the hash
-// here means the affordance is correct from this PR's side; the
-// receiver lands later. Today the click effectively returns the
-// operator to the chat firehose — acceptable degraded behaviour.
-function openThread(rootId) {
-  window.location.hash = `#/chat?thread=${rootId}`;
+// Slack/Teams-style accordion: clicking a row expands the thread in
+// place beneath the summary. The URL hash carries the most recently
+// opened thread (`#/feed?thread=N` or `#/chat?thread=N`) so deep-links
+// auto-expand on mount, but expanding is a no-navigation operation —
+// the operator can open several threads at once.
+function parseThreadFromHash() {
+  const hash = window.location.hash || '';
+  const q = hash.indexOf('?');
+  if (q === -1) return 0;
+  const params = new URLSearchParams(hash.slice(q + 1));
+  const n = Number(params.get('thread'));
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function setThreadInHash(rootId) {
+  const hash = window.location.hash || '#/feed';
+  const base = hash.split('?')[0] || '#/feed';
+  const next = rootId > 0 ? `${base}?thread=${rootId}` : base;
+  if (window.location.hash !== next) {
+    // Use replaceState so the back button doesn't fill with expand/collapse
+    // toggles. Pair with a manual hashchange dispatch so any listener that
+    // does care still fires.
+    history.replaceState(null, '', next);
+  }
 }
 
 // Pull a row state shape off a Thread. Computed once per render per
@@ -142,6 +160,102 @@ function snapshotThread(thread) {
   };
 }
 
+// ExpandedThread — renders the root message + indented replies + an
+// inline reply composer for a single thread. Owns a Thread subscription
+// of its own so live messages update without forcing the parent
+// FeedView to re-render every row. The composer leverages the global
+// `replyTo` signal (same plumbing ChatInput already uses) so posting
+// auto-targets this thread root.
+function ExpandedThread({ rootId }) {
+  const thread = peekThread(rootId);
+  // version bump → rerender on Thread change. Cheap: Thread.subscribe
+  // fires only when this thread's messages change.
+  const [, setTick] = useState(0);
+
+  useEffect(() => {
+    const t = peekThread(rootId);
+    if (!t) return undefined;
+    // Make sure the subtree is loaded (idempotent if already loaded).
+    t.load().catch(() => {});
+    const off = t.subscribe(() => setTick((n) => n + 1));
+    return off;
+  }, [rootId]);
+
+  if (!thread) {
+    return html`<div class="feed-thread-expanded-empty">Loading thread…</div>`;
+  }
+
+  const msgs = thread.messages;
+  const root = msgs[0];
+  const replies = msgs.slice(1);
+  const stillLoading = !thread.loaded && replies.length === 0;
+
+  function setReplyTarget(e) {
+    // Stop the click from bubbling to the row (which would collapse it).
+    e.stopPropagation();
+    replyTo.value = root;
+  }
+
+  function clearReplyTarget(e) {
+    e.stopPropagation();
+    if (replyTo.value && replyTo.value.id === rootId) {
+      replyTo.value = null;
+    }
+  }
+
+  return html`
+    <div class="feed-thread-expanded" onClick=${(e) => e.stopPropagation()}>
+      ${root && html`
+        <div class="feed-thread-expanded-root">
+          <${MessageBubble} msg=${root} />
+        </div>
+      `}
+      ${replies.length > 0 && html`
+        <div class="feed-thread-expanded-replies">
+          ${replies.map((m, i) => {
+            const parent = (m.reply_to && msgs.find((p) => p.id === m.reply_to)) || null;
+            const compact = i > 0 && replies[i - 1].from === m.from;
+            return html`
+              <${MessageBubble}
+                key=${m.id}
+                msg=${m}
+                parentMsg=${parent}
+                compact=${compact}
+              />
+            `;
+          })}
+        </div>
+      `}
+      ${stillLoading && html`
+        <div class="feed-thread-expanded-loading">Loading replies…</div>
+      `}
+      ${!stillLoading && replies.length === 0 && html`
+        <div class="feed-thread-expanded-noreplies">No replies yet — be the first.</div>
+      `}
+      <div class="feed-thread-expanded-composer">
+        ${replyTo.value && replyTo.value.id === rootId
+          ? html`
+            <div class="feed-thread-replying">
+              <span>Replying in thread…</span>
+              <button
+                type="button"
+                class="feed-thread-replying-cancel"
+                onClick=${clearReplyTarget}
+              >Cancel</button>
+            </div>
+          `
+          : html`
+            <button
+              type="button"
+              class="feed-thread-reply-cta"
+              onClick=${setReplyTarget}
+            >Reply in thread…</button>
+          `}
+      </div>
+    </div>
+  `;
+}
+
 export function FeedView() {
   // Map of rootId → snapshot. Using an object keyed by rootId so
   // Thread.subscribe callbacks can patch a single row without
@@ -150,6 +264,63 @@ export function FeedView() {
   const [roleFilter, setRoleFilter] = useState('');
   const [mentionsMe, setMentionsMe] = useState(false);
   const [loading, setLoading] = useState(true);
+  // Currently-expanded thread rootId (0 = none). Single-thread accordion:
+  // opening a different thread collapses the previous one. Avoids the
+  // visual mess of multiple half-loaded threads stacked on each other.
+  const [expandedRoot, setExpandedRoot] = useState(() => parseThreadFromHash());
+  const listRef = useRef(null);
+
+  function toggleExpand(rootId) {
+    setExpandedRoot((cur) => {
+      if (cur === rootId) {
+        // Collapse the open one.
+        setThreadInHash(0);
+        if (replyTo.value && replyTo.value.id === rootId) replyTo.value = null;
+        return 0;
+      }
+      // Switching to a different thread — clear any reply target tied
+      // to the previously-open thread so we don't post into the wrong place.
+      if (replyTo.value && cur > 0 && replyTo.value.id === cur) {
+        replyTo.value = null;
+      }
+      setThreadInHash(rootId);
+      const t = peekThread(rootId) || getOrCreateThread(rootId);
+      t.load().catch(() => {});
+      return rootId;
+    });
+  }
+
+  // Esc collapses the open thread.
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key !== 'Escape') return;
+      const tag = (document.activeElement && document.activeElement.tagName) || '';
+      if (tag === 'TEXTAREA' || tag === 'INPUT') return;
+      setExpandedRoot((cur) => {
+        if (cur > 0) {
+          setThreadInHash(0);
+          if (replyTo.value && replyTo.value.id === cur) replyTo.value = null;
+        }
+        return 0;
+      });
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Deep-link: external hash change → reflect into expandedRoot.
+  useEffect(() => {
+    function onHashChange() {
+      const t = parseThreadFromHash();
+      setExpandedRoot(t);
+      if (t > 0) {
+        const thread = peekThread(t) || getOrCreateThread(t);
+        thread.load().catch(() => {});
+      }
+    }
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -309,7 +480,7 @@ export function FeedView() {
         </label>
       </div>
 
-      <div class="chat-messages feed-thread-list">
+      <div class="chat-messages feed-thread-list" ref=${listRef}>
         ${loading && !filtered.length && html`
           <div class="feed-thread-empty">Loading threads...</div>
         `}
@@ -318,39 +489,55 @@ export function FeedView() {
         `}
         ${filtered.map((r) => {
           const fromColor = (agentColors.value || {})[r.from] || '#888';
+          const isExpanded = expandedRoot === r.rootId;
           return html`
             <div
               key=${r.rootId}
-              class="feed-thread-row"
-              onClick=${() => openThread(r.rootId)}
-              role="button"
-              tabIndex=${0}
-              onKeyDown=${(e) => { if (e.key === 'Enter' || e.key === ' ') openThread(r.rootId); }}
+              data-thread-root=${r.rootId}
+              class=${'feed-thread-row' + (isExpanded ? ' is-expanded' : '')}
             >
-              <div class="feed-thread-row-head">
-                <span class="feed-thread-from" style=${{ '--agent-color': fromColor }}>
-                  ${r.from || '(unknown)'}
-                </span>
-                ${r.roleHint && html`
-                  <span class=${'feed-thread-role feed-thread-role-' + r.roleHint}>
-                    ${ROLE_LABELS[r.roleHint] || r.roleHint}
-                  </span>
-                `}
-                <span class="feed-thread-time">${relTime(r.lastAt)}</span>
+              <div
+                class="feed-thread-row-summary"
+                onClick=${() => toggleExpand(r.rootId)}
+                role="button"
+                tabIndex=${0}
+                aria-expanded=${isExpanded}
+                onKeyDown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(r.rootId); } }}
+              >
+                <span
+                  class=${'feed-thread-caret' + (isExpanded ? ' is-open' : '')}
+                  aria-hidden="true"
+                >▸</span>
+                <div class="feed-thread-row-body">
+                  <div class="feed-thread-row-head">
+                    <span class="feed-thread-from" style=${{ '--agent-color': fromColor }}>
+                      ${r.from || '(unknown)'}
+                    </span>
+                    ${r.roleHint && html`
+                      <span class=${'feed-thread-role feed-thread-role-' + r.roleHint}>
+                        ${ROLE_LABELS[r.roleHint] || r.roleHint}
+                      </span>
+                    `}
+                    <span class="feed-thread-time">${relTime(r.lastAt)}</span>
+                  </div>
+                  ${!isExpanded && html`
+                    <div class="feed-thread-preview">${r.preview || '(empty)'}</div>
+                  `}
+                  <div class="feed-thread-row-foot">
+                    <span class="feed-thread-participants">
+                      ${r.participants.length
+                        ? r.participants.map((p) => `@${p}`).join(' ')
+                        : '(no participants)'}
+                    </span>
+                    <span class="feed-thread-replies">
+                      ${r.replyCount === 0 ? 'no replies' :
+                        r.replyCount === 1 ? '1 reply' :
+                        `${r.replyCount} replies`}
+                    </span>
+                  </div>
+                </div>
               </div>
-              <div class="feed-thread-preview">${r.preview || '(empty)'}</div>
-              <div class="feed-thread-row-foot">
-                <span class="feed-thread-participants">
-                  ${r.participants.length
-                    ? r.participants.map((p) => `@${p}`).join(' ')
-                    : '(no participants)'}
-                </span>
-                <span class="feed-thread-replies">
-                  ${r.replyCount === 0 ? 'no replies' :
-                    r.replyCount === 1 ? '1 reply' :
-                    `${r.replyCount} replies`}
-                </span>
-              </div>
+              ${isExpanded && html`<${ExpandedThread} rootId=${r.rootId} />`}
             </div>
           `;
         })}

@@ -91,6 +91,11 @@ func main() {
 	// than silently falling back to env.
 	tlsCert := flag.String("tls-cert", os.Getenv("NEXUS_TLS_CERT"), "path to TLS server cert PEM (default: NEXUS_TLS_CERT env). Required.")
 	tlsKey := flag.String("tls-key", os.Getenv("NEXUS_TLS_KEY"), "path to TLS server key PEM (default: NEXUS_TLS_KEY env). Required.")
+	// Dev override: serve the dashboard SPA from this on-disk directory
+	// instead of the embedded copy baked into nexus.exe. Point at the
+	// static/dashboard tree (the one containing index.html). When unset,
+	// the embedded copy is used. Production deployments leave this empty.
+	dashboardDir := flag.String("dashboard-dir", os.Getenv("NEXUS_DASHBOARD_DIR"), "serve dashboard SPA from this on-disk directory instead of the embedded copy (dev override; default: NEXUS_DASHBOARD_DIR env)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -463,6 +468,7 @@ func main() {
 		AspectHomes:       aspectHomes,
 		TLSCertFile:       *tlsCert,
 		TLSKeyFile:        *tlsKey,
+		DashboardDir:      *dashboardDir,
 		KeyfileValidator:  keyfileValidator,
 		// Knowledge store powers operator-facing knowledge frames
 		// (knowledge.list / knowledge.search / knowledge.store) on the

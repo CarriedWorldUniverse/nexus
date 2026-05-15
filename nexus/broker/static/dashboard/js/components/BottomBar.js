@@ -23,6 +23,10 @@ function fmtTokens(n) {
 }
 
 export function BottomBar({ activeRoute }) {
+  // Chat (single-thread drill-through) is a sub-view of Feed — highlight
+  // the Feed tab while the operator is reading a thread so the nav
+  // reflects "where you came from".
+  const highlightRoute = activeRoute === 'chat' ? 'feed' : activeRoute;
   const usage = usageData.value;
   const totalOutput = usage?.totals?.output || 0;
   const totalCacheRead = usage?.totals?.cache_read || 0;
@@ -55,7 +59,7 @@ export function BottomBar({ activeRoute }) {
         <a
           key=${tab.id}
           href=${'#/' + tab.id}
-          class=${'bottom-bar-tab' + (activeRoute === tab.id ? ' active' : '')}
+          class=${'bottom-bar-tab' + (highlightRoute === tab.id ? ' active' : '')}
         >
           <span class="bottom-bar-icon">${tab.Icon ? html`<${tab.Icon} />` : '🤖'}</span>
           <span class="bottom-bar-label">${tab.label}</span>

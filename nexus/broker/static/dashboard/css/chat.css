@@ -836,12 +836,13 @@
 .feed-filter-btn.active { color: var(--agent-color, var(--view-accent)); border-color: var(--agent-color, var(--view-accent)); background: var(--bg-elevated); }
 
 /* ──────────────────────────────────────────────────────────────
-   Feed Thread View (NEX-246 Parts 4a) — chat root view rewritten
-   to show one row per thread rather than one row per message.
-   FeedView.js emits the .feed-thread-* class family; these are
-   the matching rules. Roles get accent chips drawn from the
-   palette tokens (planner=silver, worker=moss, operator=ember,
-   casual=gold) so the operator can scan by lane.
+   Feed Thread View (NEX-246 Parts 4a/4b) — chat root view rewritten
+   to show one row per thread rather than one row per message. Part 4b
+   layers accordion expand-in-place onto each row. FeedView.js emits
+   the .feed-thread-* class family; these are the matching rules.
+   Roles get accent chips drawn from the palette tokens
+   (planner=silver, worker=moss, operator=ember, casual=gold) so the
+   operator can scan by lane.
    ────────────────────────────────────────────────────────────── */
 
 .feed-thread-view { /* inherits .chat-view */ }
@@ -902,29 +903,78 @@
   font-style: italic;
 }
 
+/* Row is now a container for an interactive summary + (optional)
+   expanded panel below it. flex-shrink:0 protects sibling rows from
+   being squashed when one row's expanded panel grows tall — without
+   this the parent flex-column container compresses the others. */
 .feed-thread-row {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 10px 12px;
+  flex-shrink: 0;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-left: 2px solid transparent;
   border-radius: 6px;
-  cursor: pointer;
+  overflow: hidden;
   transition: background 120ms ease, border-color 120ms ease;
 }
 
-.feed-thread-row:hover {
+.feed-thread-row.is-expanded {
   background: var(--bg-raised);
+  border-color: var(--border-default);
+  border-left-color: var(--view-accent);
+}
+
+/* Summary = the always-visible row header (caret + head + preview +
+   foot). Click toggles expansion. */
+.feed-thread-row-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: 10px 12px;
+  min-height: 56px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 120ms ease;
+}
+
+.feed-thread-row:not(.is-expanded) .feed-thread-row-summary:hover {
+  background: var(--bg-raised);
+}
+
+.feed-thread-row:not(.is-expanded):hover {
   border-color: var(--border-default);
   border-left-color: var(--view-accent-dim);
 }
 
-.feed-thread-row:focus {
+.feed-thread-row-summary:focus-visible {
   outline: none;
-  border-color: var(--view-accent);
-  border-left-color: var(--view-accent);
+  background: var(--bg-raised);
+  box-shadow: inset 0 0 0 1px var(--view-accent-glow);
+}
+
+.feed-thread-row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.feed-thread-caret {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+  transition: transform 160ms ease, color 160ms ease;
+}
+
+.feed-thread-caret.is-open {
+  transform: rotate(90deg);
+  color: var(--view-accent);
 }
 
 .feed-thread-row-head {
@@ -996,4 +1046,163 @@
 .feed-thread-replies {
   flex-shrink: 0;
   color: var(--text-secondary);
+}
+
+/* ── Expanded thread panel (NEX-246 Part 4b — accordion) ──
+   Slides under the row summary when a thread is opened. Uses
+   --view-accent* tokens so it inherits the chat-view identity colour
+   (silver) and stays cohesive with the rest of the Feed surface. */
+
+.feed-thread-expanded {
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-deep);
+  padding: var(--space-sm) var(--space-md) var(--space-sm) 36px;
+  cursor: default;
+  animation: feed-thread-expand 180ms ease;
+}
+
+@keyframes feed-thread-expand {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.feed-thread-expanded-root {
+  padding-bottom: var(--space-sm);
+  margin-bottom: var(--space-sm);
+  border-bottom: 1px dashed var(--border-subtle);
+}
+
+.feed-thread-expanded-replies {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: var(--space-sm);
+  border-left: 1px solid var(--border-subtle);
+  margin-bottom: 10px;
+}
+
+.feed-thread-expanded-empty,
+.feed-thread-expanded-loading,
+.feed-thread-expanded-noreplies {
+  padding: 10px 4px 14px;
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 13px;
+}
+
+.feed-thread-expanded-empty {
+  padding: 14px var(--space-md) 14px 36px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-deep);
+}
+
+.feed-thread-expanded-composer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding-top: 4px;
+}
+
+.feed-thread-reply-cta {
+  flex: 1;
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  cursor: text;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.feed-thread-reply-cta:hover {
+  border-color: var(--view-accent-dim);
+  color: var(--text-secondary);
+}
+
+.feed-thread-replying {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--view-accent);
+  background: var(--view-accent-glow);
+  border: 1px solid var(--view-accent-dim);
+  border-radius: 4px;
+}
+
+.feed-thread-replying-cancel {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: 2px;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.feed-thread-replying-cancel:hover {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+
+/* ── Chat single-thread drill-through (NEX-246 Part 4b — fallback)
+   Kept as a deep-link receiver for #/chat?thread=N. Feed accordion is
+   the primary surface; this view is what shows when the URL is hit
+   directly without going through Feed (or on narrow screens later). */
+
+.chat-thread-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.chat-thread-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.chat-thread-back:hover {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  border-color: var(--border-default);
+}
+
+.chat-thread-from {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: 4px;
+  text-transform: lowercase;
+}
+
+.chat-thread-empty {
+  padding: 48px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 14px;
+  line-height: 1.5;
 }
