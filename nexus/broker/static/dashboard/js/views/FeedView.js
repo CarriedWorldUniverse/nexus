@@ -456,7 +456,9 @@ export function FeedView() {
     }
     return true;
   });
-  filtered.sort((a, b) => b.lastSortKey - a.lastSortKey);
+  // Sort ascending by last-activity — chat-style, newest at the bottom
+  // so an arriving reply moves its thread down to the foot of the list.
+  filtered.sort((a, b) => a.lastSortKey - b.lastSortKey);
 
   return html`
     <div class="chat-view feed-thread-view">
