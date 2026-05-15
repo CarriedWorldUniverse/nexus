@@ -239,6 +239,71 @@ Costs ~150 tokens in the system prompt; substantial behavior change.
 
 ---
 
+## Procedural memory — auto-creation from experience
+
+Inspired by Hermes Agent §1.2 (per harrow's breakdown at `~/Google Drive/My Drive/nexus/general/2026-05-15-hermes-feature-breakdown.md`). The catalog above is one-way: operator + maintainer aspects upsert skills, models consume them. Procedural memory adds the reverse path — **skills crystallize from successful execution**, then become part of the catalog for the next agent to discover.
+
+### Creation trigger — runtime nudge
+
+The model doesn't decide on its own to write a skill. The runtime prompts: after a turn (or a sequence of turns) that completed a non-trivial task successfully, the runtime nudges the model with something like:
+
+> "You just completed a multi-step task that took N tool calls and produced result R. Is there a reusable procedure worth saving as a skill for future similar tasks? If yes, draft it; if no, say so."
+
+The model either drafts a skill body (markdown recipe per §"What skills actually contain") or declines. Either way, the runtime gets a signal that distinguishes "worth saving" from "ephemeral."
+
+This is Hermes' "periodic memory nudges" applied specifically to procedural memory. The cost is the nudge turn (one extra inference per candidate-worthy session); the value is the catalog grows from real experience rather than only from curated authoring.
+
+### Self-improvement during use
+
+Hermes' insight: skills aren't immutable once authored. When the model invokes a skill and discovers mid-execution that the recipe is wrong, suboptimal, or missing a step, the runtime allows in-place editing of the skill body. Next invocation gets the improved version automatically.
+
+This forces **versioning at the catalog layer**:
+- Every skill has a version number that bumps on edit.
+- The catalog retains version history (rollback path).
+- Audit logs record who/what triggered each edit (model-self-edit vs operator-edit) and from which trigger session.
+
+Without versioning, model-self-edits are catastrophic — a hallucinated "improvement" overwrites a working skill with no recovery.
+
+### Submission path
+
+The auto-creation path needs operator gating before publishing into the live catalog:
+
+- Model drafts a skill (in response to a nudge) → enters a **proposed** state.
+- Operator (or a designated reviewer aspect) approves/rejects → on approve, the skill becomes **published**.
+- Direct in-place edits during invocation similarly enter **proposed-edit** state and require approval before becoming the current version.
+
+This avoids the model silently polluting the catalog with low-quality or hallucinated skills. v1 can run review-gated; v2 may auto-publish skills from trusted-aspect models if telemetry shows the gating bottleneck isn't paying for itself.
+
+### Memory substrate context
+
+Procedural memory sits on top of an episodic/semantic memory layer per Hermes §1.1:
+- **Episodic** — what happened in this session (Hermes uses FTS5 + LLM summarization for cross-session recall).
+- **Semantic** — generalized facts (our `memory/` directories with type-tagged memories — user / project / reference / feedback).
+- **Procedural** — crystallized how-to (the skill catalog).
+
+Nexus already has the semantic layer via `~/.claude/projects/<aspect>/memory/`. We don't yet have:
+- An episodic search layer (FTS5 across sessions).
+- The runtime nudges that prompt the model to curate.
+
+Episodic search is a separate story (see NEX-XX, filed). Runtime nudges for the procedural layer specifically are in scope for the skill-delivery design and would land in the same agentfunnel/agora runtime pass that wires `nexus_skills.list/fetch`.
+
+### Implications for v1 acceptance
+
+Extend the v1 acceptance criteria:
+- An agent can submit a draft skill via `nexus_skills.propose(name, body, description, intended_use, source_session_id)`.
+- The draft sits in **proposed** state until operator (or designated reviewer) approves.
+- Published skills bump version on edit; prior versions remain queryable.
+- Audit trail captures author (operator vs aspect-self), trigger session, version diff.
+
+**Out of v1 for procedural memory** (defer):
+- Runtime nudge implementation (model-side prompting on turn-end).
+- Auto-edit-during-invocation flow.
+- Cross-aspect skill sharing (Aspect A's auto-created skill auto-published into Aspect B's catalog).
+
+The catalog + tool surface + version handling land in v1; the nudge + auto-creation layer lands in v2 once we know the catalog is useful.
+
+---
+
 ## Lanes (if greenlit)
 
 - **keel-cli (broker/admin):** schema, admin REST, JWT-gated WS frame for skills.fetch + skills.list, audit log, CLI subcommands.
