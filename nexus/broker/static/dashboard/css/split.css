@@ -56,7 +56,7 @@
 }
 
 .split-pane-picker:focus {
-  border-color: var(--accent-dim);
+  border-color: var(--view-accent-dim);
 }
 
 .split-pane-swap {
@@ -115,7 +115,7 @@
 }
 
 .split-divider:hover::after {
-  background: var(--accent-dim);
+  background: var(--view-accent-dim);
   height: 60px;
 }
 
@@ -166,7 +166,7 @@
 }
 
 .bottom-bar-split-toggle.active {
-  color: var(--accent);
-  border-color: var(--accent-dim);
-  background: var(--accent-glow);
+  color: var(--view-accent);
+  border-color: var(--view-accent-dim);
+  background: var(--view-accent-glow);
 }

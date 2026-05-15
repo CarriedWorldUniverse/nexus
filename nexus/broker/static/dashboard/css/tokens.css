@@ -29,6 +29,18 @@
   --color-ember:  #d4622a;
   --color-moss:   #5a7a4a;
 
+  /* View accent — each top-level view overrides this at its root
+   * with one of the world colors. Chrome elements (active-tab
+   * underline, focus ring, key-metric highlight, per-view dot)
+   * consume --view-accent instead of --accent so each view carries
+   * a distinct identity color while sharing the same brand-level
+   * accent (--accent) for global affordances (CTAs, alerts).
+   *
+   * Default to --accent for surfaces outside a recognised view root. */
+  --view-accent:     var(--accent);
+  --view-accent-dim: var(--accent-dim);
+  --view-accent-glow: var(--accent-glow);
+
   /* Typography */
   --font-display: 'Playfair Display', Georgia, serif;
   --font-body:    'DM Sans', system-ui, sans-serif;

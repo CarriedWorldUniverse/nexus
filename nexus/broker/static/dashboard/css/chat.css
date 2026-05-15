@@ -1,6 +1,11 @@
 /* ── Chat View ── */
 
 .chat-view {
+  /* View identity color: silver — refined readable text / conversation. */
+  --view-accent:      var(--color-silver);
+  --view-accent-dim:  rgba(143, 163, 177, 0.35);
+  --view-accent-glow: rgba(143, 163, 177, 0.15);
+
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -66,8 +71,8 @@
 }
 
 .chat-tab.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
+  color: var(--view-accent);
+  border-bottom-color: var(--view-accent);
 }
 
 /* Message list */
@@ -264,7 +269,7 @@
 /* Thread toggle */
 .msg-replies {
   font-size: 11px;
-  color: var(--accent);
+  color: var(--view-accent);
   cursor: pointer;
   margin-top: var(--space-xs);
   display: inline-block;
@@ -336,7 +341,7 @@
 
 .reaction-chip.mine {
   background: rgba(88, 101, 242, 0.18);
-  border-color: var(--accent);
+  border-color: var(--view-accent);
   color: var(--text-primary);
 }
 
@@ -489,7 +494,7 @@
  * referenced message (Chat.js handleMsgRefClick) and briefly flashes the
  * target so it's locatable in a busy feed. */
 .msg-id-ref {
-  color: var(--accent);
+  color: var(--view-accent);
   font-family: var(--font-mono);
   font-size: 0.92em;
   text-decoration: none;
@@ -527,7 +532,7 @@
   gap: 8px;
   padding: 10px var(--space-sm);
   background: rgba(187, 134, 252, 0.18);
-  border-left: 4px solid var(--accent);
+  border-left: 4px solid var(--view-accent);
   border-radius: 4px 4px 0 0;
   font-size: 13px;
   color: var(--text-primary);
@@ -574,7 +579,7 @@
 }
 
 .msg.tappable:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--view-accent);
   outline-offset: 2px;
 }
 
@@ -582,7 +587,7 @@
  * message they're replying to without having to read the input bar. */
 .msg.replying {
   background: rgba(187, 134, 252, 0.12);
-  border-left: 3px solid var(--accent);
+  border-left: 3px solid var(--view-accent);
   padding-left: calc(var(--space-md) - 3px);
 }
 
@@ -683,7 +688,7 @@
 .chat-input-row .chat-attach-btn:hover { color: var(--text-secondary); }
 
 .chat-input-row .chat-send-btn {
-  background: var(--accent);
+  background: var(--view-accent);
   color: white;
   font-family: var(--font-body);
   font-size: 12px;
@@ -691,7 +696,7 @@
   padding: 10px 18px;
 }
 
-.chat-input-row .chat-send-btn:hover { background: var(--accent-dim); }
+.chat-input-row .chat-send-btn:hover { background: var(--view-accent-dim); }
 
 .chat-img-preview {
   font-size: 11px;
@@ -759,8 +764,8 @@
   flex-shrink: 0;
 }
 
-.agent-btn:hover { border-color: var(--agent-color, var(--accent)); color: var(--text-primary); }
-.agent-btn.active { border-color: var(--agent-color, var(--accent)); color: var(--agent-color, var(--accent)); background: var(--bg-elevated); }
+.agent-btn:hover { border-color: var(--agent-color, var(--view-accent)); color: var(--text-primary); }
+.agent-btn.active { border-color: var(--agent-color, var(--view-accent)); color: var(--agent-color, var(--view-accent)); background: var(--bg-elevated); }
 
 .agent-dot {
   width: 7px;
@@ -828,4 +833,4 @@
 }
 
 .feed-filter-btn:hover { color: var(--text-secondary); border-color: var(--text-muted); }
-.feed-filter-btn.active { color: var(--agent-color, var(--accent)); border-color: var(--agent-color, var(--accent)); background: var(--bg-elevated); }
+.feed-filter-btn.active { color: var(--agent-color, var(--view-accent)); border-color: var(--agent-color, var(--view-accent)); background: var(--bg-elevated); }

@@ -1,6 +1,11 @@
 /* ── Files View ── */
 
 .files-view {
+  /* View identity color: moss — organic streams / artifacts in flow. */
+  --view-accent:      var(--color-moss);
+  --view-accent-dim:  rgba(90, 122, 74, 0.35);
+  --view-accent-glow: rgba(90, 122, 74, 0.15);
+
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -43,7 +48,7 @@
   display: inline-flex;
   align-items: center;
   padding: 5px 12px;
-  background: var(--accent);
+  background: var(--view-accent);
   color: #fff;
   font-size: 12px;
   font-weight: 500;
@@ -97,7 +102,7 @@
   padding: var(--space-sm) var(--space-md);
   background: rgba(233, 69, 96, 0.12);
   border-bottom: 1px solid rgba(233, 69, 96, 0.25);
-  color: var(--accent);
+  color: var(--view-accent);
   font-size: 12px;
   flex-shrink: 0;
 }
@@ -229,9 +234,9 @@
 }
 
 .file-btn-delete:hover {
-  color: var(--accent);
+  color: var(--view-accent);
   border-color: rgba(233, 69, 96, 0.4);
-  background: var(--accent-glow);
+  background: var(--view-accent-glow);
 }
 
 /* ============================================================
@@ -260,7 +265,7 @@
 }
 
 .files-view-tab:hover { color: var(--text-secondary); }
-.files-view-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.files-view-tab.active { color: var(--view-accent); border-bottom-color: var(--view-accent); }
 
 .files-view-content {
   flex: 1;

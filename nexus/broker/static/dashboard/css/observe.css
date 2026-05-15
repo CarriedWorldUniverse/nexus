@@ -6,6 +6,11 @@
  * can diverge without selector collisions. */
 
 .observe-view {
+  /* View identity color: ember — per-aspect activity / heat. */
+  --view-accent:      var(--color-ember);
+  --view-accent-dim:  rgba(212, 98, 42, 0.35);
+  --view-accent-glow: rgba(212, 98, 42, 0.15);
+
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -42,8 +47,8 @@
   flex-shrink: 0;
 }
 
-.observe-btn:hover { border-color: var(--observe-color, var(--accent)); color: var(--text-primary); }
-.observe-btn.active { border-color: var(--observe-color, var(--accent)); color: var(--observe-color, var(--accent)); background: var(--bg-raised); }
+.observe-btn:hover { border-color: var(--observe-color, var(--view-accent)); color: var(--text-primary); }
+.observe-btn.active { border-color: var(--observe-color, var(--view-accent)); color: var(--observe-color, var(--view-accent)); background: var(--bg-raised); }
 
 .observe-dot {
   width: 7px;
@@ -63,7 +68,7 @@
   padding: 0 12px;
 }
 
-.observe-status.connected { color: var(--accent); }
+.observe-status.connected { color: var(--view-accent); }
 
 .observe-stream {
   flex: 1;
@@ -108,7 +113,7 @@
 }
 
 .observe-direction.inbound  { color: var(--text-muted); }
-.observe-direction.outbound { color: var(--accent); }
+.observe-direction.outbound { color: var(--view-accent); }
 
 .observe-chatrow .msg { flex: 1; min-width: 0; }
 
@@ -257,7 +262,7 @@
 }
 
 .observe-turn-status-errored  { border-left-color: #cf6679; }
-.observe-turn-status-in_flight { border-left-color: var(--accent); }
+.observe-turn-status-in_flight { border-left-color: var(--view-accent); }
 .observe-turn-status-complete { opacity: 0.9; }
 
 /* ── ToolCall ── */
@@ -268,7 +273,7 @@
   font-family: var(--font-mono);
   font-size: 11px;
 }
-.observe-toolcall-pending { border-left: 2px solid var(--accent); }
+.observe-toolcall-pending { border-left: 2px solid var(--view-accent); }
 .observe-toolcall-error   { border-left: 2px solid #cf6679; }
 .observe-toolcall-orphan  { border-left: 2px solid #cf6679; opacity: 0.8; }
 .observe-toolcall-ok      { border-left: 2px solid transparent; }
@@ -362,7 +367,7 @@
 .observe-artifact-path {
   font-size: 11px;
   font-family: var(--font-mono);
-  color: var(--accent);
+  color: var(--view-accent);
   word-break: break-all;
 }
 .observe-artifact-meta {
@@ -415,7 +420,7 @@
 .observe-diff-toggle {
   background: transparent;
   border: none;
-  color: var(--accent);
+  color: var(--view-accent);
   font-size: 10px;
   padding: 2px 6px;
   cursor: pointer;

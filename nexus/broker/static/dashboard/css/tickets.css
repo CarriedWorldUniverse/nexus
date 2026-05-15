@@ -1,6 +1,11 @@
 /* ── Tickets View ── */
 
 .tickets-view {
+  /* View identity color: ember — work in motion / active heat. */
+  --view-accent:      var(--color-ember);
+  --view-accent-dim:  rgba(212, 98, 42, 0.35);
+  --view-accent-glow: rgba(212, 98, 42, 0.15);
+
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -166,7 +171,7 @@
 }
 
 .card-source-link {
-  color: var(--accent);
+  color: var(--view-accent);
   text-decoration: none;
   font-size: 10px;
   font-family: var(--font-mono);

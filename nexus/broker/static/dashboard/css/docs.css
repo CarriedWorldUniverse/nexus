@@ -1,6 +1,11 @@
 /* Docs View */
 
 .docs-view {
+  /* View identity color: silver — refined readable text / typography. */
+  --view-accent:      var(--color-silver);
+  --view-accent-dim:  rgba(143, 163, 177, 0.35);
+  --view-accent-glow: rgba(143, 163, 177, 0.15);
+
   display: flex;
   height: 100%;
   overflow: hidden;

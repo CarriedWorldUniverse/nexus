@@ -1,6 +1,11 @@
 /* ── Knowledge View ── */
 
 .knowledge-view {
+  /* View identity color: gold — preserved value / treasure. */
+  --view-accent:      var(--color-gold);
+  --view-accent-dim:  rgba(201, 168, 76, 0.35);
+  --view-accent-glow: rgba(201, 168, 76, 0.15);
+
   display: flex;
   flex-direction: column;
   height: 100%;

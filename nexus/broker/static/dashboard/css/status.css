@@ -1,6 +1,11 @@
 /* ── Status View ── */
 
 .status-view {
+  /* View identity color: gold — stability / preserved value. */
+  --view-accent:      var(--color-gold);
+  --view-accent-dim:  rgba(201, 168, 76, 0.35);
+  --view-accent-glow: rgba(201, 168, 76, 0.15);
+
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -196,8 +201,8 @@
 
 .badge-escalated {
   background: rgba(233, 69, 96, 0.12);
-  color: var(--accent);
-  border: 1px solid var(--accent-dim);
+  color: var(--view-accent);
+  border: 1px solid var(--view-accent-dim);
 }
 
 /* Card actions */
@@ -224,8 +229,8 @@
 }
 
 .action-btn.confirming {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--view-accent);
+  color: var(--view-accent);
 }
 
 /* Network controls */
@@ -257,13 +262,13 @@
 }
 
 .restart-btn {
-  background: var(--accent);
+  background: var(--view-accent);
   color: #fff;
 }
 
 .restart-btn.confirming {
-  background: var(--accent);
-  box-shadow: 0 0 12px var(--accent-dim);
+  background: var(--view-accent);
+  box-shadow: 0 0 12px var(--view-accent-dim);
 }
 
 .shutdown-btn {
@@ -326,7 +331,7 @@
 }
 
 .usage-period-btn:hover { color: var(--text-secondary); border-color: var(--border-default); }
-.usage-period-btn.active { color: var(--accent); border-color: var(--accent-dim); }
+.usage-period-btn.active { color: var(--view-accent); border-color: var(--view-accent-dim); }
 
 .usage-totals {
   display: flex;
