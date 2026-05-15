@@ -161,6 +161,73 @@ a:hover {
   }
 }
 
+/* ────────────────────────────────────────────────────────────
+   Signature element — view-identity marker. NEX-101 step C.
+
+   Every top-level view carries a thin 2px stripe in its
+   --view-accent color along its top edge, offset 16px from the
+   left to leave breathing room, with a small triangular wedge
+   dropping below the stripe at its left terminus. The wedge +
+   stripe pair is the "you are in [color] territory" marker —
+   one consistent visual gesture across every view, identity
+   carried by color rather than form.
+
+   Subtle but unmistakable. The operator sees this on every view
+   and registers it as the dashboard's signature.
+   ────────────────────────────────────────────────────────────── */
+
+.chat-view,
+.status-view,
+.observe-view,
+.knowledge-view,
+.tickets-view,
+.files-view,
+.docs-view,
+.split-view {
+  position: relative;
+}
+
+.chat-view::before,
+.status-view::before,
+.observe-view::before,
+.knowledge-view::before,
+.tickets-view::before,
+.files-view::before,
+.docs-view::before,
+.split-view::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 16px;
+  right: 0;
+  height: 2px;
+  background: var(--view-accent);
+  z-index: 10;
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+.chat-view::after,
+.status-view::after,
+.observe-view::after,
+.knowledge-view::after,
+.tickets-view::after,
+.files-view::after,
+.docs-view::after,
+.split-view::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 16px;
+  width: 7px;
+  height: 7px;
+  background: var(--view-accent);
+  clip-path: polygon(0 0, 100% 0, 0 100%);
+  z-index: 10;
+  pointer-events: none;
+  opacity: 0.85;
+}
+
 /* ============================================================
    Mobile triage — global floor for touch usability
    Per-view layouts land separately. This block does NOT change
