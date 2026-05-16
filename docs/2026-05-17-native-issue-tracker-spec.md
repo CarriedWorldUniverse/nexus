@@ -249,6 +249,7 @@ State machine enforced on every `issue_transition` call. Rules per type:
 
 **No escape hatch.** Validator rules are strict; there is no `force_transition` mode. If a transition needs to happen that the validator rejects, the operator asks an aspect (keel or shadow) to undo the prerequisites first — uncheck DoD items, mark a linked PR not-required, unblock the blocker — and then transition normally. The aspect's prerequisite edits are themselves audited events, so any "skip the rules" path is fully traceable, deliberate, and aware of side effects.
 
+
 ## External-sync engine
 
 Worker goroutine inside `nexus/issues/sync/`. Reads from `sync_jobs` table (durable across nexus.exe restarts).
