@@ -78,73 +78,103 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	auth, err := validateKeyfile(ctx, kf, *nexusURLFlag, *insecureSkip, log)
-	if err != nil {
-		log.Error("keyfile validate failed", "err", err)
-		os.Exit(2)
-	}
-
-	wsCli, err := wsclient.New(wsclient.Config{
-		URL:              auth.wsURL,
-		AuthToken:        auth.jwt,
-		Handler:          wsclient.HandlerFunc(func(frames.Envelope) {}),
-		Logger:           log,
-		FailFirstConnect: true,
-	})
-	if err != nil {
-		log.Error("wsclient.New", "err", err)
-		os.Exit(2)
-	}
-	wsErrCh := make(chan error, 1)
-	go func() { wsErrCh <- wsCli.Run(ctx) }()
-
-	if err := waitConnected(ctx, wsCli, 10*time.Second); err != nil {
-		log.Error("ws never connected", "err", err)
-		stop()
-		<-wsErrCh
-		os.Exit(2)
-	}
-
-	fetchCtx, fetchCancel := context.WithTimeout(ctx, 15*time.Second)
-	credName, bundle, err := brokercreds.FetchIMAP(fetchCtx, wsCli, *credentialName)
-	fetchCancel()
-	if err != nil {
-		log.Error("credential.fetch imap failed", "err", err, "credential_name", *credentialName)
-		stop()
-		<-wsErrCh
-		os.Exit(3)
+	// NEX-130: prefer keyfile-side IMAP credentials when present.
+	// Keyfile is the operator-controlled source of truth; broker fetch
+	// is the legacy / shared-credential path.
+	var (
+		host, user, password string
+		port                 int
+		credName             string
+		wsCli                *wsclient.Client
+		wsErrCh              chan error
+		brokerFetched        bool
+	)
+	if kf.IMAP != nil && kf.IMAP.Host != "" && kf.IMAP.Username != "" && kf.IMAP.Password != "" {
+		// Fast path: secrets in keyfile. Skip broker entirely.
+		host = kf.IMAP.Host
+		port = kf.IMAP.Port
+		user = kf.IMAP.Username
+		password = kf.IMAP.Password
+		credName = "keyfile:imap"
+		log.Info("imap creds from keyfile (no broker fetch)", "host", host, "user", user)
+	} else {
+		brokerFetched = true
+		auth, err := validateKeyfile(ctx, kf, *nexusURLFlag, *insecureSkip, log)
+		if err != nil {
+			log.Error("keyfile validate failed", "err", err)
+			os.Exit(2)
+		}
+		wsCli, err = wsclient.New(wsclient.Config{
+			URL:              auth.wsURL,
+			AuthToken:        auth.jwt,
+			Handler:          wsclient.HandlerFunc(func(frames.Envelope) {}),
+			Logger:           log,
+			FailFirstConnect: true,
+		})
+		if err != nil {
+			log.Error("wsclient.New", "err", err)
+			os.Exit(2)
+		}
+		wsErrCh = make(chan error, 1)
+		go func() { wsErrCh <- wsCli.Run(ctx) }()
+		if err := waitConnected(ctx, wsCli, 10*time.Second); err != nil {
+			log.Error("ws never connected", "err", err)
+			stop()
+			<-wsErrCh
+			os.Exit(2)
+		}
+		fetchCtx, fetchCancel := context.WithTimeout(ctx, 15*time.Second)
+		cn, bundle, err := brokercreds.FetchIMAP(fetchCtx, wsCli, *credentialName)
+		fetchCancel()
+		if err != nil {
+			log.Error("credential.fetch imap failed", "err", err, "credential_name", *credentialName)
+			stop()
+			<-wsErrCh
+			os.Exit(3)
+		}
+		credName = cn
+		host = bundle.Host
+		port = bundle.Port
+		user = bundle.User
+		password = bundle.Password
 	}
 
 	// Non-secret config (default_folder) still comes from the keyfile.
-	// Per NEX-88 follow-up tracking: bundle extension to carry per-aspect
-	// config is deferred; keyfile keeps that role for now.
 	defaultFolder := "INBOX"
 	if kf.IMAP != nil && kf.IMAP.DefaultFolder != "" {
 		defaultFolder = kf.IMAP.DefaultFolder
 	}
 
-	client := NewClient(bundle.Host, bundle.Port, bundle.User, bundle.Password)
+	client := NewClient(host, port, user, password)
 
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	if err := client.Probe(probeCtx); err != nil {
 		cancel()
 		log.Error("imap credential probe failed", "err", err, "credential_name", credName)
 		stop()
-		<-wsErrCh
+		if wsErrCh != nil {
+			<-wsErrCh
+		}
 		os.Exit(3)
 	}
 	cancel()
-	log.Info("nexus-imap-mcp ready (fetched 1 credential from broker for "+auth.aspect+")",
-		"host", bundle.Host,
-		"port", bundle.Port,
-		"username", bundle.User,
+	credSource := "keyfile"
+	if brokerFetched {
+		credSource = "broker"
+	}
+	log.Info("nexus-imap-mcp ready",
+		"host", host,
+		"port", port,
+		"username", user,
 		"default_folder", defaultFolder,
 		"credential_name", credName,
-		"aspect", auth.aspect)
+		"credential_source", credSource)
 
 	if *probe {
 		stop()
-		<-wsErrCh
+		if wsErrCh != nil {
+			<-wsErrCh
+		}
 		return
 	}
 
@@ -156,6 +186,14 @@ func main() {
 	mcpErrCh := make(chan error, 1)
 	go func() { mcpErrCh <- mcpserver.ServeStdio(srv) }()
 
+	// In keyfile-only mode there's no WS to watch; block on MCP loop only.
+	if wsErrCh == nil {
+		if err := <-mcpErrCh; err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "EOF") {
+			log.Error("MCP stdio loop ended", "err", err)
+		}
+		stop()
+		return
+	}
 	select {
 	case err := <-mcpErrCh:
 		if err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "EOF") {

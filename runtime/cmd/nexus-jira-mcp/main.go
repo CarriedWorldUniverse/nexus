@@ -84,68 +84,75 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Validate the keyfile against Nexus to get the WS JWT + URL.
-	auth, err := validateKeyfile(ctx, kf, *nexusURLFlag, *insecureSkip, log)
-	if err != nil {
-		log.Error("keyfile validate failed", "err", err)
-		os.Exit(2)
-	}
-
-	// Dial the broker WS and hold it open for the credential fetch.
-	// We don't need any push frames (no register), just the
-	// request/response correlation for credential.fetch.
-	wsCli, err := wsclient.New(wsclient.Config{
-		URL:              auth.wsURL,
-		AuthToken:        auth.jwt,
-		Handler:          wsclient.HandlerFunc(func(frames.Envelope) {}),
-		Logger:           log,
-		FailFirstConnect: true,
-	})
-	if err != nil {
-		log.Error("wsclient.New", "err", err)
-		os.Exit(2)
-	}
-	wsErrCh := make(chan error, 1)
-	go func() { wsErrCh <- wsCli.Run(ctx) }()
-
-	// Wait for the initial WS connect before fetching. FailFirstConnect
-	// guarantees Run returns fast if the dial fails; otherwise we poll
-	// briefly until Connected() — wsclient does not expose a synchronous
-	// "wait for first connect" hook today and adding one is out of scope.
-	if err := waitConnected(ctx, wsCli, 10*time.Second); err != nil {
-		log.Error("ws never connected", "err", err)
-		stop()
-		<-wsErrCh
-		os.Exit(2)
-	}
-
-	// Fetch jira credentials from the broker.
-	fetchCtx, fetchCancel := context.WithTimeout(ctx, 15*time.Second)
-	credName, bundle, err := brokercreds.FetchJira(fetchCtx, wsCli, *credentialName)
-	fetchCancel()
-	if err != nil {
-		log.Error("credential.fetch jira failed", "err", err, "credential_name", *credentialName)
-		stop()
-		<-wsErrCh
-		os.Exit(3)
-	}
-
-	// Compose the full Atlassian site hostname from the subdomain.
-	// JiraBundle stores subdomain only ("carriedworlduniverse"); the
-	// existing jiraClient expects the full hostname
-	// ("carriedworlduniverse.atlassian.net").
-	site := bundle.Subdomain + ".atlassian.net"
-
-	// Non-secret config (project_key) still comes from the keyfile.
-	// Per work-routing v1.2 + NEX-88 follow-up: the broker bundle
-	// deliberately does not carry per-aspect config; the keyfile keeps
-	// that role for now.
-	var projectKey string
-	if kf.Jira != nil {
+	// NEX-130: prefer keyfile-side credentials when present. Keyfile is
+	// the operator-controlled source of truth — broker mediation only
+	// applies when the keyfile doesn't carry secrets (legacy / shared
+	// credentials managed in the broker's credential store).
+	var (
+		site, email, token, projectKey string
+		credName                       string
+		wsCli                          *wsclient.Client
+		wsErrCh                        chan error
+		brokerFetched                  bool
+	)
+	if kf.Jira != nil && kf.Jira.Email != "" && kf.Jira.APIToken != "" {
+		// NEX-130 fast path: secrets live in the keyfile. Skip the
+		// broker entirely — no WS, no JWT, no credential.fetch.
+		site = kf.Jira.Site
+		email = kf.Jira.Email
+		token = kf.Jira.APIToken
 		projectKey = kf.Jira.ProjectKey
+		credName = "keyfile:jira"
+		log.Info("jira creds from keyfile (no broker fetch)", "site", site)
+	} else {
+		brokerFetched = true
+		// Fall back to broker fetch — validate keyfile, dial WS,
+		// request the credential.
+		auth, err := validateKeyfile(ctx, kf, *nexusURLFlag, *insecureSkip, log)
+		if err != nil {
+			log.Error("keyfile validate failed", "err", err)
+			os.Exit(2)
+		}
+		wsCli, err = wsclient.New(wsclient.Config{
+			URL:              auth.wsURL,
+			AuthToken:        auth.jwt,
+			Handler:          wsclient.HandlerFunc(func(frames.Envelope) {}),
+			Logger:           log,
+			FailFirstConnect: true,
+		})
+		if err != nil {
+			log.Error("wsclient.New", "err", err)
+			os.Exit(2)
+		}
+		wsErrCh = make(chan error, 1)
+		go func() { wsErrCh <- wsCli.Run(ctx) }()
+		if err := waitConnected(ctx, wsCli, 10*time.Second); err != nil {
+			log.Error("ws never connected", "err", err)
+			stop()
+			<-wsErrCh
+			os.Exit(2)
+		}
+		fetchCtx, fetchCancel := context.WithTimeout(ctx, 15*time.Second)
+		var bundle interface{ /* shape via brokercreds */ }
+		_ = bundle
+		cn, b, err := brokercreds.FetchJira(fetchCtx, wsCli, *credentialName)
+		fetchCancel()
+		if err != nil {
+			log.Error("credential.fetch jira failed", "err", err, "credential_name", *credentialName)
+			stop()
+			<-wsErrCh
+			os.Exit(3)
+		}
+		credName = cn
+		site = b.Subdomain + ".atlassian.net"
+		email = b.Email
+		token = b.Token
+		if kf.Jira != nil {
+			projectKey = kf.Jira.ProjectKey
+		}
 	}
 
-	client := newJiraClient(site, bundle.Email, bundle.Token, projectKey, nil)
+	client := newJiraClient(site, email, token, projectKey, nil)
 
 	// Credential smoke test — confirms we can reach Atlassian + auth
 	// works before starting the MCP loop.
@@ -155,20 +162,28 @@ func main() {
 	if err != nil {
 		log.Error("jira credential probe failed", "err", err, "credential_name", credName)
 		stop()
-		<-wsErrCh
+		if wsErrCh != nil {
+			<-wsErrCh
+		}
 		os.Exit(3)
 	}
-	log.Info("nexus-jira-mcp ready (fetched 1 credential from broker for "+auth.aspect+")",
+	credSource := "keyfile"
+	if brokerFetched {
+		credSource = "broker"
+	}
+	log.Info("nexus-jira-mcp ready",
 		"site", site,
-		"email", bundle.Email,
+		"email", email,
 		"account_id", accountID,
 		"project_key", projectKey,
 		"credential_name", credName,
-		"aspect", auth.aspect)
+		"credential_source", credSource)
 
 	if *probe {
 		stop()
-		<-wsErrCh
+		if wsErrCh != nil {
+			<-wsErrCh
+		}
 		return
 	}
 
@@ -180,6 +195,16 @@ func main() {
 	mcpErrCh := make(chan error, 1)
 	go func() { mcpErrCh <- mcpserver.ServeStdio(srv) }()
 
+	// In keyfile-only mode there's no WS to watch; just block on the
+	// MCP loop. In broker-fetch mode watch both so a broker drop
+	// triggers an orderly shutdown.
+	if wsErrCh == nil {
+		if err := <-mcpErrCh; err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "EOF") {
+			log.Error("MCP stdio loop ended", "err", err)
+		}
+		stop()
+		return
+	}
 	select {
 	case err := <-mcpErrCh:
 		if err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "EOF") {
