@@ -34,7 +34,7 @@ This spec covers the **native issue tracker** only. Dependencies tracked separat
 | 4 | Priority controls | All changes logged in timeline with reasoning. Operator can mark `priority-locked` to freeze. Aspect changing priority on a ticket it's working pings operator. |
 | 5 | Routing | Assignee is either a specific aspect OR a named team. Teams are operator-defined sets. Default team for engineering: `oss-nexus-dev` = {keel, shadow, anvil, plumb}. Unity work pinned to wren. |
 | 6 | Workflow (per issue type) | **Epic**: Brief → Sketch/Refined → In Development → Delivered. **Story/Task/Bug**: To Do → In Progress → Blocked → In Review → Done → Cancelled. **Subtask**: same as Story. |
-| 7 | Definition of Done | Markdown checklist (`- [ ]`). All items must be ticked before transition to Done/Delivered. Workflow validator enforces. |
+| 7 | Definition of Done | Markdown checklist (`- [ ]`), **required on every issue type**. All items must be ticked before transition to Done/Delivered. Minimum acceptable DoD is one ticked item (e.g., `PR builds clean`). Workflow validator enforces. |
 | 8 | Comment edits | **Immutable**, append-only. Aspects must plan before posting. Self-correction = new comment. |
 | 9 | Permissions | Soft guards, full audit: close-someone-else requires rationale; reporter immutable; no deletes (only Cancelled state); DoD modified mid-flight pings operator; Epic-archive is operator-only. |
 | 10 | Notifications | Operator stream (push assignments + mentions to assignee, all events to an operator activity stream). Aspects on run-loops also pull `issue_list_my_updates`. |
@@ -76,7 +76,7 @@ This spec covers the **native issue tracker** only. Dependencies tracked separat
 - `status` (text — workflow state, validated per-type)
 - `summary` (text)
 - `description` (markdown)
-- `definition_of_done` (markdown checklist; nullable for Subtask/Bug)
+- `definition_of_done` (markdown checklist, NOT NULL — required for every type)
 - `priority` (Lowest | Low | Medium | High | Highest)
 - `priority_locked` (bool, operator-only)
 - `assignee_aspect` (text, nullable — direct assignment)
@@ -235,17 +235,19 @@ State machine enforced on every `issue_transition` call. Rules per type:
 **Epic**:
 - Brief → Sketch/Refined → In Development → Delivered
 - Any state → Cancelled
-- Cannot transition to Delivered unless DoD checklist 100% ticked
+- Cannot transition to Delivered unless DoD present AND checklist 100% ticked
 
 **Story / Task / Bug**:
 - To Do ↔ In Progress, To Do → Cancelled
 - In Progress → Blocked ↔ In Progress (or → In Review)
 - In Review → In Progress (kickback) or → Done
 - Any state → Cancelled
-- Cannot transition to Done unless DoD complete (when DoD is present) AND no open blocked-by links pointing to non-terminal issues
+- Cannot transition to Done unless DoD present, all items ticked, AND no open blocked-by links pointing to non-terminal issues
 - If linked PR exists and `sync_policy = bidirectional`, cannot transition to Done unless PR is merged
 
 **Subtask**: same as Story.
+
+**No escape hatch.** Validator rules are strict; there is no `force_transition` mode. If a transition needs to happen that the validator rejects, the operator asks an aspect (keel or shadow) to undo the prerequisites first — uncheck DoD items, mark a linked PR not-required, unblock the blocker — and then transition normally. The aspect's prerequisite edits are themselves audited events, so any "skip the rules" path is fully traceable, deliberate, and aware of side effects.
 
 ## External-sync engine
 
@@ -317,12 +319,13 @@ Lookup paths (`issue_get`, `issue_link`, etc.) check `key_aliases` if the key is
 
 ## Open questions (post-spec, pre-build)
 
-- Mentions syntax: `@anvil` resolved against `aspects` table — case-sensitive? (recommend case-insensitive)
-- Cancelled-ticket retention: prune after N days, or keep forever? (recommend keep forever, dashboard hides by default)
-- Workflow strict-mode escape hatch: should operator be able to force a transition that violates the validator? (recommend yes, logged as `forced_transition` event)
-- Cross-project parent links: allowed (e.g., WAKE story has NEX epic as parent)? Adds resolution complexity; defer to "no" in v1.
-- Markdown flavour: GFM via goldmark, with sanitiser tuned for the dashboard. Lock GFM.
-- Subtask DoD: required or optional? Recommend optional (Story/Task/Bug make it discretionary, Epic always required).
+All previously-open questions have been resolved:
+
+- **Mentions syntax**: `@anvil` is case-insensitive against the broker `aspects` table.
+- **Cancelled-ticket retention**: keep forever. Dashboard hides Cancelled by default; filter to surface.
+- **Cross-project parent links**: disallowed in v1. Cross-project relationships use `relates-to` links instead.
+- **Markdown flavour**: GFM via goldmark. Sanitiser tuned for dashboard render.
+- **DoD on every type**: required for every issue type (Epic, Story, Task, Subtask, Bug). Minimum is one ticked item; minimal-but-real DoD like "PR builds clean" is acceptable. Workflow validator rejects transition to Done/Delivered without a ticked checklist.
 
 ## Risks
 
