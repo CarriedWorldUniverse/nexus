@@ -72,6 +72,62 @@ func postSetup(t *testing.T, addr string, body any) *http.Response {
 	return resp
 }
 
+// dialAndQueueSetup opens a TCP connection to the bootstrap server,
+// writes the HTTP POST headers + body, then waits on `gate` before
+// flushing. Returns the connection so the caller can read the
+// response after closing the gate.
+//
+// Used by the concurrent-setup tests to guarantee both requests reach
+// the server's handleSetup at the same time on slow Windows TCP. The
+// stdlib http.Post + raw goroutine pattern raced the listener's
+// post-Shutdown close on Windows-latest CI — the second goroutine
+// could fail TCP connect after the first succeeded and triggered
+// Shutdown, producing a single 200 but also a test-aborting t.Fatalf
+// from the goroutine. Dialing both connections up front, *before*
+// either has flushed bytes that the server will act on, removes the
+// race: by the time the listener closes, both sockets are already
+// established and in-flight.
+func dialAndQueueSetup(t *testing.T, addr string, body any, gate <-chan struct{}) net.Conn {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	go func() {
+		<-gate
+		req := fmt.Sprintf("POST /bootstrap/setup HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+			addr, len(raw), raw)
+		_, _ = c.Write([]byte(req))
+	}()
+	return c
+}
+
+// readResponseStatus parses just the HTTP status code from a raw
+// connection opened by dialAndQueueSetup, then closes the conn.
+func readResponseStatus(t *testing.T, c net.Conn) int {
+	t.Helper()
+	defer c.Close()
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	br := make([]byte, 12) // "HTTP/1.1 NNN"
+	if _, err := io.ReadFull(c, br); err != nil {
+		t.Logf("read status: %v", err)
+		return 0
+	}
+	// br looks like "HTTP/1.1 200" — extract bytes 9..12.
+	var code int
+	if _, err := fmt.Sscanf(string(br[9:]), "%d", &code); err != nil {
+		t.Logf("parse status %q: %v", br, err)
+		return 0
+	}
+	// Drain the rest so the server doesn't see a half-read peer.
+	_, _ = io.Copy(io.Discard, c)
+	return code
+}
+
 func readBody(t *testing.T, resp *http.Response) []byte {
 	t.Helper()
 	defer resp.Body.Close()
@@ -255,35 +311,42 @@ func TestBootstrap_ConcurrentDifferentNamesProduceOneFrame(t *testing.T) {
 	// names must not produce two frame dirs. Check-and-set-before-write
 	// ensures the second submission is rejected before its filesystem
 	// work begins.
+	//
+	// Windows-flake fix: dial both connections BEFORE either sends
+	// bytes the server will act on, then release a barrier. http.Post
+	// raced the listener's post-success Shutdown on Windows-latest CI
+	// and the loser goroutine t.Fatalf'd on connection refused.
 	dir := t.TempDir()
 	addr, _, errCh := startBootstrap(t, dir)
 
-	type result struct{ status int }
-	results := make(chan result, 2)
+	names := []string{"frame_a", "frame_b"}
+	gate := make(chan struct{})
+	conns := make([]net.Conn, len(names))
+	for i, name := range names {
+		conns[i] = dialAndQueueSetup(t, addr, SetupRequest{Name: name}, gate)
+	}
+	close(gate)
+
+	statuses := make([]int, len(conns))
 	var wg sync.WaitGroup
-	for i, name := range []string{"frame_a", "frame_b"} {
+	for i, c := range conns {
 		wg.Add(1)
-		i, name := i, name
-		go func() {
+		go func(i int, c net.Conn) {
 			defer wg.Done()
-			_ = i
-			resp := postSetup(t, addr, SetupRequest{Name: name})
-			results <- result{resp.StatusCode}
-			resp.Body.Close()
-		}()
+			statuses[i] = readResponseStatus(t, c)
+		}(i, c)
 	}
 	wg.Wait()
-	close(results)
 	<-errCh
 
 	gotOK := 0
-	for r := range results {
-		if r.status == 200 {
+	for _, s := range statuses {
+		if s == 200 {
 			gotOK++
 		}
 	}
 	if gotOK != 1 {
-		t.Errorf("expected exactly one 200 across concurrent different-name setups, got %d", gotOK)
+		t.Errorf("expected exactly one 200 across concurrent different-name setups, got %d (statuses=%v)", gotOK, statuses)
 	}
 
 	// And exactly one frame dir exists in agentsDir.
@@ -333,34 +396,37 @@ func TestBootstrap_RejectsSecondSetup(t *testing.T) {
 	// After a successful setup, Run begins shutting down. We can't
 	// reliably hit a second POST after that, so this test exercises the
 	// in-memory used-flag check by submitting two near-simultaneous
-	// requests from goroutines and asserting one wins, one loses.
+	// requests and asserting one wins, one loses.
+	//
+	// Windows-flake fix: we dial both TCP connections BEFORE either has
+	// sent its request bytes, then release a barrier so the server sees
+	// both arrive on already-established sockets. http.Post's transport
+	// would race the listener close on slow Windows TCP, producing a
+	// single 200 but also a connection-refused error from the loser
+	// goroutine that t.Fatalf'd inside the goroutine — making the test
+	// fail despite the server having behaved correctly.
 	dir := t.TempDir()
 	addr, _, errCh := startBootstrap(t, dir)
 
-	type result struct{ status int }
-	results := make(chan result, 2)
-	var wg sync.WaitGroup
+	gate := make(chan struct{})
+	conns := make([]net.Conn, 2)
 	for i := 0; i < 2; i++ {
+		body := SetupRequest{Name: fmt.Sprintf("frame%d", i)}
+		conns[i] = dialAndQueueSetup(t, addr, body, gate)
+	}
+	close(gate) // release both writers simultaneously
+
+	statuses := make([]int, len(conns))
+	var wg sync.WaitGroup
+	for i, c := range conns {
 		wg.Add(1)
-		i := i
-		go func() {
+		go func(i int, c net.Conn) {
 			defer wg.Done()
-			body := SetupRequest{Name: fmt.Sprintf("frame%d", i)}
-			resp := postSetup(t, addr, body)
-			results <- result{resp.StatusCode}
-			resp.Body.Close()
-		}()
+			statuses[i] = readResponseStatus(t, c)
+		}(i, c)
 	}
 	wg.Wait()
-	close(results)
 
-	statuses := []int{}
-	for r := range results {
-		statuses = append(statuses, r.status)
-	}
-	// One should be 200, the other should NOT be 200 — could be 409
-	// (already-complete) OR 500 (filesystem rejected the second
-	// folder), depending on timing. Not asserting on which non-200.
 	gotOK := 0
 	for _, s := range statuses {
 		if s == 200 {
@@ -368,7 +434,7 @@ func TestBootstrap_RejectsSecondSetup(t *testing.T) {
 		}
 	}
 	if gotOK != 1 {
-		t.Fatalf("expected exactly one 200 across concurrent setups, got statuses=%v", statuses)
+		t.Errorf("expected exactly one 200 across concurrent setups, got statuses=%v", statuses)
 	}
 
 	<-errCh
