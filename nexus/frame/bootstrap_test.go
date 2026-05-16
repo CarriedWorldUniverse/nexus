@@ -258,7 +258,10 @@ func TestBootstrap_ConcurrentDifferentNamesProduceOneFrame(t *testing.T) {
 	dir := t.TempDir()
 	addr, _, errCh := startBootstrap(t, dir)
 
-	type result struct{ status int }
+	type result struct {
+		status  int
+		gotResp bool // false → transport error (treated as "lost" — server shutdown closed the socket mid-POST)
+	}
 	results := make(chan result, 2)
 	var wg sync.WaitGroup
 	for i, name := range []string{"frame_a", "frame_b"} {
@@ -267,8 +270,13 @@ func TestBootstrap_ConcurrentDifferentNamesProduceOneFrame(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			_ = i
-			resp := postSetup(t, addr, SetupRequest{Name: name})
-			results <- result{resp.StatusCode}
+			raw, _ := json.Marshal(SetupRequest{Name: name})
+			resp, err := http.Post("http://"+addr+"/bootstrap/setup", "application/json", bytes.NewReader(raw))
+			if err != nil {
+				results <- result{gotResp: false}
+				return
+			}
+			results <- result{status: resp.StatusCode, gotResp: true}
 			resp.Body.Close()
 		}()
 	}
@@ -278,7 +286,7 @@ func TestBootstrap_ConcurrentDifferentNamesProduceOneFrame(t *testing.T) {
 
 	gotOK := 0
 	for r := range results {
-		if r.status == 200 {
+		if r.gotResp && r.status == 200 {
 			gotOK++
 		}
 	}
@@ -334,10 +342,19 @@ func TestBootstrap_RejectsSecondSetup(t *testing.T) {
 	// reliably hit a second POST after that, so this test exercises the
 	// in-memory used-flag check by submitting two near-simultaneous
 	// requests from goroutines and asserting one wins, one loses.
+	//
+	// The "loser" outcome covers: 409 (already-complete), 500 (filesystem
+	// rejected the second folder), OR transport error (EOF / connection
+	// closed mid-POST because Run started shutting down between the
+	// goroutines). The semantic invariant is "never two successful
+	// setups," not "every request gets a clean HTTP response."
 	dir := t.TempDir()
 	addr, _, errCh := startBootstrap(t, dir)
 
-	type result struct{ status int }
+	type result struct {
+		status  int
+		gotResp bool // false → transport error (treated as "lost")
+	}
 	results := make(chan result, 2)
 	var wg sync.WaitGroup
 	for i := 0; i < 2; i++ {
@@ -346,29 +363,33 @@ func TestBootstrap_RejectsSecondSetup(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			body := SetupRequest{Name: fmt.Sprintf("frame%d", i)}
-			resp := postSetup(t, addr, body)
-			results <- result{resp.StatusCode}
+			raw, _ := json.Marshal(body)
+			resp, err := http.Post("http://"+addr+"/bootstrap/setup", "application/json", bytes.NewReader(raw))
+			if err != nil {
+				results <- result{gotResp: false}
+				return
+			}
+			results <- result{status: resp.StatusCode, gotResp: true}
 			resp.Body.Close()
 		}()
 	}
 	wg.Wait()
 	close(results)
 
-	statuses := []int{}
-	for r := range results {
-		statuses = append(statuses, r.status)
-	}
-	// One should be 200, the other should NOT be 200 — could be 409
-	// (already-complete) OR 500 (filesystem rejected the second
-	// folder), depending on timing. Not asserting on which non-200.
 	gotOK := 0
-	for _, s := range statuses {
-		if s == 200 {
+	outcomes := []string{}
+	for r := range results {
+		if !r.gotResp {
+			outcomes = append(outcomes, "transport-error")
+			continue
+		}
+		outcomes = append(outcomes, fmt.Sprintf("%d", r.status))
+		if r.status == 200 {
 			gotOK++
 		}
 	}
 	if gotOK != 1 {
-		t.Fatalf("expected exactly one 200 across concurrent setups, got statuses=%v", statuses)
+		t.Fatalf("expected exactly one 200 across concurrent setups, got outcomes=%v", outcomes)
 	}
 
 	<-errCh
