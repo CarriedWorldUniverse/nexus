@@ -198,17 +198,22 @@ func (a *Agent) Start(ctx context.Context) error {
 	// a deregister frame BEFORE wsclient's Run tears down the
 	// connection. Uses a derived context that lives slightly past
 	// ctx so the frame has time to flush.
+	//
+	// Issue #51: the prior guard `if a.registered` raced the ack —
+	// `a.registered` flips true only after sendRegister receives the
+	// ack, but ctx-cancel can race the window between "nexus received
+	// the register frame" and "ack returned to agent." In that window
+	// `registered` is still false → deregister was skipped → nexus
+	// still has the agent as registered. Drop the guard: attempt the
+	// deregister unconditionally on graceful shutdown. Send-on-dead-
+	// socket is fine — the 2s timeout caps the wait, and the broker
+	// treats an unmatched deregister as a no-op.
 	runCtx, runCancel := context.WithCancel(context.Background())
 	go func() {
 		<-ctx.Done()
-		a.mu.Lock()
-		wasRegistered := a.registered
-		a.mu.Unlock()
-		if wasRegistered {
-			bg, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = a.sendDeregister(bg)
-			cancel()
-		}
+		bg, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = a.sendDeregister(bg)
+		cancel()
 		runCancel()
 	}()
 
