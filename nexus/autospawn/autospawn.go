@@ -9,6 +9,7 @@ package autospawn
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
@@ -209,17 +211,104 @@ func optOut(cfg schemas.AspectConfig) bool {
 	return false
 }
 
-// Spawn starts a harness subprocess for each candidate. Fire-and-
-// forget: we os.exec, attach stdout/stderr to log prefixers, return.
-// If a child dies, we do not restart.
-func Spawn(cfg Config, candidates []Candidate) error {
+// Supervisor tracks the harness subprocesses Spawn has started so that
+// the parent process can kill them on shutdown. Without this, Windows
+// (no SIGTERM, no process groups) leaks one funnel per aspect per
+// nexus run — restart loops accumulate orphans in Task Manager.
+type Supervisor struct {
+	mu       sync.Mutex
+	children []supervisedChild
+	log      *slog.Logger
+}
+
+type supervisedChild struct {
+	name string
+	cmd  *exec.Cmd
+	// done closes when the reaper goroutine sees the process exit.
+	done chan struct{}
+}
+
+// track records a started child for later Shutdown.
+func (s *Supervisor) track(name string, cmd *exec.Cmd, done chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.children = append(s.children, supervisedChild{name: name, cmd: cmd, done: done})
+}
+
+// Shutdown kills every tracked child and waits for them to exit (or
+// for ctx to fire). On Unix a graceful SIGTERM would be nicer, but
+// agentfunnel doesn't currently install a signal handler and Windows
+// has no SIGTERM at all — Process.Kill (SIGKILL / TerminateProcess) is
+// the portable contract. Caller is responsible for ordering: shut down
+// the broker first so children get clean WS-close events before being
+// terminated.
+//
+// Safe to call once; subsequent calls are no-ops because the tracked
+// slice is drained.
+func (s *Supervisor) Shutdown(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	children := s.children
+	s.children = nil
+	s.mu.Unlock()
+
+	log := s.log
+	if log == nil {
+		log = slog.Default()
+	}
+
+	for _, ch := range children {
+		if ch.cmd.Process == nil {
+			continue
+		}
+		if err := ch.cmd.Process.Kill(); err != nil {
+			// Already-exited is the common "error" here — the reaper
+			// goroutine got there first. Not worth surfacing as a
+			// warning.
+			log.Debug("autospawn: kill returned",
+				"aspect", ch.name, "pid", ch.cmd.Process.Pid, "err", err)
+		} else {
+			log.Info("autospawn: killed child on shutdown",
+				"aspect", ch.name, "pid", ch.cmd.Process.Pid)
+		}
+	}
+
+	// Wait for the reaper goroutines to drain so the parent doesn't
+	// exit while pipes are still being read. On ctx expiry we keep
+	// iterating the rest of the children — Kill was already sent to
+	// every PID above, so the remaining items have nothing useful to
+	// block on, but we do want a log line per skipped child so a slow
+	// pipe drain doesn't silently mask itself.
+	for _, ch := range children {
+		select {
+		case <-ch.done:
+		case <-ctx.Done():
+			log.Warn("autospawn: shutdown context expired before child reaped",
+				"aspect", ch.name)
+		}
+	}
+}
+
+// Spawn starts a harness subprocess for each candidate. Returns a
+// Supervisor that tracks the children so the parent can kill them on
+// shutdown (Shutdown). Without supervision, Windows nexus restarts
+// leak one funnel per aspect per run — Task Manager fills up with
+// orphaned agentfunnel.exe.
+//
+// If a child dies on its own, we still do NOT restart it (the spec
+// §7 "container-orchestrator supervises" contract is unchanged). The
+// supervisor is only for the parent-driven kill on exit.
+func Spawn(cfg Config, candidates []Candidate) (*Supervisor, error) {
 	if cfg.HarnessPath == "" {
-		return errors.New("autospawn.Spawn: HarnessPath required")
+		return nil, errors.New("autospawn.Spawn: HarnessPath required")
 	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
 	}
+	sup := &Supervisor{log: log}
 
 	for _, c := range candidates {
 		var cmd *exec.Cmd
@@ -263,11 +352,15 @@ func Spawn(cfg Config, candidates []Candidate) error {
 
 		log.Info("autospawn: started", "aspect", c.Name, "home", c.Path, "pid", cmd.Process.Pid)
 
+		done := make(chan struct{})
+		sup.track(c.Name, cmd, done)
+
 		// Reap the child once both pipes drain. Without cmd.Wait, Unix
 		// leaves zombies and Windows leaks the OS process handle —
 		// long-running brokers across many aspect restarts hit
 		// fd/handle limits otherwise (#26).
-		go func(cmd *exec.Cmd, name string) {
+		go func(cmd *exec.Cmd, name string, done chan struct{}) {
+			defer close(done)
 			<-pipeDone
 			<-pipeDone
 			err := cmd.Wait()
@@ -278,9 +371,9 @@ func Spawn(cfg Config, candidates []Candidate) error {
 				log.Info("autospawn: child exited cleanly",
 					"aspect", name, "pid", cmd.Process.Pid)
 			}
-		}(cmd, c.Name)
+		}(cmd, c.Name, done)
 	}
-	return nil
+	return sup, nil
 }
 
 // envAllowlist is the set of parent env variables forwarded to

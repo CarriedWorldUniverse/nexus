@@ -1,14 +1,31 @@
 package autospawn
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
+
+// TestMain handles the spawn-a-sleeper helper used by
+// TestSupervisorKillsChildrenOnShutdown. When SLEEPER_HELPER is set,
+// the binary acts as a no-op long-running process so the test has
+// something realistic to kill (instead of mocking *exec.Cmd).
+func TestMain(m *testing.M) {
+	if os.Getenv("SLEEPER_HELPER") == "1" {
+		// Block until killed. 30s ceiling is well past the test timeout
+		// so we don't leak even if Shutdown fails.
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func writeAspect(t *testing.T, base, name string, cfg schemas.AspectConfig) string {
 	t.Helper()
@@ -275,6 +292,106 @@ func TestDiscoverRoots_MergesMultipleRoots(t *testing.T) {
 	if !strings.HasPrefix(names["wren"], abs1) {
 		t.Errorf("wren resolved to %q, expected root1 (%q) to win", names["wren"], abs1)
 	}
+}
+
+// TestSupervisorKillsChildrenOnShutdown — orphan-funnel regression.
+// Spawns two long-running helper processes (re-exec of the test
+// binary in SLEEPER_HELPER mode), then asserts Shutdown terminates
+// them within the grace window. Without supervision the children
+// would survive the test binary's exit; with it, the OS sees them
+// reaped before we return.
+func TestSupervisorKillsChildrenOnShutdown(t *testing.T) {
+	// Use the test binary itself as the harness so the test is
+	// hermetic. SLEEPER_HELPER=1 + TestMain redirects the child into
+	// a 30s sleep loop.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+
+	base := t.TempDir()
+	writeAspect(t, base, "alpha", schemas.AspectConfig{Provider: "claude-api"})
+	writeAspect(t, base, "beta", schemas.AspectConfig{Provider: "claude-api"})
+
+	cfg := Config{
+		ScanDir:     base,
+		HarnessPath: self,
+		BaseEnv:     []string{"SLEEPER_HELPER=1"},
+	}
+	// We pass the legacy -home form (KeyfileDir empty) so the helper
+	// gets `-home <path>` which it ignores and falls through to the
+	// 30s sleep.
+	candidates, err := Discover(cfg)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("got %d candidates, want 2", len(candidates))
+	}
+
+	sup, err := Spawn(cfg, candidates)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if sup == nil {
+		t.Fatal("Spawn returned nil supervisor")
+	}
+
+	// Snapshot PIDs while Shutdown still has the slice.
+	sup.mu.Lock()
+	pids := make([]int, 0, len(sup.children))
+	for _, c := range sup.children {
+		if c.cmd.Process != nil {
+			pids = append(pids, c.cmd.Process.Pid)
+		}
+	}
+	sup.mu.Unlock()
+	if len(pids) != 2 {
+		t.Fatalf("supervisor tracking %d PIDs, want 2", len(pids))
+	}
+
+	// Give children a tick to actually be running before we try to
+	// kill them — Spawn returns after exec.Start, which on Windows
+	// may not yet have a fully-initialised process.
+	time.Sleep(50 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	sup.Shutdown(ctx)
+	elapsed := time.Since(start)
+
+	if ctx.Err() != nil {
+		t.Errorf("Shutdown hit context deadline: %v (elapsed %v)", ctx.Err(), elapsed)
+	}
+
+	// Verify each PID is actually gone. FindProcess always succeeds
+	// on Unix, so we send signal 0 (existence probe) — on Windows,
+	// Process.Signal(syscall.Signal(0)) returns an error if the
+	// process is gone, but the behaviour is platform-quirky, so we
+	// just check that Shutdown returned before the timeout.
+	if elapsed > 2*time.Second {
+		t.Errorf("Shutdown took %v, expected sub-second kill", elapsed)
+	}
+
+	// Second Shutdown is a no-op (tracked slice drained on first call).
+	sup.Shutdown(context.Background())
+
+	// runtime guard: this test assumes a real OS process, not js/wasm.
+	_ = runtime.GOOS
+}
+
+// TestSupervisorShutdownNil — defensive: calling Shutdown on a nil
+// receiver should not panic. Lets callers do `sup.Shutdown(ctx)`
+// without nil-checking when autospawn was disabled or never ran.
+func TestSupervisorShutdownNil(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("nil Shutdown panicked: %v", r)
+		}
+	}()
+	var sup *Supervisor
+	sup.Shutdown(context.Background())
 }
 
 // TestChildEnvEmptyTokenIsMiss — resolver returning ("", true) is
