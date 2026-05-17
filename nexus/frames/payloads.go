@@ -673,6 +673,23 @@ type ShutdownPayload struct {
 	GracePeriodS int    `json:"grace_period_s,omitempty"`
 }
 
+// SwitchSurfacePayload is sent by an aspect to request a live surface
+// flip (funnel ↔ agora). The broker validates ownership, updates the
+// aspects DB, and closes the WS connection so the supervisor restarts
+// the aspect under the new binary.
+type SwitchSurfacePayload struct {
+	PrimarySurface string `json:"primary_surface"`
+}
+
+// SwitchSurfaceResultPayload is the broker's ack to a switch.surface
+// frame. The aspect should exit after receiving this; the supervisor
+// restarts it with the new surface binary.
+type SwitchSurfaceResultPayload struct {
+	Aspect          string `json:"aspect"`
+	PrimarySurface  string `json:"primary_surface"`
+	PreviousSurface string `json:"previous_surface,omitempty"`
+}
+
 // -------------------------------------------------------------------
 // Tickets (operator-aspect WS extension §4.1)
 // -------------------------------------------------------------------

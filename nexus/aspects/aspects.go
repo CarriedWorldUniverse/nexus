@@ -26,6 +26,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrNotFound is returned by Get / PersonalityGet when no row matches.
@@ -119,6 +120,12 @@ type Store interface {
 	// content change. The composed field is invalidated (set to "")
 	// on every write — readers recompute on demand.
 	PersonalitySet(ctx context.Context, p Personality) error
+
+	// SetPrimarySurface writes the aspect's primary_surface preference
+	// into the metadata JSON column. No schema migration needed — the
+	// metadata column already carries JSON. Returns ErrNotFound if the
+	// aspect doesn't exist.
+	SetPrimarySurface(ctx context.Context, name string, surface string) error
 }
 
 // SQLStore is the *sql.DB-backed implementation of Store.
@@ -359,6 +366,51 @@ func (s *SQLStore) PersonalitySet(ctx context.Context, p Personality) error {
 		return fmt.Errorf("aspects.PersonalitySet(%q): %w", p.AspectName, err)
 	}
 	return nil
+}
+
+// SetPrimarySurface implements Store.
+func (s *SQLStore) SetPrimarySurface(ctx context.Context, name string, surface string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE aspects
+		SET metadata = json_set(coalesce(metadata, '{}'), '$.primary_surface', ?),
+		    updated_at = datetime('now')
+		WHERE name = ?
+	`, surface, name)
+	if err != nil {
+		return fmt.Errorf("aspects.SetPrimarySurface(%q, %q): %w", name, surface, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("aspects.SetPrimarySurface(%q) rows affected: %w", name, err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// PrimarySurfaceFromMetadata extracts the primary_surface value from
+// an aspect metadata JSON column. Returns "" on any parse failure or
+// missing key — callers should treat empty as "funnel".
+func PrimarySurfaceFromMetadata(metadataJSON string) string {
+	if metadataJSON == "" {
+		return ""
+	}
+	// Lightweight extract without full JSON unmarshal: look for the
+	// key in the raw string. Adequate for a JSON column we control
+	// the shape of. If the metadata column ever grows nested objects
+	// with their own "primary_surface" keys, replace with encoding/json.
+	const key = `"primary_surface": "`
+	idx := strings.Index(metadataJSON, key)
+	if idx < 0 {
+		return ""
+	}
+	start := idx + len(key)
+	end := strings.IndexByte(metadataJSON[start:], '"')
+	if end < 0 {
+		return ""
+	}
+	return metadataJSON[start : start+end]
 }
 
 // nullIfEmpty wraps a string in sql.NullString if non-empty, returning

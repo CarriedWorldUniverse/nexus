@@ -54,10 +54,16 @@ type Config struct {
 	// ScanDir is the directory to scan. Defaults to "./aspects".
 	ScanDir string
 
-	// HarnessPath is the absolute path to the harness binary.
+	// HarnessPath is the absolute path to the agentfunnel binary.
 	// Required — autospawn doesn't search PATH to avoid ambiguity
 	// over which harness to use in multi-installation hosts.
 	HarnessPath string
+
+	// AgoraPath is the absolute path to the agora binary. When an
+	// aspect's PrimarySurface is "agora", autospawn uses this path
+	// instead of HarnessPath. Empty → agora-surface aspects fall
+	// back to HarnessPath with a warning.
+	AgoraPath string
 
 	// KeyfileDir is the directory that holds per-aspect keyfile JSON.
 	// When non-empty, autospawn invokes the harness as
@@ -311,10 +317,22 @@ func Spawn(cfg Config, candidates []Candidate) (*Supervisor, error) {
 	sup := &Supervisor{log: log}
 
 	for _, c := range candidates {
+		surface := c.Config.EffectivePrimarySurface()
 		var cmd *exec.Cmd
 		if cfg.KeyfileDir != "" {
 			keyfilePath := filepath.Join(cfg.KeyfileDir, c.Name+".keyfile.json")
-			cmd = exec.Command(cfg.HarnessPath, "-k", keyfilePath)
+			switch surface {
+			case schemas.SurfaceAgora:
+				if cfg.AgoraPath != "" {
+					cmd = exec.Command(cfg.AgoraPath, "--keyfile", keyfilePath)
+				} else {
+					log.Warn("autospawn: aspect wants agora but no AgoraPath configured; falling back to funnel",
+						"aspect", c.Name)
+					cmd = exec.Command(cfg.HarnessPath, "-k", keyfilePath)
+				}
+			default:
+				cmd = exec.Command(cfg.HarnessPath, "-k", keyfilePath)
+			}
 		} else {
 			cmd = exec.Command(cfg.HarnessPath, "-home", c.Path)
 		}

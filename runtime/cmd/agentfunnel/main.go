@@ -160,13 +160,14 @@ func main() {
 			}
 		},
 		Register: schemas.RegisterRequest{
-			Name:        res.AspectName,
-			ContextMode: cm,
-			Provider:    res.Provider,
-			PID:         os.Getpid(),
-			StartedAt:   time.Now().UTC(),
-			Model:       res.Model,
-			SessionID:   sessionID,
+			Name:           res.AspectName,
+			ContextMode:    cm,
+			Provider:       res.Provider,
+			PID:            os.Getpid(),
+			StartedAt:      time.Now().UTC(),
+			Model:          res.Model,
+			SessionID:      sessionID,
+			PrimarySurface: schemas.SurfaceFunnel,
 		},
 	}
 	wsClient, err := wsasp.NewClient(wsCfg)

@@ -190,6 +190,12 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 			b.requireAdmin(http.HandlerFunc(b.handleAdminNexusMDEdit)))
 	}
 
+	// Surface switching — admin-gated, requires the aspects store.
+	if b.cfg.KeyfileValidator != nil && b.cfg.KeyfileValidator.Store != nil {
+		mux.Handle("PUT /api/admin/aspects/{name}/switch-surface",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminSwitchSurface)))
+	}
+
 	// Credentials (task #218). Gate on the Store being configured —
 	// pre-#218 boot paths leave Credentials nil and lose this surface
 	// (correct: no encryption key derived means no credentials API).
