@@ -5,12 +5,13 @@ go 1.25.5
 require (
 	filippo.io/edwards25519 v1.2.0
 	github.com/CarriedWorldUniverse/bridle v0.1.0
+	github.com/CarriedWorldUniverse/ledger v0.0.2
 	github.com/anthropics/anthropic-sdk-go v1.38.0
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/go-webauthn/webauthn v0.17.3
 	github.com/google/uuid v1.6.0
 	github.com/mark3labs/mcp-go v0.50.0
-	github.com/ncruces/go-sqlite3 v0.34.0
+	github.com/ncruces/go-sqlite3 v0.34.1
 	github.com/oklog/ulid/v2 v2.1.1
 	golang.org/x/crypto v0.51.0
 )
@@ -40,7 +41,7 @@ require (
 	github.com/coder/websocket v1.8.14
 	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
-	github.com/ncruces/go-sqlite3-wasm/v2 v2.1.35300 // indirect
+	github.com/ncruces/go-sqlite3-wasm/v2 v2.2.35301 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
