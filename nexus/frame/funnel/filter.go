@@ -83,11 +83,20 @@ type FilterInput struct {
 	// back to its originating chat message — without it, judge tiles
 	// orphan in the activity stream.
 	TriggerMsgID int64
+
+	// DoD is the Definition of Done for the current ticket, when the
+	// turn is part of a goal-pursuit loop (NEX-210). The judge prompt
+	// receives this as additional context and compares the turn's
+	// artifacts against the DoD criteria. Empty when no goal is active
+	// — the judge operates in legacy binary post/suppress mode.
+	DoD string
 }
 
 // FilterDecision is the result of Judge.
 type FilterDecision struct {
 	// ShouldPost true: post the FinalText to chat. False: suppress.
+	// Derived from Class for cheap-model filters; set directly by
+	// hard-rules and always-post filters.
 	ShouldPost bool
 
 	// Reason is a short, machine-readable label for telemetry. For
@@ -95,7 +104,21 @@ type FilterDecision struct {
 	// the FilterReason* constants below or a free-form reason from
 	// custom filters.
 	Reason string
+
+	// Class is the four-class verdict (NEX-210). Empty for legacy
+	// filters that predate the classification expansion — callers
+	// should treat empty-Class as "complete" when ShouldPost and
+	// "scratch" when !ShouldPost.
+	Class string
 }
+
+// FilterClass values for the four-class judge (NEX-210).
+const (
+	FilterClassComplete   = "complete"     // DoD met, work done
+	FilterClassScratch    = "scratch"      // non-substantive output
+	FilterClassGoalNotMet = "goal_not_met" // substantive but DoD not yet satisfied
+	FilterClassBlocked    = "blocked"      // aspect says blocked or no progress visible
+)
 
 // FilterReason* are canonical suppression labels. New filters should
 // use these where they fit and only invent new strings for genuinely
@@ -250,38 +273,42 @@ type CheapModelFilter struct {
 const filterJudgeTimeout = 30 * time.Second
 
 // filterJudgePrompt is the system prompt for the cheap-model filter.
-// Reply format is a single JSON object: {"post": bool, "reason": string}.
+// Reply format is a single JSON object:
+//   {"class": "complete" | "scratch" | "goal_not_met" | "blocked", "reason": "one short phrase"}
 //
-// Design rationale: the prior prose-prompt version (multi-rule, expanded
-// yes-list, 14 examples) gave the cheap model rope to find suppression
-// rationales for substantive content — observed 2026-05-13 eating keel's
-// scoping question to operator (#239 audit). Restoring the
-// agent-network shape that calibrated well in production for months:
-// narrow direct question, four specific suppress categories, JSON
-// output for robust parsing. No expanded "yes" examples — anything not
-// matching the four suppress categories defaults to post=true.
+// The four-class format (NEX-210) extends the prior binary {post, reason}
+// shape. When DoD context is present in the user message, the judge
+// compares the turn's artifacts against DoD criteria to distinguish
+// complete from goal_not_met. Without DoD, the judge falls back to
+// binary behavior: complete when substantive, scratch when not.
+//
+// Backward compat: the parser still accepts the old {"post": bool} format
+// from judge models that haven't picked up the new prompt yet.
 //
 // Symmetric treatment: operator messages are NOT bypassed. Operator is
-// just another peer for filter purposes; aspect-to-aspect calibration
-// should match aspect-to-operator calibration. If the filter
-// mis-suppresses operator-addressed replies, that's signal to fix the
-// filter, not a reason to hide it behind a bypass.
-const filterJudgePrompt = `You are a chat-output filter for an AI agent in a group chat.
-
-Single question: does the candidate output below have meaningful content for the group chat?
+// just another peer for filter purposes.
+const filterJudgePrompt = `You are a turn classifier for an AI agent in a group chat. Classify each turn into one of four categories.
 
 Respond with ONLY valid JSON (no markdown, no explanation):
-{"post": true | false, "reason": "one short phrase"}
+{"class": "complete" | "scratch" | "goal_not_met" | "blocked", "reason": "one short phrase"}
 
-post=false when the candidate is NOT meaningful chat content. Examples:
-- The agent said something like "this isn't for me, I'll stay quiet" or "no response needed" — the agent itself is signaling disengagement; respect it
-- The output is raw JSON / scratch / classification format that leaked from internal reasoning
+CLASS DEFINITIONS:
+
+"complete" — The candidate output is substantive chat content AND any stated Definition of Done is satisfied. The work is finished. Post to chat.
+
+"scratch" — The candidate output is NOT meaningful chat content. Examples:
+- The agent said "this isn't for me, I'll stay quiet" or "no response needed"
+- Raw JSON / internal reasoning / classification format that leaked
 - Empty, whitespace-only, or near-empty
 - Tool-call trace or internal protocol output that escaped
+Do NOT post to chat.
 
-post=true when the candidate has substantive content for the chat — a real reply, an answer, an ack with content, a question back, work output.
+"goal_not_met" — The candidate output IS substantive chat content, AND a Definition of Done was provided, AND the DoD is NOT yet satisfied. The agent made progress but is not finished. Post to chat (the reply is real) but flag for continuation.
 
-Bias: when in doubt, post=true. A slightly-off real reply is fine; suppressing real content is bad.
+"blocked" — The agent explicitly says it is blocked, waiting on external input, or cannot make progress. OR the candidate shows zero forward progress against the DoD (same output as prior turn, looping, no new artifacts). Do NOT post to chat. Surface to operator.
+
+BIAS: when uncertain between complete and goal_not_met, prefer goal_not_met (safer to continue than to stop early). When uncertain between scratch and blocked, prefer scratch. When DoD is absent, never return goal_not_met — use complete for substantive, scratch for non-substantive.
+
 Respond with ONLY the JSON object.`
 
 // maxJudgeTriggerLen / maxJudgeCandidateLen bound the strings the judge
@@ -318,6 +345,17 @@ func buildJudgeUserMessage(in FilterInput) string {
 	} else {
 		triggerBlock = "From: @" + triggerFrom + "\nContent: " + triggerText
 	}
+	msg := "INCOMING MESSAGE:\n" + triggerBlock
+	// NEX-210: when a Definition of Done is provided, include it so the
+	// judge can compare turn artifacts against DoD criteria. Bounded to
+	// keep prompt cost predictable.
+	if dod := strings.TrimSpace(in.DoD); dod != "" {
+		const maxDoDLen = 2000
+		if len(dod) > maxDoDLen {
+			dod = dod[:maxDoDLen] + "…"
+		}
+		msg += "\n\nDEFINITION OF DONE:\n" + dod
+	}
 	// Plain section labels, no leading dashes. claudecode's `-p <prompt>`
 	// passes the prompt as a command-line argument; a leading "---" gets
 	// parsed by the CLI argv parser as an unknown flag and the subprocess
@@ -326,8 +364,8 @@ func buildJudgeUserMessage(in FilterInput) string {
 	// disabled. Surfaced 2026-05-12 by operator catching that the judge
 	// hadn't actually run during the post-fix conversation — every
 	// non-operator-triggered turn was failing open.
-	return "INCOMING MESSAGE:\n" + triggerBlock +
-		"\n\nCANDIDATE OUTPUT (from @" + in.AspectID + "):\n" + candidate
+	msg += "\n\nCANDIDATE OUTPUT (from @" + in.AspectID + "):\n" + candidate
+	return msg
 }
 
 // Judge runs the cheap-model judgment. The deadline is enforced by a
@@ -440,6 +478,7 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 			"aspect", in.AspectID,
 			"turn_id", in.TurnID,
 			"should_post", decision.ShouldPost,
+			"class", decision.Class,
 			"reason", decision.Reason,
 			"judge_raw", result.FinalText,
 			"trigger_from", in.TriggerFrom,
@@ -450,15 +489,16 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 }
 
 // parseJudgeJSON extracts the verdict from the cheap-model's JSON
-// response. The prompt asks for `{"post": bool, "reason": string}` with
-// no markdown / no explanation, but cheap models occasionally wrap in
-// code fences or add surrounding whitespace; tolerate those, fail
-// anything else so the caller can fail-open with parse_failure.
+// response. Accepts two formats:
 //
-// Returns the FilterDecision when parsing succeeds. On any error
-// (malformed JSON, missing fields, wrong types), returns an empty
-// FilterDecision and a non-nil error — caller is expected to default to
-// ShouldPost=true.
+//   New (NEX-210): {"class": "complete"|"scratch"|"goal_not_met"|"blocked", "reason": "…"}
+//   Legacy:        {"post": true|false, "reason": "…"}
+//
+// The new format is preferred. When both fields are present, class wins.
+// When only post is present, the parser derives class from it (complete/scratch).
+// Cheap models occasionally wrap in code fences or add surrounding
+// whitespace; those are tolerated. Anything else fails so the caller can
+// fail-open with parse_failure.
 func parseJudgeJSON(raw string) (FilterDecision, error) {
 	trimmed := strings.TrimSpace(raw)
 	// Strip leading/trailing ``` or ```json fences if present.
@@ -478,26 +518,59 @@ func parseJudgeJSON(raw string) (FilterDecision, error) {
 	objText := trimmed[start : end+1]
 
 	var verdict struct {
+		Class  string `json:"class"`
 		Post   *bool  `json:"post"`
 		Reason string `json:"reason"`
 	}
 	if err := json.Unmarshal([]byte(objText), &verdict); err != nil {
 		return FilterDecision{}, fmt.Errorf("json unmarshal: %w (text=%q)", err, objText)
 	}
-	if verdict.Post == nil {
-		return FilterDecision{}, fmt.Errorf("missing post field: %q", objText)
-	}
 
 	reason := strings.TrimSpace(verdict.Reason)
-	// Bound to avoid logging walls of text if the model ignored the
-	// "one short phrase" instruction.
 	if len(reason) > 200 {
 		reason = reason[:200] + "…"
 	}
-	// Map empty-on-suppression to the canonical scratch label so audit
-	// logs always have a populated reason for "no" verdicts.
+
+	// New four-class format (NEX-210): class field drives the decision.
+	if verdict.Class != "" {
+		class := verdict.Class
+		var shouldPost bool
+		switch class {
+		case FilterClassComplete:
+			shouldPost = true
+		case FilterClassScratch:
+			shouldPost = false
+			if reason == "" {
+				reason = FilterReasonScratch
+			}
+		case FilterClassGoalNotMet:
+			shouldPost = true
+			if reason == "" {
+				reason = "goal_not_met"
+			}
+		case FilterClassBlocked:
+			shouldPost = false
+			if reason == "" {
+				reason = "blocked"
+			}
+		default:
+			// Unknown class — fail open. The model invented a class not
+			// in the prompt; treat as parse failure so caller posts.
+			return FilterDecision{}, fmt.Errorf("unknown class %q: %s", class, objText)
+		}
+		return FilterDecision{ShouldPost: shouldPost, Reason: reason, Class: class}, nil
+	}
+
+	// Legacy binary format: derive from post field.
+	if verdict.Post == nil {
+		return FilterDecision{}, fmt.Errorf("missing class and post fields: %q", objText)
+	}
 	if !*verdict.Post && reason == "" {
 		reason = FilterReasonScratch
 	}
-	return FilterDecision{ShouldPost: *verdict.Post, Reason: reason}, nil
+	class := FilterClassComplete
+	if !*verdict.Post {
+		class = FilterClassScratch
+	}
+	return FilterDecision{ShouldPost: *verdict.Post, Reason: reason, Class: class}, nil
 }

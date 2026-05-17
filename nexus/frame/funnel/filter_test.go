@@ -342,25 +342,38 @@ func TestFunnel_FilterRespectsContextCancellation(t *testing.T) {
 
 func TestParseJudgeJSON(t *testing.T) {
 	cases := []struct {
-		name        string
-		raw         string
-		wantPost    bool
-		wantReason  string
-		wantErr     bool
+		name       string
+		raw        string
+		wantPost   bool
+		wantReason string
+		wantClass  string
+		wantErr    bool
 	}{
-		{"plain post true", `{"post": true, "reason": "substantive"}`, true, "substantive", false},
-		{"plain post false", `{"post": false, "reason": "self-suppress"}`, false, "self-suppress", false},
-		{"empty reason on suppress maps to scratch", `{"post": false, "reason": ""}`, false, FilterReasonScratch, false},
-		{"empty reason on post stays empty", `{"post": true, "reason": ""}`, true, "", false},
-		{"fenced json", "```json\n{\"post\": true, \"reason\": \"ok\"}\n```", true, "ok", false},
-		{"fenced plain", "```\n{\"post\": false, \"reason\": \"empty\"}\n```", false, "empty", false},
-		{"prose before object", `Here's my answer: {"post": true, "reason": "useful"}`, true, "useful", false},
-		{"prose after object", `{"post": false, "reason": "scratch"} (low confidence)`, false, "scratch", false},
-		{"whitespace surrounding", "  \n{\"post\": true, \"reason\": \"go\"}\n  ", true, "go", false},
-		{"missing post field", `{"reason": "??"}`, false, "", true},
-		{"not json at all", `yes substantive`, false, "", true},
-		{"empty input", ``, false, "", true},
-		{"long reason truncated", `{"post": true, "reason": "` + strings.Repeat("x", 300) + `"}`, true, strings.Repeat("x", 200) + "…", false},
+		// Legacy binary format — backward compat.
+		{"legacy post true", `{"post": true, "reason": "substantive"}`, true, "substantive", FilterClassComplete, false},
+		{"legacy post false", `{"post": false, "reason": "self-suppress"}`, false, "self-suppress", FilterClassScratch, false},
+		{"legacy empty reason suppress", `{"post": false, "reason": ""}`, false, FilterReasonScratch, FilterClassScratch, false},
+		{"legacy empty reason post", `{"post": true, "reason": ""}`, true, "", FilterClassComplete, false},
+		// Four-class format (NEX-210).
+		{"class complete", `{"class": "complete", "reason": "done"}`, true, "done", FilterClassComplete, false},
+		{"class scratch", `{"class": "scratch", "reason": "thin reply"}`, false, "thin reply", FilterClassScratch, false},
+		{"class goal_not_met", `{"class": "goal_not_met", "reason": "needs more work"}`, true, "needs more work", FilterClassGoalNotMet, false},
+		{"class goal_not_met empty reason", `{"class": "goal_not_met"}`, true, "goal_not_met", FilterClassGoalNotMet, false},
+		{"class blocked", `{"class": "blocked", "reason": "waiting on operator"}`, false, "waiting on operator", FilterClassBlocked, false},
+		{"class blocked empty reason", `{"class": "blocked"}`, false, "blocked", FilterClassBlocked, false},
+		// Class wins over post when both present.
+		{"class wins over post", `{"class": "goal_not_met", "post": false, "reason": "wip"}`, true, "wip", FilterClassGoalNotMet, false},
+		// Format tolerance.
+		{"fenced class json", "```json\n{\"class\": \"complete\", \"reason\": \"ok\"}\n```", true, "ok", FilterClassComplete, false},
+		{"fenced legacy plain", "```\n{\"post\": false, \"reason\": \"empty\"}\n```", false, "empty", FilterClassScratch, false},
+		{"prose before class object", `classification: {"class": "scratch", "reason": "no content"}`, false, "no content", FilterClassScratch, false},
+		{"whitespace surrounding class", "  \n{\"class\": \"goal_not_met\", \"reason\": \"wip\"}\n  ", true, "wip", FilterClassGoalNotMet, false},
+		// Error cases.
+		{"unknown class", `{"class": "invalid"}`, false, "", "", true},
+		{"missing class and post", `{"reason": "??"}`, false, "", "", true},
+		{"not json at all", `yes substantive`, false, "", "", true},
+		{"empty input", ``, false, "", "", true},
+		{"long reason truncated", `{"class": "complete", "reason": "` + strings.Repeat("x", 300) + `"}`, true, strings.Repeat("x", 200) + "…", FilterClassComplete, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -379,6 +392,9 @@ func TestParseJudgeJSON(t *testing.T) {
 			}
 			if got.Reason != tc.wantReason {
 				t.Errorf("Reason: got %q want %q", got.Reason, tc.wantReason)
+			}
+			if got.Class != tc.wantClass {
+				t.Errorf("Class: got %q want %q", got.Class, tc.wantClass)
 			}
 		})
 	}

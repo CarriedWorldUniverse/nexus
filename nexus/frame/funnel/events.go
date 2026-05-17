@@ -70,6 +70,21 @@ const (
 	// backoff duration. Reserved — bridle owns retry today; funnel
 	// surfaces it once bridle exposes the hook.
 	EventProviderRetry EventType = "provider.retry"
+
+	// EventGoalLoopContinue fires when the goal-loop enqueues a
+	// continuation brief after a goal_not_met classification (NEX-210).
+	// Carries ticket id, turn count, and cap.
+	EventGoalLoopContinue EventType = "goal_loop.continue"
+
+	// EventGoalLoopBlocked fires when the judge returns "blocked" or
+	// the goal-loop detects no forward progress (NEX-210). Carries
+	// ticket id and the reason the judge gave.
+	EventGoalLoopBlocked EventType = "goal_loop.blocked"
+
+	// EventGoalLoopCap fires when the goal-loop reaches MaxTurns
+	// without the DoD being met (NEX-210). Carries ticket id and the
+	// turn count at which the cap was hit.
+	EventGoalLoopCap EventType = "goal_loop.cap"
 )
 
 // Event is the envelope all lifecycle events share. Payload carries
@@ -174,6 +189,25 @@ type ProviderRetryPayload struct {
 	Attempt    int           `json:"attempt"`
 	ErrorClass string        `json:"error_class"`
 	Backoff    time.Duration `json:"backoff"`
+}
+
+// GoalLoopContinuePayload accompanies EventGoalLoopContinue (NEX-210).
+type GoalLoopContinuePayload struct {
+	TicketID  string `json:"ticket_id"`
+	TurnCount int    `json:"turn_count"`
+	MaxTurns  int    `json:"max_turns"`
+}
+
+// GoalLoopBlockedPayload accompanies EventGoalLoopBlocked (NEX-210).
+type GoalLoopBlockedPayload struct {
+	TicketID string `json:"ticket_id"`
+	Reason   string `json:"reason"`
+}
+
+// GoalLoopCapPayload accompanies EventGoalLoopCap (NEX-210).
+type GoalLoopCapPayload struct {
+	TicketID  string `json:"ticket_id"`
+	TurnCount int    `json:"turn_count"`
 }
 
 // EventSink consumes lifecycle events. Implementations must be

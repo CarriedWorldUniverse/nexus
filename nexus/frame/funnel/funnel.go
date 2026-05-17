@@ -476,6 +476,12 @@ type Funnel struct {
 	// resolver owns the per-Deliberate session id derivation. Always
 	// non-nil after New; see ContextMode.
 	resolver *SessionResolver
+
+	// goalDoD is the Definition of Done for the current goal-pursuit
+	// turn (NEX-210). Set by GoalLoop via SetDoD before Deliberate;
+	// read and cleared by Deliberate when constructing FilterInput.
+	// Empty when no goal is active.
+	goalDoD string
 }
 
 // New constructs a Funnel from cfg. Returns an error if required fields
@@ -617,6 +623,36 @@ func (f *Funnel) ReceiveWithMsgID(item bridle.InboxItem, msgID int64) {
 		f.triggeringFrom = item.From
 		f.triggeringContent = item.Content
 	}
+}
+
+// SetDoD stores the Definition of Done for the next deliberation
+// (NEX-210). Read and cleared by Deliberate when constructing the
+// FilterInput for the post-turn judge. Safe for concurrent use —
+// the goal-loop calls this from the same goroutine that calls
+// Deliberate, but observability readers may access it.
+func (f *Funnel) SetDoD(dod string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.goalDoD = dod
+}
+
+// takeDoD reads and clears the goal DoD. Called by Deliberate once per turn.
+func (f *Funnel) takeDoD() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d := f.goalDoD
+	f.goalDoD = ""
+	return d
+}
+
+// ReceiveSynthetic enqueues a synthetic inbox item — one that didn't
+// originate from a chat message (MsgID=0). Used by the goal-loop
+// (NEX-210) to inject continuation briefs, and by other internal
+// producers that need to stimulate a deliberation without a real
+// chat trigger. Preserves ThreadRoot for per-thread session isolation.
+func (f *Funnel) ReceiveSynthetic(item bridle.InboxItem) {
+	item.MsgID = 0 // synthetic — not a real chat message
+	f.Receive(item)
 }
 
 // InboxLen reports the current inbox depth. Useful for observability.
@@ -958,6 +994,10 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		Type:    EventFilterJudging,
 		Payload: FilterJudgingPayload{TurnID: turnID},
 	})
+
+	// Read and clear the goal DoD for this turn (NEX-210).
+	dod := f.takeDoD()
+
 	decision := f.runFilter(ctx, FilterInput{
 		FinalText:    result.FinalText,
 		AspectID:     f.cfg.AspectID,
@@ -965,6 +1005,7 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		TriggerFrom:  triggerFrom,
 		TriggerText:  triggerContent,
 		TriggerMsgID: triggerMsgID,
+		DoD:          dod,
 	})
 
 	// Surface the verdict as a structured Event so non-obs-hook sinks
@@ -1412,15 +1453,18 @@ func (f *Funnel) runFilter(ctx context.Context, in FilterInput) FilterDecision {
 // scratch/ramble or a free-form 12-word reason from the judge model.
 // Anything not in the canonical hard-rules set is treated as
 // cheap_judge so freeform reasons route correctly.
-func filterDecisionLayer(reason string) string {
+func filterDecisionLayer(reason string, class string) string {
+	// NEX-210: classification-driven layers take priority.
+	switch class {
+	case FilterClassGoalNotMet:
+		return "cheap_judge"
+	case FilterClassBlocked:
+		return "cheap_judge"
+	}
 	switch reason {
 	case FilterReasonEmpty, FilterReasonSelfSuppress:
 		return "hard_rules"
 	case "":
-		// AlwaysPostFilter (fallback) leaves reason empty; this also
-		// covers the rare path where the cheap judge returns ShouldPost
-		// without populating Reason. Label generically so the operator
-		// sees the verdict but knows it bypassed real judging.
 		return "always_post"
 	default:
 		return "cheap_judge"
@@ -1440,7 +1484,15 @@ func renderFilterVerdict(d FilterDecision) string {
 	if reason == "" {
 		reason = "(none)"
 	}
-	return "verdict=" + verdict + " layer=" + filterDecisionLayer(d.Reason) + " reason=" + reason
+	class := d.Class
+	if class == "" {
+		if d.ShouldPost {
+			class = FilterClassComplete
+		} else {
+			class = FilterClassScratch
+		}
+	}
+	return "verdict=" + verdict + " class=" + class + " layer=" + filterDecisionLayer(d.Reason, d.Class) + " reason=" + reason
 }
 
 // reconcileTriage walks the inbox items the turn ingested and inserts
