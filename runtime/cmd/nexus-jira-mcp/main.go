@@ -61,6 +61,7 @@ func main() {
 		logLevel       = flag.String("log-level", "info", "slog level: debug|info|warn|error")
 		logFile        = flag.String("log-file", "", "Write logs here instead of stderr; stdout is reserved for the MCP protocol stream.")
 		probe          = flag.Bool("probe", false, "Don't start MCP — call /rest/api/3/myself and exit. Useful for credential smoke tests.")
+		dualWriteBase  = flag.String("dual-write-base", "", "If set, mirror Jira writes to the native tracker at this base URL.")
 	)
 	flag.Parse()
 
@@ -94,6 +95,8 @@ func main() {
 		wsCli                          *wsclient.Client
 		wsErrCh                        chan error
 		brokerFetched                  bool
+		sessionJWT                     string
+		aspectName                     string
 	)
 	if kf.Jira != nil && kf.Jira.Email != "" && kf.Jira.APIToken != "" {
 		// NEX-130 fast path: secrets live in the keyfile. Skip the
@@ -113,6 +116,8 @@ func main() {
 			log.Error("keyfile validate failed", "err", err)
 			os.Exit(2)
 		}
+		sessionJWT = auth.jwt
+		aspectName = auth.aspect
 		wsCli, err = wsclient.New(wsclient.Config{
 			URL:              auth.wsURL,
 			AuthToken:        auth.jwt,
@@ -190,7 +195,25 @@ func main() {
 	srv := mcpserver.NewMCPServer("nexus-jira", "0.2.0",
 		mcpserver.WithToolCapabilities(true),
 	)
-	registerTools(srv, client, log)
+	// Dual-write shim: mirror Jira writes to the native tracker.
+	// Only available when we have a JWT (broker-fetch path) and
+	// -dual-write-base is set. Keyfile-only mode skips — no JWT.
+	var native *nativeClient
+	if *dualWriteBase != "" {
+		if sessionJWT != "" {
+			native = &nativeClient{
+				base:   *dualWriteBase,
+				jwt:    sessionJWT,
+				aspect: aspectName,
+				http:   &http.Client{Timeout: 10 * time.Second},
+				log:    log,
+			}
+		} else {
+			log.Warn("-dual-write-base set but no JWT available (keyfile-only mode); dual-write disabled")
+		}
+	}
+
+	registerTools(srv, client, native, log)
 
 	mcpErrCh := make(chan error, 1)
 	go func() { mcpErrCh <- mcpserver.ServeStdio(srv) }()

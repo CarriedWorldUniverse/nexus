@@ -14,7 +14,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-func registerTools(srv *mcpserver.MCPServer, c *jiraClient, log *slog.Logger) {
+func registerTools(srv *mcpserver.MCPServer, c *jiraClient, native *nativeClient, log *slog.Logger) {
 	type toolDef struct {
 		name        string
 		description string
@@ -157,9 +157,17 @@ func registerTools(srv *mcpserver.MCPServer, c *jiraClient, log *slog.Logger) {
 					// only if the issue isn't actually there.
 					issue, gErr := c.Get(ctx, key)
 					if gErr == nil && issue.Status == "In Progress" {
+						if native != nil && native.enabled() {
+							native.MirrorAssign(ctx, key, accountID, native.aspect)
+							native.MirrorTransition(ctx, key, "In Progress", native.aspect)
+						}
 						return mcpJSON(map[string]any{"claimed": key, "assignee_account": accountID, "status": issue.Status, "note": "already In Progress"}), nil
 					}
 					return mcpErr("transition: " + err.Error()), nil
+				}
+				if native != nil && native.enabled() {
+					native.MirrorAssign(ctx, key, accountID, native.aspect)
+					native.MirrorTransition(ctx, key, "In Progress", native.aspect)
 				}
 				return mcpJSON(map[string]any{"claimed": key, "assignee_account": accountID, "status": "In Progress"}), nil
 			},
@@ -209,6 +217,9 @@ func registerTools(srv *mcpserver.MCPServer, c *jiraClient, log *slog.Logger) {
 				if err := c.TransitionTo(ctx, key, status, comment); err != nil {
 					return mcpErr(err.Error()), nil
 				}
+				if native != nil && native.enabled() {
+					native.MirrorTransition(ctx, key, status, native.aspect)
+				}
 				return mcpJSON(map[string]any{"transitioned": key, "status": status}), nil
 			},
 		},
@@ -241,6 +252,10 @@ func registerTools(srv *mcpserver.MCPServer, c *jiraClient, log *slog.Logger) {
 				if err != nil {
 					return mcpErr(err.Error()), nil
 				}
+				if native != nil && native.enabled() {
+					body := translateJiraCreate(c.projectKey, issueType, summary, desc, native.aspect, "")
+					native.MirrorCreate(ctx, body)
+				}
 				return mcpJSON(map[string]any{"created": key}), nil
 			},
 		},
@@ -269,6 +284,9 @@ func registerTools(srv *mcpserver.MCPServer, c *jiraClient, log *slog.Logger) {
 				}
 				if err := c.TransitionTo(ctx, key, target, comment); err != nil {
 					return mcpErr(err.Error()), nil
+				}
+				if native != nil && native.enabled() {
+					native.MirrorTransition(ctx, key, target, native.aspect)
 				}
 				return mcpJSON(map[string]any{"completed": key, "status": target}), nil
 			},
