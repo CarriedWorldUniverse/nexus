@@ -142,6 +142,26 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 		}
 		return mcpJSON(out), nil
 	})
+
+	srv.AddTool(mcpgo.NewTool("issue.list_my_updates",
+		mcpgo.WithDescription("Pull-mode catch-up: returns events on issues assigned to or watched by the aspect, since an optional ISO 8601 timestamp. LIMIT 200."),
+		mcpgo.WithString("aspect", mcpgo.Required()),
+		mcpgo.WithString("since", mcpgo.Description("ISO 8601 timestamp; events after this")),
+	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		aspect := req.GetString("aspect", "")
+		if aspect == "" {
+			return mcpErr("aspect required"), nil
+		}
+		path := "/api/issues/updates?aspect=" + aspect
+		if since := req.GetString("since", ""); since != "" {
+			path += "&since=" + since
+		}
+		var out []any
+		if err := c.get(ctx, path, &out); err != nil {
+			return mcpErr(err.Error()), nil
+		}
+		return mcpJSON(out), nil
+	})
 }
 
 func mcpErr(msg string) *mcpgo.CallToolResult {
