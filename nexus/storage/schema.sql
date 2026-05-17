@@ -540,6 +540,32 @@ CREATE INDEX IF NOT EXISTS idx_credential_audit_aspect_ts
 -- enum from #218; the non-provider defaults (jira/imap) match kind.
 
 -- -------------------------------------------------------------------
+-- MCP profiles — per-aspect MCP server configuration (NEX-168)
+-- -------------------------------------------------------------------
+-- One row per aspect. `profile` is the operator-authored MCP-server JSON
+-- (whatever shape the agent funnel consumes) with credential references
+-- left as placeholders. At connect time the broker calls
+-- credentials.Store.Substitute(aspect, profile) to resolve those
+-- references against the credentials table, writing one credential_audit
+-- row per resolved reference (action='fetch', details.via=
+-- 'mcp_profile_substitute', details.profile_aspect=<aspect>).
+--
+-- Storing the unsubstituted profile (not the rendered output) keeps
+-- secrets out of this table — only the credentials table holds key
+-- material. Re-renders are cheap and always reflect the current
+-- credential bundle.
+--
+-- FK CASCADE on aspects(name): when an aspect is dropped from the
+-- network, its MCP profile goes with it. There's no scenario where
+-- a profile makes sense without its aspect.
+CREATE TABLE IF NOT EXISTS mcp_profiles (
+  aspect_name TEXT PRIMARY KEY
+                REFERENCES aspects(name) ON DELETE CASCADE,
+  profile     TEXT NOT NULL DEFAULT '{}',
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- -------------------------------------------------------------------
 -- Schema metadata — marker only. Real migrations defer until first
 -- backwards-incompatible change (per §10 of registration spec).
 -- -------------------------------------------------------------------

@@ -20,6 +20,7 @@ func TestOpenCreatesAndBootstraps(t *testing.T) {
 		"knowledge", "knowledge_fts", "threads", "chat_messages",
 		"chat_reactions", "shared_files", "chat_usage",
 		"tickets", "activity", "schema_meta",
+		"mcp_profiles",
 	}
 	for _, tbl := range expectedTables {
 		var name string
@@ -144,6 +145,88 @@ func TestFTSTriggersOnUpdateAndDelete(t *testing.T) {
 	).Scan(&afterDelete)
 	if afterDelete != 0 {
 		t.Errorf("FTS still has row after DELETE: %d hits", afterDelete)
+	}
+}
+
+// TestMCPProfilesTable verifies NEX-168's mcp_profiles table: one row per
+// aspect, JSON profile blob, FK to aspects(name) with ON DELETE CASCADE so
+// removing an aspect drops its profile cleanly. The table must come up
+// fresh on Bootstrap and survive a re-open (idempotent).
+func TestMCPProfilesTable(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	db, err := Open(ctx, dir, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	// Verify the column shape via PRAGMA.
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(mcp_profiles)`)
+	if err != nil {
+		t.Fatalf("pragma table_info: %v", err)
+	}
+	gotCols := map[string]string{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		gotCols[name] = ctype
+	}
+	rows.Close()
+	wantCols := map[string]string{
+		"aspect_name": "TEXT",
+		"profile":     "TEXT",
+		"updated_at":  "TEXT",
+	}
+	for col, ctype := range wantCols {
+		got, ok := gotCols[col]
+		if !ok {
+			t.Errorf("mcp_profiles missing column %q", col)
+			continue
+		}
+		if got != ctype {
+			t.Errorf("mcp_profiles.%s type = %q, want %q", col, got, ctype)
+		}
+	}
+
+	// Seed an aspect row (mcp_profiles has FK on aspects.name).
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO aspects (name, aspect_pubkey, provider, model)
+		VALUES ('forge', X'00', 'anthropic', 'claude-opus-4-7')
+	`); err != nil {
+		t.Fatalf("seed aspect: %v", err)
+	}
+
+	// Insert a profile and read it back.
+	const profileJSON = `{"mcpServers":{"github":{"command":"node","env":{"TOKEN":"x"}}}}`
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO mcp_profiles (aspect_name, profile) VALUES (?, ?)
+	`, "forge", profileJSON); err != nil {
+		t.Fatalf("insert profile: %v", err)
+	}
+	var got string
+	if err := db.QueryRowContext(ctx, `SELECT profile FROM mcp_profiles WHERE aspect_name = 'forge'`).Scan(&got); err != nil {
+		t.Fatalf("read profile: %v", err)
+	}
+	if got != profileJSON {
+		t.Errorf("profile round-trip: got %q want %q", got, profileJSON)
+	}
+
+	// FK CASCADE: deleting the aspect drops the profile.
+	if _, err := db.ExecContext(ctx, `DELETE FROM aspects WHERE name = 'forge'`); err != nil {
+		t.Fatalf("delete aspect: %v", err)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM mcp_profiles WHERE aspect_name = 'forge'`).Scan(&count); err != nil {
+		t.Fatalf("count after cascade: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("FK CASCADE failed: %d profile rows survived aspect delete (want 0)", count)
 	}
 }
 
