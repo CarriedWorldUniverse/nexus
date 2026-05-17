@@ -43,7 +43,22 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 	})
 
 	srv.AddTool(mcpgo.NewTool("issue.get",
-		mcpgo.WithDescription("Get an issue by key (resolves aliases)."),
+		mcpgo.WithDescription("Get issue as a markdown document (aspect-facing)."),
+		mcpgo.WithString("key", mcpgo.Required()),
+	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		key := req.GetString("key", "")
+		if key == "" {
+			return mcpErr("key required"), nil
+		}
+		body, err := c.getText(ctx, "/api/issues/"+key)
+		if err != nil {
+			return mcpErr(err.Error()), nil
+		}
+		return mcpgo.NewToolResultText(body), nil
+	})
+
+	srv.AddTool(mcpgo.NewTool("issue.get_raw",
+		mcpgo.WithDescription("Get structured JSON (dashboard/sync use)."),
 		mcpgo.WithString("key", mcpgo.Required()),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		key := req.GetString("key", "")
@@ -51,7 +66,7 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 			return mcpErr("key required"), nil
 		}
 		var out map[string]any
-		if err := c.get(ctx, "/api/issues/"+key, &out); err != nil {
+		if err := c.get(ctx, "/api/issues/"+key+"?format=raw", &out); err != nil {
 			return mcpErr(err.Error()), nil
 		}
 		return mcpJSON(out), nil
