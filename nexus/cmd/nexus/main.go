@@ -1709,6 +1709,33 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 				return
 			}
 			f.ReceiveWithMsgID(bridle.InboxItem{From: from, Content: content}, msgID)
+			// NEX-210: when a Definition of Done is present, wrap
+			// deliberation with the goal-loop so the post-turn judge
+			// can drive multi-turn pursuit toward DoD completion.
+			ticketID, dod := extractDoD(content, topic)
+			if dod != "" {
+				gl := funnel.NewGoalLoop(f, funnel.GoalConfig{
+					TicketID: ticketID,
+					DoD:      dod,
+					// ThreadRoot zero — the Frame runs ContextGlobal,
+					// so per-thread session isolation is inactive.
+					// NEX-176 will populate this from the ticket.
+				})
+				for {
+					result, err := gl.Pursue(rctx)
+					if err != nil {
+						log.Warn("frame funnel: goal-loop error", "err", err, "ticket", ticketID, "msg_id", msgID)
+						break
+					}
+					if result.Done || result.Blocked {
+						if result.Blocked {
+							log.Info("frame funnel: goal-loop blocked", "ticket", ticketID, "turns", result.TurnsRun)
+						}
+						break
+					}
+				}
+				return
+			}
 			// Drain the inbox one msg per turn (#224 FIFO contract).
 			// Loop until ErrEmptyInbox so a burst that arrived while the
 			// previous turn was running gets fully processed before
@@ -1726,6 +1753,34 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 			}
 		},
 	}, gateway
+}
+
+// extractDoD parses a Definition of Done from message content.
+// Recognises "Definition of Done:" (with optional leading "## ") as a
+// section marker; returns the text from the marker to the next markdown
+// header or end of content. Returns an empty dod when no marker is found.
+//
+// ticketID defaults to topic; when topic is empty it falls back to
+// "unknown". NEX-176 (queue manager) will replace this heuristic with a
+// proper ledger ticket lookup.
+func extractDoD(content, topic string) (ticketID, dod string) {
+	ticketID = topic
+	if ticketID == "" {
+		ticketID = "unknown"
+	}
+	const marker = "Definition of Done"
+	idx := strings.Index(content, marker)
+	if idx < 0 {
+		return ticketID, ""
+	}
+	rest := content[idx+len(marker):]
+	rest = strings.TrimLeft(rest, ":\n\r\t ")
+	if nextH2 := strings.Index(rest, "\n## "); nextH2 >= 0 {
+		rest = rest[:nextH2]
+	} else if nextH1 := strings.Index(rest, "\n# "); nextH1 >= 0 {
+		rest = rest[:nextH1]
+	}
+	return ticketID, strings.TrimSpace(rest)
 }
 
 func reaper(ctx context.Context, r *roster.Roster, b *broker.Broker, staleAfter, every time.Duration, log *slog.Logger) {
