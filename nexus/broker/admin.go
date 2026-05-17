@@ -218,6 +218,13 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 			b.requireAdmin(http.HandlerFunc(b.handleAdminAspectDefaultsGet)))
 		mux.Handle("PUT /api/admin/aspects/{name}/credential-defaults",
 			b.requireAdmin(http.HandlerFunc(b.handleAdminAspectDefaultsSet)))
+		// Per-aspect MCP profiles (NEX-168). The stored blob holds
+		// ${credential:NAME.field} placeholders that get resolved at
+		// fetch time via credentials.Store.Substitute.
+		mux.Handle("GET /api/admin/aspects/{name}/mcp_profile",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminMCPProfileGet)))
+		mux.Handle("PUT /api/admin/aspects/{name}/mcp_profile",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminMCPProfileSet)))
 	}
 }
 

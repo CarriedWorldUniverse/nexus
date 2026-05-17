@@ -48,6 +48,12 @@ func newTestStore(t *testing.T) (*Store, *sql.DB) {
 			default_jira_credential TEXT,
 			default_imap_credential TEXT
 		);
+		CREATE TABLE mcp_profiles (
+			aspect_name TEXT PRIMARY KEY
+			              REFERENCES aspects(name) ON DELETE CASCADE,
+			profile     TEXT NOT NULL DEFAULT '{}',
+			updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+		);
 	`)
 	if err != nil {
 		t.Fatalf("schema: %v", err)
