@@ -287,6 +287,16 @@ type Config struct {
 	// CSS/JS, refresh the browser — no rebuild. When empty, the
 	// embedded copy is served (production path).
 	DashboardDir string
+
+	// HTTPRegistrar, when non-nil, is invoked once inside ListenAndServe
+	// with the broker's internal http.ServeMux before the HTTPS server
+	// starts. It lets the embedding caller (cmd/nexus) mount peer
+	// services on the broker's listener — e.g. ledger.HealthzHandler at
+	// /healthz/ledger — without the broker package taking a build-time
+	// dependency on those services. Patterns must not collide with the
+	// broker's own routes (/connect, /api/*, /dashboard/*, /health,
+	// /chat.html, /js/*, /{$}); the broker does not de-conflict.
+	HTTPRegistrar func(*http.ServeMux)
 }
 
 // ChatRouterCallbacks wires the broker's chat.send handling to the
@@ -631,6 +641,16 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	// embedded and supplies AdminCallbacks. Per spec §3.3, admin ops
 	// belong to the Frame because the Frame IS the Nexus.
 	b.registerAdmin(mux)
+
+	// Embedder-supplied peer-service routes (NEX-144). cmd/nexus uses
+	// this hook to mount ledger.HealthzHandler at /healthz/ledger on the
+	// existing HTTPS listener. Invoked after the broker's own routes so
+	// any duplicate-pattern panic from net/http's mux surfaces with the
+	// broker route as the prior registration (more informative for the
+	// caller).
+	if b.cfg.HTTPRegistrar != nil {
+		b.cfg.HTTPRegistrar(mux)
+	}
 
 	b.srv = &http.Server{
 		Addr:              b.cfg.Addr,

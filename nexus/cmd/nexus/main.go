@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
 	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
+	"github.com/CarriedWorldUniverse/ledger"
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
@@ -452,6 +454,26 @@ func main() {
 	// cmd.Dir control vector for stolen aspect tokens).
 	aspectHomes := discoverAspectHomes(*aspectDir, logger)
 
+	// NEX-144: bring up the ledger issue-tracker service alongside the
+	// broker. ledger.db lives parallel to broker's nexus.db in the
+	// resolved data directory; the broker mounts /healthz/ledger on its
+	// HTTPS listener via the HTTPRegistrar hook below. Phase 0 ships
+	// healthz only; Phase 1 will widen the registrar to /api/ledger/*.
+	resolvedDataDir := filepath.Dir(storage.ResolvePath(*dataDir))
+	ledgerSvc, err := ledger.New(ctx, ledger.Config{
+		DBPath: filepath.Join(resolvedDataDir, "ledger.db"),
+	})
+	if err != nil {
+		logger.Error("ledger service init failed", "err", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := ledgerSvc.Close(); err != nil {
+			logger.Warn("ledger close", "err", err)
+		}
+	}()
+	logger.Info("ledger service initialised", "db", filepath.Join(resolvedDataDir, "ledger.db"))
+
 	b := broker.New(broker.Config{
 		Addr:               *addr,
 		AuthToken:          token,
@@ -502,6 +524,13 @@ func main() {
 		// Phase E: adopt the Hub already wired into the funnel so
 		// emitted frames reach the broker's broadcast path.
 		Observability: obsHub,
+		// NEX-144 Phase 0: mount ledger's healthz on the broker's TLS
+		// listener. The registrar runs inside ListenAndServe with the
+		// broker's internal mux, so /healthz/ledger lives alongside
+		// /health and /api/* on the same port.
+		HTTPRegistrar: func(mux *http.ServeMux) {
+			mux.Handle("/healthz/ledger", ledgerSvc.HealthzHandler())
+		},
 	}, r)
 
 	// Activity log persistence: chain a jsonlsink writer onto the Hub's
