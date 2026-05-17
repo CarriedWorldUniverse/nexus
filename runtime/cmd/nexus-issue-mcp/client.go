@@ -73,6 +73,28 @@ func (c *client) del(ctx context.Context, path string, in, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+func (c *client) getText(ctx context.Context, path string) (string, error) {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+	req.Header.Set("Authorization", "Bearer "+c.jwt)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("not found: %s", path)
+	}
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("%s: %d %s", path, resp.StatusCode, string(b))
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 func (c *client) get(ctx context.Context, path string, out any) error {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	req.Header.Set("Authorization", "Bearer "+c.jwt)
