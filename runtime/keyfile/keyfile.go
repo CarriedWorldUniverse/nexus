@@ -98,6 +98,13 @@ type Keyfile struct {
 	// gated flows on behalf of other aspects — but the schema lives on
 	// every keyfile so future aspect-owned mailboxes are zero-friction.
 	IMAP *IMAPConfig `json:"imap,omitempty"`
+
+	// GitHub is an optional per-aspect GitHub credential block read by
+	// nexus-github-mcp. Provides the classic PAT + commit identity
+	// (username + email) so aspect-attributed PRs and commits don't
+	// collapse to the host's shared `gh` auth. Absent when the aspect
+	// doesn't drive GitHub directly.
+	GitHub *GitHubConfig `json:"github,omitempty"`
 }
 
 // JiraConfig carries the Atlassian Cloud credentials an aspect uses
@@ -146,6 +153,31 @@ type IMAPConfig struct {
 	// DefaultFolder is the folder used when an MCP tool call doesn't
 	// specify one. Empty → "INBOX".
 	DefaultFolder string `json:"default_folder,omitempty"`
+}
+
+// GitHubConfig carries the per-aspect GitHub credentials. Plaintext at
+// rest alongside the rest of the keyfile; rotate by minting a fresh
+// classic PAT at github.com/settings/tokens and editing this block.
+type GitHubConfig struct {
+	// Username is the aspect's GitHub login (e.g. "nexus-anvil").
+	// Used for matching in tools that take an owner/user argument and
+	// for log + audit display.
+	Username string `json:"username"`
+
+	// Email is the verified address attached to the GitHub account.
+	// Set as `user.email` on git commits made by this aspect so PR
+	// authors render correctly.
+	Email string `json:"email"`
+
+	// PAT is a classic Personal Access Token. Treated as a bearer
+	// secret. Scopes expected by nexus-github-mcp for v1: `repo`,
+	// `workflow`, `read:org`.
+	PAT string `json:"pat"`
+
+	// DefaultOrg, when set, is the GitHub organisation used by tools
+	// that don't specify one explicitly (e.g. "CarriedWorldUniverse").
+	// Optional.
+	DefaultOrg string `json:"default_org,omitempty"`
 }
 
 // PersonalityBundle is what the validation response delivers. Wire
