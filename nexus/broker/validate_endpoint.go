@@ -20,6 +20,7 @@
 package broker
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 )
 
 // KeyfileValidator wires the data /api/aspect/validate needs. cmd/nexus
@@ -54,6 +56,14 @@ type KeyfileValidator struct {
 	// above the per-aspect bundle. Optional; nil = legacy shape with
 	// per-aspect content only.
 	Settings aspects.SettingsStore
+
+	// Credentials is the broker-mediated credential store (NEX-168).
+	// When non-nil, /api/aspect/validate resolves the aspect's
+	// mcp_profile via Substitute and includes the rendered JSON in the
+	// success response (NEX-169). Nil = no profile is emitted (legacy
+	// boot mode without the credential store wired); the response's
+	// mcp_profile field is "".
+	Credentials *credentials.Store
 
 	// JWTTTL is the issued JWT lifetime. Default 1h per spec §6.
 	JWTTTL time.Duration
@@ -85,6 +95,24 @@ type validateResponse struct {
 	// shape — Personality alone is the prompt).
 	CentralNexusMD string `json:"central_nexus_md"`
 	CentralVersion int64  `json:"central_version"`
+
+	// MCPProfile is the aspect's resolved MCP-server profile (NEX-169):
+	// the stored JSON blob from mcp_profiles.profile with every
+	// ${credential:NAME.field} placeholder substituted with the
+	// plaintext credential value. agentfunnel materialises this into
+	// the aspect's .mcp.json (NEX-170, keel's lane).
+	//
+	// Empty string when:
+	//   - KeyfileValidator.Credentials is nil (legacy boot), OR
+	//   - no mcp_profiles row exists for the aspect (operator hasn't
+	//     configured one yet — treated identically to the empty profile
+	//     case by GetMCPProfile).
+	//
+	// Substitution failure (malformed placeholder, unknown credential,
+	// unknown field) is fatal: identity is verified but the response
+	// is unusable, so the handler returns 500 rather than emit a
+	// half-resolved profile.
+	MCPProfile string `json:"mcp_profile"`
 }
 
 // personalityWire is the on-the-wire shape of the personality bundle.
@@ -216,6 +244,23 @@ func (b *Broker) handleAspectValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// NEX-169: resolve the aspect's mcp_profile (NEX-168 stored blob +
+	// Substitute). Gated on the credentials store being wired — a
+	// legacy boot without it just emits an empty profile field.
+	mcpProfile, mcpErr := resolveMCPProfile(r.Context(), v.Credentials, sess.AspectName)
+	if mcpErr != nil {
+		// Identity passed but the profile is broken (malformed placeholder,
+		// unknown credential, unknown field, or audit-tx failure). Emit a
+		// 500 rather than a half-resolved profile: the operator must fix
+		// the misconfiguration before the aspect can connect. The aspect
+		// name + cause go to logs; the wire body stays opaque so we don't
+		// leak credential names to the client.
+		b.log.Error("validate: mcp_profile resolve failed",
+			"aspect", sess.AspectName, "err", mcpErr)
+		writeError(w, http.StatusInternalServerError, "mcp profile resolve failed")
+		return
+	}
+
 	resp := validateResponse{
 		OK:               true,
 		SessionJWT:       sess.SessionJWT,
@@ -225,6 +270,7 @@ func (b *Broker) handleAspectValidate(w http.ResponseWriter, r *http.Request) {
 		Personality:      personalityWireFrom(sess.Personality),
 		CentralNexusMD:   sess.CentralNexusMD,
 		CentralVersion:   sess.CentralVersion,
+		MCPProfile:       mcpProfile,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -246,6 +292,28 @@ func personalityWireFrom(p *aspects.Personality) personalityWire {
 		Version:   p.Version,
 		UpdatedAt: p.UpdatedAt,
 	}
+}
+
+// resolveMCPProfile loads the aspect's stored MCP profile blob and runs
+// credential substitution. Returns ("", nil) when:
+//   - the credentials store isn't wired (legacy boot), OR
+//   - no profile row exists for the aspect.
+//
+// Any error from Substitute (malformed placeholder, unknown credential,
+// unknown field, audit-tx failure) is propagated; the caller maps that
+// to a 500 since the response is unusable. NEX-169.
+func resolveMCPProfile(ctx context.Context, store *credentials.Store, aspect string) (string, error) {
+	if store == nil {
+		return "", nil
+	}
+	profile, err := store.GetMCPProfile(ctx, aspect)
+	if err != nil {
+		return "", err
+	}
+	if profile == "" {
+		return "", nil
+	}
+	return store.Substitute(ctx, aspect, profile)
 }
 
 // writeJSONError emits the spec §5 error shape. currentVersion is
