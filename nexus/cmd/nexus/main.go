@@ -241,6 +241,15 @@ func main() {
 		}
 	}
 
+	// NEX-169: wire the credentials store into the keyfile validator
+	// so /api/aspect/validate resolves the aspect's mcp_profile and
+	// includes it in the response. Set post-construction because
+	// credentialStore is built downstream of keyfileValidator above
+	// (HKDF needs the same SessionSigningSecret). Nil-tolerant: when
+	// the store init failed and credentialStore is nil, the validator
+	// emits an empty mcp_profile field (legacy shape).
+	keyfileValidator.Credentials = credentialStore
+
 	r := roster.New()
 	proj := sessions.New(db)
 

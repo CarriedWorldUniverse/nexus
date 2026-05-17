@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
@@ -31,6 +32,7 @@ type keyfileEndpointFixture struct {
 	nexusID      string
 	signingSec   []byte
 	store        *aspects.SQLStore
+	creds        *credentials.Store
 	serverPubKey ed25519.PublicKey
 }
 
@@ -63,6 +65,14 @@ func newKeyfileEndpointFixture(t *testing.T) *keyfileEndpointFixture {
 
 	signingSec := []byte("fixture-secret-32-bytes-padding-x")
 
+	// NEX-169: wire a real credentials.Store so tests can exercise the
+	// validate-response mcp_profile path end-to-end (Set credential,
+	// SetMCPProfile, POST validate, assert resolved profile on the wire).
+	cstore, err := credentials.NewStore(db, signingSec)
+	if err != nil {
+		t.Fatalf("credentials.NewStore: %v", err)
+	}
+
 	cfg := Config{
 		KeyfileValidator: &KeyfileValidator{
 			NexusID:              "fixture-nexus",
@@ -70,6 +80,7 @@ func newKeyfileEndpointFixture(t *testing.T) *keyfileEndpointFixture {
 			ServerEd25519Privkey: serverPriv,
 			SessionSigningSecret: signingSec,
 			Store:                store,
+			Credentials:          cstore,
 			JWTTTL:               time.Hour,
 		},
 	}
@@ -83,7 +94,7 @@ func newKeyfileEndpointFixture(t *testing.T) *keyfileEndpointFixture {
 	return &keyfileEndpointFixture{
 		srv: srv, encrypted: kf.EncryptedPayload,
 		nexusID: "fixture-nexus", signingSec: signingSec,
-		store: store, serverPubKey: serverPub,
+		store: store, creds: cstore, serverPubKey: serverPub,
 	}
 }
 
@@ -285,6 +296,169 @@ func TestEndpoint_Validate_BadRequestBody(t *testing.T) {
 				t.Errorf("%s: status = %d; want 400", tc.name, resp.StatusCode)
 			}
 		})
+	}
+}
+
+// TestEndpoint_Validate_MCPProfile_Empty — no mcp_profile row for the
+// aspect → response.mcp_profile is "" but everything else is normal.
+// Matches the "operator hasn't configured a profile yet" case (NEX-169).
+func TestEndpoint_Validate_MCPProfile_Empty(t *testing.T) {
+	f := newKeyfileEndpointFixture(t)
+	body, _ := json.Marshal(validateRequest{EncryptedPayload: f.encrypted})
+	resp, err := http.Post(f.srv.URL+"/api/aspect/validate", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d; body = %s", resp.StatusCode, raw)
+	}
+	var got validateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.MCPProfile != "" {
+		t.Errorf("mcp_profile = %q; want empty (no profile row seeded)", got.MCPProfile)
+	}
+}
+
+// TestEndpoint_Validate_MCPProfile_Resolved — seed a credential + a
+// profile referencing it. The validate response carries the rendered
+// JSON with the placeholder substituted in (NEX-169).
+func TestEndpoint_Validate_MCPProfile_Resolved(t *testing.T) {
+	f := newKeyfileEndpointFixture(t)
+	ctx := context.Background()
+
+	// Seed a provider credential. Bundle.key is what the placeholder
+	// resolves to.
+	if err := f.creds.Set(ctx, credentials.UpsertParams{
+		Name: "gh-pat", Kind: credentials.KindProvider,
+		Bundle: map[string]any{
+			"api_shape":     "anthropic",
+			"base_url":      "https://example.invalid",
+			"key":           "ghp-secret-token",
+			"default_model": "claude-opus-4-7",
+		},
+		AllowedAspects: []string{"*"},
+		Mode:           credentials.ModeFetch,
+	}); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+	const profile = `{"mcpServers":{"github":{"command":"node","env":{"TOKEN":"${credential:gh-pat.key}"}}}}`
+	if err := f.creds.SetMCPProfile(ctx, "plumb", profile); err != nil {
+		t.Fatalf("SetMCPProfile: %v", err)
+	}
+
+	body, _ := json.Marshal(validateRequest{EncryptedPayload: f.encrypted})
+	resp, err := http.Post(f.srv.URL+"/api/aspect/validate", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d; body = %s", resp.StatusCode, raw)
+	}
+	var got validateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	const want = `{"mcpServers":{"github":{"command":"node","env":{"TOKEN":"ghp-secret-token"}}}}`
+	if got.MCPProfile != want {
+		t.Errorf("mcp_profile mismatch:\n got  %q\n want %q", got.MCPProfile, want)
+	}
+}
+
+// TestEndpoint_Validate_MCPProfile_SubstituteFailure — a profile that
+// references an unknown credential → 500. Identity passed but the
+// response is unusable; we fail loud rather than emit a half-resolved
+// or empty profile that would silently boot the aspect without MCP
+// (NEX-169).
+func TestEndpoint_Validate_MCPProfile_SubstituteFailure(t *testing.T) {
+	f := newKeyfileEndpointFixture(t)
+	const profile = `{"mcpServers":{"github":{"env":{"TOKEN":"${credential:does-not-exist.key}"}}}}`
+	if err := f.creds.SetMCPProfile(context.Background(), "plumb", profile); err != nil {
+		t.Fatalf("SetMCPProfile: %v", err)
+	}
+
+	body, _ := json.Marshal(validateRequest{EncryptedPayload: f.encrypted})
+	resp, err := http.Post(f.srv.URL+"/api/aspect/validate", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d; want 500 (body=%s)", resp.StatusCode, raw)
+	}
+}
+
+// TestEndpoint_Validate_MCPProfile_NoCredentialsStore — when the
+// validator has no credentials store wired (legacy boot), the
+// mcp_profile field is empty but validation still succeeds.
+func TestEndpoint_Validate_MCPProfile_NoCredentialsStore(t *testing.T) {
+	// Build a minimal broker with KeyfileValidator.Credentials nil. The
+	// shared fixture wires a real credentials.Store, so re-using it here
+	// would mask the nil-tolerance path. Mirror its setup directly.
+	dir := t.TempDir()
+	db, err := storage.Open(context.Background(), dir, nil)
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	store := aspects.NewSQLStore(db)
+	serverPub, serverPriv, _ := ed25519.GenerateKey(rand.Reader)
+	aspectPub, aspectPriv, _ := ed25519.GenerateKey(rand.Reader)
+	if err := store.Insert(context.Background(), aspects.Aspect{
+		Name: "legacy", AspectPubkey: aspectPub,
+		Provider: "claude-api", Model: "claude-opus-4-7",
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	kf, _, err := aspects.Mint(aspects.MintInput{
+		AspectName: "legacy", KeyfileVersion: 1,
+		AspectPrivkey: aspectPriv, ServerPubkey: serverPub,
+		NexusID: "fixture-nexus", NexusURL: "wss://x", MintedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	signingSec := []byte("fixture-secret-32-bytes-padding-x")
+
+	cfg := Config{
+		KeyfileValidator: &KeyfileValidator{
+			NexusID:              "fixture-nexus",
+			ServerEd25519Pubkey:  serverPub,
+			ServerEd25519Privkey: serverPriv,
+			SessionSigningSecret: signingSec,
+			Store:                store,
+			// Credentials intentionally nil.
+			JWTTTL: time.Hour,
+		},
+	}
+	b := &Broker{cfg: cfg, log: discardLogger()}
+	mux := http.NewServeMux()
+	b.registerKeyfileEndpoints(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	body, _ := json.Marshal(validateRequest{EncryptedPayload: kf.EncryptedPayload})
+	resp, err := http.Post(srv.URL+"/api/aspect/validate", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d; body = %s", resp.StatusCode, raw)
+	}
+	var got validateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.MCPProfile != "" {
+		t.Errorf("mcp_profile = %q; want empty (no credentials store wired)", got.MCPProfile)
 	}
 }
 
