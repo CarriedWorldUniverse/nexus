@@ -68,6 +68,22 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 		}
 		return mcpJSON(out), nil
 	})
+
+	srv.AddTool(mcpgo.NewTool("issue.comment",
+		mcpgo.WithDescription("Append an immutable comment."),
+		mcpgo.WithString("key", mcpgo.Required()),
+		mcpgo.WithString("actor", mcpgo.Required()),
+		mcpgo.WithString("body", mcpgo.Required()),
+	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		body := map[string]any{
+			"actor": req.GetString("actor", ""),
+			"body":  req.GetString("body", ""),
+		}
+		if err := c.post(ctx, "/api/issues/"+req.GetString("key", "")+"/comments", body, nil); err != nil {
+			return mcpErr(err.Error()), nil
+		}
+		return mcpJSON(map[string]any{"ok": true}), nil
+	})
 }
 
 func mcpErr(msg string) *mcpgo.CallToolResult {
