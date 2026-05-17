@@ -60,20 +60,25 @@ func (r *Roster) Register(req *schemas.RegisterRequest) (state *schemas.AspectSt
 		}
 	}
 
+	surface := req.PrimarySurface
+	if surface == "" {
+		surface = schemas.SurfaceFunnel
+	}
 	state = &schemas.AspectState{
-		Name:          req.Name,
-		ContextMode:   req.ContextMode,
-		Provider:      req.Provider,
-		Port:          req.Port,
-		PID:           req.PID,
-		StartedAt:     req.StartedAt,
-		Model:         req.Model,
-		Capabilities:  req.Capabilities,
-		Home:          req.Home,
-		SessionID:     req.SessionID,
-		Metadata:      req.Metadata,
-		LastHeartbeat: time.Now().UTC(),
-		Status:        "live",
+		Name:           req.Name,
+		ContextMode:    req.ContextMode,
+		Provider:       req.Provider,
+		Port:           req.Port,
+		PID:            req.PID,
+		StartedAt:      req.StartedAt,
+		Model:          req.Model,
+		Capabilities:   req.Capabilities,
+		Home:           req.Home,
+		SessionID:      req.SessionID,
+		PrimarySurface: surface,
+		Metadata:       req.Metadata,
+		LastHeartbeat:  time.Now().UTC(),
+		Status:         "live",
 	}
 	r.aspects[req.Name] = state
 	return state, displacedSession, nil

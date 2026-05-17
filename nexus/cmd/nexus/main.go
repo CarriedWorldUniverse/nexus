@@ -86,7 +86,8 @@ func main() {
 	reapEvery := flag.Duration("reap-every", 10*time.Second, "how often to sweep for stale aspects")
 	dataDir := flag.String("data-dir", "", "data directory holding nexus.db (falls back to NEXUS_DATA_DIR env, then ./data)")
 	aspectDir := flag.String("aspect-dir", "", "comma-separated directories to scan for aspect homes (falls back to NEXUS_ASPECT_DIR env; disabled if neither set). The broker uses this as the source of truth for aspect homes (#21).")
-	harnessPath := flag.String("harness-path", "", "path to the harness binary used for auto-spawn (falls back to NEXUS_HARNESS env)")
+	harnessPath := flag.String("harness-path", "", "path to the agentfunnel binary used for auto-spawn (falls back to NEXUS_HARNESS env)")
+	agoraPath := flag.String("agora-path", "", "path to the agora binary used for auto-spawn when aspect primary_surface=agora (falls back to NEXUS_AGORA env)")
 	// Defaults from env so explicit `--tls-cert=` (empty) is honored
 	// as the operator's intent (fail-fast at broker startup) rather
 	// than silently falling back to env.
@@ -643,7 +644,7 @@ func main() {
 	// the children on shutdown (otherwise Windows leaks one funnel
 	// per aspect per nexus run).
 	var supervisor atomic.Pointer[autospawn.Supervisor]
-	go runAutoSpawn(ctx, logger, *aspectDir, *harnessPath, *dataDir, *addr, token,
+	go runAutoSpawn(ctx, logger, *aspectDir, *harnessPath, *agoraPath, *dataDir, *addr, token,
 		autospawn.AspectTokenResolverFunc(tokenResolverFunc), &supervisor)
 
 	serveErr := b.ListenAndServe(ctx)
@@ -668,7 +669,7 @@ func main() {
 // NEXUS_ASPECT_DIR env) and spawns a harness for each. Skipped if
 // no dir is configured. Runs after a short delay so the broker's
 // listener has bound before children try to dial in.
-func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessPathFlag, dataDirFlag, brokerAddr, token string, tokens autospawn.AspectTokenResolver, supOut *atomic.Pointer[autospawn.Supervisor]) {
+func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessPathFlag, agoraPathFlag, dataDirFlag, brokerAddr, token string, tokens autospawn.AspectTokenResolver, supOut *atomic.Pointer[autospawn.Supervisor]) {
 	dir := aspectDirFlag
 	if dir == "" {
 		dir = os.Getenv("NEXUS_ASPECT_DIR")
@@ -687,6 +688,16 @@ func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessP
 	absHarness, err := filepath.Abs(harnessPath)
 	if err == nil {
 		harnessPath = absHarness
+	}
+
+	agoraBinPath := agoraPathFlag
+	if agoraBinPath == "" {
+		agoraBinPath = os.Getenv("NEXUS_AGORA")
+	}
+	if agoraBinPath != "" {
+		if absAgora, err := filepath.Abs(agoraBinPath); err == nil {
+			agoraBinPath = absAgora
+		}
 	}
 
 	// Give the broker a moment to bind before children dial in.
@@ -714,6 +725,7 @@ func runAutoSpawn(ctx context.Context, log *slog.Logger, aspectDirFlag, harnessP
 	cfg := autospawn.Config{
 		ScanDir:     dir,
 		HarnessPath: harnessPath,
+		AgoraPath:   agoraBinPath,
 		// Resolve per-aspect keyfiles from <data-dir>/keyfiles when
 		// autospawning. agentfunnel takes -k <keyfile>; aspect.json on
 		// disk holds only the name, so autospawn maps name → keyfile

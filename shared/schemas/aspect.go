@@ -15,6 +15,17 @@ const (
 	ContextStateless ContextMode = "stateless"
 )
 
+// Surface names the runtime surface an aspect uses to connect to the Nexus.
+// "funnel" (headless WS-connected process) is the default; "agora" is the
+// operator-facing interactive TUI. Both use the same keyfile auth + WS
+// transport + bridle/funnel deliberation machinery.
+type Surface string
+
+const (
+	SurfaceFunnel Surface = "funnel"
+	SurfaceAgora  Surface = "agora"
+)
+
 // Role declares whether an aspect home defines a regular aspect or the
 // Nexus's Frame. See frame-role spec §3 — exactly one Frame per Nexus.
 //
@@ -91,6 +102,12 @@ type AspectConfig struct {
 	// ProviderEnvResolver; until then this is a static per-aspect knob.
 	FilterCredential string `json:"filter_credential,omitempty"`
 
+	// PrimarySurface selects which runtime binary the aspect runs as.
+	// "funnel" (default/empty) → agentfunnel.exe; "agora" → agora.exe.
+	// Autospawn uses this to pick the correct binary. Self-switch
+	// updates this field at runtime to flip surfaces without identity loss.
+	PrimarySurface Surface `json:"primary_surface,omitempty"`
+
 	// Rewriter configures the per-turn session-jsonl rewriter (see
 	// nexus/frame/funnel/rewriter). Only meaningful for claude-code-
 	// backed aspects — direct-API providers don't replay a jsonl, so
@@ -137,6 +154,18 @@ func (c AspectConfig) EffectiveRole() Role {
 	return c.Role
 }
 
+// EffectivePrimarySurface returns the surface with empty-string normalized
+// to SurfaceFunnel. Unknown values are treated as SurfaceFunnel so a typo
+// doesn't block startup — the operator will see the default and can correct.
+func (c AspectConfig) EffectivePrimarySurface() Surface {
+	switch c.PrimarySurface {
+	case SurfaceFunnel, SurfaceAgora:
+		return c.PrimarySurface
+	default:
+		return SurfaceFunnel
+	}
+}
+
 // Known reports whether r is one of the recognized role values for an
 // on-disk aspect.json. False means the role string was not the empty
 // string AND not in the known set — likely a typo. Callers should
@@ -170,17 +199,18 @@ func (r Role) IsRuntimeIdentity() bool {
 
 // RegisterRequest is the body of POST /aspects/register. See spec §4.2.
 type RegisterRequest struct {
-	Name         string         `json:"name"`
-	ContextMode  ContextMode    `json:"context_mode"`
-	Provider     string         `json:"provider"`
-	Port         int            `json:"port"`
-	PID          int            `json:"pid"`
-	StartedAt    time.Time      `json:"started_at"`
-	Model        string         `json:"model,omitempty"`
-	Capabilities []string       `json:"capabilities"`
-	Home         string         `json:"home"`
-	SessionID    string         `json:"session_id"`
-	Metadata     map[string]any `json:"metadata,omitempty"`
+	Name           string         `json:"name"`
+	ContextMode    ContextMode    `json:"context_mode"`
+	Provider       string         `json:"provider"`
+	Port           int            `json:"port"`
+	PID            int            `json:"pid"`
+	StartedAt      time.Time      `json:"started_at"`
+	Model          string         `json:"model,omitempty"`
+	Capabilities   []string       `json:"capabilities"`
+	Home           string         `json:"home"`
+	SessionID      string         `json:"session_id"`
+	PrimarySurface Surface        `json:"primary_surface,omitempty"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
 }
 
 // RegisterResponse is returned to an aspect after successful registration.
@@ -209,17 +239,18 @@ type DeregisterRequest struct {
 // enrichment fiber (spec §2.5).
 type AspectState struct {
 	// Static — set on registration, immutable for session lifetime.
-	Name         string         `json:"name"`
-	ContextMode  ContextMode    `json:"context_mode"`
-	Provider     string         `json:"provider"`
-	Port         int            `json:"port"`
-	PID          int            `json:"pid"`
-	StartedAt    time.Time      `json:"started_at"`
-	Model        string         `json:"model,omitempty"`
-	Capabilities []string       `json:"capabilities"`
-	Home         string         `json:"home"`
-	SessionID    string         `json:"session_id"`
-	Metadata     map[string]any `json:"metadata,omitempty"`
+	Name           string         `json:"name"`
+	ContextMode    ContextMode    `json:"context_mode"`
+	Provider       string         `json:"provider"`
+	Port           int            `json:"port"`
+	PID            int            `json:"pid"`
+	StartedAt      time.Time      `json:"started_at"`
+	Model          string         `json:"model,omitempty"`
+	Capabilities   []string       `json:"capabilities"`
+	Home           string         `json:"home"`
+	SessionID      string         `json:"session_id"`
+	PrimarySurface Surface        `json:"primary_surface,omitempty"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
 
 	// Dynamic — refreshed by heartbeats and enrichment fiber.
 	LastHeartbeat time.Time      `json:"last_heartbeat"`

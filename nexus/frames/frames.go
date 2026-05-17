@@ -109,6 +109,13 @@ const (
 	// Lifecycle.
 	KindShutdown Kind = "shutdown"
 
+	// switch.surface — aspect requests a live surface flip
+	// (funnel ↔ agora). Broker validates, updates the DB, closes
+	// the WS connection. Aspect exits; supervisor restarts with
+	// the new binary.
+	KindSwitchSurface       Kind = "switch.surface"
+	KindSwitchSurfaceResult Kind = "switch.surface.result"
+
 	// Operator dashboard (dashboard-ws-port spec §3.2). Request/response
 	// frames the SPA sends from the browser's WS connection. All carry
 	// a correlation_id (the envelope's ID) and the broker echoes it on
