@@ -5,7 +5,7 @@ go 1.25.5
 require (
 	filippo.io/edwards25519 v1.2.0
 	github.com/CarriedWorldUniverse/bridle v0.1.0
-	github.com/CarriedWorldUniverse/ledger v0.0.0-00010101000000-000000000000
+	github.com/CarriedWorldUniverse/ledger v0.0.2
 	github.com/anthropics/anthropic-sdk-go v1.38.0
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/go-webauthn/webauthn v0.17.3
@@ -52,8 +52,3 @@ require (
 	golang.org/x/sys v0.44.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// Phase 0 of NEX-137: ledger is in-tree at ~/Source/ledger and not yet
-// tagged. Drop this replace + bump the version pin in `require` above
-// once Phase 0 closes and ledger cuts a v0.1.0.
-replace github.com/CarriedWorldUniverse/ledger => ../ledger

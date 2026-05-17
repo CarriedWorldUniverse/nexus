@@ -4,6 +4,8 @@ github.com/CarriedWorldUniverse/bridle v0.1.0 h1:VUy4W+ben8lLOlkG5+reOAkVe81BeN/
 github.com/CarriedWorldUniverse/bridle v0.1.0/go.mod h1:nEWWic3aiWRjyUzmjdafUtqXoqS9f92KuUuuKpT5NYE=
 github.com/CarriedWorldUniverse/casket-go v0.1.0 h1:t+DvXs8vhaNcTfkSS/sqK47fBTNVRdHfF7DT/ur0jtY=
 github.com/CarriedWorldUniverse/casket-go v0.1.0/go.mod h1:v0y8kPW/WmusBw+Q3ZtRYhVwoK/WVVVXHWSc/oRVWBo=
+github.com/CarriedWorldUniverse/ledger v0.0.2 h1:RpfTw6jWGDk4/vDZAcN52BeZg143ce4pxnecSGbfN6k=
+github.com/CarriedWorldUniverse/ledger v0.0.2/go.mod h1:2aeFr46SOJ19rDnwsSwGJA9CZqNrtYXY1BQ6vfzMEog=
 github.com/anthropics/anthropic-sdk-go v1.38.0 h1:bA4DcK+91gorIX+5VTONnynyt9LRU4nnN6rRQ+j/NIg=
 github.com/anthropics/anthropic-sdk-go v1.38.0/go.mod h1:d288C1L+m74OYuYBvc4UFtR1Q8J0gC55oYDh2t+XxdI=
 github.com/bahlo/generic-list-go v0.2.0 h1:5sz/EEAK+ls5wF+NeqDpk5+iNdMDXrh3z3nPnH1Wvgk=
