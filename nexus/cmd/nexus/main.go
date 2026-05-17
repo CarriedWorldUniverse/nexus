@@ -322,7 +322,7 @@ func main() {
 	// exists. Until then any emit is a silent drop — safe because no
 	// turns can run before the broker is up.
 	obsHub := observability.NewHub(500, nil)
-	chatRouter, frameGateway := buildChatRouter(ctx, embeddedFrame, r, chatStore, triageStore, usage.NewSQLStore(db), knowledgeStore, obsHub, credentialStore, logger)
+	chatRouter, frameGateway, frameFunnel := buildChatRouter(ctx, embeddedFrame, r, chatStore, triageStore, usage.NewSQLStore(db), knowledgeStore, obsHub, credentialStore, logger)
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
@@ -673,6 +673,14 @@ func main() {
 				}
 			}
 		}()
+	}
+
+	// NEX-176: queue-manager goroutine polls the ledger for ready
+	// tickets and dispatches work to assignee aspects. Runs until ctx
+	// cancels. When no Frame funnel is available (legacy / no-aspect-dir
+	// mode), the queue manager is a no-op.
+	if frameFunnel != nil && ledgerSvc != nil {
+		go runQueueManager(ctx, frameFunnel, ledgerSvc, b, embeddedFrame.Aspect.Name, logger)
 	}
 
 	// Auto-spawn: after the broker has bound its listener (brief
@@ -1496,9 +1504,9 @@ func buildRewriterRunner(cfg schemas.AspectConfig, aspectCwd string, frameProvid
 // to the broker after broker.New so in-process Frame posts go through
 // Broker.HandleChatSend (the unified chat-send path). When ef is nil
 // both returns are nil.
-func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.Roster, store chat.Store, triageStore chat.TriageStore, usageStore *usage.SQLStore, knowledgeStore *knowledge.Store, obsHub *observability.Hub, credentialStore *credentials.Store, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway) {
+func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.Roster, store chat.Store, triageStore chat.TriageStore, usageStore *usage.SQLStore, knowledgeStore *knowledge.Store, obsHub *observability.Hub, credentialStore *credentials.Store, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway, *funnel.Funnel) {
 	if ef == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	provider := ef.Aspect.Config.Provider
@@ -1523,13 +1531,13 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 	default:
 		log.Warn("frame funnel: unrecognised provider; deliberation disabled",
 			"provider", provider, "frame", ef.Aspect.Name)
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	if model == "" {
 		log.Warn("frame funnel: no model configured in aspect.json; deliberation disabled",
 			"frame", ef.Aspect.Name)
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// F1.4b.4: wire the comms tool surface (Lock 3) and the
@@ -1654,7 +1662,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 	if err != nil {
 		log.Error("frame funnel: construction failed; deliberation disabled",
 			"err", err, "frame", ef.Aspect.Name)
-		return nil, nil
+		return nil, nil, nil
 	}
 	// Bind the lazy session-id closure used by the rewriter runner.
 	funnelPtr = f
@@ -1752,7 +1760,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 				}
 			}
 		},
-	}, gateway
+	}, gateway, f
 }
 
 // extractDoD parses a Definition of Done from message content.
@@ -1781,6 +1789,90 @@ func extractDoD(content, topic string) (ticketID, dod string) {
 		rest = rest[:nextH1]
 	}
 	return ticketID, strings.TrimSpace(rest)
+}
+
+// runQueueManager is the NEX-176 keel-as-queue-manager loop. It polls
+// the ledger for ready tickets and dispatches work to assignee aspects.
+// When a ticket has a Definition of Done, the queue manager injects a
+// synthetic work item into the Frame's funnel so the NEX-210 goal-loop
+// can drive multi-turn pursuit.
+func runQueueManager(ctx context.Context, f *funnel.Funnel, ledgerSvc *ledger.Service, sender *broker.Broker, frameName string, log *slog.Logger) {
+	const pollInterval = 30 * time.Second
+	// Track tickets we've already dispatched so we don't double-send.
+	active := make(map[string]bool)
+
+	t := time.NewTicker(pollInterval)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+
+		// ListReady returns tickets in "To Do" or "In Progress" status
+		// assigned to this Frame (directly or via team). The Frame's
+		// own name is used as the polling identity — the queue manager
+		// is the Frame acting as dispatcher.
+		refs, err := ledgerSvc.ListReady(ctx, frameName, nil)
+		if err != nil {
+			log.Warn("queue-manager: ledger ListReady failed", "err", err)
+			continue
+		}
+
+		seen := make(map[string]bool)
+		for _, ref := range refs {
+			seen[ref.Key] = true
+
+			if active[ref.Key] {
+				continue // already dispatched
+			}
+
+			// Fetch the full issue to get DefinitionOfDone + assignee.
+			issue, err := ledgerSvc.GetIssue(ctx, ref.Key)
+			if err != nil {
+				log.Warn("queue-manager: GetIssue failed", "err", err, "key", ref.Key)
+				continue
+			}
+			if issue.AssigneeAspect == "" {
+				continue // can't dispatch without an assignee
+			}
+			if strings.TrimSpace(issue.DefinitionOfDone) == "" {
+				continue // can't goal-pursue without a DoD
+			}
+
+			dispatchContent := fmt.Sprintf(
+				"@%s [TICKET %s] %s\n\nPriority: %s\nStatus: %s\n\nDefinition of Done:\n%s",
+				issue.AssigneeAspect, issue.Key, issue.Summary,
+				issue.Priority, issue.Status, issue.DefinitionOfDone,
+			)
+
+			// Send chat message to the assignee aspect so it picks
+			// up the work order through its own funnel. The message
+			// @-mentions the assignee and includes the ticket DoD,
+			// ready for the aspect's own goal-loop (if enabled).
+			if _, err := sender.HandleChatSend(ctx, frameName, dispatchContent, 0, issue.Key); err != nil {
+				log.Warn("queue-manager: chat send failed", "err", err, "key", issue.Key)
+				continue
+			}
+
+			active[ref.Key] = true
+			log.Info("queue-manager: dispatched ticket",
+				"key", issue.Key,
+				"assignee", issue.AssigneeAspect,
+				"priority", issue.Priority,
+			)
+		}
+
+		// Prune tracked tickets that are no longer in the ready pool.
+		for key := range active {
+			if !seen[key] {
+				delete(active, key)
+				log.Info("queue-manager: ticket left ready pool", "key", key)
+			}
+		}
+	}
 }
 
 func reaper(ctx context.Context, r *roster.Roster, b *broker.Broker, staleAfter, every time.Duration, log *slog.Logger) {
