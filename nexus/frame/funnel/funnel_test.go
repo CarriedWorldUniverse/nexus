@@ -378,6 +378,46 @@ func TestReceive_FIFOOneMessagePerDeliberate(t *testing.T) {
 	}
 }
 
+func TestMCPConfigPropagatesToProviderRequest(t *testing.T) {
+	// When Config.MCP is non-nil, it must flow through to
+	// bridle.ProviderRequest.MCP so the claude-code provider gate
+	// (skip --allowedTools when MCP is configured) fires.
+	prov := &scriptedProvider{}
+	harness := bridle.NewHarness(prov)
+
+	// Empty config is the marker pattern — non-nil pointer, no servers.
+	// The claude-code provider gate only checks req.MCP != nil.
+	mcpCfg := &bridle.MCPClientConfig{}
+
+	f, err := New(Config{
+		AspectID:     "test",
+		SystemPrompt: "s",
+		Harness:      harness,
+		Provider:     "scripted",
+		Model:        "m",
+		Runner:       noopRunner{},
+		MCP:          mcpCfg,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Push one inbox item so Deliberate actually runs a turn.
+	f.Receive(bridle.InboxItem{From: "operator", Content: "hello"})
+
+	_, err = f.Deliberate(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if prov.last.MCP == nil {
+		t.Fatal("MCP was nil in ProviderRequest; want non-nil")
+	}
+	if prov.last.MCP != mcpCfg {
+		t.Errorf("MCP pointer mismatch: config=%p request=%p", mcpCfg, prov.last.MCP)
+	}
+}
+
 func TestNewSessionID_UniqueAcrossCalls(t *testing.T) {
 	seen := map[string]struct{}{}
 	for i := 0; i < 100; i++ {
