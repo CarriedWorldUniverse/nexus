@@ -148,12 +148,32 @@ func main() {
 		wsURL = strings.TrimRight(wsURL, "/") + "/connect"
 	}
 
+	// TokenProvider re-validates the keyfile to get a fresh JWT.
+	// Wired as a closure so wsclient calls it before each dial
+	// attempt — expired tokens get replaced without process restart.
+	// Falls back to the existing token on error (network down,
+	// broker unreachable) so the aspect can still attempt to
+	// reconnect with the old token when the re-validate fails.
+	tokenProvider := func(ctx context.Context) (string, error) {
+		client := keyfile.NewClient()
+		fresh, ferr := client.Validate(ctx, kf)
+		if ferr != nil {
+			log.Warn("agentfunnel: TokenProvider re-validate failed, using cached token",
+				"err", ferr)
+			return "", ferr
+		}
+		log.Info("agentfunnel: TokenProvider refreshed JWT",
+			"expires", fresh.SessionExpiresAt.Format(time.RFC3339))
+		return fresh.SessionJWT, nil
+	}
+
 	var bridge *wsasp.Bridge
 	wsCfg := wsasp.Config{
-		URL:        wsURL,
-		AuthToken:  res.SessionJWT, // <- the JWT replaces NEXUS_TOKEN
-		AspectName: res.AspectName,
-		CursorFile: cursorFile,
+		URL:           wsURL,
+		AuthToken:     res.SessionJWT, // initial JWT; TokenProvider refreshes it
+		TokenProvider: tokenProvider,
+		AspectName:    res.AspectName,
+		CursorFile:    cursorFile,
 		OnDeliver: func(msg wsasp.DeliveredMessage) {
 			if bridge != nil {
 				bridge.OnDeliver(msg)
@@ -239,8 +259,8 @@ func main() {
 		// Tools field is for direct-API providers; claude-code subprocess
 		// owns its own tool surface natively. Mirrors cmd/nexus/main.go's
 		// toolsForProvider — see #181 for the MCP fix.
-		Tools:        toolsForProviderAgent(bridle.ProviderID(res.Provider)),
-		Runner:       funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		Tools:  toolsForProviderAgent(bridle.ProviderID(res.Provider)),
+		Runner: funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
 		// ChatGateway routes the model's auto-post FinalText through the
 		// same SendChat path CommsRunner uses for explicit send_chat tool
 		// calls. Required for claude-code (subprocess mode): without it,
@@ -272,19 +292,20 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// JWT pre-expiry monitor (v0.1 supervisor-restart model).
+	// JWT pre-expiry monitor — safety net only.
 	//
-	// Without this, the process zombies on JWT expiry: wsclient.Run
-	// treats every dial error (including 401 after the bearer goes
-	// stale) as transient and reconnects forever. The supervisor sees
-	// a live process and never restarts. Until Part 7 lands proper
-	// re-validate-without-restart, the only working strategy is to
-	// exit cleanly before expiry so the supervisor cycles us.
+	// The TokenProvider handles JWT refresh on every reconnect, so
+	// a stale bearer no longer causes permanent reconnect failure.
+	// This monitor catches the edge case where the connection stays
+	// up past JWT expiry (e.g. idle aspect with no disconnects):
+	// the next reconnect would fail if the TokenProvider path is
+	// unavailable (network down, broker unreachable). Exiting here
+	// lets the supervisor restart us with a fresh handshake.
 	//
-	// 5-minute lead time: tight enough to keep using the JWT for most
-	// of its hour, generous enough that we don't hit "expired in
-	// flight" mid-handshake on a slow network.
-	go jwtExpiryMonitor(ctx, res.SessionExpiresAt, 5*time.Minute, stop, log)
+	// 1-minute lead: generous enough not to hit "expired in flight"
+	// and short enough that the primary TokenProvider path carries
+	// all normal-ops reconnects.
+	go jwtExpiryMonitor(ctx, res.SessionExpiresAt, 1*time.Minute, stop, log)
 
 	go deliberateLoop(ctx, f, log)
 

@@ -38,6 +38,13 @@ type Config struct {
 	// AuthToken is the per-aspect bearer.
 	AuthToken string
 
+	// TokenProvider, when set, is called before each WS dial to
+	// obtain a fresh bearer token. Passed through to wsclient.Config.
+	// Callers with JWT-based auth should wire a closure that re-validates
+	// against the keyfile endpoint so that an expired token doesn't
+	// cause permanent reconnect failures.
+	TokenProvider func(ctx context.Context) (string, error)
+
 	// AspectName is the registered aspect id.
 	AspectName string
 
