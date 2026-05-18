@@ -175,6 +175,10 @@ func main() {
 		// the funnel package's ContextMode constants 1:1, so a direct
 		// cast carries it through.
 		ContextMode: funnel.ContextMode(cfg.ContextMode),
+		// MCP: non-nil enables MCP tool discovery via cmd.Dir/.mcp.json
+		// for claude-code subprocess. Marker-only -- actual MCP loading
+		// is via the subprocess's own .mcp.json discovery from AspectHome.
+		MCP: &bridle.MCPClientConfig{},
 		// Tools: bridle-side tool defs are for direct-API providers
 		// where bridle routes tool_use through ToolRunner. For
 		// claude-code (subprocess-stream), the CLI owns its tool

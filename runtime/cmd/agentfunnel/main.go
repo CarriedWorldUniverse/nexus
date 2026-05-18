@@ -221,6 +221,11 @@ func main() {
 		Provider:     bridle.ProviderID(res.Provider),
 		Model:        res.Model,
 		SystemPrompt: systemPrompt,
+		// MCP: non-nil enables MCP tool discovery via cmd.Dir/.mcp.json
+		// for claude-code subprocess. Marker-only -- actual MCP loading
+		// is via the subprocess's own .mcp.json discovery. Inert without
+		// NEX-170 (keel's lane: materialize MCPProfile from validate).
+		MCP: &bridle.MCPClientConfig{},
 		// ContextMode (#226.5): funnel-driven aspects key per-thread
 		// sessions on the chat thread root, so each chat thread keeps
 		// its own claude-code jsonl. schemas.ContextMode and
