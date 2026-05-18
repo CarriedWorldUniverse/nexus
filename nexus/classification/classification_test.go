@@ -42,3 +42,65 @@ func TestResolveModel_EmptyDefault(t *testing.T) {
 		t.Errorf("ResolveModel with empty default and no env = %q, want empty", got)
 	}
 }
+
+func TestParseVerdict_NeedsReview(t *testing.T) {
+	raw := `{"class": "needs-review", "reason": "touches auth middleware"}`
+	v, err := ParseVerdict(raw)
+	if err != nil {
+		t.Fatalf("ParseVerdict: %v", err)
+	}
+	if v.Class != ClassNeedsReview {
+		t.Errorf("Class = %q, want %q", v.Class, ClassNeedsReview)
+	}
+	if v.Reason != "touches auth middleware" {
+		t.Errorf("Reason = %q, want %q", v.Reason, "touches auth middleware")
+	}
+}
+
+func TestParseVerdict_Trivial(t *testing.T) {
+	raw := `{"class": "trivial", "reason": "whitespace only"}`
+	v, err := ParseVerdict(raw)
+	if err != nil {
+		t.Fatalf("ParseVerdict: %v", err)
+	}
+	if v.Class != ClassTrivial {
+		t.Errorf("Class = %q, want %q", v.Class, ClassTrivial)
+	}
+}
+
+func TestParseVerdict_Suspicious(t *testing.T) {
+	raw := `{"class": "suspicious", "reason": "large diff in credential code"}`
+	v, err := ParseVerdict(raw)
+	if err != nil {
+		t.Fatalf("ParseVerdict: %v", err)
+	}
+	if v.Class != ClassSuspicious {
+		t.Errorf("Class = %q, want %q", v.Class, ClassSuspicious)
+	}
+}
+
+func TestParseVerdict_CodeFence(t *testing.T) {
+	raw := "```json\n{\"class\": \"needs-review\", \"reason\": \"new endpoint\"}\n```"
+	v, err := ParseVerdict(raw)
+	if err != nil {
+		t.Fatalf("ParseVerdict: %v", err)
+	}
+	if v.Class != ClassNeedsReview {
+		t.Errorf("Class = %q, want %q", v.Class, ClassNeedsReview)
+	}
+}
+
+func TestParseVerdict_InvalidClass(t *testing.T) {
+	raw := `{"class": "fantastic", "reason": "not a real class"}`
+	_, err := ParseVerdict(raw)
+	if err == nil {
+		t.Fatal("expected error for invalid class, got nil")
+	}
+}
+
+func TestParseVerdict_NotJSON(t *testing.T) {
+	_, err := ParseVerdict("just some text, no JSON here")
+	if err == nil {
+		t.Fatal("expected error for non-JSON, got nil")
+	}
+}
