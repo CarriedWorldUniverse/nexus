@@ -43,7 +43,20 @@ type Config struct {
 	URL string
 
 	// AuthToken is sent as Authorization: Bearer on the upgrade.
+	// When TokenProvider is set, AuthToken is the fallback used if
+	// TokenProvider returns an error. In the common JWT case set
+	// AuthToken to the initial token and wire TokenProvider to return
+	// a fresh token on each reconnect.
 	AuthToken string
+
+	// TokenProvider, when set, is called before each dial attempt to
+	// obtain a fresh auth token. The returned string is used instead
+	// of Config.AuthToken for this dial. If TokenProvider returns an
+	// error, AuthToken is used as a fallback (retaining whatever was
+	// previously set). Callers with JWT-based auth should wire a
+	// TokenProvider that re-validates against the keyfile endpoint.
+	// When nil, AuthToken is used directly (backward compatible).
+	TokenProvider func(ctx context.Context) (string, error)
 
 	// Handler receives uncorrelated incoming frames. Required.
 	Handler Handler
@@ -146,6 +159,11 @@ func (c *Client) Events() <-chan ConnectEvent { return c.eventCh }
 // Run drives the dial+serve+reconnect loop. Blocks until ctx done.
 // Returns the first-connect error if FailFirstConnect is true and
 // the initial dial fails; otherwise always returns ctx.Err() on exit.
+//
+// Backoff: on dial failure (never connected), exponential backoff
+// applies. On read-loop failure (connection was established then
+// dropped), backoff resets to MinReconnectDelay — a sleep gap or
+// transient network flap shouldn't permanently accumulate delay.
 func (c *Client) Run(ctx context.Context) error {
 	first := true
 	backoff := c.cfg.MinReconnectDelay
@@ -155,7 +173,7 @@ func (c *Client) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		err := c.dialAndServe(ctx)
+		wasConnected, err := c.dialAndServe(ctx)
 		if err != nil && first && c.cfg.FailFirstConnect {
 			return fmt.Errorf("wsclient: initial connect failed: %w", err)
 		}
@@ -165,32 +183,51 @@ func (c *Client) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		c.log.Warn("wsclient reconnecting", "err", err, "delay", backoff)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-		}
+		if wasConnected {
+			// Connection was established then dropped naturally
+			// (readLoop error, ping timeout, broker close).
+			// Reset backoff — transient disconnects shouldn't
+			// accumulate delay across the process lifetime.
+			backoff = c.cfg.MinReconnectDelay
+		} else {
+			c.log.Warn("wsclient reconnecting", "err", err, "delay", backoff)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
 
-		// Exponential backoff, clamped.
-		backoff *= 2
-		if backoff > c.cfg.MaxReconnectDelay {
-			backoff = c.cfg.MaxReconnectDelay
+			// Exponential backoff on dial failure, clamped.
+			backoff *= 2
+			if backoff > c.cfg.MaxReconnectDelay {
+				backoff = c.cfg.MaxReconnectDelay
+			}
 		}
 	}
 }
 
 // dialAndServe opens one connection and runs its read loop until the
-// connection drops. Resets backoff on successful connection.
-func (c *Client) dialAndServe(ctx context.Context) error {
+// connection drops. Returns (true, err) when the connection was
+// established then dropped via readLoop; (false, err) when dial
+// failed and no connection was ever established.
+func (c *Client) dialAndServe(ctx context.Context) (bool, error) {
+	token := c.cfg.AuthToken
+	if c.cfg.TokenProvider != nil {
+		if fresh, ferr := c.cfg.TokenProvider(ctx); ferr == nil {
+			token = fresh
+		} else {
+			c.log.Warn("wsclient: TokenProvider failed, using existing token", "err", ferr)
+		}
+	}
+
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	conn, _, err := websocket.Dial(dialCtx, c.cfg.URL, &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": {"Bearer " + c.cfg.AuthToken}},
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + token}},
 	})
 	if err != nil {
-		return fmt.Errorf("dial: %w", err)
+		return false, fmt.Errorf("dial: %w", err)
 	}
 	conn.SetReadLimit(1 << 20) // match broker's 1 MiB cap
 
@@ -222,7 +259,7 @@ func (c *Client) dialAndServe(ctx context.Context) error {
 		c.emitEvent(ConnectEvent{Connected: false})
 	}()
 
-	return c.readLoop(ctx, conn)
+	return true, c.readLoop(ctx, conn)
 }
 
 // readLoop reads frames off conn and dispatches them to either a
