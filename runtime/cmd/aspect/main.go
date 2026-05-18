@@ -166,16 +166,22 @@ func main() {
 	commsRunner := funnel.CommsRunner{Gateway: gateway}
 
 	f, err := funnel.New(funnel.Config{
-		AspectID: cfg.Name,
-		Harness:  bridle.NewHarness(provider),
-		Provider: bridle.ProviderID(cfg.Provider),
-		Model:    model,
+		AspectID:   cfg.Name,
+		AspectHome: absHome,
+		Harness:    bridle.NewHarness(provider),
+		Provider:   bridle.ProviderID(cfg.Provider),
+		Model:      model,
 		// ContextMode (#226.5): sourced from aspect.json. Values match
 		// the funnel package's ContextMode constants 1:1, so a direct
 		// cast carries it through.
 		ContextMode: funnel.ContextMode(cfg.ContextMode),
-		Tools:       funnel.CommsToolDefs(),
-		Runner:      funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		// Tools: bridle-side tool defs are for direct-API providers
+		// where bridle routes tool_use through ToolRunner. For
+		// claude-code (subprocess-stream), the CLI owns its tool
+		// surface natively — passing CommsToolDefs() creates phantom
+		// tool names in --allowedTools that block MCP-discovered tools.
+		Tools:  toolsForProvider(bridle.ProviderID(cfg.Provider)),
+		Runner: funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
 		// NEX-96: persist the seen-msg-id set under aspect home so the
 		// idempotency guard survives aspect restart. Sits beside the
 		// wsasp cursor file under <home>/.
@@ -331,6 +337,18 @@ func pickModel(cfg schemas.AspectConfig) string {
 	default:
 		return ""
 	}
+}
+
+// toolsForProvider returns the bridle-side tool defs for the funnel.
+// Mirrors the broker's toolsForProvider in nexus/cmd/nexus/main.go:
+// nil for claude-code (subprocess owns its tool surface), CommsToolDefs
+// for direct-API providers (bridle routes tool_use through ToolRunner).
+func toolsForProvider(id bridle.ProviderID) []bridle.ToolDef {
+	switch id {
+	case "claude-code", "claudecode":
+		return nil
+	}
+	return funnel.CommsToolDefs()
 }
 
 func fail(log *slog.Logger, msg string, err error) {
