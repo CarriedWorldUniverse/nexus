@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -41,7 +42,7 @@ func TestMaterialiseMCP_WritesProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat .mcp.json: %v", err)
 	}
-	if fi.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0600 {
 		t.Errorf("permissions = %#o, want 0600", fi.Mode().Perm())
 	}
 }
