@@ -238,6 +238,13 @@ type ValidationResult struct {
 	Provider string
 	Model    string
 
+	// MCPProfile is the aspect's resolved MCP-server profile (NEX-169):
+	// the stored JSON blob from mcp_profiles.profile with every
+	// ${credential:NAME.field} placeholder substituted with the
+	// plaintext credential value. Empty when the Nexus has no
+	// credentials store wired or no profile is configured.
+	MCPProfile string
+
 	// NexusURL is the WS endpoint agentfunnel should dial. Drawn from
 	// the keyfile envelope, surfaced here for caller convenience.
 	NexusURL string
@@ -347,6 +354,7 @@ func (c *Client) Validate(ctx context.Context, kf *Keyfile) (*ValidationResult, 
 		CentralVersion:   resp.CentralVersion,
 		Provider:         resp.Provider,
 		Model:            resp.Model,
+		MCPProfile:       resp.MCPProfile,
 		NexusURL:         kf.Envelope.NexusURL,
 		NexusID:          kf.Envelope.NexusID,
 	}, nil
@@ -400,6 +408,10 @@ type validateResponse struct {
 	// composes from per-aspect content alone (legacy shape).
 	CentralNexusMD string `json:"central_nexus_md"`
 	CentralVersion int64  `json:"central_version"`
+
+	// NEX-169: resolved MCP profile. Empty when the Nexus doesn't have
+	// a credentials store wired or no profile is configured.
+	MCPProfile string `json:"mcp_profile"`
 }
 
 // postValidate POSTs the encrypted_payload and decodes the response.
