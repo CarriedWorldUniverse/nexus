@@ -44,6 +44,11 @@ import { TurnBlock } from '../components/TurnBlock.js';
 import { getOrCreateThread, peekThread, listOpenThreads } from '../models/threads.js';
 
 const HISTORY_CAP = 200;
+// Auto-scroll tolerance (NEX-167): if the operator is within this many
+// pixels of the bottom when a new frame arrives, pin the viewport to
+// the latest entry. Above that, treat them as reading history and leave
+// the scroll position alone.
+const NEAR_BOTTOM_PX = 50;
 
 function aspectFromHash() {
   const hash = window.location.hash;
@@ -87,6 +92,15 @@ export function ObserveView() {
   // threadFilter — when non-zero, only frames whose thread-root matches
   // are rendered. 0 means "show everything" (default).
   const [threadFilter, setThreadFilter] = useState(0);
+  // Auto-scroll bookkeeping. The stream div is the scrollable element;
+  // `wasNearBottom` records the operator's anchor BEFORE each render via
+  // a passive scroll listener. After a frames update, the post-render
+  // effect consults this ref to decide whether to pin to bottom. If the
+  // operator has scrolled up to read history, ref is false and we leave
+  // the viewport alone. NEAR_BOTTOM_PX matches the NEX-167 acceptance
+  // tolerance.
+  const streamRef = useRef(null);
+  const wasNearBottom = useRef(true); // default: pin on first paint
   // filterInput — controlled value for the filter text box. Decoupled
   // from threadFilter so the operator can type freely and we only
   // commit on Enter / blur. Avoids re-filtering on every keystroke.
@@ -159,6 +173,44 @@ export function ObserveView() {
       off();
     };
   }, [aspect]);
+
+  // Scroll-listener: refresh wasNearBottom on every operator scroll. We
+  // sample on scroll rather than per-render because the post-render
+  // effect runs AFTER scrollHeight has already grown with the new frame
+  // — too late to tell whether the operator was anchored at the bottom
+  // beforehand. Passive listener so it doesn't fight smooth scrolling.
+  useEffect(() => {
+    const el = streamRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      wasNearBottom.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
+    };
+    // Seed once so the first frame after mount pins correctly even
+    // before any scroll event has fired.
+    onScroll();
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [aspect]); // re-bind after aspect switch wipes frames + remounts
+
+  // Auto-scroll on new frame: if the operator was at/near the bottom
+  // before this render, pin to the latest entry. Otherwise leave the
+  // viewport untouched so they can keep reading scrollback. Aspect
+  // switch resets frames to [] and re-mounts the stream — we pin in
+  // that case too, since "switched aspect" reads as a deliberate jump
+  // to the live edge.
+  useEffect(() => {
+    const el = streamRef.current;
+    if (!el) return;
+    if (!wasNearBottom.current) return;
+    // requestAnimationFrame so any in-flight layout settles before we
+    // measure scrollHeight — matches the pattern Chat.js uses for its
+    // own near-bottom pin.
+    requestAnimationFrame(() => {
+      if (!el.isConnected) return;
+      el.scrollTop = el.scrollHeight;
+    });
+  }, [frames, threadFilter]);
 
   function selectAspect(id) {
     setAspectState(id);
@@ -283,7 +335,7 @@ export function ObserveView() {
           >clear</button>
         ` : null}
       </div>
-      <div class="observe-stream">
+      <div class="observe-stream" ref=${streamRef}>
         ${visibleFrames.length === 0
           ? html`<div class="observe-empty">${
               threadFilter > 0
