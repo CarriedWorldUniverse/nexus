@@ -247,3 +247,73 @@ func TestGoalLoop_LegacyFilterDerivesClass(t *testing.T) {
 		t.Errorf("expected Reason=complete, got %q", result.Reason)
 	}
 }
+
+func TestGoalLoop_ThreadRootFlowsToContinuation(t *testing.T) {
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{FinalText: "still working", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
+	}}
+	f, _ := newTestFunnel(t, bridle.ProviderResult{})
+	f.cfg.Harness = bridle.NewHarness(prov)
+	f.cfg.Filter = scriptedFilter{FilterDecision{
+		ShouldPost: true,
+		Class:      FilterClassGoalNotMet,
+		Reason:     "more work needed",
+	}}
+	f.Receive(bridle.InboxItem{From: "operator", Content: "do the thing", MsgID: 1})
+
+	const threadRoot int64 = 42
+	gl := NewGoalLoop(f, GoalConfig{
+		TicketID:   "NEX-225",
+		DoD:        "Test thread root propagation",
+		ThreadRoot: threadRoot,
+	})
+	result, err := gl.Pursue(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Done {
+		t.Errorf("expected Done=false on goal_not_met, got %+v", result)
+	}
+
+	if f.InboxLen() == 0 {
+		t.Fatal("expected a continuation inbox item to be enqueued")
+	}
+	item := f.inbox[len(f.inbox)-1]
+	if item.ThreadRoot != threadRoot {
+		t.Errorf("expected ThreadRoot=%d on continuation item, got %d", threadRoot, item.ThreadRoot)
+	}
+}
+
+func TestGoalLoop_ZeroThreadRootDefault(t *testing.T) {
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{FinalText: "still working", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
+	}}
+	f, _ := newTestFunnel(t, bridle.ProviderResult{})
+	f.cfg.Harness = bridle.NewHarness(prov)
+	f.cfg.Filter = scriptedFilter{FilterDecision{
+		ShouldPost: true,
+		Class:      FilterClassGoalNotMet,
+		Reason:     "more work needed",
+	}}
+	f.Receive(bridle.InboxItem{From: "operator", Content: "do the thing", MsgID: 1})
+
+	gl := NewGoalLoop(f, GoalConfig{
+		TicketID: "NEX-225",
+		DoD:      "Test zero ThreadRoot regression",
+	})
+	result, err := gl.Pursue(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Done {
+		t.Errorf("expected Done=false on goal_not_met, got %+v", result)
+	}
+
+	if f.InboxLen() == 0 {
+		t.Fatal("expected a continuation inbox item to be enqueued")
+	}
+	item := f.inbox[len(f.inbox)-1]
+	if item.ThreadRoot != 0 {
+		t.Errorf("expected ThreadRoot=0 on continuation item (ContextGlobal default), got %d", item.ThreadRoot)
+	}
+}

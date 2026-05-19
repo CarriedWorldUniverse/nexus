@@ -1724,11 +1724,9 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 			if dod != "" {
 				ticketID := resolveTicketID(rctx, topic, ledgerSvc, log)
 				gl := funnel.NewGoalLoop(f, funnel.GoalConfig{
-					TicketID: ticketID,
-					DoD:      dod,
-					// ThreadRoot zero — the Frame runs ContextGlobal,
-					// so per-thread session isolation is inactive.
-					// NEX-176 will populate this from the ticket.
+					TicketID:   ticketID,
+					DoD:        dod,
+					ThreadRoot: msgID,
 				})
 				for {
 					result, err := gl.Pursue(rctx)
