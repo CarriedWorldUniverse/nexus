@@ -322,7 +322,27 @@ func main() {
 	// exists. Until then any emit is a silent drop — safe because no
 	// turns can run before the broker is up.
 	obsHub := observability.NewHub(500, nil)
-	chatRouter, frameGateway, frameFunnel := buildChatRouter(ctx, embeddedFrame, r, chatStore, triageStore, usage.NewSQLStore(db), knowledgeStore, obsHub, credentialStore, logger)
+
+	// NEX-144: bring up the ledger issue-tracker service alongside the
+	// broker. ledger.db lives parallel to broker's nexus.db in the
+	// resolved data directory; the broker mounts /healthz/ledger on its
+	// HTTPS listener via the HTTPRegistrar hook below.
+	resolvedDataDir := filepath.Dir(storage.ResolvePath(*dataDir))
+	ledgerSvc, err := ledger.New(ctx, ledger.Config{
+		DBPath: filepath.Join(resolvedDataDir, "ledger.db"),
+	})
+	if err != nil {
+		logger.Error("ledger service init failed", "err", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := ledgerSvc.Close(); err != nil {
+			logger.Warn("ledger close", "err", err)
+		}
+	}()
+	logger.Info("ledger service initialised", "db", filepath.Join(resolvedDataDir, "ledger.db"))
+
+	chatRouter, frameGateway, frameFunnel := buildChatRouter(ctx, embeddedFrame, r, chatStore, triageStore, usage.NewSQLStore(db), knowledgeStore, obsHub, credentialStore, logger, ledgerSvc)
 
 	// Adapter: handqueue.AspectTokenResolver / autospawn.AspectTokenResolver
 	// over the broker's TokenStore. TokenForAgent returns "" on miss; we
@@ -462,26 +482,6 @@ func main() {
 	// the register handler can override payload.Home (closes the
 	// cmd.Dir control vector for stolen aspect tokens).
 	aspectHomes := discoverAspectHomes(*aspectDir, logger)
-
-	// NEX-144: bring up the ledger issue-tracker service alongside the
-	// broker. ledger.db lives parallel to broker's nexus.db in the
-	// resolved data directory; the broker mounts /healthz/ledger on its
-	// HTTPS listener via the HTTPRegistrar hook below. Phase 0 ships
-	// healthz only; Phase 1 will widen the registrar to /api/ledger/*.
-	resolvedDataDir := filepath.Dir(storage.ResolvePath(*dataDir))
-	ledgerSvc, err := ledger.New(ctx, ledger.Config{
-		DBPath: filepath.Join(resolvedDataDir, "ledger.db"),
-	})
-	if err != nil {
-		logger.Error("ledger service init failed", "err", err)
-		os.Exit(1)
-	}
-	defer func() {
-		if err := ledgerSvc.Close(); err != nil {
-			logger.Warn("ledger close", "err", err)
-		}
-	}()
-	logger.Info("ledger service initialised", "db", filepath.Join(resolvedDataDir, "ledger.db"))
 
 	b := broker.New(broker.Config{
 		Addr:               *addr,
@@ -1504,7 +1504,7 @@ func buildRewriterRunner(cfg schemas.AspectConfig, aspectCwd string, frameProvid
 // to the broker after broker.New so in-process Frame posts go through
 // Broker.HandleChatSend (the unified chat-send path). When ef is nil
 // both returns are nil.
-func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.Roster, store chat.Store, triageStore chat.TriageStore, usageStore *usage.SQLStore, knowledgeStore *knowledge.Store, obsHub *observability.Hub, credentialStore *credentials.Store, log *slog.Logger) (*broker.ChatRouterCallbacks, *framecomms.Gateway, *funnel.Funnel) {
+func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.Roster, store chat.Store, triageStore chat.TriageStore, usageStore *usage.SQLStore, knowledgeStore *knowledge.Store, obsHub *observability.Hub, credentialStore *credentials.Store, log *slog.Logger, ledgerSvc *ledger.Service) (*broker.ChatRouterCallbacks, *framecomms.Gateway, *funnel.Funnel) {
 	if ef == nil {
 		return nil, nil, nil
 	}
@@ -1720,8 +1720,9 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 			// NEX-210: when a Definition of Done is present, wrap
 			// deliberation with the goal-loop so the post-turn judge
 			// can drive multi-turn pursuit toward DoD completion.
-			ticketID, dod := extractDoD(content, topic)
+			dod := extractDoD(content)
 			if dod != "" {
+				ticketID := resolveTicketID(rctx, topic, ledgerSvc, log)
 				gl := funnel.NewGoalLoop(f, funnel.GoalConfig{
 					TicketID: ticketID,
 					DoD:      dod,
@@ -1767,19 +1768,11 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 // Recognises "Definition of Done:" (with optional leading "## ") as a
 // section marker; returns the text from the marker to the next markdown
 // header or end of content. Returns an empty dod when no marker is found.
-//
-// ticketID defaults to topic; when topic is empty it falls back to
-// "unknown". NEX-176 (queue manager) will replace this heuristic with a
-// proper ledger ticket lookup.
-func extractDoD(content, topic string) (ticketID, dod string) {
-	ticketID = topic
-	if ticketID == "" {
-		ticketID = "unknown"
-	}
+func extractDoD(content string) (dod string) {
 	const marker = "Definition of Done"
 	idx := strings.Index(content, marker)
 	if idx < 0 {
-		return ticketID, ""
+		return ""
 	}
 	rest := content[idx+len(marker):]
 	rest = strings.TrimLeft(rest, ":\n\r\t ")
@@ -1788,7 +1781,55 @@ func extractDoD(content, topic string) (ticketID, dod string) {
 	} else if nextH1 := strings.Index(rest, "\n# "); nextH1 >= 0 {
 		rest = rest[:nextH1]
 	}
-	return ticketID, strings.TrimSpace(rest)
+	return strings.TrimSpace(rest)
+}
+
+// resolveTicketID determines the ledger ticket key for an inbound chat
+// message. When the topic matches a PROJECT-NNN pattern (e.g. NEX-226) it
+// verifies the key exists in the ledger. Otherwise it falls back to
+// "unknown" and logs a warning. The queue manager (runQueueManager) is the
+// authoritative source; this function is the best-effort fallback for
+// chat-routed messages that arrive without queue-manager dispatch context.
+func resolveTicketID(ctx context.Context, topic string, ledgerSvc *ledger.Service, log *slog.Logger) string {
+	if topic == "" {
+		log.Warn("frame: ticket ID not available; topic is empty, using 'unknown'")
+		return "unknown"
+	}
+	if isTicketKey(topic) {
+		if ledgerSvc == nil {
+			log.Warn("frame: ticket ID not available; ledger service not available for lookup, using 'unknown'", "topic", topic)
+			return "unknown"
+		}
+		if _, err := ledgerSvc.GetIssue(ctx, topic); err == nil {
+			return topic
+		}
+		log.Warn("frame: ticket ID not available; topic matches ticket key pattern but not found in ledger, using 'unknown'", "topic", topic)
+		return "unknown"
+	}
+	log.Warn("frame: ticket ID not available; topic does not match a ticket key pattern, using 'unknown'", "topic", topic)
+	return "unknown"
+}
+
+// isTicketKey reports whether s matches a PROJECT-NNN shape (e.g. NEX-226).
+func isTicketKey(s string) bool {
+	if len(s) < 4 {
+		return false
+	}
+	dash := strings.IndexByte(s, '-')
+	if dash < 1 || dash >= len(s)-1 {
+		return false
+	}
+	for _, c := range s[:dash] {
+		if c < 'A' || c > 'Z' {
+			return false
+		}
+	}
+	for _, c := range s[dash+1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // runQueueManager is the NEX-176 keel-as-queue-manager loop. It polls
