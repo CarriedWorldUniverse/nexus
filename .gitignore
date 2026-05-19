@@ -48,3 +48,12 @@ nexus-imap-mcp
 nexus-jira-mcp
 .worktree/
 /site/
+
+# Bare-named Go build outputs at repo root (no .exe extension on Unix)
+/agentfunnel
+/aspect
+/nexus
+
+# Skill artifacts (writing-plans, brainstorming, etc.) live in shadow's
+# working tree, not in this repo. Defensive ignore in case they leak.
+docs/superpowers/
