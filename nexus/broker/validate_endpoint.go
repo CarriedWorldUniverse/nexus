@@ -112,7 +112,7 @@ type validateResponse struct {
 	// unknown field) is fatal: identity is verified but the response
 	// is unusable, so the handler returns 500 rather than emit a
 	// half-resolved profile.
-	MCPProfile string `json:"mcp_profile"`
+	MCPProfile string `json:"mcp_profile,omitempty"`
 }
 
 // personalityWire is the on-the-wire shape of the personality bundle.
