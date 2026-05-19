@@ -1848,13 +1848,41 @@ func runQueueManager(ctx context.Context, f *funnel.Funnel, ledgerSvc *ledger.Se
 				issue.Priority, issue.Status, issue.DefinitionOfDone,
 			)
 
-			// Send chat message to the assignee aspect so it picks
-			// up the work order through its own funnel. The message
-			// @-mentions the assignee and includes the ticket DoD,
-			// ready for the aspect's own goal-loop (if enabled).
-			if _, err := sender.HandleChatSend(ctx, frameName, dispatchContent, 0, issue.Key); err != nil {
-				log.Warn("queue-manager: chat send failed", "err", err, "key", issue.Key)
-				continue
+			// Self-assigned tickets: inject directly into the Frame's
+			// own funnel and drive via goal-loop. Chat-send would
+			// route from frameName → RouteChat, and RouteChat skips
+			// messages where from==frameName, so the Frame would
+			// never process its own tickets through chat.
+			if issue.AssigneeAspect == frameName {
+				f.Receive(bridle.InboxItem{
+					From:    frameName + " (queue-manager)",
+					Content: dispatchContent,
+				})
+				gl := funnel.NewGoalLoop(f, funnel.GoalConfig{
+					TicketID: issue.Key,
+					DoD:      issue.DefinitionOfDone,
+				})
+				for {
+					result, err := gl.Pursue(ctx)
+					if err != nil {
+						log.Warn("queue-manager: goal-loop error", "err", err, "key", issue.Key)
+						break
+					}
+					if result.Done || result.Blocked {
+						log.Info("queue-manager: goal-loop complete",
+							"key", issue.Key, "turns", result.TurnsRun,
+							"reason", result.Reason)
+						break
+					}
+				}
+			} else {
+				// Remote aspect: send via chat. The assignee's WS
+				// funnel picks it up; @-mention + DoD section
+				// triggers the aspect's own goal-loop.
+				if _, err := sender.HandleChatSend(ctx, frameName, dispatchContent, 0, issue.Key); err != nil {
+					log.Warn("queue-manager: chat send failed", "err", err, "key", issue.Key)
+					continue
+				}
 			}
 
 			active[ref.Key] = true
