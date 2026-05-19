@@ -125,6 +125,7 @@ func fakeNexusServer(t *testing.T, opts fakeServerOpts) *httptest.Server {
 			"model":            "claude-opus-4-7",
 			"central_nexus_md": opts.centralNexusMD,
 			"central_version":  opts.centralVersion,
+			"mcp_profile":      opts.mcpProfile,
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -141,6 +142,7 @@ type fakeServerOpts struct {
 	expiresAt      string // session_expires_at to return (RFC3339)
 	centralNexusMD string // Part 9 central content (zero-valued = legacy shape)
 	centralVersion int64  // Part 9 central version
+	mcpProfile     string // NEX-169 resolved MCP profile
 }
 
 // TestValidate_HappyPath — end-to-end against a fake Nexus that mirrors
@@ -408,5 +410,57 @@ func TestJwtSub(t *testing.T) {
 	emptySub := enc([]byte(`{"alg":"HS256"}`)) + "." + enc([]byte(`{"sub":""}`)) + "." + enc([]byte("sig"))
 	if _, err := jwtSub(emptySub); err == nil {
 		t.Error("jwtSub empty sub: want error")
+	}
+}
+
+// TestValidate_MCPProfile_RoundTrip — when the Nexus emits mcp_profile on
+// the wire, ValidationResult surfaces it. Confirms end-to-end plumbing
+// from the wire response through Validate() into ValidationResult (NEX-169).
+func TestValidate_MCPProfile_RoundTrip(t *testing.T) {
+	const resolvedProfile = `{"mcpServers":{"github":{"command":"node","env":{"TOKEN":"ghp-secret-token"}}}}`
+	srv := fakeNexusServer(t, fakeServerOpts{
+		nexusID:    "matching-id",
+		jwt:        fakeJWT(t, "plumb"),
+		expiresAt:  "2026-05-08T11:00:00Z",
+		mcpProfile: resolvedProfile,
+	})
+	kf := &Keyfile{
+		Version: 1, Format: expectedFormat,
+		Envelope:         Envelope{NexusURL: srv.URL + "/connect", NexusID: "matching-id"},
+		EncryptedPayload: "AAAA",
+	}
+	c := &Client{HTTP: srv.Client()}
+	res, err := c.Validate(context.Background(), kf)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.MCPProfile != resolvedProfile {
+		t.Errorf("MCPProfile = %q; want %q", res.MCPProfile, resolvedProfile)
+	}
+}
+
+// TestValidate_MCPProfile_EmptyWhenAbsent — when the Nexus doesn't emit
+// mcp_profile (legacy Nexus or no credentials store wired), the field is
+// empty string. Backward-compatible: existing clients that ignore the field
+// keep working.
+func TestValidate_MCPProfile_EmptyWhenAbsent(t *testing.T) {
+	srv := fakeNexusServer(t, fakeServerOpts{
+		nexusID:   "matching-id",
+		jwt:       fakeJWT(t, "plumb"),
+		expiresAt: "2026-05-08T11:00:00Z",
+		// mcpProfile not set — legacy shape
+	})
+	kf := &Keyfile{
+		Version: 1, Format: expectedFormat,
+		Envelope:         Envelope{NexusURL: srv.URL + "/connect", NexusID: "matching-id"},
+		EncryptedPayload: "AAAA",
+	}
+	c := &Client{HTTP: srv.Client()}
+	res, err := c.Validate(context.Background(), kf)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.MCPProfile != "" {
+		t.Errorf("MCPProfile = %q; want empty (legacy Nexus)", res.MCPProfile)
 	}
 }

@@ -128,6 +128,15 @@ func main() {
 		"personality_version", res.Personality.Version,
 		"jwt_expires", res.SessionExpiresAt.Format(time.RFC3339))
 
+	// 2.5 Materialise MCP profile (NEX-170). Must happen before
+	// the claude-code subprocess spawns so .mcp.json is on disk
+	// and auto-discovered from cwd. Atomic write — never leaves
+	// a partial file. No-op when the profile is empty.
+	cwd, _ := os.Getwd()
+	if err := materialiseMCP(cwd, res.MCPProfile, log); err != nil {
+		fail(log, "materialise .mcp.json", err)
+	}
+
 	// 3. Build provider.
 	provider, err := buildProvider(res.Provider, *claudePath)
 	if err != nil {
@@ -242,9 +251,8 @@ func main() {
 		Model:        res.Model,
 		SystemPrompt: systemPrompt,
 		// MCP: non-nil enables MCP tool discovery via cmd.Dir/.mcp.json
-		// for claude-code subprocess. Marker-only -- actual MCP loading
-		// is via the subprocess's own .mcp.json discovery. Inert without
-		// NEX-170 (keel's lane: materialize MCPProfile from validate).
+		// for claude-code subprocess. .mcp.json is materialised from the
+		// validate response by materialiseMCP (NEX-170) before funnel init.
 		MCP: &bridle.MCPClientConfig{},
 		// ContextMode (#226.5): funnel-driven aspects key per-thread
 		// sessions on the chat thread root, so each chat thread keeps
