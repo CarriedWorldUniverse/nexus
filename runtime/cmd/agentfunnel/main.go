@@ -276,6 +276,7 @@ func main() {
 		// to call. Mirrors cmd/nexus/main.go's Frame funnel wiring.
 		ChatGateway:       gateway,
 		StreamTextToChat:  true, // NEX-240: stream text blocks to chat as they arrive
+		AspectHome:        cwd,  // NEX-241: stderr log + session isolation anchor
 		Filter:            outputFilter,
 		PostTurn:          postTurn,
 		ObservabilityHook: obsHook,
