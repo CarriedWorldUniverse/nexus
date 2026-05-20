@@ -6,6 +6,8 @@ github.com/CarriedWorldUniverse/bridle v0.1.1-0.20260519202935-5c714ee59941 h1:z
 github.com/CarriedWorldUniverse/bridle v0.1.1-0.20260519202935-5c714ee59941/go.mod h1:nEWWic3aiWRjyUzmjdafUtqXoqS9f92KuUuuKpT5NYE=
 github.com/CarriedWorldUniverse/bridle v0.1.1 h1:tb+qxm7vwi4acWXYE0KJFrjZ+wBpLQcALlr90Hh9fFs=
 github.com/CarriedWorldUniverse/bridle v0.1.1/go.mod h1:nEWWic3aiWRjyUzmjdafUtqXoqS9f92KuUuuKpT5NYE=
+github.com/CarriedWorldUniverse/bridle v0.1.2-0.20260520224953-3a7ff6e91c3f h1:hwtZ+zdVp2+2VijWTUaL9RznkfeuZ7qGVHtn/mV/66U=
+github.com/CarriedWorldUniverse/bridle v0.1.2-0.20260520224953-3a7ff6e91c3f/go.mod h1:nEWWic3aiWRjyUzmjdafUtqXoqS9f92KuUuuKpT5NYE=
 github.com/CarriedWorldUniverse/casket-go v0.1.0 h1:t+DvXs8vhaNcTfkSS/sqK47fBTNVRdHfF7DT/ur0jtY=
 github.com/CarriedWorldUniverse/casket-go v0.1.0/go.mod h1:v0y8kPW/WmusBw+Q3ZtRYhVwoK/WVVVXHWSc/oRVWBo=
 github.com/CarriedWorldUniverse/ledger v0.0.2 h1:RpfTw6jWGDk4/vDZAcN52BeZg143ce4pxnecSGbfN6k=
