@@ -57,3 +57,4 @@ nexus-jira-mcp
 # Skill artifacts (writing-plans, brainstorming, etc.) live in shadow's
 # working tree, not in this repo. Defensive ignore in case they leak.
 docs/superpowers/
+.worktrees/
