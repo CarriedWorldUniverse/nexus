@@ -428,3 +428,75 @@ func TestNewSessionID_UniqueAcrossCalls(t *testing.T) {
 		seen[id] = struct{}{}
 	}
 }
+
+// partialThenErrorProvider returns text + a dummy tool call on invocation 1,
+// then errors on invocation 2. This simulates a multi-step harness turn where
+// the first provider call produces text and the second fails — the harness
+// accumulates the text from step 1 and returns it alongside the error from
+// step 2. The funnel should surface that partial text via Return.Handle
+// rather than dropping it (NEX-239).
+type partialThenErrorProvider struct {
+	calls int
+}
+
+func (p *partialThenErrorProvider) Name() bridle.ProviderID { return "partial-then-error" }
+
+func (p *partialThenErrorProvider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{Category: bridle.CategoryDirectAPI, SupportsCustomTools: true}
+}
+
+func (p *partialThenErrorProvider) RunTurn(_ context.Context, _ bridle.ProviderRequest, _ bridle.EventSink) (bridle.ProviderResult, error) {
+	p.calls++
+	if p.calls == 1 {
+		return bridle.ProviderResult{
+			FinalText: "partial analysis from dying subprocess",
+			ToolCalls: []bridle.ToolInvocation{{ID: "t1", Name: "noop", Args: json.RawMessage(`{}`)}},
+		}, nil
+	}
+	return bridle.ProviderResult{}, errors.New("claude-code: subprocess exited 1")
+}
+
+func TestDeliberate_ErrorPath_SurfacesPartialText(t *testing.T) {
+	prov := &partialThenErrorProvider{}
+	rr := &recordingReturnHandler{}
+
+	f, err := New(Config{
+		AspectID: "test",
+		Harness:  bridle.NewHarness(prov),
+		Provider: "partial-then-error",
+		Model:    "test-model",
+		Runner:   noopRunner{},
+		Return:   rr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.Receive(bridle.InboxItem{MsgID: 4242, From: "operator", Content: "diagnose this"})
+
+	_, err = f.Deliberate(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error from Deliberate, got nil")
+	}
+
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+
+	if len(rr.handles) == 0 {
+		t.Fatal("Return.Handle was not called on error path — partial text was dropped")
+	}
+
+	h := rr.handles[0]
+	if !h.Result.Filter.ShouldPost {
+		t.Error("partial result should have ShouldPost=true so text surfaces")
+	}
+	if h.Result.TurnResult.FinalText != "partial analysis from dying subprocess" {
+		t.Errorf("FinalText = %q, want %q", h.Result.TurnResult.FinalText, "partial analysis from dying subprocess")
+	}
+	if h.Trigger.MsgID != 4242 {
+		t.Errorf("trigger MsgID = %d, want 4242", h.Trigger.MsgID)
+	}
+	if h.Trigger.From != "operator" {
+		t.Errorf("trigger From = %q, want operator", h.Trigger.From)
+	}
+}

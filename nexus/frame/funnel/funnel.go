@@ -929,6 +929,25 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		// is the right place to look if attribution numbers ever
 		// disagree with the provider's billing.
 		//
+		// Surface partial assistant text before cleanup (NEX-239).
+		// When the provider exits non-zero after producing text blocks
+		// (claude-code exit-1, stream timeout), the partial result is
+		// recoverable and should reach chat. Skip the filter judge —
+		// partial results default to ShouldPost so the text surfaces
+		// rather than being silently dropped.
+		if result.FinalText != "" {
+			partial := DeliberateResult{
+				TurnResult: result,
+				Filter:     FilterDecision{ShouldPost: true},
+			}
+			if hErr := f.cfg.Return.Handle(ctx, partial, trigger); hErr != nil {
+				f.log.Debug("funnel: partial-result Handle failed",
+					"aspect", f.cfg.AspectID,
+					"trigger_msg_id", trigger.MsgID,
+					"err", hErr)
+			}
+		}
+
 		// Flip the resolver's "known" set for this session id even on
 		// error. The provider may have written the underlying session
 		// jsonl (claudecode does this once `--session-id` is accepted,
