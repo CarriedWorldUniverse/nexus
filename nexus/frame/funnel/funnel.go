@@ -272,6 +272,14 @@ type Config struct {
 	// owns its own posting surface.
 	ChatGateway ChatGateway
 
+	// StreamTextToChat, when true, posts each assistant text block to
+	// chat as it streams from the provider rather than buffering and
+	// posting once at turn-end. Gives the operator live visibility into
+	// a turn's progress. Tool-use events stay on the activity feed.
+	// When enabled, the auto-post in NexusChatReturnHandler is
+	// suppressed (text was already streamed). Requires ChatGateway.
+	StreamTextToChat bool
+
 	// Return is the post-deliberation routing seam (NEX-82). The
 	// engine calls Return.OnTurnStart at turn pickup and Return.Handle
 	// at turn end. Implementations decide what to do with the result
@@ -532,9 +540,10 @@ func New(cfg Config) (*Funnel, error) {
 	if cfg.Return == nil {
 		if cfg.ChatGateway != nil {
 			cfg.Return = &NexusChatReturnHandler{
-				Gateway:  cfg.ChatGateway,
-				AspectID: cfg.AspectID,
-				Logger:   cfg.Logger,
+				Gateway:          cfg.ChatGateway,
+				AspectID:         cfg.AspectID,
+				Logger:           cfg.Logger,
+				SuppressAutoPost: cfg.StreamTextToChat,
 			}
 		} else {
 			cfg.Return = NoopReturnHandler{}
@@ -861,6 +870,16 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		f.cfg.ObservabilityHook.BeginTurn(turnID, "main", f.cfg.Model, string(f.cfg.Provider), triggerMsgID)
 	}
 	sink := turnSink(f.cfg.ObservabilityHook)
+	// When streaming text to chat, prepend a streamingChatSink so each
+	// ModelChunk posts to chat before the observability hook sees it.
+	if f.cfg.StreamTextToChat && f.cfg.ChatGateway != nil {
+		streamSink := &streamingChatSink{
+			gateway:  f.cfg.ChatGateway,
+			replyTo:  trigger.MsgID,
+			aspectID: f.cfg.AspectID,
+		}
+		sink = multiSink{streamSink, sink}
+	}
 	// Tag the context with the turn_id so the triage tool runner
 	// persists rows under the right turn. Required when Triage is
 	// wired; harmless otherwise.

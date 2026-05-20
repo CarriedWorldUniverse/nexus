@@ -38,6 +38,12 @@ type NexusChatReturnHandler struct {
 	// the inline-Deliberate behavior which always had a logger
 	// available.
 	Logger *slog.Logger
+
+	// SuppressAutoPost skips the final auto-post in Handle (text was
+	// already streamed to chat during the turn via streamingChatSink).
+	// Emoji resolution still fires — the turn lifecycle signals remain
+	// intact. Set by the funnel when Config.StreamTextToChat is true.
+	SuppressAutoPost bool
 }
 
 // Verify NexusChatReturnHandler satisfies the interface at compile time.
@@ -106,7 +112,9 @@ func (h *NexusChatReturnHandler) Handle(ctx context.Context, result DeliberateRe
 	}
 
 	// Auto-post the model's natural reply when filter approves.
-	if result.Filter.ShouldPost {
+	// Skip when text was already streamed to chat during the turn —
+	// posting FinalText again would duplicate the last block.
+	if result.Filter.ShouldPost && !h.SuppressAutoPost {
 		text := strings.TrimSpace(result.TurnResult.FinalText)
 		if text != "" {
 			if msgID, err := h.Gateway.SendChat(ctx, text, trigger.MsgID, ""); err != nil {

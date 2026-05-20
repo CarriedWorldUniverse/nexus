@@ -275,6 +275,7 @@ func main() {
 		// model output evaporates because the CLI has no MCP-loaded tools
 		// to call. Mirrors cmd/nexus/main.go's Frame funnel wiring.
 		ChatGateway:       gateway,
+		StreamTextToChat:  true, // NEX-240: stream text blocks to chat as they arrive
 		Filter:            outputFilter,
 		PostTurn:          postTurn,
 		ObservabilityHook: obsHook,
