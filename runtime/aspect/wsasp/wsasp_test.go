@@ -1,10 +1,13 @@
 package wsasp
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
+	"unsafe"
 )
 
 // Cursor persistence is the load-bearing Lock 6 invariant on the
@@ -143,3 +146,47 @@ func TestCursorFileForAspect(t *testing.T) {
 }
 
 func noopDeliver(_ DeliveredMessage) {}
+
+// Regression for NEX-237: NewClient must forward Config.TokenProvider into
+// the underlying wsclient.Config. Prior to the fix the field was silently
+// dropped, which meant aspects wired with a JWT-refresh closure would dial
+// with the stale initial token forever and never recover from token expiry.
+func TestNewClient_ForwardsTokenProviderToWSClient(t *testing.T) {
+	called := false
+	provider := func(_ context.Context) (string, error) {
+		called = true
+		return "fresh-token", nil
+	}
+
+	c, err := NewClient(Config{
+		URL:           "wss://example/connect",
+		AspectName:    "anvil",
+		OnDeliver:     noopDeliver,
+		TokenProvider: provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// wsclient.Client.cfg is unexported across packages; reach in via
+	// reflection + unsafe so we can both check it's set and invoke it.
+	// The test is a regression guard, not a public-API user.
+	wsCfg := reflect.ValueOf(c.ws).Elem().FieldByName("cfg")
+	tpField := wsCfg.FieldByName("TokenProvider")
+	if !tpField.IsValid() {
+		t.Fatal("wsclient.Config has no TokenProvider field — schema changed")
+	}
+	if tpField.IsNil() {
+		t.Fatal("TokenProvider not forwarded to wsclient.Config")
+	}
+
+	// Re-form the unexported field value as a callable one via unsafe.
+	callable := reflect.NewAt(tpField.Type(), unsafe.Pointer(tpField.UnsafeAddr())).Elem()
+	results := callable.Call([]reflect.Value{reflect.ValueOf(context.Background())})
+	if !called {
+		t.Fatal("forwarded TokenProvider did not invoke the supplied closure")
+	}
+	if got := results[0].String(); got != "fresh-token" {
+		t.Errorf("TokenProvider returned %q, want %q", got, "fresh-token")
+	}
+}

@@ -116,9 +116,10 @@ func NewClient(cfg Config) (*Client, error) {
 	c.cursor = c.loadCursor()
 
 	ws, err := wsclient.New(wsclient.Config{
-		URL:       cfg.URL,
-		AuthToken: cfg.AuthToken,
-		Handler:   wsclient.HandlerFunc(c.handleFrame),
+		URL:           cfg.URL,
+		AuthToken:     cfg.AuthToken,
+		TokenProvider: cfg.TokenProvider,
+		Handler:       wsclient.HandlerFunc(c.handleFrame),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("wsasp: ws client: %w", err)
