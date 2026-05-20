@@ -500,3 +500,216 @@ func TestDeliberate_ErrorPath_SurfacesPartialText(t *testing.T) {
 		t.Errorf("trigger From = %q, want operator", h.Trigger.From)
 	}
 }
+
+// multiBlockProvider is a subprocess-stream stub that replays a scripted
+// sequence of bridle events in a single RunTurn call. Used to test that
+// the funnel's streaming chat sink posts each text block and suppresses
+// tool events.
+type multiBlockProvider struct {
+	events []bridle.Event
+}
+
+func (p *multiBlockProvider) Name() bridle.ProviderID { return "multi-block" }
+func (p *multiBlockProvider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{Category: bridle.CategorySubprocessStream}
+}
+func (p *multiBlockProvider) RunTurn(_ context.Context, _ bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
+	var finalText string
+	for _, ev := range p.events {
+		sink.Emit(ev)
+		if chunk, ok := ev.(bridle.ModelChunk); ok {
+			finalText = chunk.Text
+		}
+	}
+	return bridle.ProviderResult{
+		FinalText:  finalText,
+		StopReason: bridle.StopReasonModelDone,
+	}, nil
+}
+
+func TestStreamTextToChat_PerBlockEmit(t *testing.T) {
+	chat := &recordingChatGateway{}
+	prov := &multiBlockProvider{
+		events: []bridle.Event{
+			bridle.ModelChunk{Text: "First text block"},
+			bridle.ToolCallStart{ID: "tc1", Name: "grep"},
+			bridle.ToolCallResult{ID: "tc1"},
+			bridle.ModelChunk{Text: "Second text block"},
+			bridle.ToolCallStart{ID: "tc2", Name: "write"},
+			bridle.ToolCallResult{ID: "tc2"},
+			bridle.ModelChunk{Text: "Third text block"},
+		},
+	}
+
+	f, err := New(Config{
+		AspectID:         "test-aspect",
+		SystemPrompt:     "test",
+		Harness:          bridle.NewHarness(prov),
+		Provider:         "multi-block",
+		Model:            "test-model",
+		Runner:           NullRunner{},
+		ChatGateway:      chat,
+		StreamTextToChat: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.ReceiveWithMsgID(bridle.InboxItem{
+		From: "operator", Content: "hello", ThreadRoot: 42,
+	}, 100)
+
+	_, err = f.Deliberate(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 3 text blocks → 3 chat posts, 0 tool messages.
+	if len(chat.sends) != 3 {
+		t.Fatalf("expected 3 chat sends (one per text block), got %d: %+v", len(chat.sends), chat.sends)
+	}
+
+	// Verify no tool content leaked into chat.
+	for i, s := range chat.sends {
+		if strings.Contains(s.Text, "tool") {
+			t.Errorf("send[%d]: tool content leaked to chat: %q", i, s.Text)
+		}
+	}
+
+	// First block replies to trigger (100); subsequent chain to prior block.
+	if chat.sends[0].ReplyTo != 100 {
+		t.Errorf("first block reply_to=%d, want 100", chat.sends[0].ReplyTo)
+	}
+	if chat.sends[1].ReplyTo != 1 {
+		t.Errorf("second block reply_to=%d, want 1 (prior block msg_id)", chat.sends[1].ReplyTo)
+	}
+	if chat.sends[2].ReplyTo != 2 {
+		t.Errorf("third block reply_to=%d, want 2 (prior block msg_id)", chat.sends[2].ReplyTo)
+	}
+
+	// Auto-post must be suppressed when streaming — 3 sends total,
+	// not 4 (3 streamed + 1 auto-post).
+	// (verified implicitly: len(chat.sends)==3 means no 4th auto-post)
+}
+
+func TestStreamTextToChat_SingleBlockNoRegression(t *testing.T) {
+	chat := &recordingChatGateway{}
+	prov := &multiBlockProvider{
+		events: []bridle.Event{
+			bridle.ModelChunk{Text: "Single reply"},
+		},
+	}
+
+	f, err := New(Config{
+		AspectID:         "test-aspect",
+		SystemPrompt:     "test",
+		Harness:          bridle.NewHarness(prov),
+		Provider:         "multi-block",
+		Model:            "test-model",
+		Runner:           NullRunner{},
+		ChatGateway:      chat,
+		StreamTextToChat: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.ReceiveWithMsgID(bridle.InboxItem{
+		From: "operator", Content: "hello", ThreadRoot: 42,
+	}, 100)
+
+	_, err = f.Deliberate(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(chat.sends) != 1 {
+		t.Fatalf("expected 1 chat send, got %d", len(chat.sends))
+	}
+	if chat.sends[0].Text != "Single reply" {
+		t.Errorf("text=%q want 'Single reply'", chat.sends[0].Text)
+	}
+	if chat.sends[0].ReplyTo != 100 {
+		t.Errorf("reply_to=%d want 100", chat.sends[0].ReplyTo)
+	}
+}
+
+func TestStreamTextToChat_EmptyBlocksSkipped(t *testing.T) {
+	chat := &recordingChatGateway{}
+	prov := &multiBlockProvider{
+		events: []bridle.Event{
+			bridle.ModelChunk{Text: "  \t\n  "}, // whitespace-only → skipped
+			bridle.ModelChunk{Text: "Real content"},
+		},
+	}
+
+	f, err := New(Config{
+		AspectID:         "test-aspect",
+		SystemPrompt:     "test",
+		Harness:          bridle.NewHarness(prov),
+		Provider:         "multi-block",
+		Model:            "test-model",
+		Runner:           NullRunner{},
+		ChatGateway:      chat,
+		StreamTextToChat: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.ReceiveWithMsgID(bridle.InboxItem{
+		From: "operator", Content: "hello", ThreadRoot: 42,
+	}, 100)
+
+	_, err = f.Deliberate(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(chat.sends) != 1 {
+		t.Fatalf("expected 1 chat send (whitespace-only block skipped), got %d", len(chat.sends))
+	}
+	if chat.sends[0].Text != "Real content" {
+		t.Errorf("text=%q want 'Real content'", chat.sends[0].Text)
+	}
+}
+
+func TestStreamTextToChat_DisabledPreservesAutoPost(t *testing.T) {
+	chat := &recordingChatGateway{}
+	prov := &multiBlockProvider{
+		events: []bridle.Event{
+			bridle.ModelChunk{Text: "Buffered text"},
+		},
+	}
+
+	f, err := New(Config{
+		AspectID:     "test-aspect",
+		SystemPrompt: "test",
+		Harness:      bridle.NewHarness(prov),
+		Provider:     "multi-block",
+		Model:        "test-model",
+		Runner:       NullRunner{},
+		ChatGateway:  chat,
+		// StreamTextToChat false → buffered auto-post path
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.ReceiveWithMsgID(bridle.InboxItem{
+		From: "operator", Content: "hello", ThreadRoot: 42,
+	}, 100)
+
+	_, err = f.Deliberate(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Without streaming, the auto-post fires via NexusChatReturnHandler.
+	if len(chat.sends) != 1 {
+		t.Fatalf("expected 1 auto-post, got %d", len(chat.sends))
+	}
+	if chat.sends[0].Text != "Buffered text" {
+		t.Errorf("text=%q want 'Buffered text'", chat.sends[0].Text)
+	}
+}

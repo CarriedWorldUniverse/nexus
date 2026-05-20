@@ -1,6 +1,12 @@
 package funnel
 
-import "github.com/CarriedWorldUniverse/bridle"
+import (
+	"context"
+	"strings"
+	"sync"
+
+	"github.com/CarriedWorldUniverse/bridle"
+)
 
 // ObservabilityHook receives bridle's raw event stream plus turn-boundary
 // signals from the funnel. Implemented by observability.Grouper.
@@ -67,4 +73,50 @@ func turnSink(hook ObservabilityHook) bridle.EventSink {
 		return collectSink{}
 	}
 	return multiSink{collectSink{}, hookSink{hook: hook}}
+}
+
+// streamingChatSink intercepts ModelChunk events and posts each text
+// block to chat immediately via ChatGateway, giving the operator live
+// visibility into a turn's progress. Tool-call events pass through
+// without side effects.
+//
+// The first block replies to replyTo (the trigger msg); subsequent
+// blocks chain onto the previous block's msg_id so the thread shows
+// a linear progression rather than a fan of siblings.
+type streamingChatSink struct {
+	gateway  ChatGateway
+	replyTo  int64
+	aspectID string
+
+	mu        sync.Mutex
+	lastMsgID int64
+}
+
+func (s *streamingChatSink) Emit(ev bridle.Event) {
+	chunk, ok := ev.(bridle.ModelChunk)
+	if !ok {
+		return
+	}
+	text := strings.TrimSpace(chunk.Text)
+	if text == "" {
+		return
+	}
+
+	s.mu.Lock()
+	replyTo := s.replyTo
+	if s.lastMsgID != 0 {
+		replyTo = s.lastMsgID
+	}
+	s.mu.Unlock()
+
+	// Use a detached context: chat posts should complete even if the
+	// turn's context is cancelled mid-stream.
+	msgID, err := s.gateway.SendChat(context.Background(), text, replyTo, "")
+	if err != nil {
+		return
+	}
+
+	s.mu.Lock()
+	s.lastMsgID = msgID
+	s.mu.Unlock()
 }
