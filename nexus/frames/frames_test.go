@@ -130,6 +130,62 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSessionRefreshRoundTrip(t *testing.T) {
+	orig, err := New(KindSessionRefresh, SessionRefreshPayload{Reason: "lead_time"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := Encode(orig)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	got, err := Decode(wire)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Kind != KindSessionRefresh {
+		t.Errorf("Kind drift: %q != %q", got.Kind, KindSessionRefresh)
+	}
+	var back SessionRefreshPayload
+	if err := PayloadAs(got, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Reason != "lead_time" {
+		t.Errorf("Reason = %q, want %q", back.Reason, "lead_time")
+	}
+}
+
+func TestSessionRefreshResultRoundTrip(t *testing.T) {
+	orig, err := New(KindSessionRefreshResult, SessionRefreshResultPayload{
+		SessionJWT:       "eyJ.fake.jwt",
+		SessionExpiresAt: "2026-05-23T12:34:56Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := Encode(orig)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	got, err := Decode(wire)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Kind != KindSessionRefreshResult {
+		t.Errorf("Kind drift: %q != %q", got.Kind, KindSessionRefreshResult)
+	}
+	var back SessionRefreshResultPayload
+	if err := PayloadAs(got, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.SessionJWT != "eyJ.fake.jwt" {
+		t.Errorf("SessionJWT = %q", back.SessionJWT)
+	}
+	if back.SessionExpiresAt != "2026-05-23T12:34:56Z" {
+		t.Errorf("SessionExpiresAt = %q", back.SessionExpiresAt)
+	}
+}
+
 func TestEncodeRejectsMissingKind(t *testing.T) {
 	_, err := Encode(Envelope{TS: time.Now()})
 	if err == nil {
@@ -172,6 +228,7 @@ func TestIsKnownCoversAllDeclaredKinds(t *testing.T) {
 		KindAspectActivity,
 		KindKnowledgeStore, KindKnowledgeSearch, KindKnowledgeSearchResult,
 		KindSessionEntryAppended, KindSessionRewind, KindSessionFork,
+		KindSessionRefresh, KindSessionRefreshResult,
 		KindShutdown,
 	}
 	for _, k := range declared {

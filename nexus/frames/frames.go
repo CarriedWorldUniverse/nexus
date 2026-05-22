@@ -106,6 +106,13 @@ const (
 	KindSessionRewind        Kind = "session.rewind"
 	KindSessionFork          Kind = "session.fork"
 
+	// Session lifecycle — aspect rotates its session JWT in-place
+	// over the existing authenticated WebSocket. Broker identifies
+	// the aspect from the connection's bound session; no keyfile
+	// material crosses the wire.
+	KindSessionRefresh       Kind = "session.refresh"
+	KindSessionRefreshResult Kind = "session.refresh.result"
+
 	// Lifecycle.
 	KindShutdown Kind = "shutdown"
 
@@ -293,6 +300,7 @@ func IsKnown(k Kind) bool {
 		KindKnowledgeStore, KindKnowledgeSearch, KindKnowledgeSearchResult,
 		KindCredentialFetch, KindCredentialFetchResult,
 		KindSessionEntryAppended, KindSessionRewind, KindSessionFork,
+		KindSessionRefresh, KindSessionRefreshResult,
 		KindShutdown,
 		// Operator dashboard (dashboard-ws-port 5c)
 		KindRosterList, KindRosterListResult,

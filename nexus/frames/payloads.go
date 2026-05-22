@@ -662,6 +662,27 @@ type SessionForkPayload struct {
 	NewHeadID string `json:"new_head_id"`
 }
 
+// SessionRefreshPayload is sent by an aspect to request a fresh
+// session JWT over the existing authenticated WebSocket. The broker
+// identifies the aspect from the connection's bound session — no
+// keyfile material is required.
+//
+// Reason is a free-form tag for telemetry. Common values: "lead_time"
+// (scheduled refresh), "manual" (operator-triggered), "post_reconnect"
+// (defensive refresh after a reconnect cycle). Not load-bearing.
+type SessionRefreshPayload struct {
+	Reason string `json:"reason"`
+}
+
+// SessionRefreshResultPayload carries the fresh session JWT and its
+// expiry back to the aspect. Same identity (sub claim unchanged).
+// On the wire the expiry uses the validate-endpoint shape (RFC3339
+// UTC) so existing parsing helpers apply.
+type SessionRefreshResultPayload struct {
+	SessionJWT       string `json:"session_jwt"`
+	SessionExpiresAt string `json:"session_expires_at"`
+}
+
 // -------------------------------------------------------------------
 // Lifecycle
 // -------------------------------------------------------------------
