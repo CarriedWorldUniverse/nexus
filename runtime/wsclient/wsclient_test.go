@@ -296,9 +296,10 @@ var _ Handler = HandlerFunc(nil)
 // silence unused imports in some skinny builds
 var _ sync.Mutex
 
-// silentServer accepts the WS upgrade then stops responding — no
-// pings, no close. Simulates broker death with half-open socket.
-func silentServer(t *testing.T, token string) *httptest.Server {
+// deafServer accepts the WS upgrade then stops responding — never
+// calls Read so coder/websocket's library doesn't auto-pong incoming
+// pings. Simulates broker death with a half-open socket.
+func deafServer(t *testing.T, token string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+token {
@@ -309,7 +310,8 @@ func silentServer(t *testing.T, token string) *httptest.Server {
 		if err != nil {
 			return
 		}
-		// Hold the connection open, never read, never write.
+		// Hold the connection open, never read (so pings aren't pong'd),
+		// never write.
 		<-r.Context().Done()
 		_ = wsc.Close(websocket.StatusNormalClosure, "shutdown")
 	}))
@@ -317,23 +319,24 @@ func silentServer(t *testing.T, token string) *httptest.Server {
 	return srv
 }
 
-func TestReadIdleTimeoutReconnects(t *testing.T) {
-	srv := silentServer(t, "tok")
+func TestPingFailureReconnects(t *testing.T) {
+	srv := deafServer(t, "tok")
 
 	var reconnects atomic.Int32
 	c, err := New(Config{
 		URL:               wsURL(srv),
 		AuthToken:         "tok",
 		Handler:           HandlerFunc(func(frames.Envelope) {}),
-		ReadIdleTimeout:   200 * time.Millisecond,
-		MinReconnectDelay: 10 * time.Millisecond,
-		MaxReconnectDelay: 10 * time.Millisecond,
+		PingInterval:      150 * time.Millisecond,
+		PingTimeout:       250 * time.Millisecond,
+		MinReconnectDelay: 50 * time.Millisecond,
+		MaxReconnectDelay: 50 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	done := make(chan struct{})
@@ -354,17 +357,17 @@ func TestReadIdleTimeoutReconnects(t *testing.T) {
 	_ = c.Run(ctx)
 	<-done
 
-	// Within 2s with a 200ms idle timeout, we should have multiple
-	// connect cycles. >=2 means at least one reconnect happened.
+	// Server doesn't pong our pings → ping times out within ~150ms →
+	// connection closed → reconnect. In 2s we expect several cycles.
 	if got := reconnects.Load(); got < 2 {
-		t.Fatalf("expected >=2 connect events from idle-timeout reconnects, got %d", got)
+		t.Fatalf("expected >=2 connect events from ping-failure reconnects, got %d", got)
 	}
 }
 
-// pingingServer accepts a WS and sends a text frame every interval.
-// Simulates the broker's keepalive: while frames flow, the client
-// must not reconnect.
-func pingingServer(t *testing.T, token string, interval time.Duration) *httptest.Server {
+// drainServer accepts the WS upgrade and reads frames in a loop,
+// discarding them. The Read loop is what lets coder/websocket auto-
+// pong incoming pings, so this represents a healthy peer.
+func drainServer(t *testing.T, token string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+token {
@@ -376,18 +379,9 @@ func pingingServer(t *testing.T, token string, interval time.Duration) *httptest
 			return
 		}
 		defer wsc.Close(websocket.StatusNormalClosure, "done")
-		tk := time.NewTicker(interval)
-		defer tk.Stop()
 		for {
-			select {
-			case <-r.Context().Done():
+			if _, _, err := wsc.Read(r.Context()); err != nil {
 				return
-			case <-tk.C:
-				env, _ := frames.New(frames.KindRegister, nil)
-				raw, _ := frames.Encode(env)
-				if err := wsc.Write(r.Context(), websocket.MessageText, raw); err != nil {
-					return
-				}
 			}
 		}
 	}))
@@ -395,20 +389,21 @@ func pingingServer(t *testing.T, token string, interval time.Duration) *httptest
 	return srv
 }
 
-func TestReadIdleTimeoutDoesNotReconnectWhenHealthy(t *testing.T) {
-	srv := pingingServer(t, "tok", 50*time.Millisecond)
+func TestHealthyConnectionDoesNotReconnect(t *testing.T) {
+	srv := drainServer(t, "tok")
 
 	var connects atomic.Int32
 	c, err := New(Config{
-		URL:             wsURL(srv),
-		AuthToken:       "tok",
-		Handler:         HandlerFunc(func(frames.Envelope) {}),
-		ReadIdleTimeout: 200 * time.Millisecond,
+		URL:          wsURL(srv),
+		AuthToken:    "tok",
+		Handler:      HandlerFunc(func(frames.Envelope) {}),
+		PingInterval: 100 * time.Millisecond,
+		PingTimeout:  200 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 
 	done := make(chan struct{})
