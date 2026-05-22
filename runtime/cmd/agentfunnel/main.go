@@ -157,13 +157,24 @@ func main() {
 		wsURL = strings.TrimRight(wsURL, "/") + "/connect"
 	}
 
-	// TokenProvider re-validates the keyfile to get a fresh JWT.
-	// Wired as a closure so wsclient calls it before each dial
-	// attempt — expired tokens get replaced without process restart.
-	// Falls back to the existing token on error (network down,
-	// broker unreachable) so the aspect can still attempt to
-	// reconnect with the old token when the re-validate fails.
+	// sessionState holds the current JWT + expiry. Refreshed in-band
+	// by sessionRefreshLoop via session.refresh frames; consulted by
+	// the TokenProvider on every WS dial and by jwtExpiryMonitor.
+	state := newSessionState(sessionSnapshot{
+		JWT:     res.SessionJWT,
+		Expires: res.SessionExpiresAt,
+	})
+
+	// TokenProvider returns the cached JWT when it's still healthy.
+	// Falls back to a keyfile re-validate when sessionState is empty
+	// or the JWT is within 1 minute of expiry (post-restart cold start,
+	// or the refresh loop has been failing long enough that the JWT
+	// is about to die).
 	tokenProvider := func(ctx context.Context) (string, error) {
+		snap := state.Snapshot()
+		if snap.JWT != "" && time.Until(snap.Expires) > 1*time.Minute {
+			return snap.JWT, nil
+		}
 		client := keyfile.NewClient()
 		fresh, ferr := client.Validate(ctx, kf)
 		if ferr != nil {
@@ -171,7 +182,8 @@ func main() {
 				"err", ferr)
 			return "", ferr
 		}
-		log.Info("agentfunnel: TokenProvider refreshed JWT",
+		state.Set(sessionSnapshot{JWT: fresh.SessionJWT, Expires: fresh.SessionExpiresAt})
+		log.Info("agentfunnel: TokenProvider re-validated via keyfile",
 			"expires", fresh.SessionExpiresAt.Format(time.RFC3339))
 		return fresh.SessionJWT, nil
 	}
@@ -315,7 +327,16 @@ func main() {
 	// 1-minute lead: generous enough not to hit "expired in flight"
 	// and short enough that the primary TokenProvider path carries
 	// all normal-ops reconnects.
-	go jwtExpiryMonitor(ctx, res.SessionExpiresAt, 1*time.Minute, stop, log)
+	go jwtExpiryMonitor(ctx, func() time.Time { return state.Snapshot().Expires },
+		1*time.Minute, stop, log)
+
+	// In-protocol JWT refresh: 1h before expiry (±10% jitter), the
+	// loop sends a session.refresh frame and on success rolls the new
+	// JWT into sessionState. The safety-net jwtExpiryMonitor above
+	// re-reads expiry after each sleep so a successful refresh pushes
+	// its wakeup forward — only repeated refresh failure 1 minute
+	// before expiry triggers a supervisor restart.
+	go sessionRefreshLoop(ctx, state, wsClient, 1*time.Hour, log)
 
 	go deliberateLoop(ctx, f, log)
 
@@ -372,18 +393,29 @@ func composeSystemPrompt(res *keyfile.ValidationResult) string {
 // `lead` is how far before expiry to fire. If we're already past
 // (expiry - lead) at startup (e.g. supervisor handed us a near-
 // expired JWT during a flap), cancel immediately so we restart fast.
-func jwtExpiryMonitor(ctx context.Context, expiry time.Time, lead time.Duration, stop context.CancelFunc, log *slog.Logger) {
-	wakeAt := expiry.Add(-lead)
-	d := time.Until(wakeAt)
-	if d > 0 {
+func jwtExpiryMonitor(ctx context.Context, expiryFn func() time.Time, lead time.Duration,
+	stop context.CancelFunc, log *slog.Logger) {
+	for {
+		wakeAt := expiryFn().Add(-lead)
+		d := time.Until(wakeAt)
+		if d <= 0 {
+			break
+		}
 		select {
 		case <-time.After(d):
 		case <-ctx.Done():
 			return
 		}
+		// Re-check: did a successful refresh push expiry out? If yes,
+		// sleep again against the new wake-at. If not (we genuinely
+		// crossed the lead boundary), fall through to stop().
+		if time.Until(expiryFn().Add(-lead)) > 0 {
+			continue
+		}
+		break
 	}
 	log.Info("agentfunnel: JWT nearing expiry — exiting for supervisor restart",
-		"jwt_expires", expiry.Format(time.RFC3339),
+		"jwt_expires", expiryFn().Format(time.RFC3339),
 		"lead", lead.String())
 	stop()
 }

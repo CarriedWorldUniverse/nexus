@@ -369,6 +369,13 @@ type Broker struct {
 	// pipeline emissions land here (chat_send.go); fan-out to
 	// subscribed operators flows through BroadcastObserveFrame.
 	observability *observability.Hub
+
+	// sessionRefreshMu guards lastSessionRefreshAt. The map records
+	// the wall-clock time of the most recent session.refresh accepted
+	// for each aspect name so the handler can rate-limit refreshes
+	// (1 per aspect per 60s) and reject the spammy case.
+	sessionRefreshMu     sync.Mutex
+	lastSessionRefreshAt map[string]time.Time
 }
 
 func New(cfg Config, r *roster.Roster) *Broker {
@@ -407,12 +414,13 @@ func New(cfg Config, r *roster.Roster) *Broker {
 			"Migrate aspects to per-aspect tokens; clear NEXUS_ALLOW_LEGACY_MASTER once done.")
 	}
 	b := &Broker{
-		cfg:        cfg,
-		roster:     r,
-		log:        cfg.Logger,
-		dispatcher: newDispatcher(),
-		connPerIP:  make(map[string]int),
-		operators:  make(map[*wsConn]struct{}),
+		cfg:                  cfg,
+		roster:               r,
+		log:                  cfg.Logger,
+		dispatcher:           newDispatcher(),
+		connPerIP:            make(map[string]int),
+		operators:            make(map[*wsConn]struct{}),
+		lastSessionRefreshAt: make(map[string]time.Time),
 	}
 	if cfg.Observability != nil {
 		b.observability = cfg.Observability

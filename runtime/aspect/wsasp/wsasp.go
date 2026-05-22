@@ -443,6 +443,16 @@ func (c *Client) ShareFile(ctx context.Context, path string, recipients []string
 	return out.ShareID, nil
 }
 
+// Request sends a request frame and awaits the correlated response.
+// Used for fire-and-await flows like session.refresh that need a typed
+// reply. Bypasses the outbound buffer: callers must accept that a
+// request fails fast if the WS is down (no buffering — a stale reply
+// arriving long after the caller has timed out is worse than a clean
+// failure).
+func (c *Client) Request(ctx context.Context, env frames.Envelope) (frames.Envelope, error) {
+	return c.ws.Request(ctx, env)
+}
+
 // errNotConnected is returned by SendBestEffort when the underlying
 // wsclient isn't connected. Sentinel so callers can distinguish
 // "wire down" from a real wire-level write error.
