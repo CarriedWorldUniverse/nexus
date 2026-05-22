@@ -295,3 +295,141 @@ var _ Handler = HandlerFunc(nil)
 
 // silence unused imports in some skinny builds
 var _ sync.Mutex
+
+// silentServer accepts the WS upgrade then stops responding — no
+// pings, no close. Simulates broker death with half-open socket.
+func silentServer(t *testing.T, token string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", 401)
+			return
+		}
+		wsc, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		// Hold the connection open, never read, never write.
+		<-r.Context().Done()
+		_ = wsc.Close(websocket.StatusNormalClosure, "shutdown")
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestReadIdleTimeoutReconnects(t *testing.T) {
+	srv := silentServer(t, "tok")
+
+	var reconnects atomic.Int32
+	c, err := New(Config{
+		URL:               wsURL(srv),
+		AuthToken:         "tok",
+		Handler:           HandlerFunc(func(frames.Envelope) {}),
+		ReadIdleTimeout:   200 * time.Millisecond,
+		MinReconnectDelay: 10 * time.Millisecond,
+		MaxReconnectDelay: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev := <-c.Events():
+				if ev.Connected {
+					reconnects.Add(1)
+				}
+			}
+		}
+	}()
+
+	_ = c.Run(ctx)
+	<-done
+
+	// Within 2s with a 200ms idle timeout, we should have multiple
+	// connect cycles. >=2 means at least one reconnect happened.
+	if got := reconnects.Load(); got < 2 {
+		t.Fatalf("expected >=2 connect events from idle-timeout reconnects, got %d", got)
+	}
+}
+
+// pingingServer accepts a WS and sends a text frame every interval.
+// Simulates the broker's keepalive: while frames flow, the client
+// must not reconnect.
+func pingingServer(t *testing.T, token string, interval time.Duration) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", 401)
+			return
+		}
+		wsc, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer wsc.Close(websocket.StatusNormalClosure, "done")
+		tk := time.NewTicker(interval)
+		defer tk.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-tk.C:
+				env, _ := frames.New(frames.KindRegister, nil)
+				raw, _ := frames.Encode(env)
+				if err := wsc.Write(r.Context(), websocket.MessageText, raw); err != nil {
+					return
+				}
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestReadIdleTimeoutDoesNotReconnectWhenHealthy(t *testing.T) {
+	srv := pingingServer(t, "tok", 50*time.Millisecond)
+
+	var connects atomic.Int32
+	c, err := New(Config{
+		URL:             wsURL(srv),
+		AuthToken:       "tok",
+		Handler:         HandlerFunc(func(frames.Envelope) {}),
+		ReadIdleTimeout: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev := <-c.Events():
+				if ev.Connected {
+					connects.Add(1)
+				}
+			}
+		}
+	}()
+
+	_ = c.Run(ctx)
+	<-done
+
+	if got := connects.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 connect event (no reconnects on healthy line), got %d", got)
+	}
+}

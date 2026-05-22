@@ -74,6 +74,13 @@ type Config struct {
 	// backoff on reconnect. Defaults: 1s → 60s.
 	MinReconnectDelay time.Duration
 	MaxReconnectDelay time.Duration
+
+	// ReadIdleTimeout is the per-read deadline applied inside readLoop.
+	// If no frame arrives within this window the read returns a timeout
+	// error, readLoop returns, and Run reconnects. 0 means use the
+	// default of 45s. Default is 1.5x the broker's 30s ping cadence
+	// (see broker/ws.go) to absorb GC/jitter without false positives.
+	ReadIdleTimeout time.Duration
 }
 
 // ConnectEvent is delivered on the channel returned by Events() each
@@ -137,6 +144,9 @@ func New(cfg Config) (*Client, error) {
 	}
 	if cfg.MaxReconnectDelay == 0 {
 		cfg.MaxReconnectDelay = 60 * time.Second
+	}
+	if cfg.ReadIdleTimeout == 0 {
+		cfg.ReadIdleTimeout = 45 * time.Second
 	}
 
 	return &Client{
@@ -266,7 +276,9 @@ func (c *Client) dialAndServe(ctx context.Context) (bool, error) {
 // waiting Request or the Handler.
 func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
 	for {
-		msgType, data, err := conn.Read(ctx)
+		readCtx, cancel := context.WithTimeout(ctx, c.cfg.ReadIdleTimeout)
+		msgType, data, err := conn.Read(readCtx)
+		cancel()
 		if err != nil {
 			return err
 		}
