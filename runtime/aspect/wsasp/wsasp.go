@@ -448,11 +448,23 @@ func (c *Client) ShareFile(ctx context.Context, path string, recipients []string
 // "wire down" from a real wire-level write error.
 var errNotConnected = fmt.Errorf("wsasp: not connected")
 
-// queueOrSend tries an immediate send; on disconnect, buffers.
+// queueOrSend tries an immediate send; on disconnect or pre-register,
+// buffers. Live sends must wait behind register on a fresh connection
+// for the same reason drainPendingLoop does — the broker can't
+// attribute a chat.send to this aspect until register lands on the
+// new connection. Non-blocking barrier check: if not yet registered,
+// buffer and let drainPendingLoop flush after the barrier closes.
 func (c *Client) queueOrSend(ctx context.Context, env frames.Envelope) {
 	if c.ws.Connected() {
-		if err := c.ws.Send(ctx, env); err == nil {
-			return
+		barrier := c.registeredBarrier()
+		select {
+		case <-barrier:
+			if err := c.ws.Send(ctx, env); err == nil {
+				return
+			}
+		default:
+			// Connection is up but register hasn't been sent yet — fall
+			// through to buffer so drain delivers in the right order.
 		}
 	}
 	c.mu.Lock()
