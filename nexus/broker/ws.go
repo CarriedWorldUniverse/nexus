@@ -444,6 +444,8 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleDispatchFrame(env)
 	case frames.KindChatSend:
 		c.handleChatSendFrame(env)
+	case frames.KindSessionRefresh:
+		c.handleSessionRefreshFrame(env)
 	case frames.KindChatRead:
 		c.handleChatReadFrame(env)
 	case frames.KindChatReaction:
@@ -1167,6 +1169,11 @@ func (c *wsConn) cleanup() {
 	}
 	if c.registeredAs != "" && c.sessionID != "" {
 		c.broker.dispatcher.unbind(c.registeredAs, c)
+		// Drop the rate-limit bookkeeping for this aspect so the map
+		// doesn't grow unboundedly across reconnect churn.
+		c.broker.sessionRefreshMu.Lock()
+		delete(c.broker.lastSessionRefreshAt, c.registeredAs)
+		c.broker.sessionRefreshMu.Unlock()
 		// Phase E: presence flip on ungraceful disconnect.
 		if c.broker.observability != nil {
 			c.broker.observability.GrouperFor(c.registeredAs).OnPresence(false, "ws_closed")
