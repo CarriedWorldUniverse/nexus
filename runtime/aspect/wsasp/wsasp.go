@@ -93,9 +93,10 @@ type Client struct {
 	cfg Config
 	ws  *wsclient.Client
 
-	mu      sync.Mutex
-	cursor  int64             // highest processed msg_id
-	pending []frames.Envelope // outbound buffer while WS is down
+	mu         sync.Mutex
+	cursor     int64             // highest processed msg_id
+	pending    []frames.Envelope // outbound buffer while WS is down
+	registered chan struct{}     // closed when register has been sent on the current connection
 }
 
 // NewClient builds the aspect host. Loads the cursor from disk
@@ -129,36 +130,59 @@ func NewClient(cfg Config) (*Client, error) {
 }
 
 // Run drives the WS connection lifecycle. Blocks until ctx done.
-// On each (re)connect, sends a register frame with since_msg_id.
+// On each (re)connect a register frame is sent before any buffered
+// chat sends are flushed — the broker must see register first or
+// it can't attribute follow-up frames to this aspect on this conn.
 func (c *Client) Run(ctx context.Context) error {
-	// On reconnect, the wsclient calls back via readyCh implicitly —
-	// we observe via Connected polling here. For v1 we rely on the
-	// caller wiring an explicit register call once Run starts.
-	go c.registerOnReady(ctx)
+	registered := make(chan struct{})
+	c.setRegisteredBarrier(registered)
+
+	go c.handleConnectEvents(ctx)
 	go c.drainPendingLoop(ctx)
 	return c.ws.Run(ctx)
 }
 
-// registerOnReady polls the ws connected state and sends the
-// register frame whenever the connection comes up.
-//
-// A subscription pattern would be cleaner; this polling shape keeps
-// the wrapper focused — wsclient's Connected() is the existing
-// surface. F2.6 may rev wsclient to add a connect callback.
-func (c *Client) registerOnReady(ctx context.Context) {
-	wasConnected := false
-	t := time.NewTicker(250 * time.Millisecond)
-	defer t.Stop()
+// setRegisteredBarrier replaces the per-connection register barrier
+// under the client lock. Callers must not touch c.registered directly.
+func (c *Client) setRegisteredBarrier(ch chan struct{}) {
+	c.mu.Lock()
+	c.registered = ch
+	c.mu.Unlock()
+}
+
+// registeredBarrier returns the current per-connection register
+// barrier. Callers wait on it (or close it) without holding the lock.
+func (c *Client) registeredBarrier() chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.registered
+}
+
+// handleConnectEvents subscribes to wsclient connect/disconnect
+// transitions. On connect: send register, then close the barrier
+// so drainPendingLoop is allowed to flush. On disconnect: install
+// a fresh barrier so the next connect cycle re-gates the drain.
+func (c *Client) handleConnectEvents(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-			now := c.ws.Connected()
-			if now && !wasConnected {
-				c.sendRegister(ctx)
+		case ev, ok := <-c.ws.Events():
+			if !ok {
+				return
 			}
-			wasConnected = now
+			if ev.Connected {
+				c.sendRegister(ctx)
+				barrier := c.registeredBarrier()
+				select {
+				case <-barrier:
+					// Already closed (duplicate Connected=true event) — leave it.
+				default:
+					close(barrier)
+				}
+			} else {
+				c.setRegisteredBarrier(make(chan struct{}))
+			}
 		}
 	}
 }
@@ -181,8 +205,9 @@ func (c *Client) sendRegister(ctx context.Context) {
 	_ = c.ws.Send(ctx, env)
 }
 
-// drainPendingLoop empties the outbound buffer once the WS becomes
-// available. Buffered sends are best-effort: drops on context done.
+// drainPendingLoop flushes the outbound buffer once register has
+// completed on the current connection. On every (re)connect cycle
+// it re-reads the barrier and waits for it to close before draining.
 func (c *Client) drainPendingLoop(ctx context.Context) {
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
@@ -194,18 +219,32 @@ func (c *Client) drainPendingLoop(ctx context.Context) {
 			if !c.ws.Connected() {
 				continue
 			}
+			barrier := c.registeredBarrier()
+			select {
+			case <-ctx.Done():
+				return
+			case <-barrier:
+				// Register has been sent on this connection.
+			}
+
+			// Disconnect could have happened while we waited; a fresh barrier is
+			// installed by handleConnectEvents on the disconnect event, but our
+			// snapshot is stale. Re-check connectedness — on false, next tick
+			// picks up the new barrier and waits for the next register.
+			if !c.ws.Connected() {
+				continue
+			}
+
 			c.mu.Lock()
 			pending := c.pending
 			c.pending = nil
 			c.mu.Unlock()
 			for _, env := range pending {
 				if err := c.ws.Send(ctx, env); err != nil {
-					// Re-queue and try later; the disconnect
-					// will be picked up on next tick.
 					c.mu.Lock()
 					c.pending = append([]frames.Envelope{env}, c.pending...)
 					c.mu.Unlock()
-					return
+					break // back to the ticker; next reconnect will re-arm the barrier and retry drain
 				}
 			}
 		}
@@ -409,11 +448,23 @@ func (c *Client) ShareFile(ctx context.Context, path string, recipients []string
 // "wire down" from a real wire-level write error.
 var errNotConnected = fmt.Errorf("wsasp: not connected")
 
-// queueOrSend tries an immediate send; on disconnect, buffers.
+// queueOrSend tries an immediate send; on disconnect or pre-register,
+// buffers. Live sends must wait behind register on a fresh connection
+// for the same reason drainPendingLoop does — the broker can't
+// attribute a chat.send to this aspect until register lands on the
+// new connection. Non-blocking barrier check: if not yet registered,
+// buffer and let drainPendingLoop flush after the barrier closes.
 func (c *Client) queueOrSend(ctx context.Context, env frames.Envelope) {
 	if c.ws.Connected() {
-		if err := c.ws.Send(ctx, env); err == nil {
-			return
+		barrier := c.registeredBarrier()
+		select {
+		case <-barrier:
+			if err := c.ws.Send(ctx, env); err == nil {
+				return
+			}
+		default:
+			// Connection is up but register hasn't been sent yet — fall
+			// through to buffer so drain delivers in the right order.
 		}
 	}
 	c.mu.Lock()
