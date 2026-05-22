@@ -75,12 +75,22 @@ type Config struct {
 	MinReconnectDelay time.Duration
 	MaxReconnectDelay time.Duration
 
-	// ReadIdleTimeout is the per-read deadline applied inside readLoop.
-	// If no frame arrives within this window the read returns a timeout
-	// error, readLoop returns, and Run reconnects. 0 means use the
-	// default of 45s. Default is 1.5x the broker's 30s ping cadence
-	// (see broker/ws.go) to absorb GC/jitter without false positives.
-	ReadIdleTimeout time.Duration
+	// PingInterval is how often the client sends a WS ping to the
+	// broker to verify the connection is alive. On ping failure (no
+	// pong within PingTimeout) the connection is closed and the
+	// reconnect loop picks up. 0 means use the default of 30s, which
+	// mirrors the broker's own ping cadence (nexus/broker/ws.go).
+	//
+	// We can't use a per-read deadline for liveness because coder/
+	// websocket handles ping/pong frames inside conn.Read — they never
+	// surface to the caller, so a read deadline fires on every idle
+	// period regardless of how healthy the connection is.
+	PingInterval time.Duration
+
+	// PingTimeout is how long to wait for a pong before declaring the
+	// connection dead. 0 means use the default of 10s. Mirrors the
+	// broker side's per-ping budget.
+	PingTimeout time.Duration
 }
 
 // ConnectEvent is delivered on the channel returned by Events() each
@@ -121,9 +131,10 @@ type Client struct {
 	readyCh chan struct{}
 
 	// eventCh emits ConnectEvent on each connect/disconnect
-	// transition. Buffered (size 4) so a slow consumer doesn't block
-	// the dial loop; if it overflows we drop and log. Subscribe via
-	// Events().
+	// transition. Buffered (size 16) so a busy consumer — e.g. wsasp
+	// blocking in sendRegister during a flapping reconnect — has room
+	// to catch up without losing transitions. Overflows drop and log.
+	// Subscribe via Events().
 	eventCh chan ConnectEvent
 }
 
@@ -145,8 +156,11 @@ func New(cfg Config) (*Client, error) {
 	if cfg.MaxReconnectDelay == 0 {
 		cfg.MaxReconnectDelay = 60 * time.Second
 	}
-	if cfg.ReadIdleTimeout == 0 {
-		cfg.ReadIdleTimeout = 45 * time.Second
+	if cfg.PingInterval == 0 {
+		cfg.PingInterval = 30 * time.Second
+	}
+	if cfg.PingTimeout == 0 {
+		cfg.PingTimeout = 10 * time.Second
 	}
 
 	return &Client{
@@ -154,7 +168,7 @@ func New(cfg Config) (*Client, error) {
 		log:     log,
 		pending: make(map[string]chan frames.Envelope),
 		readyCh: make(chan struct{}),
-		eventCh: make(chan ConnectEvent, 4),
+		eventCh: make(chan ConnectEvent, 16),
 	}, nil
 }
 
@@ -269,16 +283,48 @@ func (c *Client) dialAndServe(ctx context.Context) (bool, error) {
 		c.emitEvent(ConnectEvent{Connected: false})
 	}()
 
+	// Liveness: ping the broker every PingInterval. If a pong doesn't
+	// come back inside PingTimeout, close the connection — readLoop's
+	// Read will return an error and the outer Run loop reconnects.
+	// Mirrors the server-side ping pattern in nexus/broker/ws.go.
+	pingCtx, pingCancel := context.WithCancel(ctx)
+	defer pingCancel()
+	go c.pingLoop(pingCtx, conn)
+
 	return true, c.readLoop(ctx, conn)
+}
+
+// pingLoop sends a WS ping every PingInterval and closes the connection
+// if a pong doesn't arrive within PingTimeout. Exits on ctx done or on
+// the first ping failure (after which the connection is dead anyway).
+func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
+	t := time.NewTicker(c.cfg.PingInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pctx, cancel := context.WithTimeout(ctx, c.cfg.PingTimeout)
+			err := conn.Ping(pctx)
+			cancel()
+			if err != nil {
+				c.log.Info("wsclient ping failed; closing", "err", err)
+				// CloseNow, not Close — the peer just failed to respond
+				// to our ping, so the close handshake will time out at
+				// 5s, blocking the reconnect path.
+				_ = conn.CloseNow()
+				return
+			}
+		}
+	}
 }
 
 // readLoop reads frames off conn and dispatches them to either a
 // waiting Request or the Handler.
 func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
 	for {
-		readCtx, cancel := context.WithTimeout(ctx, c.cfg.ReadIdleTimeout)
-		msgType, data, err := conn.Read(readCtx)
-		cancel()
+		msgType, data, err := conn.Read(ctx)
 		if err != nil {
 			return err
 		}
