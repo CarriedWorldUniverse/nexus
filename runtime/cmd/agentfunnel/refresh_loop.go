@@ -91,7 +91,14 @@ func requestRefresh(ctx context.Context, sender refreshSender) (sessionSnapshot,
 	if err != nil {
 		return sessionSnapshot{}, fmt.Errorf("compose: %w", err)
 	}
-	resp, err := sender.Request(ctx, env)
+	// Per-attempt deadline: an old broker that doesn't know
+	// KindSessionRefresh drops the frame silently (broker/ws.go log
+	// "unknown frame kind, dropping") and never responds. Without a
+	// deadline here, sender.Request blocks forever on the unbounded
+	// root ctx and the retry-3 loop never advances.
+	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := sender.Request(reqCtx, env)
 	if err != nil {
 		return sessionSnapshot{}, fmt.Errorf("request: %w", err)
 	}

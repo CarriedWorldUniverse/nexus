@@ -92,7 +92,11 @@ func (c *wsConn) handleSessionRefreshFrame(env frames.Envelope) {
 
 	jwtTTL := v.JWTTTL
 	if jwtTTL <= 0 {
-		jwtTTL = time.Hour
+		// Match the production default in cmd/nexus/main.go:217 so a
+		// misconfigured broker doesn't silently issue 1h refresh JWTs
+		// against 24h initial JWTs, which would cause the refresh loop
+		// to fire 24× more often than expected.
+		jwtTTL = 24 * time.Hour
 	}
 	cfg := aspects.RefreshConfig{
 		NexusID:              v.NexusID,
