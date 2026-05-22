@@ -2,12 +2,21 @@ package wsasp
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unsafe"
+
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
+	"github.com/coder/websocket"
 )
 
 // Cursor persistence is the load-bearing Lock 6 invariant on the
@@ -146,6 +155,87 @@ func TestCursorFileForAspect(t *testing.T) {
 }
 
 func noopDeliver(_ DeliveredMessage) {}
+
+func TestRegisterPrecedesDrainedSendsAfterReconnect(t *testing.T) {
+	// Recorder for the order of inbound frames on the server side.
+	var (
+		mu    sync.Mutex
+		order []frames.Kind
+	)
+	record := func(env frames.Envelope) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, env.Kind)
+	}
+
+	// Server that records every frame it receives and stays up.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wsc, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer wsc.Close(websocket.StatusNormalClosure, "done")
+		for {
+			_, data, err := wsc.Read(r.Context())
+			if err != nil {
+				return
+			}
+			env, err := frames.Decode(data)
+			if err != nil {
+				continue
+			}
+			record(env)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(Config{
+		URL:        "ws" + strings.TrimPrefix(srv.URL, "http"),
+		AspectName: "test",
+		OnDeliver:  func(DeliveredMessage) {},
+		Register:   schemas.RegisterRequest{Name: "test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Queue three chat sends BEFORE Run starts → they go into
+	// pending immediately (ws not connected yet).
+	bg := context.Background()
+	_, _ = c.SendChat(bg, "first", 0, "")
+	_, _ = c.SendChat(bg, "second", 0, "")
+	_, _ = c.SendChat(bg, "third", 0, "")
+
+	ctx, cancel := context.WithTimeout(bg, 5*time.Second)
+	defer cancel()
+	go c.Run(ctx)
+
+	// Wait for the server to see 4 frames (register + 3 chats).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(order)
+		mu.Unlock()
+		if n >= 4 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) < 4 {
+		t.Fatalf("server only received %d frames: %v", len(order), order)
+	}
+	if order[0] != frames.KindRegister {
+		t.Fatalf("first frame should be register, got %v; full order: %v", order[0], order)
+	}
+	for i := 1; i < 4; i++ {
+		if order[i] != frames.KindChatSend {
+			t.Fatalf("frame %d should be chat.send, got %v", i, order[i])
+		}
+	}
+}
 
 // Regression for NEX-237: NewClient must forward Config.TokenProvider into
 // the underlying wsclient.Config. Prior to the fix the field was silently
