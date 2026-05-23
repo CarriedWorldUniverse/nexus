@@ -39,6 +39,31 @@ type ObservabilityHook interface {
 	EndTurn()
 }
 
+// FilterDecisionRenderer is an optional sub-interface of
+// ObservabilityHook for sinks that want to receive post-hoc filter
+// verdicts as structured data rather than fabricated bridle-turn
+// events. Funnel type-asserts at runtime; hooks that implement this
+// get the clean call, hooks that don't fall back to the synthetic
+// BeginTurn → ModelChunk → TurnDone → EndTurn dance preserved for
+// backward compatibility.
+//
+// New hooks should implement this directly. Existing hooks can adopt
+// it without API breakage — adding the method is purely additive,
+// because the funnel uses a type assertion, not a required method.
+//
+// Signature uses primitives (not funnel.FilterDecision) so observability
+// renderers can implement it without importing funnel — keeps the
+// layering one-way (renderers don't depend on funnel).
+type FilterDecisionRenderer interface {
+	// OnFilterDecision is called once per Deliberate after the post-
+	// hoc filter judge returns. mainTurnID identifies the parent
+	// deliberation turn so renderers can pair the verdict against it;
+	// model + provider mirror what was passed to BeginTurn for the
+	// main turn. shouldPost / reason / class mirror the FilterDecision
+	// fields the funnel chose.
+	OnFilterDecision(mainTurnID, model, provider string, shouldPost bool, reason, class string)
+}
+
 // hookSink adapts an ObservabilityHook to bridle.EventSink so the hook
 // can be passed as the sink argument to Harness.RunTurn. Each Emit
 // forwards to OnBridleEvent.

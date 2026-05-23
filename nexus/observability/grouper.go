@@ -192,6 +192,31 @@ func (g *Grouper) OnChat(msg chat.Message, direction Direction) {
 	})
 }
 
+// OnFilterDecision emits a FilterDecisionFrame summarising the post-
+// hoc filter verdict for the just-completed main turn. Satisfies
+// funnel.FilterDecisionRenderer so the funnel can publish the
+// verdict as structured data instead of the legacy synthetic
+// "filter-decision" TurnFrame.
+func (g *Grouper) OnFilterDecision(mainTurnID, model, provider string, shouldPost bool, reason, class string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	fd := FilterDecisionFrame{
+		MainTurnID: mainTurnID,
+		Model:      model,
+		Provider:   provider,
+		ShouldPost: shouldPost,
+		Reason:     reason,
+		Class:      class,
+	}
+	payload, _ := json.Marshal(fd)
+	g.emitFrame(Frame{
+		Kind:    FrameFilterDecision,
+		Aspect:  g.aspect,
+		TS:      g.clock(),
+		Payload: payload,
+	})
+}
+
 // OnPresence emits a PresenceFrame for the WS connection-state flip.
 func (g *Grouper) OnPresence(connected bool, reason string) {
 	g.mu.Lock()

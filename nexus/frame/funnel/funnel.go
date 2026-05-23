@@ -1300,16 +1300,22 @@ func (f *Funnel) judgeTurn(ctx context.Context, st *deliberateState, result brid
 		},
 	})
 
-	// Synthetic filter-decision turn for the observability stream so
-	// EVERY filter outcome surfaces as a frame — including HardRules
-	// short-circuits that never invoke the cheap judge. Without this,
-	// suppressions from substring/prefix self-suppress and empty-output
-	// rejections are invisible to operators: they see EventFilterJudging
-	// (filter is running) but no decision, no judge turn, and no auto-
-	// post. The synthetic turn carries the verdict, the layer that
-	// produced it, and the reason text so the operator can audit
-	// suppressions without grepping host logs.
-	if f.cfg.ObservabilityHook != nil {
+	// Publish the verdict to the observability stream so EVERY filter
+	// outcome surfaces — including HardRules short-circuits that never
+	// invoke the cheap judge. Without this, suppressions from
+	// substring/prefix self-suppress and empty-output rejections are
+	// invisible to operators: they see EventFilterJudging (filter is
+	// running) but no decision, no judge turn, and no auto-post.
+	//
+	// Two-path dispatch: hooks implementing FilterDecisionRenderer get
+	// the structured call. Older hooks fall back to a synthetic
+	// BeginTurn → ModelChunk → TurnDone → EndTurn sequence — workaround
+	// for the pre-FilterDecisionRenderer protocol where dashboards
+	// only knew how to render turns. The fallback stays until every
+	// consumer (WSForwarder + plumb-side) has migrated.
+	if r, ok := f.cfg.ObservabilityHook.(FilterDecisionRenderer); ok {
+		r.OnFilterDecision(st.turnID, f.cfg.Model, string(f.cfg.Provider), decision.ShouldPost, decision.Reason, decision.Class)
+	} else if f.cfg.ObservabilityHook != nil {
 		f.cfg.ObservabilityHook.BeginTurn(st.turnID+"-decision", "filter-decision", f.cfg.Model, string(f.cfg.Provider), 0)
 		f.cfg.ObservabilityHook.OnBridleEvent(bridle.ModelChunk{Text: renderFilterVerdict(decision)})
 		f.cfg.ObservabilityHook.OnBridleEvent(bridle.TurnDone{})

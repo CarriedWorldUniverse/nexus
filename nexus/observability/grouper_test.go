@@ -250,6 +250,38 @@ func TestGrouperPresence(t *testing.T) {
 	}
 }
 
+func TestGrouperOnFilterDecision(t *testing.T) {
+	c := &capture{}
+	g := NewGrouperWithClock("plumb", c.emit, fixedClock())
+	g.OnFilterDecision("turn-123", "claude-opus", "claude-api", false, "scratch", "scratch")
+	if len(c.frames) != 1 {
+		t.Fatalf("frames len=%d want 1", len(c.frames))
+	}
+	f := c.frames[0]
+	if f.Kind != FrameFilterDecision {
+		t.Errorf("kind=%s want %s", f.Kind, FrameFilterDecision)
+	}
+	if f.Aspect != "plumb" {
+		t.Errorf("aspect=%q want plumb", f.Aspect)
+	}
+	var fd FilterDecisionFrame
+	if err := json.Unmarshal(f.Payload, &fd); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if fd.MainTurnID != "turn-123" {
+		t.Errorf("MainTurnID=%q want turn-123", fd.MainTurnID)
+	}
+	if fd.Model != "claude-opus" || fd.Provider != "claude-api" {
+		t.Errorf("model/provider mismatch: %+v", fd)
+	}
+	if fd.ShouldPost {
+		t.Errorf("ShouldPost=true want false")
+	}
+	if fd.Reason != "scratch" || fd.Class != "scratch" {
+		t.Errorf("reason/class: %+v", fd)
+	}
+}
+
 func TestGrouperEventWithoutActiveTurnIsNoOp(t *testing.T) {
 	c := &capture{}
 	g := NewGrouperWithClock("p", c.emit, fixedClock())

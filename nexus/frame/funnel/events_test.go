@@ -2,6 +2,7 @@ package funnel
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -508,6 +509,161 @@ func TestEmit_CtxRespectingSinkUnblocksOnEmitTimeout(t *testing.T) {
 	// at most a few hundred ms even with all of them slow.
 	if elapsed > time.Second {
 		t.Errorf("deliberation took %v; want well under 1s (emit timeout not enforced?)", elapsed)
+	}
+}
+
+// filterDecisionRecorder is a hook that implements both
+// ObservabilityHook and FilterDecisionRenderer. Records the
+// OnFilterDecision call args so a test can assert the funnel hit
+// the structured path instead of falling through to the synthetic-
+// turn fallback.
+type filterDecisionRecorder struct {
+	mu sync.Mutex
+
+	bridleEvents []bridle.Event
+	beginCalls   []string // turnID-label
+	endCalls     int
+
+	decisionCalls []recordedFilterDecision
+}
+
+type recordedFilterDecision struct {
+	turnID     string
+	model      string
+	provider   string
+	shouldPost bool
+	reason     string
+	class      string
+}
+
+func (r *filterDecisionRecorder) BeginTurn(turnID, label, model, provider string, triggerMsg int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.beginCalls = append(r.beginCalls, turnID+":"+label)
+}
+func (r *filterDecisionRecorder) OnBridleEvent(ev bridle.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.bridleEvents = append(r.bridleEvents, ev)
+}
+func (r *filterDecisionRecorder) EndTurn() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.endCalls++
+}
+func (r *filterDecisionRecorder) OnFilterDecision(turnID, model, provider string, shouldPost bool, reason, class string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.decisionCalls = append(r.decisionCalls, recordedFilterDecision{
+		turnID:     turnID,
+		model:      model,
+		provider:   provider,
+		shouldPost: shouldPost,
+		reason:     reason,
+		class:      class,
+	})
+}
+
+// TestJudgeTurn_PrefersFilterDecisionRendererOverSyntheticTurn verifies
+// that when the ObservabilityHook implements FilterDecisionRenderer,
+// the funnel calls OnFilterDecision with the structured verdict and
+// SKIPS the legacy synthetic BeginTurn+ModelChunk+TurnDone+EndTurn
+// fallback. Hooks that don't implement the interface still get the
+// synthetic dance (see TestJudgeTurn_LegacyHookGetsSyntheticTurn).
+func TestJudgeTurn_PrefersFilterDecisionRendererOverSyntheticTurn(t *testing.T) {
+	hook := &filterDecisionRecorder{}
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{FinalText: "ok", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
+	}}
+	f, err := New(Config{
+		AspectID:          "frame",
+		Harness:           bridle.NewHarness(prov),
+		Provider:          "scripted",
+		Model:             "test-model",
+		Runner:            noopRunner{},
+		ObservabilityHook: hook,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{From: "op", Content: "go"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatalf("deliberate: %v", err)
+	}
+
+	hook.mu.Lock()
+	defer hook.mu.Unlock()
+	if len(hook.decisionCalls) != 1 {
+		t.Fatalf("OnFilterDecision calls = %d; want 1", len(hook.decisionCalls))
+	}
+	d := hook.decisionCalls[0]
+	if d.turnID == "" {
+		t.Errorf("turnID empty")
+	}
+	if d.model != "test-model" {
+		t.Errorf("model = %q; want test-model", d.model)
+	}
+	if !d.shouldPost {
+		t.Errorf("shouldPost = false; AlwaysPostFilter should yield true")
+	}
+	// Synthetic-fallback shape: legacy path would emit a second
+	// BeginTurn with "filter-decision" label. With FilterDecisionRenderer
+	// satisfied, that should NOT happen.
+	for _, b := range hook.beginCalls {
+		if strings.Contains(b, "filter-decision") {
+			t.Errorf("synthetic filter-decision BeginTurn fired even though FilterDecisionRenderer was satisfied: %v", hook.beginCalls)
+		}
+	}
+}
+
+// legacyHook is an ObservabilityHook that does NOT implement
+// FilterDecisionRenderer. Verifies the fallback synthetic-turn dance
+// still fires for hooks that haven't migrated.
+type legacyHook struct {
+	mu         sync.Mutex
+	beginCalls []string
+}
+
+func (l *legacyHook) BeginTurn(turnID, label, _, _ string, _ int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.beginCalls = append(l.beginCalls, turnID+":"+label)
+}
+func (l *legacyHook) OnBridleEvent(_ bridle.Event) {}
+func (l *legacyHook) EndTurn()                     {}
+
+func TestJudgeTurn_LegacyHookGetsSyntheticTurn(t *testing.T) {
+	hook := &legacyHook{}
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{FinalText: "ok", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
+	}}
+	f, err := New(Config{
+		AspectID:          "frame",
+		Harness:           bridle.NewHarness(prov),
+		Provider:          "scripted",
+		Model:             "test-model",
+		Runner:            noopRunner{},
+		ObservabilityHook: hook,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{From: "op", Content: "go"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatalf("deliberate: %v", err)
+	}
+
+	hook.mu.Lock()
+	defer hook.mu.Unlock()
+	// Must see the synthetic "filter-decision" BeginTurn for back-compat.
+	found := false
+	for _, b := range hook.beginCalls {
+		if strings.HasSuffix(b, ":filter-decision") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("legacy hook didn't receive synthetic filter-decision BeginTurn; got %v", hook.beginCalls)
 	}
 }
 
