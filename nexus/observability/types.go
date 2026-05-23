@@ -9,9 +9,10 @@ import (
 type FrameKind string
 
 const (
-	FrameTurn     FrameKind = "turn"
-	FrameChat     FrameKind = "chat"
-	FramePresence FrameKind = "presence"
+	FrameTurn            FrameKind = "turn"
+	FrameChat            FrameKind = "chat"
+	FramePresence        FrameKind = "presence"
+	FrameFilterDecision  FrameKind = "filter_decision"
 )
 
 // Frame is the wire-format unit consumed by clients. Sequence is
@@ -155,6 +156,25 @@ type ChatFrame struct {
 type PresenceFrame struct {
 	Connected bool   `json:"connected"`
 	Reason    string `json:"reason,omitempty"`
+}
+
+// FilterDecisionFrame is the structured verdict from the funnel's
+// post-hoc output filter for a completed main turn. Emitted via
+// Grouper.OnFilterDecision (the funnel.FilterDecisionRenderer
+// interface) so renderers see a typed frame instead of the legacy
+// synthetic "filter-decision" TurnFrame fabricated by the pre-
+// FilterDecisionRenderer fallback path.
+//
+// MainTurnID pairs the verdict to its parent main turn; renderers
+// SHOULD attach the decision to that turn's snapshot rather than
+// rendering it as a standalone row, but the choice is theirs.
+type FilterDecisionFrame struct {
+	MainTurnID string `json:"main_turn_id"`
+	Model      string `json:"model,omitempty"`
+	Provider   string `json:"provider,omitempty"`
+	ShouldPost bool   `json:"should_post"`
+	Reason     string `json:"reason,omitempty"`
+	Class      string `json:"class,omitempty"`
 }
 
 // UsageStats is the renderer-side view of bridle.Usage plus the
