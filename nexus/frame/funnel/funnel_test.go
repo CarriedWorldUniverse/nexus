@@ -104,6 +104,43 @@ func TestNew_RequiresFields(t *testing.T) {
 	}
 }
 
+// TestNew_NormalizesClaudecodeAlias pins the alias-fold added with
+// the Deliberate toolkit-blurb fix. Before the fix, Deliberate
+// compared `f.cfg.Provider == "claudecode"` (no hyphen) but bridle's
+// canonical constant is "claude-code" — so aspects configured with
+// the canonical form silently missed the toolkit blurb. After the
+// fix, New() folds "claudecode" → bridle.ProviderClaudeCode and the
+// downstream comparison uses the typed constant.
+func TestNew_NormalizesClaudecodeAlias(t *testing.T) {
+	cases := []struct {
+		name  string
+		input bridle.ProviderID
+		want  bridle.ProviderID
+	}{
+		{"alias spelling", "claudecode", bridle.ProviderClaudeCode},
+		{"canonical hyphenated", bridle.ProviderClaudeCode, bridle.ProviderClaudeCode},
+		{"unrelated provider not normalized", "scripted", "scripted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{
+				AspectID: "frame",
+				Harness:  bridle.NewHarness(&scriptedProvider{}),
+				Provider: tc.input,
+				Model:    "m",
+				Runner:   noopRunner{},
+			}
+			f, err := New(cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if f.cfg.Provider != tc.want {
+				t.Errorf("Provider = %q; want %q", f.cfg.Provider, tc.want)
+			}
+		})
+	}
+}
+
 func TestNew_AppliesDefaultCompaction(t *testing.T) {
 	f, _ := newTestFunnel(t)
 	if f.cfg.Compaction.ThresholdTokens != 125_000 {
