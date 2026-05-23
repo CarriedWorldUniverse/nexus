@@ -591,6 +591,47 @@
   padding-left: calc(var(--space-md) - 3px);
 }
 
+/* Operator's own messages — right-aligned with an accent background +
+ * border so the operator can find their own posts at a glance in a
+ * scrolling wall of agent chatter (docs/2026-05-23-feed-trust-surface-
+ * spec.md). The avatar swaps to the trailing side of the row so the
+ * visual weight matches the alignment direction. */
+.msg.is-operator {
+  flex-direction: row-reverse;
+  background: rgba(143, 163, 177, 0.10); /* tint of --color-silver */
+  border-right: 3px solid var(--view-accent);
+  padding-right: calc(var(--space-md) - 3px);
+}
+
+.msg.is-operator .msg-body {
+  /* Cap width so right-aligned content forms a clear bubble shape
+   * instead of stretching to full width like agent messages. */
+  max-width: 70%;
+  flex-grow: 0;
+}
+
+.msg.is-operator .msg-head,
+.msg.is-operator .msg-content,
+.msg.is-operator .msg-quote,
+.msg.is-operator .msg-reactions {
+  text-align: right;
+}
+
+/* The msg-actions buttons row already aligns next to the body; mirror
+ * its position so reply/react controls sit at the leading edge of the
+ * operator bubble, away from where the message content begins. */
+.msg.is-operator .msg-actions {
+  order: -1;
+}
+
+/* When .replying lands on an operator message, keep the accent on the
+ * right side rather than letting the left-border .replying rule fight
+ * with the right-border .is-operator rule. */
+.msg.is-operator.replying {
+  border-left: none;
+  padding-left: var(--space-md);
+}
+
 @media (max-width: 768px) and (pointer: coarse) {
   .chat-reply-bar {
     font-size: 13px;
