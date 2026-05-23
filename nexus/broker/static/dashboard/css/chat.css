@@ -1148,6 +1148,35 @@
   margin-bottom: 10px;
 }
 
+/* "New since you left" divider — horizontal rule rendered above the
+ * first reply with id > the per-thread lastSeen baseline (captured
+ * once per focus mount; see FocusedThread.js). Gold accent picked to
+ * stand out against the dashed reply separators without competing
+ * with the silver --view-accent of the chat surface. */
+.feed-since-divider {
+  position: relative;
+  border: 0;
+  border-top: 1px dashed var(--color-gold);
+  margin: 12px 0 8px;
+  overflow: visible;
+}
+
+.feed-since-divider::before {
+  content: attr(data-label);
+  position: absolute;
+  top: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-gold);
+  background: var(--bg-deep); /* matches .feed-thread-expanded bg */
+  white-space: nowrap;
+}
+
 .feed-thread-expanded-empty,
 .feed-thread-expanded-loading,
 .feed-thread-expanded-noreplies {

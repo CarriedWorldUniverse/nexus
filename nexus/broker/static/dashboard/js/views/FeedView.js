@@ -38,6 +38,7 @@ import { aspectActivity } from '../models/activity.js';
 import { ChatInput } from '../components/ChatInput.js';
 import { ThreadSidebar } from '../components/ThreadSidebar.js';
 import { FocusedThread } from '../components/FocusedThread.js';
+import { persistGet, persistSet } from '../util/persist.js';
 
 const { html, useState, useEffect, useMemo } = window.__preact;
 
@@ -120,17 +121,25 @@ export function FeedView() {
   const [rows, setRows] = useState({});
   const [loading, setLoading] = useState(true);
   // Currently-focused thread rootId (0 = none — empty-state in main
-  // area). Initial value reads the URL hash so deep-links work.
-  const [focusedRoot, setFocusedRoot] = useState(() => parseThreadFromHash());
+  // area). Initial value priority: URL hash (deep-link from another
+  // view) → localStorage (last focused before reload) → 0 (auto-focus
+  // most-active thread on first hydration kicks in via the effect
+  // below).
+  const [focusedRoot, setFocusedRoot] = useState(() => {
+    return parseThreadFromHash() || persistGet('feed', 'focusedThread', 0);
+  });
 
   // Drive focus changes from a single helper so URL-hash + replyTo
   // teardown stay paired. Switching focus also kicks the new thread
   // into load() — idempotent on the Thread registry, but ensures the
   // FocusedThread component sees a populated thread on first render.
+  // Persists to localStorage so a reload lands the operator back on
+  // the same thread (URL hash still wins if present).
   function focusThread(rootId) {
     if (rootId === focusedRoot) return;
     setFocusedRoot(rootId);
     setThreadInHash(rootId);
+    persistSet('feed', 'focusedThread', rootId);
     if (rootId > 0) {
       const t = peekThread(rootId) || getOrCreateThread(rootId);
       t.load().catch(() => {});
