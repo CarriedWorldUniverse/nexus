@@ -211,6 +211,14 @@ func NewSQLStore(db *sql.DB) *SQLStore {
 }
 
 // ErrEmptyFrom is returned by Insert when the sender is empty.
+// maxScanLimit caps `limit` for ListThread and ListSince when the
+// caller passes 0 (or a value above the cap). The historical contract
+// was "0 = unlimited" — defensible in normal use (callers paginate at
+// 500) but a careless caller could pull the entire chat history into
+// memory. Cap leaves ~10x headroom over real page sizes and converts
+// a soft footgun into a known bound.
+const maxScanLimit = 5000
+
 var ErrEmptyFrom = errors.New("chat.Insert: from is required")
 
 // ErrEmptyContent is returned by Insert when the content is empty.
@@ -370,11 +378,14 @@ func (s *SQLStore) Insert(ctx context.Context, from, content string, replyTo int
 // ListThread returns messages in the thread rooted at threadID,
 // optionally filtered to id > sinceID. Walks reply_to via recursive
 // CTE; ordered ascending by id (== oldest first since id is
-// monotonic). Limit 0 = no SQL limit; callers should pass a
-// reasonable cap.
+// monotonic). limit <= 0 OR limit > maxScanLimit clamps to maxScanLimit
+// so a careless caller can't slurp an unbounded result set.
 func (s *SQLStore) ListThread(ctx context.Context, threadID, sinceID int64, limit int) ([]Message, error) {
 	if threadID <= 0 {
 		return nil, fmt.Errorf("chat.ListThread: thread_id must be positive")
+	}
+	if limit <= 0 || limit > maxScanLimit {
+		limit = maxScanLimit
 	}
 
 	// Build the CTE: start at threadID, recurse through reply_to.
@@ -393,15 +404,9 @@ func (s *SQLStore) ListThread(ctx context.Context, threadID, sinceID int64, limi
 		JOIN thread t ON cm.id = t.id
 		WHERE cm.id > ?
 		ORDER BY cm.id ASC
+		LIMIT ?
 	`
-	args := []any{threadID, sinceID}
-	q := query
-	if limit > 0 {
-		q += ` LIMIT ?`
-		args = append(args, limit)
-	}
-
-	rows, err := s.DB.QueryContext(ctx, q, args...)
+	rows, err := s.DB.QueryContext(ctx, query, threadID, sinceID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("chat.ListThread: query: %w", err)
 	}
@@ -647,7 +652,7 @@ func (s *SQLStore) AnnounceSharedFile(ctx context.Context, sharedBy, path, descr
 	if err != nil {
 		return 0, 0, fmt.Errorf("chat.AnnounceSharedFile: begin tx: %w", err)
 	}
-	defer tx.Rollback() // no-op after commit; safe to defer unconditionally
+	defer func() { _ = tx.Rollback() }() // no-op after commit; safe to defer unconditionally
 
 	msgRes, err := tx.ExecContext(ctx, `
 		INSERT INTO chat_messages (thread_id, from_agent, content, reply_to, kind)
@@ -714,24 +719,23 @@ func (s *SQLStore) ShareFile(ctx context.Context, sharedBy, path string, recipie
 // chat history, oldest first, capped at limit. Used for Lock 6
 // replay scans — broker filters by recipient before delivering.
 //
-// Limit 0 means "no SQL limit"; callers should pass a sensible cap
-// (e.g. 500). For huge offline windows the broker paginates by
-// re-calling with the new since-cursor (the last id seen) until a
-// page comes back short of the limit.
+// limit <= 0 OR limit > maxScanLimit clamps to maxScanLimit. Callers
+// should still pass a sensible cap (e.g. 500); for huge offline
+// windows the broker paginates by re-calling with the new since-
+// cursor (the last id seen) until a page comes back short of limit.
 func (s *SQLStore) ListSince(ctx context.Context, sinceID int64, limit int) ([]Message, error) {
-	q := `
+	if limit <= 0 || limit > maxScanLimit {
+		limit = maxScanLimit
+	}
+	const query = `
 		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at, parent_msg_id, thread_root_msg_id
 		FROM chat_messages
 		WHERE id > ?
 		ORDER BY id ASC
+		LIMIT ?
 	`
-	args := []any{sinceID}
-	if limit > 0 {
-		q += ` LIMIT ?`
-		args = append(args, limit)
-	}
 
-	rows, err := s.DB.QueryContext(ctx, q, args...)
+	rows, err := s.DB.QueryContext(ctx, query, sinceID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("chat.ListSince: query: %w", err)
 	}
@@ -879,7 +883,10 @@ func (s *SQLStore) ListShared(ctx context.Context, limit int) ([]SharedFile, err
 		}
 		out = append(out, f)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("chat.ListShared rows: %w", err)
+	}
+	return out, nil
 }
 
 // GetShared implements Store. Returns sql.ErrNoRows when the id
