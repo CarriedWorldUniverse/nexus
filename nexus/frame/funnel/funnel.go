@@ -504,6 +504,16 @@ func New(cfg Config) (*Funnel, error) {
 	if cfg.Provider == "" {
 		return nil, errors.New("funnel: Provider required")
 	}
+	// Normalize the un-hyphenated alias "claudecode" (accepted in
+	// nexus aspect configs) to bridle's canonical ProviderClaudeCode
+	// ("claude-code"). Without this, downstream comparisons against
+	// the typed constant silently miss aliased aspects — and the
+	// toolkit-awareness blurb in Deliberate was doing exactly that
+	// half the time, depending on how the operator spelled the
+	// provider field.
+	if cfg.Provider == "claudecode" {
+		cfg.Provider = bridle.ProviderClaudeCode
+	}
 	if cfg.Model == "" {
 		return nil, errors.New("funnel: Model required")
 	}
@@ -823,7 +833,7 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	// the tools are right there. Other providers (claude-api, openai,
 	// ollama) have no Anthropic default to layer onto; the blurb would
 	// be load-bearing-as-instruction not as-augmentation, so skip it.
-	if f.cfg.Provider == "claudecode" {
+	if f.cfg.Provider == bridle.ProviderClaudeCode {
 		systemPrompt = appendToolkitBlurb(systemPrompt)
 	}
 	providerEnv, err := f.resolveProviderEnv(ctx, "main")
