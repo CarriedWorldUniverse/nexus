@@ -81,6 +81,19 @@ func TestParseLeadingAction(t *testing.T) {
 		{"action with args", "!dispatch implement NEX-179", "dispatch", "implement NEX-179", true},
 		{"action with multi-space args", "!dispatch  two  spaces", "dispatch", " two  spaces", true},
 		{"action with newline args", "!dispatch line1\nline2", "dispatch", "line1\nline2", true},
+		// Positional rule: '!' must be the first non-whitespace byte.
+		// Anywhere else in the content is plain text — operator and
+		// aspects can discuss actions ("let's use !dispatch for this")
+		// without accidentally triggering one.
+		{"mid-text bang ignored", "let's use !dispatch for this", "", "", false},
+		{"backtick-wrapped", "use `!dispatch` to spawn", "", "", false},
+		{"quoted in prose", `remember: "!actions" works`, "", "", false},
+		// Lenient whitespace policy: leading spaces / tabs / newlines
+		// are skipped before checking for '!'. Friendly to pasted
+		// content and multi-line messages whose first line is blank.
+		{"leading spaces fire", "  !dispatch foo", "dispatch", "foo", true},
+		{"leading newline fires", "\n!dispatch foo", "dispatch", "foo", true},
+		{"mixed leading whitespace fires", " \t !dispatch foo", "dispatch", "foo", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,15 +142,25 @@ import (
 )
 
 // parseLeadingAction inspects chat content for a leading "!action-name".
-// Returns (name, args, true) if the content starts with '!'; otherwise
-// returns ("", "", false). The split is on the first space byte —
-// args preserve their internal whitespace exactly. A bare "!" returns
-// ("", "", true).
+// The rule is positional: '!' must be the first non-whitespace byte
+// in the message. Anywhere else (mid-prose, backtick-wrapped, quoted)
+// is plain text and is NOT intercepted — operators and aspects can
+// freely discuss actions without accidentally triggering them.
+//
+// Leading whitespace (spaces, tabs, newlines) is skipped before the
+// '!' check. This is friendly to pasted content and to multi-line
+// messages whose first line is blank.
+//
+// Returns (name, args, true) on a leading-position action; otherwise
+// returns ("", "", false). The split between name and args is on the
+// first space byte after '!'; args preserve their internal whitespace
+// exactly. A bare "!" (possibly after whitespace) returns ("", "", true).
 func parseLeadingAction(content string) (name, args string, isAction bool) {
-	if len(content) == 0 || content[0] != '!' {
+	trimmed := strings.TrimLeft(content, " \t\r\n")
+	if len(trimmed) == 0 || trimmed[0] != '!' {
 		return "", "", false
 	}
-	rest := content[1:]
+	rest := trimmed[1:]
 	idx := strings.IndexByte(rest, ' ')
 	if idx < 0 {
 		return rest, "", true
@@ -152,7 +175,7 @@ func parseLeadingAction(content string) (name, args string, isAction bool) {
 go test ./nexus/broker/ -run TestParseLeadingAction -v
 ```
 
-Expected: PASS — all 8 cases.
+Expected: PASS — all 14 cases (8 original + 3 mid-text/wrapped/quoted lock-ins + 3 lenient-whitespace).
 
 - [ ] **Step 5: Commit**
 
