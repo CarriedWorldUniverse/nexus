@@ -1,6 +1,13 @@
 package observability
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
+
+// onFrameFn is the broadcast callback signature. Named so it can be
+// stored in atomic.Pointer (which needs a concrete type).
+type onFrameFn func(aspect string, f Frame)
 
 // Hub is the broker-side aggregation point for observability Frames.
 // It owns one Grouper per aspect (lazy-instantiated on first use) and
@@ -10,30 +17,35 @@ import "sync"
 //
 // Concurrency: GrouperFor is the workhorse. RLock on the fast path
 // (hit); Lock + double-check on the create path (miss). Tail
-// delegates to Buffer which has its own mutex. The onFrame callback
-// is invoked while NOT holding the Hub mutex — the broker fan-out
-// is allowed to acquire its own locks.
+// delegates to Buffer which has its own mutex. onFrame is an
+// atomic.Pointer so SetOnFrame can race a concurrent emit safely.
+// The callback is invoked while NOT holding the Hub mutex — the
+// broker fan-out is allowed to acquire its own locks.
 type Hub struct {
 	mu        sync.RWMutex
 	groupers  map[string]*Grouper
 	buffer    *Buffer
-	onFrame   func(aspect string, f Frame)
+	onFrame   atomic.Pointer[onFrameFn]
 	bufferCap int
 }
 
 // NewHub constructs a Hub with the given per-aspect Buffer capacity.
-// onFrame is invoked synchronously for every emitted Frame; pass a
-// no-op closure if the caller hasn't wired fan-out yet.
+// onFrame is invoked synchronously for every emitted Frame; pass nil
+// if the caller hasn't wired fan-out yet and will SetOnFrame later.
 func NewHub(bufferCap int, onFrame func(aspect string, f Frame)) *Hub {
 	if bufferCap <= 0 {
 		bufferCap = 500
 	}
-	return &Hub{
+	h := &Hub{
 		groupers:  make(map[string]*Grouper),
 		buffer:    NewBuffer(bufferCap),
-		onFrame:   onFrame,
 		bufferCap: bufferCap,
 	}
+	if onFrame != nil {
+		fn := onFrameFn(onFrame)
+		h.onFrame.Store(&fn)
+	}
+	return h
 }
 
 // GrouperFor returns the Grouper for aspect, creating one on first
@@ -54,8 +66,8 @@ func (h *Hub) GrouperFor(aspect string) *Grouper {
 	}
 	g = NewGrouper(aspect, func(f Frame) {
 		h.buffer.Append(f)
-		if h.onFrame != nil {
-			h.onFrame(aspect, f)
+		if cb := h.onFrame.Load(); cb != nil {
+			(*cb)(aspect, f)
 		}
 	})
 	h.groupers[aspect] = g
@@ -64,19 +76,16 @@ func (h *Hub) GrouperFor(aspect string) *Grouper {
 
 // SetOnFrame replaces the broadcast callback. Used by callers that
 // need to construct the Hub before the consumer (e.g. the broker) is
-// available — pass a nil/placeholder closure to NewHub, then call
-// SetOnFrame once the consumer exists.
-//
-// Must be called BEFORE any goroutine can call into a Grouper —
-// emit reads h.onFrame without a lock, so a write here racing a
-// concurrent emit trips `-race`. In practice that means SetOnFrame
-// must complete before the broker's WS listener starts AND before
-// any in-process funnel issues a Deliberate (the embedded Frame
-// could in principle run a proactive turn before any WS connect).
-// Production wiring sequences this on the startup goroutine before
-// ListenAndServe.
+// available — pass nil to NewHub, then call SetOnFrame once the
+// consumer exists. Safe to call concurrently with emit; passing nil
+// detaches the callback.
 func (h *Hub) SetOnFrame(onFrame func(aspect string, f Frame)) {
-	h.onFrame = onFrame
+	if onFrame == nil {
+		h.onFrame.Store(nil)
+		return
+	}
+	fn := onFrameFn(onFrame)
+	h.onFrame.Store(&fn)
 }
 
 // Tail returns retained frames for aspect with Sequence > sinceSeq.

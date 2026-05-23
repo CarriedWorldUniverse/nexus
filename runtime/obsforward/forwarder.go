@@ -21,7 +21,9 @@ package obsforward
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/CarriedWorldUniverse/bridle"
@@ -55,10 +57,16 @@ const sendTimeout = 2 * time.Second
 // from multiple goroutines — Send on the wsclient is goroutine-safe
 // and each method here is a self-contained marshal + send.
 type WSForwarder struct {
-	sender Sender
-	aspect string
-	log    *slog.Logger
+	sender  Sender
+	aspect  string
+	log     *slog.Logger
+	dropped atomic.Uint64
 }
+
+// Dropped returns the number of frames the forwarder has failed to
+// send (build or transport errors). Exposed so callers can surface a
+// silent-drop rate without scraping debug logs.
+func (w *WSForwarder) Dropped() uint64 { return w.dropped.Load() }
 
 // New constructs a forwarder for the named aspect. aspect is included
 // in each frame's payload for receiver diagnostics, but the broker
@@ -82,6 +90,7 @@ func (w *WSForwarder) BeginTurn(turnID, label, model, provider string, trigger i
 		TriggerMsg: trigger,
 	})
 	if err != nil {
+		w.dropped.Add(1)
 		w.log.Warn("obsforward: build begin frame", "err", err, "turn_id", turnID)
 		return
 	}
@@ -95,6 +104,7 @@ func (w *WSForwarder) BeginTurn(turnID, label, model, provider string, trigger i
 func (w *WSForwarder) OnBridleEvent(ev bridle.Event) {
 	kind, body, err := encodeBridleEvent(ev)
 	if err != nil {
+		w.dropped.Add(1)
 		w.log.Warn("obsforward: encode bridle event", "err", err, "type_kind", kind)
 		return
 	}
@@ -104,6 +114,7 @@ func (w *WSForwarder) OnBridleEvent(ev bridle.Event) {
 		Event:     body,
 	})
 	if err != nil {
+		w.dropped.Add(1)
 		w.log.Warn("obsforward: build event frame", "err", err, "event_kind", kind)
 		return
 	}
@@ -114,6 +125,7 @@ func (w *WSForwarder) OnBridleEvent(ev bridle.Event) {
 func (w *WSForwarder) EndTurn() {
 	env, err := frames.New(frames.KindObserveEnd, frames.ObserveEndPayload{Aspect: w.aspect})
 	if err != nil {
+		w.dropped.Add(1)
 		w.log.Warn("obsforward: build end frame", "err", err)
 		return
 	}
@@ -124,6 +136,7 @@ func (w *WSForwarder) send(env frames.Envelope, tag string) {
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
 	if err := w.sender.Send(ctx, env); err != nil {
+		w.dropped.Add(1)
 		// Debug level — disconnects are routine (sleep/wake on
 		// <operator-host>) and we don't want to spam at warn.
 		w.log.Debug("obsforward: send failed", "err", err, "tag", tag)
@@ -182,8 +195,4 @@ func encodeBridleEvent(ev bridle.Event) (string, json.RawMessage, error) {
 // errUnknownEventType signals encodeBridleEvent received a bridle.Event
 // shape it doesn't recognise. Sentinel so callers can log without a
 // fresh allocation on the common path.
-var errUnknownEventType = unknownEventTypeErr{}
-
-type unknownEventTypeErr struct{}
-
-func (unknownEventTypeErr) Error() string { return "obsforward: unknown bridle.Event type" }
+var errUnknownEventType = errors.New("obsforward: unknown bridle.Event type")

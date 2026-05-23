@@ -33,6 +33,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -283,9 +284,13 @@ func Load(path string) (*Keyfile, error) {
 
 // Client performs the spec §5 handshake against a Nexus. Configurable
 // HTTP client lets callers inject a TLS-trust-store-aware transport
-// (e.g. when dialing a self-signed dev cert).
+// (e.g. when dialing a self-signed dev cert). A nil HTTP field is
+// lazy-initialised to a 10s-timeout default on first use; the
+// initialisation is sync.Once-guarded so concurrent Validate calls
+// can't race on the field write.
 type Client struct {
-	HTTP *http.Client
+	HTTP    *http.Client
+	httpInit sync.Once
 }
 
 // NewClient returns a Client with a sensible default HTTP client
@@ -295,6 +300,17 @@ func NewClient() *Client {
 	return &Client{
 		HTTP: &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// ensureHTTP lazily initialises c.HTTP if the caller constructed
+// Client{} directly without supplying one. Guarded by sync.Once so
+// concurrent Validate calls can't race on the field write.
+func (c *Client) ensureHTTP() {
+	c.httpInit.Do(func() {
+		if c.HTTP == nil {
+			c.HTTP = &http.Client{Timeout: 10 * time.Second}
+		}
+	})
 }
 
 // Validate runs the spec §5 startup handshake:
@@ -310,9 +326,7 @@ func NewClient() *Client {
 // re-minting, ErrValidationRejected with body lets the operator
 // see "revoked, current=N").
 func (c *Client) Validate(ctx context.Context, kf *Keyfile) (*ValidationResult, error) {
-	if c.HTTP == nil {
-		c.HTTP = &http.Client{Timeout: 10 * time.Second}
-	}
+	c.ensureHTTP()
 
 	// Translate envelope.nexus_url (wss://) to the HTTPS base for
 	// REST calls. The broker serves WS and HTTP on the same listener
@@ -374,7 +388,10 @@ func (c *Client) checkNexusID(ctx context.Context, base, expected string) error 
 		return fmt.Errorf("keyfile.checkNexusID: GET %s/api/nexus_id: %w", base, err)
 	}
 	defer httpResp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 4096))
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, 4096))
+	if err != nil {
+		return fmt.Errorf("keyfile.checkNexusID: read body: %w", err)
+	}
 	if httpResp.StatusCode != http.StatusOK {
 		return fmt.Errorf("keyfile.checkNexusID: status %d: %s", httpResp.StatusCode, string(body))
 	}
@@ -430,7 +447,10 @@ func (c *Client) postValidate(ctx context.Context, base, encryptedPayload string
 		return nil, fmt.Errorf("keyfile.postValidate: POST: %w", err)
 	}
 	defer httpResp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 64*1024))
+	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, 64*1024))
+	if err != nil {
+		return nil, fmt.Errorf("keyfile.postValidate: read body: %w", err)
+	}
 	if httpResp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%w: status %d: %s", ErrValidationRejected, httpResp.StatusCode, string(respBody))
 	}
