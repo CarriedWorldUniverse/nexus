@@ -164,6 +164,17 @@ func (t *Tree) appendLocked(ctx context.Context, e Entry) (Entry, AppendHook, er
 		return Entry{}, nil, fmt.Errorf("tree.Append: marshal: %w", err)
 	}
 
+	// Capture pre-write size so we can roll the JSONL back if
+	// writeHead fails — otherwise the entry is durably appended but
+	// unreferenced, leaking disk forever. The mutex (held above) is
+	// what makes the stat→write→truncate sequence safe.
+	var preSize int64
+	if info, err := os.Stat(t.jsonlPath); err == nil {
+		preSize = info.Size()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Entry{}, nil, fmt.Errorf("tree.Append: stat jsonl: %w", err)
+	}
+
 	f, err := os.OpenFile(t.jsonlPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return Entry{}, nil, fmt.Errorf("tree.Append: open jsonl: %w", err)
@@ -180,6 +191,13 @@ func (t *Tree) appendLocked(ctx context.Context, e Entry) (Entry, AppendHook, er
 		return Entry{}, nil, fmt.Errorf("tree.Append: sync: %w", err)
 	}
 	if err := t.writeHead(e.ID); err != nil {
+		// Roll the JSONL back to its pre-write size so the orphan
+		// entry doesn't leak. Best-effort: if truncate fails we
+		// still surface the writeHead error, but log the rollback
+		// failure so an operator can hand-trim if needed.
+		if truncErr := os.Truncate(t.jsonlPath, preSize); truncErr != nil {
+			return Entry{}, nil, fmt.Errorf("tree.Append: write head: %w (rollback failed: %v)", err, truncErr)
+		}
 		return Entry{}, nil, fmt.Errorf("tree.Append: write head: %w", err)
 	}
 	// Capture the currently-installed hook under the lock — caller
@@ -315,16 +333,23 @@ func (t *Tree) writeHead(id string) error {
 	}
 	if _, err := f.Write(raw); err != nil {
 		f.Close()
+		os.Remove(tmp)
 		return err
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
+		os.Remove(tmp)
 		return err
 	}
 	if err := f.Close(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, t.sidecarPath)
+	if err := os.Rename(tmp, t.sidecarPath); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // loadIndex returns a map id → entry for every entry in the log.
@@ -356,8 +381,7 @@ func (t *Tree) findEntry(ctx context.Context, id string) (Entry, bool, error) {
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // allow entries up to 1 MB
+	scanner := newJSONLScanner(f) // allow entries up to 1 MB
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
 			return Entry{}, false, err
@@ -392,8 +416,7 @@ func (t *Tree) readAll(ctx context.Context) ([]Entry, error) {
 	defer f.Close()
 
 	var entries []Entry
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner := newJSONLScanner(f)
 	lineNum := 0
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
@@ -420,4 +443,13 @@ func (t *Tree) readAll(ctx context.Context) ([]Entry, error) {
 		return nil, err
 	}
 	return entries, nil
+}
+
+// newJSONLScanner returns a bufio.Scanner configured for line-based
+// JSONL with a 1 MB max line size — enough headroom for fat turn
+// artifacts (tool results, model chunks) without uncapped growth.
+func newJSONLScanner(r io.Reader) *bufio.Scanner {
+	s := bufio.NewScanner(r)
+	s.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	return s
 }

@@ -366,3 +366,51 @@ func TestTreeMethodsHonorContext(t *testing.T) {
 		t.Errorf("All err = %v, want context.Canceled", err)
 	}
 }
+
+// TestAppendRollsBackJSONLOnWriteHeadFailure verifies the post-PR
+// rollback: if writeHead fails after the JSONL write+fsync, the JSONL
+// is truncated back to its pre-write size so an orphan entry doesn't
+// leak forever.
+func TestAppendRollsBackJSONLOnWriteHeadFailure(t *testing.T) {
+	tt := openTestTree(t)
+	ctx := context.Background()
+
+	// First Append succeeds and creates the sidecar.
+	if _, err := tt.Append(ctx, Entry{Kind: KindTurnUser, Payload: map[string]any{"text": "first"}}); err != nil {
+		t.Fatalf("seed Append: %v", err)
+	}
+
+	jsonlPath := strings.TrimSuffix(tt.SidecarPath(), ".head.json") + ".jsonl"
+	preSize := mustSize(t, jsonlPath)
+
+	// Force writeHead to fail by replacing the sidecar with a non-empty
+	// directory of the same name — os.Rename(tmp, sidecar) then returns
+	// ENOTDIR/EISDIR/ENOTEMPTY depending on platform.
+	if err := os.Remove(tt.SidecarPath()); err != nil {
+		t.Fatalf("remove sidecar: %v", err)
+	}
+	if err := os.Mkdir(tt.SidecarPath(), 0o755); err != nil {
+		t.Fatalf("mkdir sidecar-as-dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tt.SidecarPath(), "blocker"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed blocker: %v", err)
+	}
+
+	if _, err := tt.Append(ctx, Entry{Kind: KindTurnUser, Payload: map[string]any{"text": "doomed"}}); err == nil {
+		t.Fatal("Append succeeded; expected writeHead failure")
+	}
+
+	postSize := mustSize(t, jsonlPath)
+	if postSize != preSize {
+		t.Errorf("JSONL size after failed Append: got %d, want %d (rollback missed an orphan line)", postSize, preSize)
+	}
+}
+
+func mustSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Size()
+}
