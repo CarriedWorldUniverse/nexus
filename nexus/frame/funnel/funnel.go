@@ -1512,9 +1512,17 @@ const emitTimeout = 100 * time.Millisecond
 //
 // Sinks that need long-running work should buffer to a channel and
 // return; the funnel does not wait for downstream delivery.
+//
+// Sink ctx: the emitCtx passed into Events.Emit is a child of the
+// caller's ctx with emitTimeout. Sinks that respect ctx unblock
+// within emitTimeout once the deadline fires, so the per-emit
+// goroutine exits cleanly even after the outer select has abandoned
+// waiting. Sinks that ignore ctx leak — see EventSink docstring.
 func (f *Funnel) emit(ctx context.Context, e Event) {
 	e.AspectID = f.cfg.AspectID
 	e.EmittedAt = time.Now()
+	emitCtx, cancel := context.WithTimeout(ctx, emitTimeout)
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer func() {
@@ -1524,7 +1532,7 @@ func (f *Funnel) emit(ctx context.Context, e Event) {
 			}
 			close(done)
 		}()
-		f.cfg.Events.Emit(ctx, e)
+		f.cfg.Events.Emit(emitCtx, e)
 	}()
 	select {
 	case <-done:
