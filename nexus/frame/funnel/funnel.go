@@ -412,6 +412,16 @@ type Config struct {
 	// unbounded memory.
 	IdempotencyCap int
 
+	// InboxWarnThreshold is the inbox size at which Receive logs a
+	// single WARN that the funnel is under message pressure. Used to
+	// surface buildup that would otherwise be silent — broker burst,
+	// reconnect with stale-cursor replay, a stuck Deliberate not
+	// draining the inbox. The warning fires once per pressure event:
+	// once the inbox drops back below half the threshold, the latch
+	// clears and the next breach can re-warn. 0 = default (100). Set
+	// to a negative number to disable.
+	InboxWarnThreshold int
+
 	Logger *slog.Logger
 }
 
@@ -512,6 +522,13 @@ type Funnel struct {
 	// Only accessed inside Deliberate, which is single-caller after
 	// the deliberating guard.
 	compactionFailures int
+
+	// inboxWarnLatched is true once Receive has warned about inbox
+	// pressure for the current breach, and false again once the inbox
+	// has drained back below half the threshold. Hysteresis prevents
+	// the WARN from firing once per Receive call while the inbox
+	// hovers near the threshold. Guarded by f.mu.
+	inboxWarnLatched bool
 }
 
 // compactionFailureLimit caps how many consecutive compact() errors
@@ -592,6 +609,9 @@ func New(cfg Config) (*Funnel, error) {
 	if cfg.IdempotencyCap == 0 {
 		cfg.IdempotencyCap = 1000
 	}
+	if cfg.InboxWarnThreshold == 0 {
+		cfg.InboxWarnThreshold = 100
+	}
 
 	resolver := NewSessionResolver(cfg.AspectID, cfg.ContextMode)
 	f := &Funnel{
@@ -631,6 +651,7 @@ func (f *Funnel) Receive(item bridle.InboxItem) {
 		}
 	}
 	f.inbox = append(f.inbox, item)
+	f.warnInboxPressureLocked()
 }
 
 // ReceiveWithMsgID is Receive plus Lock 4 attribution: stores the
@@ -662,6 +683,7 @@ func (f *Funnel) ReceiveWithMsgID(item bridle.InboxItem, msgID int64) {
 		}
 	}
 	f.inbox = append(f.inbox, item)
+	f.warnInboxPressureLocked()
 	if msgID > 0 {
 		f.triggeringMsgID = msgID
 		// Capture from + content for the filter judge (latest wins,
@@ -670,6 +692,40 @@ func (f *Funnel) ReceiveWithMsgID(item bridle.InboxItem, msgID int64) {
 		// judge evaluates the candidate against).
 		f.triggeringFrom = item.From
 		f.triggeringContent = item.Content
+	}
+}
+
+// warnInboxPressureLocked logs a single WARN when the inbox crosses
+// InboxWarnThreshold. Hysteresis: the warning latches until the
+// inbox drains to half the threshold, then re-arms. Negative
+// threshold disables. Must be called with f.mu held.
+func (f *Funnel) warnInboxPressureLocked() {
+	if f.cfg.InboxWarnThreshold < 0 {
+		return
+	}
+	if len(f.inbox) >= f.cfg.InboxWarnThreshold && !f.inboxWarnLatched {
+		f.log.Warn("funnel: inbox under pressure",
+			"aspect", f.cfg.AspectID,
+			"inbox_size", len(f.inbox),
+			"threshold", f.cfg.InboxWarnThreshold)
+		f.inboxWarnLatched = true
+	}
+}
+
+// clearInboxWarnLatchLocked re-arms the inbox-pressure warning once
+// the inbox has drained back below half the threshold. Called from
+// Deliberate after popping the head item. Must be called with f.mu
+// held.
+func (f *Funnel) clearInboxWarnLatchLocked() {
+	if !f.inboxWarnLatched {
+		return
+	}
+	if f.cfg.InboxWarnThreshold < 0 {
+		f.inboxWarnLatched = false
+		return
+	}
+	if len(f.inbox) <= f.cfg.InboxWarnThreshold/2 {
+		f.inboxWarnLatched = false
 	}
 }
 
@@ -781,6 +837,9 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		if head.MsgID > 0 {
 			f.markSeenLocked(head.MsgID)
 		}
+		// Re-arm the inbox-pressure WARN latch if the pop drained us
+		// back below the hysteresis threshold.
+		f.clearInboxWarnLatchLocked()
 	}
 
 	// Trigger context comes from the popped item (not from the legacy
