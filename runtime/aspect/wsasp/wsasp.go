@@ -239,16 +239,36 @@ func (c *Client) drainPendingLoop(ctx context.Context) {
 			pending := c.pending
 			c.pending = nil
 			c.mu.Unlock()
-			for _, env := range pending {
+			for i, env := range pending {
 				if err := c.ws.Send(ctx, env); err != nil {
+					// Restore the UNSENT SUFFIX ahead of anything that
+					// landed in c.pending while we drained (Receive can
+					// buffer concurrently). Bug fix: the prior version
+					// re-prepended only env, losing pending[i+1:]
+					// silently — chat.send / react_to frames at the
+					// tail of a burst would vanish on a mid-drain
+					// transient send failure.
 					c.mu.Lock()
-					c.pending = append([]frames.Envelope{env}, c.pending...)
+					c.pending = restoreUnsentPending(pending, i, c.pending)
 					c.mu.Unlock()
 					break // back to the ticker; next reconnect will re-arm the barrier and retry drain
 				}
 			}
 		}
 	}
+}
+
+// restoreUnsentPending rebuilds the pending queue after a mid-drain
+// send failure: the unsent suffix of the just-drained batch
+// (pending[i:]) goes first, followed by anything that arrived in
+// concurrent during the drain. Pure helper so the slice manipulation
+// is unit-testable without a WS mock.
+func restoreUnsentPending(drained []frames.Envelope, failedAt int, concurrent []frames.Envelope) []frames.Envelope {
+	unsent := drained[failedAt:]
+	out := make([]frames.Envelope, 0, len(unsent)+len(concurrent))
+	out = append(out, unsent...)
+	out = append(out, concurrent...)
+	return out
 }
 
 // handleFrame is the wsclient.Handler. Routes inbound frames to
