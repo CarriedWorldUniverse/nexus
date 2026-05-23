@@ -132,6 +132,24 @@ type Store interface {
 	// a parent message when computing reply-recipient.
 	GetByID(ctx context.Context, id int64) (Message, error)
 
+	// ThreadParticipants returns every distinct from_agent that has
+	// posted into the thread containing msgID, in stable order.
+	// Drives Slack/Teams-style routing: replies in a thread reach
+	// all participants without the sender having to @-tag each one.
+	//
+	// The walk is by thread_root_msg_id (column added by #226, indexed
+	// by idx_chat_thread_root_msg_id). When msgID is itself a reply,
+	// its row carries the same thread_root_msg_id as the root, so the
+	// lookup works regardless of where in the thread the operator
+	// replies.
+	//
+	// Returns an empty slice (not an error) when msgID is unknown or
+	// its thread has no recorded participants — callers (the recipient
+	// policy) treat empty as "fall back to parent-author rule," which
+	// preserves pre-thread-participants behaviour for transient lookup
+	// misses.
+	ThreadParticipants(ctx context.Context, msgID int64) ([]string, error)
+
 	// ListShared returns shared_files rows, newest first, capped to
 	// `limit`. Used by the list_shared comms tool — gives an aspect
 	// the recently-shared file roster.
@@ -785,6 +803,47 @@ func (s *SQLStore) GetByID(ctx context.Context, id int64) (Message, error) {
 		return Message{}, fmt.Errorf("chat.GetByID: parse created_at %q: %w", createdAtRaw, err)
 	}
 	return msg, nil
+}
+
+// ThreadParticipants returns every distinct from_agent in the thread
+// containing msgID, in alphabetical order. Walks chat_messages by
+// thread_root_msg_id: we look up the given msg's thread_root in a
+// subquery, then collect the distinct senders sharing that root.
+//
+// Returns an empty slice with no error when msgID is unknown, when
+// the thread has only one participant (the sender), or when the
+// thread_root_msg_id column isn't populated for the row (legacy rows
+// before the #226 migration may have NULL until the backfill catches
+// them — backfillChatThreadRoots in storage/schema.go handles this
+// idempotently on every boot, so the gap closes by the next start).
+func (s *SQLStore) ThreadParticipants(ctx context.Context, msgID int64) ([]string, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT DISTINCT from_agent
+		FROM chat_messages
+		WHERE thread_root_msg_id = (
+			SELECT thread_root_msg_id FROM chat_messages WHERE id = ?
+		)
+		AND thread_root_msg_id IS NOT NULL
+		ORDER BY from_agent
+	`, msgID)
+	if err != nil {
+		return nil, fmt.Errorf("chat.ThreadParticipants: query: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("chat.ThreadParticipants: scan: %w", err)
+		}
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("chat.ThreadParticipants: rows: %w", err)
+	}
+	return out, nil
 }
 
 // FormatRFC3339 renders a Message's CreatedAt in the canonical wire

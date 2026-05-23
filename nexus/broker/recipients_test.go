@@ -179,3 +179,99 @@ func TestRecipientPolicy_FrameIsValidExplicitMention(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
+
+// stubThreadParticipants returns a fixed slice for any rootID.
+// Used by the thread-participants test family so each test reads
+// like "given these participants, expect this routing."
+func stubThreadParticipants(names []string) ThreadParticipantsLookup {
+	return func(int64) ([]string, error) { return names, nil }
+}
+
+func TestRecipientPolicy_ThreadParticipantsAutoIncluded(t *testing.T) {
+	// Operator replies in a thread alice + bob + carol are in.
+	// Without @-mentioning each, all three should receive the reply
+	// (Slack/Teams semantics).
+	p := RecipientPolicy{
+		Parent:             func(int64) (string, error) { return "alice", nil },
+		ThreadParticipants: stubThreadParticipants([]string{"alice", "bob", "carol"}),
+	}
+	got := p.Compute("operator", "any thoughts on this?", 100)
+	want := []string{"alice", "bob", "carol"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestRecipientPolicy_ThreadParticipantsPlusExplicitMention(t *testing.T) {
+	// Operator's reply in an alice+bob thread also @-mentions carol
+	// (who hasn't posted yet). carol gets pulled in alongside the
+	// existing thread participants.
+	p := RecipientPolicy{
+		Parent:             func(int64) (string, error) { return "alice", nil },
+		ThreadParticipants: stubThreadParticipants([]string{"alice", "bob"}),
+	}
+	got := p.Compute("operator", "hey @carol take a look", 100)
+	want := []string{"alice", "bob", "carol"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestRecipientPolicy_ThreadParticipantsExcludesSender(t *testing.T) {
+	// Aspect bob replies in a thread it's already a participant in.
+	// Bob shouldn't get its own reply.
+	p := RecipientPolicy{
+		Parent:             func(int64) (string, error) { return "alice", nil },
+		ThreadParticipants: stubThreadParticipants([]string{"alice", "bob", "carol"}),
+	}
+	got := p.Compute("bob", "good question", 100)
+	want := []string{"alice", "carol"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestRecipientPolicy_ThreadParticipantsNilFallsBackToParent(t *testing.T) {
+	// Graceful degradation: when ThreadParticipants is unset (as the
+	// legacy 12-case test suite leaves it), Compute must still produce
+	// the pre-thread-participants behaviour. This guards the existing
+	// tests from silently changing meaning.
+	p := RecipientPolicy{
+		Parent: func(int64) (string, error) { return "alice", nil },
+	}
+	got := p.Compute("operator", "reply", 100)
+	want := []string{"alice"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("expected parent-only fallback, got %v", got)
+	}
+}
+
+func TestRecipientPolicy_ThreadParticipantsEmptyFallsBackToParent(t *testing.T) {
+	// Lookup wired but returns empty (e.g., parent not yet indexed by
+	// thread_root_msg_id, or chat store transient miss). Same fallback
+	// as nil-lookup: don't silently drop the parent author.
+	p := RecipientPolicy{
+		Parent:             func(int64) (string, error) { return "alice", nil },
+		ThreadParticipants: stubThreadParticipants(nil),
+	}
+	got := p.Compute("operator", "reply", 100)
+	want := []string{"alice"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("expected parent-only fallback on empty thread, got %v", got)
+	}
+}
+
+func TestRecipientPolicy_AllStillBroadcastsOverThreadParticipants(t *testing.T) {
+	// @all overrides every other rule, including the thread-participants
+	// expansion. Operator broadcasting in a small thread still reaches
+	// every registered aspect, not just the thread.
+	p := RecipientPolicy{
+		Aspects:            func() []string { return []string{"x", "y", "z"} },
+		ThreadParticipants: stubThreadParticipants([]string{"alice"}),
+	}
+	got := p.Compute("operator", "@all heads up", 100)
+	want := []string{"x", "y", "z"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("@all should override thread participants, got %v", got)
+	}
+}

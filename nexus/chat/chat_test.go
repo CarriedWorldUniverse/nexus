@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
@@ -157,6 +158,80 @@ func TestSQLStore_InsertResolvesThreadColumns(t *testing.T) {
 	}
 }
 
+
+func TestSQLStore_ThreadParticipants(t *testing.T) {
+	// Powers the Slack/Teams-style routing in recipients.go: every
+	// distinct sender in a thread is reachable from any msg in that
+	// thread. Verify: build a thread of mixed senders, query from
+	// the root and from a mid-thread reply, both return the same set.
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	root, err := s.Insert(ctx, "operator", "root", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1, err := s.Insert(ctx, "anvil", "first reply", root.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := s.Insert(ctx, "plumb", "second reply", r1.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Anvil chimes in again — should still only appear once (DISTINCT).
+	if _, err := s.Insert(ctx, "anvil", "back again", r2.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"anvil", "operator", "plumb"} // alphabetical
+
+	// Query from the root id.
+	got, err := s.ThreadParticipants(ctx, root.ID)
+	if err != nil {
+		t.Fatalf("ThreadParticipants from root: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("from root: got %v, want %v", got, want)
+	}
+
+	// Query from a mid-thread reply id — same answer.
+	got, err = s.ThreadParticipants(ctx, r2.ID)
+	if err != nil {
+		t.Fatalf("ThreadParticipants from r2: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("from r2: got %v, want %v", got, want)
+	}
+
+	// Unrelated thread is isolated: a new root with a different
+	// sender shouldn't pollute the original thread's participants.
+	other, err := s.Insert(ctx, "keel", "other root", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.ThreadParticipants(ctx, other.ID)
+	if err != nil {
+		t.Fatalf("ThreadParticipants from other root: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"keel"}) {
+		t.Errorf("unrelated thread: got %v, want [keel]", got)
+	}
+}
+
+func TestSQLStore_ThreadParticipantsUnknownMsg(t *testing.T) {
+	// Looking up a non-existent msg id returns empty + nil error.
+	// recipients.go treats this as "fall back to parent" — must
+	// never blow up the chat.send path.
+	s := openTestStore(t)
+	got, err := s.ThreadParticipants(context.Background(), 999999)
+	if err != nil {
+		t.Errorf("unknown msg id should not error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("unknown msg id should return empty: got %v", got)
+	}
+}
 
 func TestSQLStore_FormatRFC3339(t *testing.T) {
 	s := openTestStore(t)
