@@ -605,9 +605,17 @@
 
 .msg.is-operator .msg-body {
   /* Cap width so right-aligned content forms a clear bubble shape
-   * instead of stretching to full width like agent messages. */
+   * instead of stretching to full width like agent messages.
+   *
+   * flex shorthand reset is load-bearing: the base .msg-body rule sets
+   * `flex: 1` (= 1 1 0%), so flex-basis is 0% by default. Just setting
+   * flex-grow: 0 leaves basis at 0%, and combined with min-width: auto
+   * defaulting to min-content under word-wrap: break-word, the body
+   * collapses to a single-character-wide column (every char wraps to
+   * its own line). Resetting to `flex: 0 1 auto` makes the basis
+   * track content, capped by max-width above. */
+  flex: 0 1 auto;
   max-width: 70%;
-  flex-grow: 0;
 }
 
 .msg.is-operator .msg-head,
