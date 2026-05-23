@@ -811,10 +811,71 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	}
 	defer f.deliberating.Store(false)
 
+	st, err := f.popHeadForTurn(userMessage)
+	if err != nil {
+		return DeliberateResult{}, err
+	}
+
+	// NEX-82: Return.OnTurnStart fires the "picking it up" pulse.
+	// Default impl (NexusChatReturnHandler) writes 👀 on the trigger
+	// msg via ChatGateway. Noop for headless callers. Errors are
+	// logged but never abort the turn — failed start-pulse shouldn't
+	// kill substantive work.
+	if err := f.cfg.Return.OnTurnStart(ctx, st.trigger); err != nil {
+		f.log.Debug("funnel: return handler OnTurnStart failed",
+			"aspect", f.cfg.AspectID, "trigger_msg_id", st.trigger.MsgID, "err", err)
+	}
+
+	f.maybeCompact(ctx, st)
+
+	req := f.buildTurnRequest(ctx, st, userMessage)
+
+	result, err := f.runMainTurn(ctx, st, req)
+
+	if err != nil {
+		return f.handleTurnError(ctx, st, result, err)
+	}
+
+	f.commitTurnState(ctx, st, result)
+
+	decision := f.judgeTurn(ctx, st, result)
+
+	return f.dispatchReturn(ctx, st, result, decision), nil
+}
+
+// deliberateState carries per-turn working state across Deliberate's
+// extracted helper methods. Per-call (not per-Funnel); safe to mutate
+// freely because the deliberating atomic guard ensures only one
+// Deliberate runs at a time per Funnel.
+type deliberateState struct {
+	// Trigger context — populated by popHeadForTurn from the popped
+	// inbox item. Zero/empty for userMessage-only (autonomous) turns.
+	pending           []bridle.InboxItem
+	trigger           TurnTrigger
+	triggerMsgID      int64
+	triggerThreadRoot int64
+	triggerFrom       string
+	triggerContent    string
+
+	// Session view — initially resolved by popHeadForTurn, may be
+	// rotated by maybeCompact's force-rotation path.
+	session bridle.SessionHandle
+	tail    []bridle.SessionEvent
+
+	// Per-turn telemetry — populated by runMainTurn.
+	turnID    string
+	turnStart time.Time
+}
+
+// popHeadForTurn pops the next inbox head (FIFO), builds the trigger
+// context, resolves the session for this turn, and returns the per-
+// turn state struct. Returns ErrEmptyInbox when there's nothing to
+// deliberate (no inbox + no userMessage).
+func (f *Funnel) popHeadForTurn(userMessage string) (*deliberateState, error) {
 	f.mu.Lock()
 	if len(f.inbox) == 0 && userMessage == "" {
 		f.mu.Unlock()
-		return DeliberateResult{}, ErrEmptyInbox
+		return nil, ErrEmptyInbox
 	}
 
 	// FIFO pop: take the HEAD item only. Remaining items stay in
@@ -842,17 +903,21 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		f.clearInboxWarnLatchLocked()
 	}
 
+	st := &deliberateState{pending: pending}
+
 	// Trigger context comes from the popped item (not from the legacy
 	// "latest Receive wins" path — that conflated multiple msgs into one
 	// trigger). When userMessage drives the turn with no inbox item,
 	// trigger fields stay zero/empty.
-	var triggerMsgID, triggerThreadRoot int64
-	var triggerFrom, triggerContent string
 	if len(pending) > 0 {
-		triggerMsgID = pending[0].MsgID
-		triggerFrom = pending[0].From
-		triggerContent = pending[0].Content
-		triggerThreadRoot = pending[0].ThreadRoot
+		st.triggerMsgID = pending[0].MsgID
+		st.triggerFrom = pending[0].From
+		st.triggerContent = pending[0].Content
+		st.triggerThreadRoot = pending[0].ThreadRoot
+		// Build the typed TurnTrigger from the popped item. Single
+		// source of truth for return-side context; both OnTurnStart
+		// and Handle receive it.
+		st.trigger = triggerFromInboxItem(pending[0])
 	}
 	// Clear the cached "latest Receive" fields — they're vestigial under
 	// FIFO semantics but kept until ReceiveWithMsgID is refactored to
@@ -861,30 +926,9 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	f.triggeringFrom = ""
 	f.triggeringContent = ""
 
-	// Build the typed TurnTrigger from the popped item (or zero-value
-	// for non-inbox-driven turns). Single source of truth for the
-	// return-side context; both OnTurnStart and Handle receive it.
-	var trigger TurnTrigger
-	if len(pending) > 0 {
-		trigger = triggerFromInboxItem(pending[0])
-	}
-
-	// NEX-82: Return.OnTurnStart fires the "picking it up" pulse.
-	// Default impl (NexusChatReturnHandler) writes 👀 on the trigger
-	// msg via ChatGateway. Noop for headless callers. Errors are
-	// logged but never abort the turn — failed start-pulse shouldn't
-	// kill substantive work.
-	if err := f.cfg.Return.OnTurnStart(ctx, trigger); err != nil {
-		f.log.Debug("funnel: return handler OnTurnStart failed",
-			"aspect", f.cfg.AspectID, "trigger_msg_id", trigger.MsgID, "err", err)
-	}
-
-	// Check compaction threshold before running the turn. If we'd cross
-	// it, summarize first and rotate the session.
-	threshold := f.cfg.Compaction.ThresholdTokens
-	shouldCompact := f.cumulativeTokens >= threshold
-
-	tail := append([]bridle.SessionEvent(nil), f.sessionTail...)
+	// Snapshot tail under lock. compaction can mutate sessionTail later;
+	// the per-turn `st.tail` is what gets shipped to the provider.
+	st.tail = append([]bridle.SessionEvent(nil), f.sessionTail...)
 	f.mu.Unlock()
 
 	// Resolve the session for this turn via the per-mode resolver
@@ -895,63 +939,83 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	// global handle even in thread-isolated mode, so non-chat
 	// triggers (synthetic injections, userMessage-only turns) stay on
 	// the global session rather than minting a useless one-off.
-	session := f.resolver.Resolve(triggerThreadRoot)
+	st.session = f.resolver.Resolve(st.triggerThreadRoot)
 	// Keep the legacy field in sync for SessionID()/observability
 	// callers that haven't migrated. In thread-isolated mode this
 	// reflects "the last session we deliberated against," which is
 	// the most useful observability answer for that mode.
 	f.mu.Lock()
-	f.sessionHandle = session
+	f.sessionHandle = st.session
 	f.mu.Unlock()
 
-	if shouldCompact {
-		if err := f.compact(ctx, tail); err != nil {
-			f.compactionFailures++
-			f.log.Warn("funnel: compaction failed; continuing without it",
-				"err", err, "consecutive_failures", f.compactionFailures)
-			// Sustained failure: rotate the session as a last-resort
-			// recovery (mirrors the PostTurn rewriter's reset behavior
-			// in this same function). Drops sessionTail + resets
-			// cumulativeTokens so the next turn starts clean, no
-			// further compaction attempts on the broken state.
-			// Operator sees the WARN with discarded counts.
-			if f.compactionFailures >= compactionFailureLimit {
-				fresh := f.resolver.RotateGlobal()
-				f.mu.Lock()
-				oldID := f.sessionHandle.ID
-				oldTail := len(f.sessionTail)
-				oldTokens := f.cumulativeTokens
-				f.sessionHandle = fresh
-				f.sessionTail = nil
-				f.cumulativeTokens = 0
-				f.mu.Unlock()
-				f.log.Warn("funnel: forced session rotation after sustained compaction failures",
-					"consecutive_failures", f.compactionFailures,
-					"old_session", oldID, "new_session", fresh.ID,
-					"discarded_tail_events", oldTail, "discarded_tokens", oldTokens)
-				f.compactionFailures = 0
-				tail = nil
-				session = fresh
-			}
-			// On non-rotation failure paths: proceed with the existing
-			// tail. The provider's own auto-compact (when threshold is
-			// crossed there too) is a backup; we'll retry compact next
-			// turn until the counter trips the rotation above.
-		} else {
-			f.compactionFailures = 0
-			// Refresh local view post-compaction. compact() rotates the
-			// resolver's global handle, so re-resolve to pick up the
-			// fresh id for this turn.
-			f.mu.Lock()
-			tail = append([]bridle.SessionEvent(nil), f.sessionTail...)
-			f.mu.Unlock()
-			session = f.resolver.Resolve(triggerThreadRoot)
-			f.mu.Lock()
-			f.sessionHandle = session
-			f.mu.Unlock()
-		}
+	return st, nil
+}
+
+// maybeCompact runs the compaction summarize-turn when cumulativeTokens
+// crosses the configured threshold. Mutates st.session/st.tail when
+// compaction succeeds (or when sustained failure triggers a force-
+// rotation). Tracks consecutive failures and force-rotates after the
+// limit so deterministic failures don't burn API calls forever.
+func (f *Funnel) maybeCompact(ctx context.Context, st *deliberateState) {
+	threshold := f.cfg.Compaction.ThresholdTokens
+	if f.cumulativeTokens < threshold {
+		return
 	}
 
+	if err := f.compact(ctx, st.tail); err != nil {
+		f.compactionFailures++
+		f.log.Warn("funnel: compaction failed; continuing without it",
+			"err", err, "consecutive_failures", f.compactionFailures)
+		// Sustained failure: rotate the session as a last-resort
+		// recovery (mirrors the PostTurn rewriter's reset behavior
+		// in commitTurnState). Drops sessionTail + resets
+		// cumulativeTokens so the next turn starts clean, no
+		// further compaction attempts on the broken state.
+		// Operator sees the WARN with discarded counts.
+		if f.compactionFailures >= compactionFailureLimit {
+			fresh := f.resolver.RotateGlobal()
+			f.mu.Lock()
+			oldID := f.sessionHandle.ID
+			oldTail := len(f.sessionTail)
+			oldTokens := f.cumulativeTokens
+			f.sessionHandle = fresh
+			f.sessionTail = nil
+			f.cumulativeTokens = 0
+			f.mu.Unlock()
+			f.log.Warn("funnel: forced session rotation after sustained compaction failures",
+				"consecutive_failures", f.compactionFailures,
+				"old_session", oldID, "new_session", fresh.ID,
+				"discarded_tail_events", oldTail, "discarded_tokens", oldTokens)
+			f.compactionFailures = 0
+			st.tail = nil
+			st.session = fresh
+		}
+		// On non-rotation failure paths: proceed with the existing
+		// tail. The provider's own auto-compact (when threshold is
+		// crossed there too) is a backup; we'll retry compact next
+		// turn until the counter trips the rotation above.
+		return
+	}
+
+	f.compactionFailures = 0
+	// Refresh local view post-compaction. compact() rotates the
+	// resolver's global handle, so re-resolve to pick up the
+	// fresh id for this turn.
+	f.mu.Lock()
+	st.tail = append([]bridle.SessionEvent(nil), f.sessionTail...)
+	f.mu.Unlock()
+	st.session = f.resolver.Resolve(st.triggerThreadRoot)
+	f.mu.Lock()
+	f.sessionHandle = st.session
+	f.mu.Unlock()
+}
+
+// buildTurnRequest assembles the bridle.TurnRequest for this turn:
+// resolves the system prompt (with optional toolkit blurb for
+// claudecode), resolves per-call provider env (credential routing),
+// appends the triage contract to the user message when applicable,
+// and packs everything into the request struct.
+func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, userMessage string) bridle.TurnRequest {
 	systemPrompt := f.cfg.SystemPrompt
 	if f.cfg.SystemPromptFn != nil {
 		systemPrompt = f.cfg.SystemPromptFn()
@@ -976,20 +1040,20 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	// Append the triage contract (when applicable) to the user message
 	// so the model sees it inside this turn's prompt. Moved out of
 	// bridle on 2026-05-23 — see triage_contract.go for the why.
-	if contract := triageContractFor(pending, f.cfg.Tools); contract != "" {
+	if contract := triageContractFor(st.pending, f.cfg.Tools); contract != "" {
 		if userMessage != "" {
 			userMessage = userMessage + "\n\n" + contract
 		} else {
 			userMessage = contract
 		}
 	}
-	req := bridle.TurnRequest{
+	return bridle.TurnRequest{
 		AspectID:           f.cfg.AspectID,
 		AppendSystemPrompt: systemPrompt,
-		Session:            session,
-		SessionTail:        tail,
+		Session:            st.session,
+		SessionTail:        st.tail,
 		UserMessage:        userMessage,
-		Inbox:              pending,
+		Inbox:              st.pending,
 		Tools:              f.cfg.Tools,
 		MCP:                f.cfg.MCP,
 		Provider:           f.cfg.Provider,
@@ -998,15 +1062,23 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		Cwd:                f.cfg.AspectHome,
 		ProviderEnv:        providerEnv,
 	}
+}
 
-	turnID := newTurnID()
-	turnStart := time.Now()
+// runMainTurn fires the main bridle.RunTurn call bracketed by Lock-5
+// lifecycle events (TurnStart/TurnEnd) and the ObservabilityHook
+// BeginTurn/EndTurn pair. Wires the streaming-to-chat sink when
+// configured. Always emits TurnEnd (success or error) so dashboards
+// see a paired event for every TurnStart. Records usage attribution
+// and reconciles the inbox-triage contract on every exit path.
+func (f *Funnel) runMainTurn(ctx context.Context, st *deliberateState, req bridle.TurnRequest) (bridle.TurnResult, error) {
+	st.turnID = newTurnID()
+	st.turnStart = time.Now()
 	f.emit(ctx, Event{
 		Type: EventTurnStart,
 		Payload: TurnStartPayload{
-			TurnID:        turnID,
+			TurnID:        st.turnID,
 			Round:         1,
-			ContextTokens: estimateContextTokens(tail, pending, userMessage),
+			ContextTokens: estimateContextTokens(st.tail, st.pending, req.UserMessage),
 		},
 	})
 
@@ -1014,13 +1086,14 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	// BeginTurn/events/EndTurn. turnSink falls back to collectSink when
 	// the hook is nil, preserving the pre-Phase-E no-op path.
 	//
-	// NOT deferred: the post-hoc filter judge (below) calls BeginTurn
-	// on the same Grouper. A pending defer here would land the filter
-	// inside this turn's lifetime and trigger the Grouper's protocol-
-	// violation recovery (force-close main as errored). Close explicitly
-	// immediately after RunTurn so the main TurnFrame settles cleanly.
+	// NOT deferred: the post-hoc filter judge (in judgeTurn) calls
+	// BeginTurn on the same Grouper. A pending defer here would land
+	// the filter inside this turn's lifetime and trigger the Grouper's
+	// protocol-violation recovery (force-close main as errored). Close
+	// explicitly immediately after RunTurn so the main TurnFrame
+	// settles cleanly.
 	if f.cfg.ObservabilityHook != nil {
-		f.cfg.ObservabilityHook.BeginTurn(turnID, "main", f.cfg.Model, string(f.cfg.Provider), triggerMsgID)
+		f.cfg.ObservabilityHook.BeginTurn(st.turnID, "main", f.cfg.Model, string(f.cfg.Provider), st.triggerMsgID)
 	}
 	sink := turnSink(f.cfg.ObservabilityHook)
 	// When streaming text to chat, prepend a streamingChatSink so each
@@ -1028,7 +1101,7 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	if f.cfg.StreamTextToChat && f.cfg.ChatGateway != nil {
 		streamSink := &streamingChatSink{
 			gateway:  f.cfg.ChatGateway,
-			replyTo:  trigger.MsgID,
+			replyTo:  st.trigger.MsgID,
 			aspectID: f.cfg.AspectID,
 		}
 		sink = multiSink{streamSink, sink}
@@ -1036,7 +1109,7 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	// Tag the context with the turn_id so the triage tool runner
 	// persists rows under the right turn. Required when Triage is
 	// wired; harmless otherwise.
-	turnCtx := WithTurnID(ctx, turnID)
+	turnCtx := WithTurnID(ctx, st.turnID)
 	result, err := f.cfg.Harness.RunTurn(turnCtx, req, f.cfg.Runner, sink)
 	if f.cfg.ObservabilityHook != nil {
 		f.cfg.ObservabilityHook.EndTurn()
@@ -1056,11 +1129,11 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	f.emit(ctx, Event{
 		Type: EventTurnEnd,
 		Payload: TurnEndPayload{
-			TurnID:        turnID,
+			TurnID:        st.turnID,
 			Usage:         result.Usage,
 			StopReason:    result.StopReason,
 			StepCount:     result.StepCount,
-			Duration:      time.Since(turnStart),
+			Duration:      time.Since(st.turnStart),
 			ErrorClass:    errorClass,
 			ResolvedModel: result.ResolvedModel,
 		},
@@ -1070,9 +1143,9 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	// paths) so a turn that errored still has its partial usage
 	// captured — billing apportions to errored turns too. Errors
 	// from the recorder are logged but never fail the deliberation.
-	if recErr := f.cfg.UsageRecorder.Record(ctx, triggerMsgID, turnID, f.cfg.AspectID, f.cfg.Model, result.Usage); recErr != nil {
+	if recErr := f.cfg.UsageRecorder.Record(ctx, st.triggerMsgID, st.turnID, f.cfg.AspectID, f.cfg.Model, result.Usage); recErr != nil {
 		f.log.Warn("funnel: usage record failed",
-			"err", recErr, "turn_id", turnID, "msg_id", triggerMsgID)
+			"err", recErr, "turn_id", st.turnID, "msg_id", st.triggerMsgID)
 	}
 
 	// Triage enforcement (inbox-triage contract). For every inbox
@@ -1088,75 +1161,89 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	// and the untriaged ones still need synthetic skips so the
 	// reconciliation invariant holds regardless of provider outcome.
 	if f.cfg.Triage != nil {
-		f.reconcileTriage(ctx, turnID, pending)
+		f.reconcileTriage(ctx, st.turnID, st.pending)
 	}
 
-	if err != nil {
-		// Error path skips the cumulative-token update and the post-hoc
-		// filter — neither has anything meaningful to do with a turn
-		// that didn't produce a normal completion. The turn.end event
-		// above already fired with whatever Usage the provider returned
-		// (often zero, but some SDKs report partial usage on timeout).
-		// F1.4 token-attribution work should NOT rely on
-		// cumulativeTokens being precise across error retries — this
-		// is the right place to look if attribution numbers ever
-		// disagree with the provider's billing.
-		//
-		// Surface partial assistant text before cleanup (NEX-239).
-		// When the provider exits non-zero after producing text blocks
-		// (claude-code exit-1, stream timeout), the partial result is
-		// recoverable and may reach chat. Route through the same filter
-		// the success path uses, with FilterInput.Partial=true so the
-		// judge knows the underlying turn errored mid-stream and can
-		// lean toward post for coherent partials. Filter failures
-		// already fail-open (see runFilter), so this preserves the
-		// "don't silently drop" property without bypassing scratch
-		// suppression for garbage partials (truncated mid-token,
-		// fragments of internal reasoning).
-		if result.FinalText != "" {
-			partialDecision := f.runFilter(ctx, FilterInput{
-				FinalText:    result.FinalText,
-				AspectID:     f.cfg.AspectID,
-				TurnID:       turnID,
-				TriggerFrom:  triggerFrom,
-				TriggerText:  triggerContent,
-				TriggerMsgID: triggerMsgID,
-				DoD:          f.takeDoD(),
-				ToolNames:    toolNamesFromInvocations(result.ToolCalls),
-				Partial:      true,
-			})
-			partial := DeliberateResult{
-				TurnResult: result,
-				Filter:     partialDecision,
-			}
-			if hErr := f.cfg.Return.Handle(ctx, partial, trigger); hErr != nil {
-				f.log.Debug("funnel: partial-result Handle failed",
-					"aspect", f.cfg.AspectID,
-					"trigger_msg_id", trigger.MsgID,
-					"err", hErr)
-			}
+	return result, err
+}
+
+// handleTurnError handles the error path from runMainTurn: surfaces
+// any partial assistant text via the filter (NEX-239), flips the
+// session resolver into resumed state so subsequent turns don't try
+// to re-create the same session id, and returns the partial result
+// with the error.
+func (f *Funnel) handleTurnError(ctx context.Context, st *deliberateState, result bridle.TurnResult, err error) (DeliberateResult, error) {
+	// Error path skips the cumulative-token update and the success-
+	// path filter — neither has anything meaningful to do with a turn
+	// that didn't produce a normal completion. The turn.end event
+	// (emitted in runMainTurn) already fired with whatever Usage the
+	// provider returned (often zero, but some SDKs report partial
+	// usage on timeout). F1.4 token-attribution work should NOT rely
+	// on cumulativeTokens being precise across error retries — this
+	// is the right place to look if attribution numbers ever
+	// disagree with the provider's billing.
+	//
+	// Surface partial assistant text before cleanup (NEX-239).
+	// When the provider exits non-zero after producing text blocks
+	// (claude-code exit-1, stream timeout), the partial result is
+	// recoverable and may reach chat. Route through the same filter
+	// the success path uses, with FilterInput.Partial=true so the
+	// judge knows the underlying turn errored mid-stream and can
+	// lean toward post for coherent partials. Filter failures
+	// already fail-open (see runFilter), so this preserves the
+	// "don't silently drop" property without bypassing scratch
+	// suppression for garbage partials (truncated mid-token,
+	// fragments of internal reasoning).
+	if result.FinalText != "" {
+		partialDecision := f.runFilter(ctx, FilterInput{
+			FinalText:    result.FinalText,
+			AspectID:     f.cfg.AspectID,
+			TurnID:       st.turnID,
+			TriggerFrom:  st.triggerFrom,
+			TriggerText:  st.triggerContent,
+			TriggerMsgID: st.triggerMsgID,
+			DoD:          f.takeDoD(),
+			ToolNames:    toolNamesFromInvocations(result.ToolCalls),
+			Partial:      true,
+		})
+		partial := DeliberateResult{
+			TurnResult: result,
+			Filter:     partialDecision,
 		}
-
-		// Flip the resolver's "known" set for this session id even on
-		// error. The provider may have written the underlying session
-		// jsonl (claudecode does this once `--session-id` is accepted,
-		// even if a later step fails), so the next turn MUST resume
-		// rather than try to create the same id again. Without this
-		// flip, every error pins the session in the "new" state and
-		// subsequent turns fail with "Session ID already in use".
-		f.resolver.MarkResumed(session.ID)
-		f.mu.Lock()
-		f.sessionHandle.New = false
-		f.mu.Unlock()
-		return DeliberateResult{TurnResult: result}, err
+		if hErr := f.cfg.Return.Handle(ctx, partial, st.trigger); hErr != nil {
+			f.log.Debug("funnel: partial-result Handle failed",
+				"aspect", f.cfg.AspectID,
+				"trigger_msg_id", st.trigger.MsgID,
+				"err", hErr)
+		}
 	}
 
+	// Flip the resolver's "known" set for this session id even on
+	// error. The provider may have written the underlying session
+	// jsonl (claudecode does this once `--session-id` is accepted,
+	// even if a later step fails), so the next turn MUST resume
+	// rather than try to create the same id again. Without this
+	// flip, every error pins the session in the "new" state and
+	// subsequent turns fail with "Session ID already in use".
+	f.resolver.MarkResumed(st.session.ID)
+	f.mu.Lock()
+	f.sessionHandle.New = false
+	f.mu.Unlock()
+	return DeliberateResult{TurnResult: result}, err
+}
+
+// commitTurnState applies the success-path post-processing: appends
+// the turn's session delta to the persistent sessionTail, updates
+// cumulative tokens, marks the session as resumed, fires the
+// PostTurn hook (panic-safe), and honours its ShouldResetSession
+// signal with a force-rotation when set.
+func (f *Funnel) commitTurnState(ctx context.Context, st *deliberateState, result bridle.TurnResult) {
 	// Append the turn's session delta + update cumulative tokens. If
 	// the v2 log-decision turn lands, this is where it'd gate the append.
 	// Also mark the session as resumed in the resolver: the provider has
 	// created the underlying session (e.g. claudecode wrote the jsonl),
 	// so future turns against the same id resume rather than re-create.
-	f.resolver.MarkResumed(session.ID)
+	f.resolver.MarkResumed(st.session.ID)
 	f.mu.Lock()
 	f.sessionTail = append(f.sessionTail, result.SessionDelta...)
 	f.cumulativeTokens += result.Usage.InputTokens + result.Usage.OutputTokens
@@ -1199,13 +1286,20 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 			"old_session", oldID, "new_session", newID,
 			"discarded_tail_events", oldTail, "discarded_tokens", oldTokens)
 	}
+}
 
+// judgeTurn runs the post-hoc output filter on the natural reply,
+// emits the EventFilterJudging/Judged pair around the call, and
+// fabricates a synthetic "filter-decision" turn into the
+// ObservabilityHook stream so suppressions surface to dashboards
+// even when no cheap-judge bridle turn fired.
+func (f *Funnel) judgeTurn(ctx context.Context, st *deliberateState, result bridle.TurnResult) FilterDecision {
 	// Post-hoc filter judges the natural reply. Lock 5's
 	// EventFilterJudging fires before the call so dashboards can
 	// distinguish "filter is running" from "filter result back."
 	f.emit(ctx, Event{
 		Type:    EventFilterJudging,
-		Payload: FilterJudgingPayload{TurnID: turnID},
+		Payload: FilterJudgingPayload{TurnID: st.turnID},
 	})
 
 	// Read and clear the goal DoD for this turn (NEX-210).
@@ -1214,10 +1308,10 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	decision := f.runFilter(ctx, FilterInput{
 		FinalText:    result.FinalText,
 		AspectID:     f.cfg.AspectID,
-		TurnID:       turnID,
-		TriggerFrom:  triggerFrom,
-		TriggerText:  triggerContent,
-		TriggerMsgID: triggerMsgID,
+		TurnID:       st.turnID,
+		TriggerFrom:  st.triggerFrom,
+		TriggerText:  st.triggerContent,
+		TriggerMsgID: st.triggerMsgID,
 		DoD:          dod,
 		ToolNames:    toolNamesFromInvocations(result.ToolCalls),
 	})
@@ -1230,7 +1324,7 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	f.emit(ctx, Event{
 		Type: EventFilterJudged,
 		Payload: FilterJudgedPayload{
-			TurnID:       turnID,
+			TurnID:       st.turnID,
 			ShouldPost:   decision.ShouldPost,
 			Reason:       decision.Reason,
 			FinalTextLen: len(result.FinalText),
@@ -1247,12 +1341,19 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	// produced it, and the reason text so the operator can audit
 	// suppressions without grepping host logs.
 	if f.cfg.ObservabilityHook != nil {
-		f.cfg.ObservabilityHook.BeginTurn(turnID+"-decision", "filter-decision", f.cfg.Model, string(f.cfg.Provider), 0)
+		f.cfg.ObservabilityHook.BeginTurn(st.turnID+"-decision", "filter-decision", f.cfg.Model, string(f.cfg.Provider), 0)
 		f.cfg.ObservabilityHook.OnBridleEvent(bridle.ModelChunk{Text: renderFilterVerdict(decision)})
 		f.cfg.ObservabilityHook.OnBridleEvent(bridle.TurnDone{})
 		f.cfg.ObservabilityHook.EndTurn()
 	}
 
+	return decision
+}
+
+// dispatchReturn logs the turn-complete line, calls Return.Handle
+// with the final DeliberateResult, and returns that result to the
+// outer Deliberate caller.
+func (f *Funnel) dispatchReturn(ctx context.Context, st *deliberateState, result bridle.TurnResult, decision FilterDecision) DeliberateResult {
 	f.log.Info("funnel: turn complete",
 		"aspect", f.cfg.AspectID,
 		"steps", result.StepCount,
@@ -1274,14 +1375,13 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	// Deliberate's caller already has the result; return-side failures
 	// are observability concerns.
 	deliberate := DeliberateResult{TurnResult: result, Filter: decision}
-	if err := f.cfg.Return.Handle(ctx, deliberate, trigger); err != nil {
+	if err := f.cfg.Return.Handle(ctx, deliberate, st.trigger); err != nil {
 		f.log.Debug("funnel: return handler Handle failed",
 			"aspect", f.cfg.AspectID,
-			"trigger_msg_id", trigger.MsgID,
+			"trigger_msg_id", st.trigger.MsgID,
 			"err", err)
 	}
-
-	return deliberate, nil
+	return deliberate
 }
 
 // DeliberateResult is the funnel-level outcome of one deliberation
