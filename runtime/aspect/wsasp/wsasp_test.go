@@ -2,6 +2,7 @@ package wsasp
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -213,6 +214,49 @@ func TestCursorFileForAspect(t *testing.T) {
 }
 
 func noopDeliver(_ DeliveredMessage) {}
+
+// TestQueueOrSend_CapsPendingAndDropsOldest pins the unbounded-buffer
+// fix: a long disconnect that accumulates more than maxPendingFrames
+// outbound frames drops the oldest in-memory rather than letting the
+// slice grow without bound (OOM risk on funnel-heavy aspects). New
+// frames are kept; the dropped oldest frame's kind/id surface in a
+// WARN log for operator visibility.
+func TestQueueOrSend_CapsPendingAndDropsOldest(t *testing.T) {
+	c, err := NewClient(Config{
+		URL:        "wss://example/connect",
+		AspectName: "anvil",
+		OnDeliver:  noopDeliver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-seed the pending buffer past the cap. We bypass queueOrSend's
+	// "try send first" branch by appending directly under the lock,
+	// then call queueOrSend once to exercise the drop path.
+	c.mu.Lock()
+	for i := 0; i < maxPendingFrames; i++ {
+		c.pending = append(c.pending, frames.Envelope{ID: fmt.Sprintf("old-%d", i)})
+	}
+	c.mu.Unlock()
+
+	// At-cap. queueOrSend should drop the oldest ("old-0") and append
+	// the new one. ws.Connected() returns false (no Run), so the
+	// branch falls through directly to the buffer-append path.
+	c.queueOrSend(context.Background(), frames.Envelope{ID: "new-frame"})
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if got := len(c.pending); got != maxPendingFrames {
+		t.Fatalf("buffer length = %d, want %d (cap held)", got, maxPendingFrames)
+	}
+	if c.pending[0].ID != "old-1" {
+		t.Errorf("after drop, head ID = %q, want %q (old-0 should be gone)", c.pending[0].ID, "old-1")
+	}
+	if c.pending[maxPendingFrames-1].ID != "new-frame" {
+		t.Errorf("after append, tail ID = %q, want %q", c.pending[maxPendingFrames-1].ID, "new-frame")
+	}
+}
 
 func TestRegisterPrecedesDrainedSendsAfterReconnect(t *testing.T) {
 	// Recorder for the order of inbound frames on the server side.

@@ -73,6 +73,16 @@ type Config struct {
 	Logger *slog.Logger
 }
 
+// maxPendingFrames caps the in-memory outbound buffer used during WS
+// disconnects. A long offline window (broker down, network flap that
+// outlives the wsclient's max reconnect delay) with a funnel-heavy
+// session could otherwise grow this slice without bound and OOM the
+// aspect process. When full, queueOrSend drops the OLDEST frame and
+// WARNs — recent activity wins because it's more likely to be
+// contextually relevant when the connection comes back. Operator sees
+// the WARN, knows the aspect was offline long enough to lose history.
+const maxPendingFrames = 10000
+
 // DeliveredMessage is the funnel-side representation of an inbound
 // chat.deliver frame. Mirrors funnel.ChatMessage shape so the funnel
 // can ingest without translation.
@@ -531,6 +541,13 @@ func (c *Client) queueOrSend(ctx context.Context, env frames.Envelope) {
 		}
 	}
 	c.mu.Lock()
+	if len(c.pending) >= maxPendingFrames {
+		dropped := c.pending[0]
+		c.pending = append(c.pending[:0], c.pending[1:]...)
+		c.log.Warn("wsasp: pending buffer at cap; dropped oldest frame",
+			"aspect", c.cfg.AspectName, "cap", maxPendingFrames,
+			"dropped_kind", dropped.Kind, "dropped_id", dropped.ID)
+	}
 	c.pending = append(c.pending, env)
 	c.mu.Unlock()
 }
