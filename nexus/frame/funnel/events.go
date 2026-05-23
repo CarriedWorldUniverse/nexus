@@ -220,6 +220,14 @@ type GoalLoopCapPayload struct {
 // cause an aspect to drop a message. Sinks that need to surface
 // errors should log internally.
 //
+// Emit MUST respect ctx — the funnel wraps the parent context with
+// emitTimeout (currently 100ms) before passing it in, so a sink that
+// observes ctx.Done() will be unblocked on the deadline even when the
+// funnel has already abandoned waiting synchronously. A sink that
+// ignores ctx and blocks indefinitely leaks the per-emit goroutine
+// for the lifetime of whatever resource the sink holds (channel
+// send, network write, etc.); the funnel cannot recover from that.
+//
 // Emit SHOULD be non-blocking: a slow sink starves the funnel, which
 // breaks the very thing lifecycle events exist to prevent (the
 // "looks like a hang" problem). Implementations buffering to a

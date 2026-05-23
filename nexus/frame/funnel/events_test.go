@@ -394,6 +394,30 @@ func (b *blockingSink) Emit(_ context.Context, _ Event) {
 	<-b.release
 }
 
+// ctxRespectingBlockingSink blocks Emit until either released OR ctx
+// is cancelled. Records how each Emit call exited so a test can
+// distinguish "released by signal" from "released by ctx" — verifies
+// emit() bounds the sink's ctx with emitTimeout instead of relying
+// on the caller's long-lived parent ctx.
+type ctxRespectingBlockingSink struct {
+	mu       sync.Mutex
+	release  chan struct{}
+	exitedBy []string // "ctx" or "release"
+}
+
+func (s *ctxRespectingBlockingSink) Emit(ctx context.Context, _ Event) {
+	select {
+	case <-s.release:
+		s.mu.Lock()
+		s.exitedBy = append(s.exitedBy, "release")
+		s.mu.Unlock()
+	case <-ctx.Done():
+		s.mu.Lock()
+		s.exitedBy = append(s.exitedBy, "ctx")
+		s.mu.Unlock()
+	}
+}
+
 func TestEmit_BlockingSinkDoesNotStallDeliberation(t *testing.T) {
 	sink := &blockingSink{release: make(chan struct{})}
 	defer close(sink.release) // unblock background goroutines at test end
@@ -430,6 +454,60 @@ func TestEmit_BlockingSinkDoesNotStallDeliberation(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("deliberate stalled by blocking sink — emit() timeout not enforced")
+	}
+}
+
+// TestEmit_CtxRespectingSinkUnblocksOnEmitTimeout verifies that emit()
+// passes a child ctx with emitTimeout to the sink — so a sink that
+// honors ctx unblocks within the timeout instead of dragging on until
+// the parent ctx (turn-long) cancels. Pre-fix, the sink received the
+// caller's ctx directly; sinks that respected ctx still leaked the
+// per-emit goroutine for the full duration of the parent context.
+func TestEmit_CtxRespectingSinkUnblocksOnEmitTimeout(t *testing.T) {
+	sink := &ctxRespectingBlockingSink{release: make(chan struct{})}
+	defer close(sink.release)
+
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{FinalText: "ok", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
+	}}
+	f, err := New(Config{
+		AspectID: "frame",
+		Harness:  bridle.NewHarness(prov),
+		Provider: "scripted",
+		Model:    "m",
+		Runner:   noopRunner{},
+		Events:   sink,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	if _, err := f.Deliberate(context.Background(), "ping"); err != nil {
+		t.Fatalf("deliberate: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// Give the goroutines a beat to finish — once emit()'s defer cancel
+	// fires, the sink should exit via ctx within emitTimeout.
+	time.Sleep(2 * emitTimeout)
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.exitedBy) == 0 {
+		t.Fatal("no Emit calls completed; sink goroutines didn't observe ctx")
+	}
+	for i, how := range sink.exitedBy {
+		if how != "ctx" {
+			t.Errorf("Emit %d exited by %q; want ctx (emit() should pass a child ctx with emitTimeout)", i, how)
+		}
+	}
+
+	// Sanity: deliberation should have completed quickly. emit() bounds
+	// each emit at emitTimeout; with multiple events per turn we'd see
+	// at most a few hundred ms even with all of them slow.
+	if elapsed > time.Second {
+		t.Errorf("deliberation took %v; want well under 1s (emit timeout not enforced?)", elapsed)
 	}
 }
 
