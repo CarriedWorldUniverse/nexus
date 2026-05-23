@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 )
 
 // nativeClient mirrors Jira writes to the native issue tracker over HTTPS.
@@ -36,7 +37,7 @@ func (n *nativeClient) MirrorTransition(ctx context.Context, key, status, actor 
 		return
 	}
 	body := map[string]any{"status": status, "actor": actor}
-	if err := n.do(ctx, http.MethodPost, "/api/issues/"+key+"/transition", body, nil); err != nil {
+	if err := n.do(ctx, http.MethodPost, "/api/issues/"+url.PathEscape(key)+"/transition", body, nil); err != nil {
 		n.log.Warn("dual-write transition failed", "err", err, "key", key)
 	}
 }
@@ -46,7 +47,7 @@ func (n *nativeClient) MirrorAssign(ctx context.Context, key, aspect, actor stri
 		return
 	}
 	body := map[string]any{"aspect": aspect, "actor": actor}
-	if err := n.do(ctx, http.MethodPost, "/api/issues/"+key+"/assign", body, nil); err != nil {
+	if err := n.do(ctx, http.MethodPost, "/api/issues/"+url.PathEscape(key)+"/assign", body, nil); err != nil {
 		n.log.Warn("dual-write assign failed", "err", err, "key", key)
 	}
 }

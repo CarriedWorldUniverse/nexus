@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/url"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -50,7 +51,7 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 		if key == "" {
 			return mcpErr("key required"), nil
 		}
-		body, err := c.getText(ctx, "/api/issues/"+key)
+		body, err := c.getText(ctx, "/api/issues/"+url.PathEscape(key))
 		if err != nil {
 			return mcpErr(err.Error()), nil
 		}
@@ -66,7 +67,7 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 			return mcpErr("key required"), nil
 		}
 		var out map[string]any
-		if err := c.get(ctx, "/api/issues/"+key+"?format=raw", &out); err != nil {
+		if err := c.get(ctx, "/api/issues/"+url.PathEscape(key)+"?format=raw", &out); err != nil {
 			return mcpErr(err.Error()), nil
 		}
 		return mcpJSON(out), nil
@@ -94,7 +95,7 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 			"actor": req.GetString("actor", ""),
 			"body":  req.GetString("body", ""),
 		}
-		if err := c.post(ctx, "/api/issues/"+req.GetString("key", "")+"/comments", body, nil); err != nil {
+		if err := c.post(ctx, "/api/issues/"+url.PathEscape(req.GetString("key", ""))+"/comments", body, nil); err != nil {
 			return mcpErr(err.Error()), nil
 		}
 		return mcpJSON(map[string]any{"ok": true}), nil
@@ -110,7 +111,7 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 			"aspect": req.GetString("aspect", ""),
 			"actor":  req.GetString("actor", ""),
 		}
-		if err := c.post(ctx, "/api/issues/"+req.GetString("key", "")+"/watchers", body, nil); err != nil {
+		if err := c.post(ctx, "/api/issues/"+url.PathEscape(req.GetString("key", ""))+"/watchers", body, nil); err != nil {
 			return mcpErr(err.Error()), nil
 		}
 		return mcpJSON(map[string]any{"ok": true}), nil
@@ -126,7 +127,7 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 			"aspect": req.GetString("aspect", ""),
 			"actor":  req.GetString("actor", ""),
 		}
-		if err := c.del(ctx, "/api/issues/"+req.GetString("key", "")+"/watchers", body, nil); err != nil {
+		if err := c.del(ctx, "/api/issues/"+url.PathEscape(req.GetString("key", ""))+"/watchers", body, nil); err != nil {
 			return mcpErr(err.Error()), nil
 		}
 		return mcpJSON(map[string]any{"ok": true}), nil
@@ -137,7 +138,7 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 		mcpgo.WithString("key", mcpgo.Required()),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		var out []string
-		if err := c.get(ctx, "/api/issues/"+req.GetString("key", "")+"/watchers", &out); err != nil {
+		if err := c.get(ctx, "/api/issues/"+url.PathEscape(req.GetString("key", ""))+"/watchers", &out); err != nil {
 			return mcpErr(err.Error()), nil
 		}
 		return mcpJSON(out), nil
@@ -152,10 +153,12 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 		if aspect == "" {
 			return mcpErr("aspect required"), nil
 		}
-		path := "/api/issues/updates?aspect=" + aspect
+		q := url.Values{}
+		q.Set("aspect", aspect)
 		if since := req.GetString("since", ""); since != "" {
-			path += "&since=" + since
+			q.Set("since", since)
 		}
+		path := "/api/issues/updates?" + q.Encode()
 		var out []any
 		if err := c.get(ctx, path, &out); err != nil {
 			return mcpErr(err.Error()), nil
