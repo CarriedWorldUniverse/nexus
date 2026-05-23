@@ -886,177 +886,87 @@
    operator can scan by lane.
    ────────────────────────────────────────────────────────────── */
 
-.feed-thread-view { /* inherits .chat-view */ }
+/* ── Trust-surface layout (PR 4 of the Feed redesign,
+   docs/2026-05-23-feed-trust-surface-spec.md). ──
+   Left sidebar lists active threads with per-participant activity
+   dots; main area renders one focused thread with its sticky
+   presence strip; composer pinned to the bottom row. Replaces the
+   pre-spec single-thread accordion (.feed-thread-row* family). */
 
-.feed-thread-filters {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: var(--space-md);
-  padding: var(--space-sm) var(--space-md);
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-deep);
-  flex-shrink: 0;
-}
-
-.feed-thread-filter-group {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: var(--space-xs);
-  flex-wrap: wrap;
-}
-
-.feed-thread-mentions {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  user-select: none;
-}
-
-.feed-thread-mentions input[type="checkbox"] {
-  margin: 0;
-  width: 14px;
-  height: 14px;
-  accent-color: var(--view-accent);
-  cursor: pointer;
-}
-
-.feed-thread-list {
-  flex: 1 1 0;
+.feed-trust-view {
+  /* Overrides .chat-view's flex-column with a 2x2 grid:
+     [ sidebar | main ]
+     [ input   | input ]
+     The composer row spans both columns so a reply target set from
+     the sidebar applies to the focused thread without horizontal
+     ambiguity about where the input lives. */
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  grid-template-rows: 1fr auto;
+  grid-template-areas:
+    "sidebar main"
+    "input   input";
+  height: 100%;
   min-height: 0;
-  overflow-y: auto;
-  padding: var(--space-sm);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
 }
 
-.feed-thread-empty {
-  padding: var(--space-xl) var(--space-md);
-  text-align: center;
+.feed-sidebar {
+  grid-area: sidebar;
+  overflow-y: auto;
+  padding: var(--space-sm) 0;
+  background: var(--bg-deep);
+  border-right: 1px solid var(--border-subtle);
+}
+
+.feed-sidebar-empty {
+  padding: var(--space-md);
   color: var(--text-muted);
   font-size: 13px;
   font-style: italic;
+  text-align: center;
 }
 
-/* Row is now a container for an interactive summary + (optional)
-   expanded panel below it. flex-shrink:0 protects sibling rows from
-   being squashed when one row's expanded panel grows tall — without
-   this the parent flex-column container compresses the others. */
-.feed-thread-row {
+.feed-sidebar-row {
   display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
   border-left: 2px solid transparent;
-  border-radius: 6px;
-  overflow: hidden;
   transition: background 120ms ease, border-color 120ms ease;
 }
 
-.feed-thread-row.is-expanded {
+.feed-sidebar-row:hover {
+  background: var(--bg-hover);
+}
+
+.feed-sidebar-row.is-focused {
   background: var(--bg-raised);
-  border-color: var(--border-default);
   border-left-color: var(--view-accent);
 }
 
-/* Summary = the always-visible row header (caret + head + preview +
-   foot). Click toggles expansion. */
-.feed-thread-row-summary {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-sm);
-  padding: 10px 12px;
-  min-height: 56px;
-  cursor: pointer;
-  user-select: none;
-  transition: background 120ms ease;
-}
-
-.feed-thread-row:not(.is-expanded) .feed-thread-row-summary:hover {
-  background: var(--bg-raised);
-}
-
-.feed-thread-row:not(.is-expanded):hover {
-  border-color: var(--border-default);
-  border-left-color: var(--view-accent-dim);
-}
-
-.feed-thread-row-summary:focus-visible {
+.feed-sidebar-row:focus-visible {
   outline: none;
-  background: var(--bg-raised);
   box-shadow: inset 0 0 0 1px var(--view-accent-glow);
 }
 
-.feed-thread-row-body {
+.feed-sidebar-row-body {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
-.feed-thread-caret {
-  display: inline-block;
-  flex-shrink: 0;
-  width: 14px;
-  text-align: center;
-  margin-top: 3px;
-  color: var(--text-muted);
-  font-size: 11px;
-  transition: transform 160ms ease, color 160ms ease;
-}
-
-.feed-thread-caret.is-open {
-  transform: rotate(90deg);
-  color: var(--view-accent);
-}
-
-.feed-thread-row-head {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: var(--space-sm);
-}
-
-.feed-thread-from {
+.feed-sidebar-from {
   font-family: var(--font-display);
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 600;
-  color: var(--agent-color, var(--text-primary));
+  color: var(--text-primary);
 }
 
-.feed-thread-role {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: 1px 6px;
-  border-radius: 3px;
-  border: 1px solid currentColor;
-  opacity: 0.85;
-}
-
-.feed-thread-role-planner-dispatch  { color: var(--color-silver); }
-.feed-thread-role-worker-execution  { color: var(--color-moss); }
-.feed-thread-role-operator-drive    { color: var(--color-ember); }
-.feed-thread-role-casual            { color: var(--color-gold); }
-
-.feed-thread-time {
-  margin-left: auto;
-  font-family: var(--font-mono);
+.feed-sidebar-preview {
   font-size: 11px;
-  color: var(--text-muted);
-}
-
-.feed-thread-preview {
-  font-size: 13px;
   color: var(--text-secondary);
   line-height: 1.4;
   overflow: hidden;
@@ -1066,27 +976,61 @@
   -webkit-box-orient: vertical;
 }
 
-.feed-thread-row-foot {
+.feed-sidebar-dots {
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   align-items: center;
-  gap: var(--space-sm);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.feed-thread-participants {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.feed-thread-replies {
+  gap: 3px;
+  padding-top: 2px;
   flex-shrink: 0;
-  color: var(--text-secondary);
+}
+
+.feed-sidebar-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted); /* offline default */
+}
+
+.feed-sidebar-dot.pres-online {
+  background: #4caf50;
+}
+
+/* Activity dots reuse the presence-strip vocabulary: pulsing green
+   for thinking, pulsing gold for tool. Defined here independently
+   of .presence-pill so the strip's larger styling stays decoupled
+   from the sidebar's compact 7px-dot pattern. */
+.feed-sidebar-dot.state-thinking {
+  background: #4caf50;
+  animation: presence-pulse 1.1s ease-in-out infinite;
+}
+
+.feed-sidebar-dot.state-tool {
+  background: var(--color-gold);
+  animation: presence-pulse 1.4s ease-in-out infinite;
+}
+
+.feed-main {
+  grid-area: main;
+  overflow-y: auto;
+  min-width: 0;
+  background: var(--bg-deep);
+}
+
+.feed-main-empty {
+  padding: var(--space-xl) var(--space-md);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* ChatInput is wrapped at a higher level by .chat-input-area in
+   the existing component; place its grid area so it spans the full
+   bottom row independent of which column is active. */
+.feed-trust-view > .chat-input-area,
+.feed-trust-view .chat-input-area {
+  grid-area: input;
 }
 
 /* ── Expanded thread panel (NEX-246 Part 4b — accordion) ──
