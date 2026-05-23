@@ -445,10 +445,10 @@ func (c *Client) Connected() bool {
 }
 
 // emitEvent posts a connect/disconnect transition non-blocking. The
-// channel is buffered (size 4); under sustained burst the consumer
-// has missed transitions, so dropping is the correct shape — a slow
-// subscriber should re-check Connected() rather than rely on
-// in-order delivery of every transition.
+// channel is buffered (size 16, matching the eventCh make() above);
+// under sustained burst the consumer has missed transitions, so
+// dropping is the correct shape — a slow subscriber should re-check
+// Connected() rather than rely on in-order delivery of every transition.
 func (c *Client) emitEvent(e ConnectEvent) {
 	select {
 	case c.eventCh <- e:
