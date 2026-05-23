@@ -472,22 +472,6 @@ type Funnel struct {
 	seenMsgIDs map[int64]struct{}
 	seenOrder  []int64
 
-	// triggeringMsgID is the chat msg_id that prompted the next
-	// deliberation. Set by ReceiveWithMsgID; consumed and cleared
-	// by Deliberate so each turn's UsageRecorder.Record call gets
-	// the correct attribution. Zero means "no chat trigger" — the
-	// recorder writes MsgID=0, which the usage table stores as NULL.
-	triggeringMsgID int64
-
-	// triggeringFrom / triggeringContent mirror triggeringMsgID — the
-	// From and Content of the InboxItem that closed the latency window.
-	// Passed into FilterInput so the cheap-judge can evaluate the
-	// candidate AS A REPLY TO the trigger (not in isolation). Without
-	// this context, short substantive replies routinely got mislabeled
-	// as scratch. Cleared by Deliberate alongside triggeringMsgID.
-	triggeringFrom    string
-	triggeringContent string
-
 	// sessionTail accumulates events across turns. Compacted when
 	// cumulativeTokens crosses the threshold.
 	sessionTail []bridle.SessionEvent
@@ -574,6 +558,16 @@ func New(cfg Config) (*Funnel, error) {
 	}
 	if cfg.Filter == nil {
 		cfg.Filter = AlwaysPostFilter{}
+	}
+	// Auto-derive ObservabilityHook on CheapModelFilter from the
+	// funnel's hook when the filter's own hook is nil. Eliminates the
+	// footgun where a caller wired cfg.ObservabilityHook but forgot
+	// to thread the same hook into CheapModelFilter — judge turns
+	// would then run invisibly with no observability surface. Honors
+	// an explicitly-set filter hook (different from the funnel's) for
+	// callers that want the judge published to a separate stream.
+	if cfg.ObservabilityHook != nil {
+		cfg.Filter = applyFilterObsHookDefault(cfg.Filter, cfg.ObservabilityHook)
 	}
 	if cfg.Pulser == nil {
 		cfg.Pulser = NoopPulser{}
@@ -684,15 +678,6 @@ func (f *Funnel) ReceiveWithMsgID(item bridle.InboxItem, msgID int64) {
 	}
 	f.inbox = append(f.inbox, item)
 	f.warnInboxPressureLocked()
-	if msgID > 0 {
-		f.triggeringMsgID = msgID
-		// Capture from + content for the filter judge (latest wins,
-		// matching triggeringMsgID's LATEST semantics — same message
-		// is the one credited with the turn's tokens and the one the
-		// judge evaluates the candidate against).
-		f.triggeringFrom = item.From
-		f.triggeringContent = item.Content
-	}
 }
 
 // warnInboxPressureLocked logs a single WARN when the inbox crosses
@@ -919,12 +904,6 @@ func (f *Funnel) popHeadForTurn(userMessage string) (*deliberateState, error) {
 		// and Handle receive it.
 		st.trigger = triggerFromInboxItem(pending[0])
 	}
-	// Clear the cached "latest Receive" fields — they're vestigial under
-	// FIFO semantics but kept until ReceiveWithMsgID is refactored to
-	// stop writing them. Reset on every Deliberate for safety.
-	f.triggeringMsgID = 0
-	f.triggeringFrom = ""
-	f.triggeringContent = ""
 
 	// Snapshot tail under lock. compaction can mutate sessionTail later;
 	// the per-turn `st.tail` is what gets shipped to the provider.
@@ -1095,17 +1074,7 @@ func (f *Funnel) runMainTurn(ctx context.Context, st *deliberateState, req bridl
 	if f.cfg.ObservabilityHook != nil {
 		f.cfg.ObservabilityHook.BeginTurn(st.turnID, "main", f.cfg.Model, string(f.cfg.Provider), st.triggerMsgID)
 	}
-	sink := turnSink(f.cfg.ObservabilityHook)
-	// When streaming text to chat, prepend a streamingChatSink so each
-	// ModelChunk posts to chat before the observability hook sees it.
-	if f.cfg.StreamTextToChat && f.cfg.ChatGateway != nil {
-		streamSink := &streamingChatSink{
-			gateway:  f.cfg.ChatGateway,
-			replyTo:  st.trigger.MsgID,
-			aspectID: f.cfg.AspectID,
-		}
-		sink = multiSink{streamSink, sink}
-	}
+	sink := f.buildTurnSink(st.trigger.MsgID)
 	// Tag the context with the turn_id so the triage tool runner
 	// persists rows under the right turn. Required when Triage is
 	// wired; harmless otherwise.
@@ -1568,6 +1537,52 @@ func (f *Funnel) resolveProviderEnv(ctx context.Context, kind string) (map[strin
 
 // ErrEmptyInbox is returned by Deliberate when there's nothing to
 // deliberate on (no inbox items AND empty user message).
+// buildTurnSink composes the EventSink wired into bridle.RunTurn for
+// the main turn: ObservabilityHook fan-out plus an optional
+// streamingChatSink that posts each ModelChunk to chat as it arrives.
+// The streaming sink is prepended so it runs before the obs hook,
+// matching the previous inline construction in runMainTurn.
+//
+// replyTo is the trigger msg_id the streaming sink uses for the first
+// posted block; subsequent blocks chain off the prior post's id.
+func (f *Funnel) buildTurnSink(replyTo int64) bridle.EventSink {
+	sink := turnSink(f.cfg.ObservabilityHook)
+	if !f.cfg.StreamTextToChat || f.cfg.ChatGateway == nil {
+		return sink
+	}
+	return multiSink{
+		&streamingChatSink{
+			gateway:  f.cfg.ChatGateway,
+			replyTo:  replyTo,
+			aspectID: f.cfg.AspectID,
+		},
+		sink,
+	}
+}
+
+// applyFilterObsHookDefault walks the filter chain (HardRulesFilter
+// wrapping CheapModelFilter, or CheapModelFilter directly) and sets
+// the ObservabilityHook on any CheapModelFilter that doesn't have
+// one. Other filter types are returned unchanged. Reconstructs the
+// chain because filters are value types — mutating a copy inside
+// the interface wouldn't reach the original.
+func applyFilterObsHookDefault(filter OutputFilter, hook ObservabilityHook) OutputFilter {
+	switch f := filter.(type) {
+	case CheapModelFilter:
+		if f.ObservabilityHook == nil {
+			f.ObservabilityHook = hook
+		}
+		return f
+	case HardRulesFilter:
+		if f.Inner != nil {
+			f.Inner = applyFilterObsHookDefault(f.Inner, hook)
+		}
+		return f
+	default:
+		return filter
+	}
+}
+
 var ErrEmptyInbox = errors.New("funnel: empty inbox + empty user message; nothing to deliberate")
 
 // ErrConcurrentDeliberate is returned by Deliberate when another
