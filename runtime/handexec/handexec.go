@@ -159,12 +159,18 @@ func writeResponse(resp frames.DispatchResultPayload) error {
 // fragments, request bodies, or partial credentials and must not
 // round-trip across the dispatch boundary.
 func writeAndReturnError(req Request, label string, err error) error {
-	_ = writeResponse(frames.DispatchResultPayload{
+	if wrErr := writeResponse(frames.DispatchResultPayload{
 		Aspect:     req.Aspect,
 		Thread:     req.Thread,
 		DispatchID: req.DispatchID,
 		Error:      fmt.Sprintf("%s: %v", label, err),
-	})
+	}); wrErr != nil {
+		// stdout write failed (broken pipe, etc.) — log so the
+		// dispatch-result-frame-missing failure mode is at least
+		// visible in process logs.
+		slog.Error("dispatch error frame write failed",
+			"dispatch_id", req.DispatchID, "label", label, "err", wrErr)
+	}
 	return fmt.Errorf("%s: %w", label, err)
 }
 
@@ -183,12 +189,15 @@ func writeAndReturnProviderError(req Request, err error) error {
 		"dispatch_id", req.DispatchID,
 		"code", code,
 		"err", err)
-	_ = writeResponse(frames.DispatchResultPayload{
+	if wrErr := writeResponse(frames.DispatchResultPayload{
 		Aspect:     req.Aspect,
 		Thread:     req.Thread,
 		DispatchID: req.DispatchID,
 		Error:      code,
-	})
+	}); wrErr != nil {
+		slog.Error("dispatch provider-error frame write failed",
+			"dispatch_id", req.DispatchID, "code", code, "err", wrErr)
+	}
 	return fmt.Errorf("provider.Invoke: %w", err)
 }
 
