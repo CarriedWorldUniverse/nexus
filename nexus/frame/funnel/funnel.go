@@ -1056,12 +1056,13 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	f.emit(ctx, Event{
 		Type: EventTurnEnd,
 		Payload: TurnEndPayload{
-			TurnID:     turnID,
-			Usage:      result.Usage,
-			StopReason: result.StopReason,
-			StepCount:  result.StepCount,
-			Duration:   time.Since(turnStart),
-			ErrorClass: errorClass,
+			TurnID:        turnID,
+			Usage:         result.Usage,
+			StopReason:    result.StopReason,
+			StepCount:     result.StepCount,
+			Duration:      time.Since(turnStart),
+			ErrorClass:    errorClass,
+			ResolvedModel: result.ResolvedModel,
 		},
 	})
 
