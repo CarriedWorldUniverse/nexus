@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -535,6 +536,113 @@ func TestDeliberate_ErrorPath_SurfacesPartialText(t *testing.T) {
 	}
 	if h.Trigger.From != "operator" {
 		t.Errorf("trigger From = %q, want operator", h.Trigger.From)
+	}
+}
+
+// recordingFilter captures every FilterInput it was asked to judge
+// and returns ShouldPost=true. Used to verify the funnel populates
+// FilterInput correctly (tool names, partial flag, etc.).
+type recordingFilter struct {
+	mu     sync.Mutex
+	inputs []FilterInput
+}
+
+func (r *recordingFilter) Judge(_ context.Context, in FilterInput) FilterDecision {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.inputs = append(r.inputs, in)
+	return FilterDecision{ShouldPost: true}
+}
+
+// TestDeliberate_ErrorPath_RoutesPartialThroughFilter verifies the
+// error-path partial-result flow runs through runFilter (not a
+// hardcoded ShouldPost=true) so scratch suppression still works on
+// partials. The FilterInput must carry Partial=true so the judge can
+// lean toward post for coherent partials, plus the tool names so the
+// judge weights "thin text + tool work" as complete.
+func TestDeliberate_ErrorPath_RoutesPartialThroughFilter(t *testing.T) {
+	prov := &partialThenErrorProvider{}
+	rf := &recordingFilter{}
+
+	f, err := New(Config{
+		AspectID: "test",
+		Harness:  bridle.NewHarness(prov),
+		Provider: "partial-then-error",
+		Model:    "test-model",
+		Runner:   noopRunner{},
+		Filter:   rf,
+		Return:   &recordingReturnHandler{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{MsgID: 7, From: "operator", Content: "diagnose"})
+
+	if _, err := f.Deliberate(context.Background(), ""); err == nil {
+		t.Fatal("expected error from Deliberate")
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if len(rf.inputs) != 1 {
+		t.Fatalf("filter calls = %d; want 1 (error-path partial routed through filter)", len(rf.inputs))
+	}
+	in := rf.inputs[0]
+	if !in.Partial {
+		t.Error("FilterInput.Partial = false; want true on error path")
+	}
+	if len(in.ToolNames) != 1 || in.ToolNames[0] != "noop" {
+		t.Errorf("FilterInput.ToolNames = %v; want [noop]", in.ToolNames)
+	}
+}
+
+// TestDeliberate_SuccessPath_PassesToolNamesToFilter verifies the
+// success path also populates FilterInput.ToolNames so the judge can
+// distinguish "thin text + real work via tools" from scratch. Uses
+// scriptedProvider's two-result chain: first invocation emits tool
+// calls (harness runs them via noopRunner), second emits the final
+// text — bridle's harness accumulates both into result.ToolCalls and
+// result.FinalText.
+func TestDeliberate_SuccessPath_PassesToolNamesToFilter(t *testing.T) {
+	prov := &scriptedProvider{
+		results: []bridle.ProviderResult{
+			{ToolCalls: []bridle.ToolInvocation{
+				{ID: "a", Name: "Bash", Args: json.RawMessage(`{}`)},
+				{ID: "b", Name: "Write", Args: json.RawMessage(`{}`)},
+			}},
+			{FinalText: "done"},
+		},
+	}
+	rf := &recordingFilter{}
+	f, err := New(Config{
+		AspectID: "test",
+		Harness:  bridle.NewHarness(prov),
+		Provider: "scripted",
+		Model:    "m",
+		Runner:   noopRunner{},
+		Filter:   rf,
+		MaxStepsPerTurn: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{MsgID: 1, From: "operator", Content: "go"})
+
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatalf("Deliberate: %v", err)
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if len(rf.inputs) != 1 {
+		t.Fatalf("filter calls = %d; want 1", len(rf.inputs))
+	}
+	in := rf.inputs[0]
+	if in.Partial {
+		t.Error("FilterInput.Partial = true on success path; want false")
+	}
+	if len(in.ToolNames) != 2 || in.ToolNames[0] != "Bash" || in.ToolNames[1] != "Write" {
+		t.Errorf("FilterInput.ToolNames = %v; want [Bash Write]", in.ToolNames)
 	}
 }
 

@@ -36,10 +36,14 @@ import (
 // suppress. Reason is a short string for telemetry; ignored when
 // shouldPost is true.
 //
-// Implementations MUST be safe to call from any goroutine. Slow
-// implementations (e.g. cheap-bridle filter making a network call)
-// must respect the ctx deadline; the funnel sets a bounded timeout
-// per Judge.
+// Implementations MUST be safe to call from any goroutine.
+//
+// Implementations MUST respect ctx — Judge runs inside a goroutine
+// that the funnel's runFilter races against ctx.Done(). If Judge
+// ignores ctx and the parent cancels, the goroutine leaks for the
+// remaining lifetime of whatever resources Judge holds. CheapModelFilter
+// satisfies this via context.WithTimeout around the bridle call; custom
+// filters MUST do the same.
 type OutputFilter interface {
 	Judge(ctx context.Context, in FilterInput) FilterDecision
 }
@@ -90,6 +94,28 @@ type FilterInput struct {
 	// artifacts against the DoD criteria. Empty when no goal is active
 	// — the judge operates in legacy binary post/suppress mode.
 	DoD string
+
+	// ToolNames lists the tool names the model invoked during this
+	// turn (provider-order). Empty for text-only turns. The judge uses
+	// this to distinguish "thin text but real work happened via tools"
+	// (post-as-complete) from "thin text and no work" (scratch). Pre-
+	// existing behavior judged solely on FinalText and routinely
+	// labeled tool-effecting turns as scratch when the model emitted
+	// only a terse confirmation.
+	//
+	// Just names, not args/results — the judge doesn't need the
+	// payload; it needs the signal that tool calls happened.
+	ToolNames []string
+
+	// Partial signals the FinalText is a recovered partial — the
+	// underlying turn errored mid-stream (claudecode StopReasonProcessExit,
+	// stream timeout, etc.) and the harness preserved what the model
+	// said before the failure. Filters MAY use this to lean toward
+	// posting (the user has been waiting; suppressing a half-formed
+	// answer because of a transport error is worse than letting it
+	// through). CheapModelFilter mentions this in the user message so
+	// the cheap judge can apply the same lean.
+	Partial bool
 }
 
 // FilterDecision is the result of Judge.
@@ -307,6 +333,10 @@ Do NOT post to chat.
 
 "blocked" — The agent explicitly says it is blocked, waiting on external input, or cannot make progress. OR the candidate shows zero forward progress against the DoD (same output as prior turn, looping, no new artifacts). Do NOT post to chat. Surface to operator.
 
+TOOL USAGE: when the TOOLS USED section lists one or more tool calls AND the candidate output is thin (a terse confirmation like "done", "ok", "updated X"), prefer "complete" — substantive work happened via tool effects; the terse confirmation IS the appropriate chat reply. Reserve "scratch" for thin text with NO tool work.
+
+PARTIAL RESULTS: when the candidate is marked PARTIAL, the underlying turn errored mid-stream (transport issue, output cap). Lean toward "complete" if the partial is coherent; the user has been waiting and a half-formed answer is better than silence after a stream failure. Only flag as "scratch" if the partial is genuinely unusable (truncated mid-token, fragments of internal reasoning).
+
 BIAS: when uncertain between complete and goal_not_met, prefer goal_not_met (safer to continue than to stop early). When uncertain between scratch and blocked, prefer scratch. When DoD is absent, never return goal_not_met — use complete for substantive, scratch for non-substantive.
 
 Respond with ONLY the JSON object.`
@@ -355,6 +385,29 @@ func buildJudgeUserMessage(in FilterInput) string {
 			dod = dod[:maxDoDLen] + "…"
 		}
 		msg += "\n\nDEFINITION OF DONE:\n" + dod
+	}
+	// Surface tool usage so the judge can weight "thin text + real
+	// work via tools" as complete rather than scratch. Bounded list
+	// — 20 names is enough to convey the shape without bloating the
+	// prompt; anything beyond gets summarized.
+	if len(in.ToolNames) > 0 {
+		const maxNames = 20
+		names := in.ToolNames
+		extra := 0
+		if len(names) > maxNames {
+			extra = len(names) - maxNames
+			names = names[:maxNames]
+		}
+		toolList := strings.Join(names, ", ")
+		if extra > 0 {
+			toolList += fmt.Sprintf(" (+%d more)", extra)
+		}
+		msg += "\n\nTOOLS USED:\n" + toolList
+	}
+	// Partial marker — tell the judge the underlying turn errored
+	// mid-stream so it can lean toward post for coherent partials.
+	if in.Partial {
+		msg += "\n\nPARTIAL: the turn errored mid-stream; this is the recovered partial output."
 	}
 	// Plain section labels, no leading dashes. claudecode's `-p <prompt>`
 	// passes the prompt as a command-line argument; a leading "---" gets
