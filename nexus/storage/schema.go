@@ -58,7 +58,13 @@ func Open(ctx context.Context, dir string, log *slog.Logger) (*sql.DB, error) {
 	// Windows paths need forward slashes and URI-style prefix so the
 	// driver doesn't parse backslashes as escape characters.
 	uriPath := filepath.ToSlash(path)
-	dsn := "file:" + uriPath + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)"
+	// _txlock=immediate makes BeginTx issue BEGIN IMMEDIATE instead of
+	// BEGIN (DEFERRED). Required by chat.Insert's linked-list threading:
+	// the SELECT-MAX(id)-then-INSERT pair must be atomic against other
+	// writers, otherwise two concurrent replies to the same parent both
+	// read the same MAX and fork the thread (#226 invariant violation).
+	// Under WAL, writers serialize at BEGIN; reads stay non-blocking.
+	dsn := "file:" + uriPath + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)&_txlock=immediate"
 
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
