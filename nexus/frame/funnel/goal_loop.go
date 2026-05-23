@@ -11,6 +11,7 @@ package funnel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -74,7 +75,9 @@ func NewGoalLoop(f *Funnel, cfg GoalConfig) *GoalLoop {
 }
 
 // TurnCount reports how many turns have run in the current goal
-// pursuit. Resets on each new Pursue call.
+// pursuit. Persists across Pursue calls so the MaxTurns cap applies
+// to the whole pursuit; call Reset to start a fresh count when the
+// operator unblocks or overrides the loop cap.
 func (g *GoalLoop) TurnCount() int {
 	return g.turnCount
 }
@@ -103,7 +106,7 @@ func (g *GoalLoop) Pursue(ctx context.Context) (GoalResult, error) {
 
 	result, err := g.funnel.Deliberate(ctx, "")
 	if err != nil {
-		if err == ErrEmptyInbox {
+		if errors.Is(err, ErrEmptyInbox) {
 			return GoalResult{Done: true, Reason: "empty_inbox"}, nil
 		}
 		return GoalResult{}, err
