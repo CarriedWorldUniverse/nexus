@@ -2,9 +2,12 @@ package chat
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"sync"
 	"testing"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
@@ -618,5 +621,100 @@ func TestSQLStore_ShareFileRequiresRecipients(t *testing.T) {
 	_, err = s.ShareFile(ctx, "frame", "/x", nil)
 	if err == nil {
 		t.Error("nil recipients should error")
+	}
+}
+
+// TestSQLStore_ConcurrentRepliesChain pins the linked-list invariant
+// from the #226 design: when N senders concurrently reply to the same
+// parent, the resulting messages form a chain — exactly one row has
+// parent_msg_id = root and every other row has a unique parent_msg_id.
+//
+// Regression guard for the BEGIN-IMMEDIATE-vs-DEFERRED bug: under
+// default DEFERRED isolation two writers could both read the same
+// MAX(id) for the thread and write rows that fork the linked list.
+// _txlock=immediate in the DSN (storage.Open) closes the race; this
+// test fails loudly if the DSN regresses.
+func TestSQLStore_ConcurrentRepliesChain(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	root, err := s.Insert(ctx, "operator", "root", 0, "")
+	if err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+
+	const N = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, N)
+	start := make(chan struct{})
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			if _, err := s.Insert(ctx, "operator", "reply", root.ID, ""); err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent insert: %v", err)
+	}
+
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT id, parent_msg_id FROM chat_messages WHERE thread_root_msg_id = ? AND id != ? ORDER BY id`,
+		root.ID, root.ID,
+	)
+	if err != nil {
+		t.Fatalf("query replies: %v", err)
+	}
+	defer rows.Close()
+	type row struct{ id, parent int64 }
+	var got []row
+	for rows.Next() {
+		var r row
+		var parent sql.NullInt64
+		if err := rows.Scan(&r.id, &parent); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !parent.Valid {
+			t.Errorf("row id=%d has NULL parent_msg_id", r.id)
+			continue
+		}
+		r.parent = parent.Int64
+		got = append(got, r)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows.Err: %v", err)
+	}
+	if len(got) != N {
+		t.Fatalf("got %d reply rows, want %d", len(got), N)
+	}
+
+	// Chain invariant: parent ids must be unique across descendants —
+	// no two replies share the same parent. Equivalently, the sorted
+	// (id, parent) sequence should satisfy parent[k] == id[k-1] for
+	// k>=1 and parent[0] == root.ID.
+	sort.Slice(got, func(i, j int) bool { return got[i].id < got[j].id })
+	if got[0].parent != root.ID {
+		t.Errorf("first reply parent = %d, want root %d", got[0].parent, root.ID)
+	}
+	parents := make(map[int64]int)
+	for _, r := range got {
+		parents[r.parent]++
+	}
+	for parent, count := range parents {
+		if count > 1 {
+			t.Errorf("parent_msg_id %d shared by %d replies — thread forked instead of chained", parent, count)
+		}
+	}
+	for k := 1; k < len(got); k++ {
+		if got[k].parent != got[k-1].id {
+			t.Errorf("chain break at k=%d: id=%d parent=%d, expected parent=%d",
+				k, got[k].id, got[k].parent, got[k-1].id)
+		}
 	}
 }

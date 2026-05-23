@@ -232,9 +232,10 @@ var ErrEmptyContent = errors.New("chat.Insert: content is required")
 //     parent the second sees the first as its parent, producing a
 //     linked list rather than a DAG.
 //
-// The serialized transaction (BEGIN IMMEDIATE) is the concurrency
-// primitive — SQLite holds the RESERVED lock for the duration so the
-// SELECT-MAX and INSERT pair is atomic against other writers.
+// BEGIN IMMEDIATE (configured via _txlock=immediate in the DSN, see
+// storage.Open) is the concurrency primitive — SQLite acquires the
+// RESERVED lock at BeginTx, serializing concurrent writers at BEGIN
+// so the SELECT-MAX and INSERT pair is atomic against them.
 func (s *SQLStore) Insert(ctx context.Context, from, content string, replyTo int64, topic string) (Message, error) {
 	if from == "" {
 		return Message{}, ErrEmptyFrom
@@ -258,11 +259,10 @@ func (s *SQLStore) Insert(ctx context.Context, from, content string, replyTo int
 	if err != nil {
 		return Message{}, fmt.Errorf("chat.Insert: begin: %w", err)
 	}
-	// SQLite acquires RESERVED on the first write below, escalating to
-	// EXCLUSIVE on COMMIT — that's effectively BEGIN IMMEDIATE for our
-	// access pattern (no SELECT-then-INSERT race window because each
-	// INSERT goes through this same path). Defer rollback so any
-	// early-return cleans up.
+	// BEGIN IMMEDIATE happens at BeginTx (DSN sets _txlock=immediate),
+	// so the RESERVED lock is held for the SELECT-MAX → INSERT pair
+	// below and concurrent writers serialize at BEGIN. Defer rollback
+	// so any early-return cleans up.
 	defer func() { _ = tx.Rollback() }()
 
 	var threadRootArg any = nil
