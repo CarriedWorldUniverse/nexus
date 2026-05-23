@@ -19,6 +19,64 @@ import (
 	"github.com/coder/websocket"
 )
 
+// TestRestoreUnsentPending verifies the slice-restore that fixes the
+// drainPendingLoop data-loss bug. Before this helper landed, the
+// drain loop re-prepended only the failing item — pending[i+1:] was
+// silently dropped on transient send failures mid-burst (chat.send /
+// react_to frames at the tail of the buffer would vanish).
+func TestRestoreUnsentPending(t *testing.T) {
+	mk := func(id string) frames.Envelope { return frames.Envelope{ID: id} }
+	ids := func(envs []frames.Envelope) []string {
+		out := make([]string, len(envs))
+		for i, e := range envs {
+			out[i] = e.ID
+		}
+		return out
+	}
+
+	cases := []struct {
+		name       string
+		drained    []frames.Envelope
+		failedAt   int
+		concurrent []frames.Envelope
+		want       []string
+	}{
+		{
+			name:     "fail on second of four — unsent SUFFIX preserved",
+			drained:  []frames.Envelope{mk("A"), mk("B"), mk("C"), mk("D")},
+			failedAt: 1,
+			want:     []string{"B", "C", "D"}, // bug: previously only "B"
+		},
+		{
+			name:     "fail on first — entire batch preserved",
+			drained:  []frames.Envelope{mk("A"), mk("B"), mk("C")},
+			failedAt: 0,
+			want:     []string{"A", "B", "C"},
+		},
+		{
+			name:       "concurrent items appended after unsent suffix",
+			drained:    []frames.Envelope{mk("A"), mk("B"), mk("C")},
+			failedAt:   1,
+			concurrent: []frames.Envelope{mk("X"), mk("Y")},
+			want:       []string{"B", "C", "X", "Y"},
+		},
+		{
+			name:     "fail on last — only last preserved",
+			drained:  []frames.Envelope{mk("A"), mk("B"), mk("C")},
+			failedAt: 2,
+			want:     []string{"C"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := restoreUnsentPending(tc.drained, tc.failedAt, tc.concurrent)
+			if !reflect.DeepEqual(ids(got), tc.want) {
+				t.Errorf("got %v; want %v", ids(got), tc.want)
+			}
+		})
+	}
+}
+
 // Cursor persistence is the load-bearing Lock 6 invariant on the
 // aspect side. These tests exercise it without standing up a real
 // WS connection — the wsclient itself has its own coverage.
