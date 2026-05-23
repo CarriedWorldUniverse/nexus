@@ -172,7 +172,7 @@ func encodeBridleEvent(ev bridle.Event) (string, json.RawMessage, error) {
 		body, err := json.Marshal(struct {
 			Err   string `json:"err,omitempty"`
 			Stage string `json:"stage,omitempty"`
-		}{Err: errStr, Stage: e.Stage})
+		}{Err: errStr, Stage: string(e.Stage)})
 		return EventKindTurnError, body, err
 	default:
 		return "unknown", nil, errUnknownEventType

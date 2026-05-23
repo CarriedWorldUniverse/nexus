@@ -149,7 +149,7 @@ func decodeInboundBridleEvent(kind string, body json.RawMessage) (bridle.Event, 
 		if raw.Err != "" {
 			revivedErr = inboundError(raw.Err)
 		}
-		return bridle.TurnError{Err: revivedErr, Stage: raw.Stage}, true
+		return bridle.TurnError{Err: revivedErr, Stage: bridle.TurnErrorStage(raw.Stage)}, true
 	default:
 		return nil, false
 	}
