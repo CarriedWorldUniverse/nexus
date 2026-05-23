@@ -38,6 +38,7 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/CarriedWorldUniverse/bridle"
@@ -435,6 +436,17 @@ type Funnel struct {
 	cfg Config
 	log *slog.Logger
 
+	// deliberating enforces the single-caller invariant on Deliberate.
+	// The function holds many short mutex sections across an end-to-end
+	// turn (pop inbox → run → update sessionTail → run filter → return);
+	// two concurrent Deliberate calls would race on sessionHandle and
+	// sessionTail between those sections without any individual section
+	// observing a violation. compact's docstring acknowledges this as an
+	// implicit invariant; this flag makes it explicit. Receive remains
+	// safe to call concurrently with Deliberate — that's the documented
+	// mid-turn comms shape (Lock 3).
+	deliberating atomic.Bool
+
 	mu sync.Mutex // guards inbox, sessionTail, cumulativeTokens, sessionHandle, seenMsgIDs
 
 	// inbox holds comms that arrived since the last deliberation. Folded
@@ -705,10 +717,27 @@ func (f *Funnel) InboxLen() int {
 // Returns ErrEmptyInbox if no comms are pending and userMessage is
 // empty — a no-op deliberation isn't useful.
 //
+// Returns ErrConcurrentDeliberate if another Deliberate call on this
+// Funnel is already in flight. Deliberate is single-caller by design;
+// see ErrConcurrentDeliberate. Receive remains safe to call
+// concurrently — that's the documented mid-turn comms shape.
+//
 // Callers consult FilterDecision.ShouldPost to decide whether to
 // surface result.FinalText to chat. The funnel's auto-post path uses
 // the popped item's msg_id as reply_to, so threading is intrinsic.
 func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (DeliberateResult, error) {
+	// Single-caller guard. CompareAndSwap returns false if another
+	// Deliberate is already in flight on this Funnel — bail with the
+	// sentinel rather than silently racing on sessionHandle/sessionTail/
+	// cumulativeTokens across the function's many short mutex sections.
+	// Deferred clear ensures the flag drops on every exit path,
+	// including panics propagating out of bridle's RunTurn (which has
+	// its own panic recovery but still returns through the same defer).
+	if !f.deliberating.CompareAndSwap(false, true) {
+		return DeliberateResult{}, ErrConcurrentDeliberate
+	}
+	defer f.deliberating.Store(false)
+
 	f.mu.Lock()
 	if len(f.inbox) == 0 && userMessage == "" {
 		f.mu.Unlock()
@@ -1330,6 +1359,15 @@ func (f *Funnel) resolveProviderEnv(ctx context.Context, kind string) (map[strin
 // ErrEmptyInbox is returned by Deliberate when there's nothing to
 // deliberate on (no inbox items AND empty user message).
 var ErrEmptyInbox = errors.New("funnel: empty inbox + empty user message; nothing to deliberate")
+
+// ErrConcurrentDeliberate is returned by Deliberate when another
+// Deliberate call on the same Funnel is already in flight. Deliberate
+// is single-caller by design (the many short mutex sections across one
+// turn cannot enforce serialization on their own — compact's docstring
+// has acknowledged this implicitly since v1). Callers that genuinely
+// need parallel deliberation should spin up multiple Funnel instances,
+// not multiple goroutines into one.
+var ErrConcurrentDeliberate = errors.New("funnel: concurrent Deliberate call on the same Funnel; single-caller only")
 
 // summarizationPrompt is the system prompt used during compaction's
 // cheap summarize turn. Optimized for "produce a faithful, compact
