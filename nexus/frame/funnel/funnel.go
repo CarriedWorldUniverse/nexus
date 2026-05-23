@@ -1110,8 +1110,13 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	// distillation failures cross the runner's threshold, rotate the
 	// session id to a fresh one rather than continue racking up
 	// errors against a session we can't compress.
-	f.cfg.PostTurn.AfterTurn(ctx)
-	if f.cfg.PostTurn.ShouldResetSession() {
+	//
+	// Panic safety: the PostTurn calls are guarded so a misbehaving
+	// rewriter (panic in AfterTurn / ShouldResetSession / AcknowledgeReset)
+	// can't crash deliberation. emit() and runFilter() guard the same
+	// way; PostTurn used to be the missing one.
+	f.callPostTurnAfter(ctx)
+	if f.callPostTurnShouldReset() {
 		// Reset shape mirrors compaction: rotate session id to a
 		// fresh one AND clear sessionTail + cumulativeTokens. The
 		// rewriter requested this because it couldn't compress the
@@ -1129,7 +1134,7 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		f.cumulativeTokens = 0
 		newID := f.sessionHandle.ID
 		f.mu.Unlock()
-		f.cfg.PostTurn.AcknowledgeReset()
+		f.callPostTurnAcknowledgeReset()
 		f.log.Warn("funnel: rotated session after sustained rewriter failures",
 			"old_session", oldID, "new_session", newID,
 			"discarded_tail_events", oldTail, "discarded_tokens", oldTokens)
@@ -1542,6 +1547,51 @@ func (f *Funnel) emit(ctx context.Context, e Event) {
 	case <-ctx.Done():
 		f.log.Warn("funnel: context cancelled during emit", "event", e.Type)
 	}
+}
+
+// callPostTurnAfter invokes PostTurnHook.AfterTurn with panic
+// recovery. A misbehaving rewriter implementation can't take down
+// deliberation — same defence pattern as emit() and runFilter().
+// Errors/panics are logged at WARN; the turn proceeds as if the
+// hook had been a no-op.
+func (f *Funnel) callPostTurnAfter(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			f.log.Warn("funnel: PostTurn.AfterTurn panicked; suppressing",
+				"aspect", f.cfg.AspectID, "panic", r)
+		}
+	}()
+	f.cfg.PostTurn.AfterTurn(ctx)
+}
+
+// callPostTurnShouldReset invokes PostTurnHook.ShouldResetSession
+// with panic recovery. On panic, returns false (no reset) so a
+// broken rewriter can't repeatedly nuke the session by panicking.
+func (f *Funnel) callPostTurnShouldReset() (reset bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			f.log.Warn("funnel: PostTurn.ShouldResetSession panicked; treating as false",
+				"aspect", f.cfg.AspectID, "panic", r)
+			reset = false
+		}
+	}()
+	return f.cfg.PostTurn.ShouldResetSession()
+}
+
+// callPostTurnAcknowledgeReset invokes PostTurnHook.AcknowledgeReset
+// with panic recovery. Logged at WARN on panic; if the rewriter
+// can't observe the ack, its counter won't reset and ShouldResetSession
+// will likely return true again next turn — but that's the rewriter's
+// failure to recover, not the funnel's. The funnel has already done
+// the session rotation it was asked to do.
+func (f *Funnel) callPostTurnAcknowledgeReset() {
+	defer func() {
+		if r := recover(); r != nil {
+			f.log.Warn("funnel: PostTurn.AcknowledgeReset panicked; suppressing",
+				"aspect", f.cfg.AspectID, "panic", r)
+		}
+	}()
+	f.cfg.PostTurn.AcknowledgeReset()
 }
 
 // snapshotCumulative reads the cumulative token count under the
