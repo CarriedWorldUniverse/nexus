@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -65,6 +66,11 @@ type Config struct {
 	// Lock 6 since_msg_id cursor. SessionID, PID, StartedAt, etc.
 	// are caller's responsibility — wsasp doesn't own identity.
 	Register schemas.RegisterRequest
+
+	// Logger is optional. Nil falls back to slog.Default(). Used for
+	// failure-path WARNs (register-send failures, etc.) that prior
+	// versions silently swallowed.
+	Logger *slog.Logger
 }
 
 // DeliveredMessage is the funnel-side representation of an inbound
@@ -92,6 +98,7 @@ type DeliveredMessage struct {
 type Client struct {
 	cfg Config
 	ws  *wsclient.Client
+	log *slog.Logger
 
 	mu         sync.Mutex
 	cursor     int64             // highest processed msg_id
@@ -113,7 +120,11 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("wsasp: OnDeliver required")
 	}
 
-	c := &Client{cfg: cfg}
+	log := cfg.Logger
+	if log == nil {
+		log = slog.Default()
+	}
+	c := &Client{cfg: cfg, log: log}
 	c.cursor = c.loadCursor()
 
 	ws, err := wsclient.New(wsclient.Config{
@@ -162,6 +173,13 @@ func (c *Client) registeredBarrier() chan struct{} {
 // transitions. On connect: send register, then close the barrier
 // so drainPendingLoop is allowed to flush. On disconnect: install
 // a fresh barrier so the next connect cycle re-gates the drain.
+//
+// Register-failure behavior: when sendRegister fails, the barrier is
+// NOT closed — the broker hasn't seen register yet, so any buffered
+// chat.send / react_to frames the drain would ship would be rejected.
+// Holding the barrier open keeps drainPendingLoop parked until the
+// wsclient's ping timeout (~30s default) tears the connection down
+// and a fresh reconnect retries. Operator sees the WARN.
 func (c *Client) handleConnectEvents(ctx context.Context) {
 	for {
 		select {
@@ -172,7 +190,11 @@ func (c *Client) handleConnectEvents(ctx context.Context) {
 				return
 			}
 			if ev.Connected {
-				c.sendRegister(ctx)
+				if err := c.sendRegister(ctx); err != nil {
+					c.log.Warn("wsasp: register send failed; barrier stays open until next reconnect (drain parked)",
+						"aspect", c.cfg.Register.Name, "err", err)
+					continue
+				}
 				barrier := c.registeredBarrier()
 				select {
 				case <-barrier:
@@ -188,9 +210,12 @@ func (c *Client) handleConnectEvents(ctx context.Context) {
 }
 
 // sendRegister builds and sends the register frame with the current
-// cursor and the caller-supplied RegisterRequest. Failures are
-// logged and retried on next ready.
-func (c *Client) sendRegister(ctx context.Context) {
+// cursor and the caller-supplied RegisterRequest. Returns the
+// underlying error on failure so handleConnectEvents can decide
+// whether to close the register barrier (which gates outbound chat
+// sends against the just-connected WS — only safe to open once
+// register has actually landed).
+func (c *Client) sendRegister(ctx context.Context) error {
 	c.mu.Lock()
 	since := c.cursor
 	c.mu.Unlock()
@@ -200,9 +225,12 @@ func (c *Client) sendRegister(ctx context.Context) {
 		SinceMsgID:      since,
 	})
 	if err != nil {
-		return
+		return fmt.Errorf("wsasp: build register frame: %w", err)
 	}
-	_ = c.ws.Send(ctx, env)
+	if err := c.ws.Send(ctx, env); err != nil {
+		return fmt.Errorf("wsasp: send register frame: %w", err)
+	}
+	return nil
 }
 
 // drainPendingLoop flushes the outbound buffer once register has
@@ -317,19 +345,24 @@ func (c *Client) onChatDeliver(env frames.Envelope) {
 // advanceCursor updates the highest-processed cursor and persists
 // it. Atomic: write to a temp file + rename. Failures are silent
 // (logging at this layer would be noise for routine WS frames).
+//
+// Lock held through the file I/O: single-caller in production today
+// (wsclient's read goroutine), but the API doesn't enforce that, so
+// keep concurrent callers safe against clobbering the .tmp file
+// mid-write. WriteFile + Rename are local-disk ops; the lock is held
+// briefly enough that contention with chat-send queueing (the other
+// c.mu user) is not a concern.
 func (c *Client) advanceCursor(id int64) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if id > c.cursor {
 		c.cursor = id
 	}
-	persistID := c.cursor
-	c.mu.Unlock()
-
 	if c.cfg.CursorFile == "" {
 		return
 	}
 	tmp := c.cfg.CursorFile + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strconv.FormatInt(persistID, 10)), 0o600); err == nil {
+	if err := os.WriteFile(tmp, []byte(strconv.FormatInt(c.cursor, 10)), 0o600); err == nil {
 		_ = os.Rename(tmp, c.cfg.CursorFile)
 	}
 }
