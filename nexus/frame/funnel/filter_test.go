@@ -399,3 +399,55 @@ func TestParseJudgeJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildJudgeUserMessage_IncludesToolsUsed(t *testing.T) {
+	msg := buildJudgeUserMessage(FilterInput{
+		AspectID:    "shadow",
+		FinalText:   "done",
+		TriggerFrom: "operator",
+		TriggerText: "summarize the changes",
+		ToolNames:   []string{"Bash", "Read", "Write"},
+	})
+	if !strings.Contains(msg, "TOOLS USED:\nBash, Read, Write") {
+		t.Errorf("expected TOOLS USED section with comma-joined names; got:\n%s", msg)
+	}
+}
+
+func TestBuildJudgeUserMessage_TruncatesLongToolList(t *testing.T) {
+	names := make([]string, 30)
+	for i := range names {
+		names[i] = "tool"
+	}
+	msg := buildJudgeUserMessage(FilterInput{
+		AspectID:  "shadow",
+		FinalText: "done",
+		ToolNames: names,
+	})
+	if !strings.Contains(msg, "(+10 more)") {
+		t.Errorf("expected +10 more truncation suffix; got:\n%s", msg)
+	}
+}
+
+func TestBuildJudgeUserMessage_IncludesPartialMarker(t *testing.T) {
+	msg := buildJudgeUserMessage(FilterInput{
+		AspectID:  "shadow",
+		FinalText: "partial...",
+		Partial:   true,
+	})
+	if !strings.Contains(msg, "PARTIAL:") {
+		t.Errorf("expected PARTIAL marker when Partial=true; got:\n%s", msg)
+	}
+}
+
+func TestBuildJudgeUserMessage_OmitsSectionsWhenAbsent(t *testing.T) {
+	msg := buildJudgeUserMessage(FilterInput{
+		AspectID:  "shadow",
+		FinalText: "hello",
+	})
+	if strings.Contains(msg, "TOOLS USED") {
+		t.Errorf("TOOLS USED leaked when ToolNames empty; got:\n%s", msg)
+	}
+	if strings.Contains(msg, "PARTIAL") {
+		t.Errorf("PARTIAL marker leaked when Partial=false; got:\n%s", msg)
+	}
+}

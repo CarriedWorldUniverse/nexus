@@ -971,13 +971,29 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		// Surface partial assistant text before cleanup (NEX-239).
 		// When the provider exits non-zero after producing text blocks
 		// (claude-code exit-1, stream timeout), the partial result is
-		// recoverable and should reach chat. Skip the filter judge —
-		// partial results default to ShouldPost so the text surfaces
-		// rather than being silently dropped.
+		// recoverable and may reach chat. Route through the same filter
+		// the success path uses, with FilterInput.Partial=true so the
+		// judge knows the underlying turn errored mid-stream and can
+		// lean toward post for coherent partials. Filter failures
+		// already fail-open (see runFilter), so this preserves the
+		// "don't silently drop" property without bypassing scratch
+		// suppression for garbage partials (truncated mid-token,
+		// fragments of internal reasoning).
 		if result.FinalText != "" {
+			partialDecision := f.runFilter(ctx, FilterInput{
+				FinalText:    result.FinalText,
+				AspectID:     f.cfg.AspectID,
+				TurnID:       turnID,
+				TriggerFrom:  triggerFrom,
+				TriggerText:  triggerContent,
+				TriggerMsgID: triggerMsgID,
+				DoD:          f.takeDoD(),
+				ToolNames:    toolNamesFromInvocations(result.ToolCalls),
+				Partial:      true,
+			})
 			partial := DeliberateResult{
 				TurnResult: result,
-				Filter:     FilterDecision{ShouldPost: true},
+				Filter:     partialDecision,
 			}
 			if hErr := f.cfg.Return.Handle(ctx, partial, trigger); hErr != nil {
 				f.log.Debug("funnel: partial-result Handle failed",
@@ -1064,6 +1080,7 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		TriggerText:  triggerContent,
 		TriggerMsgID: triggerMsgID,
 		DoD:          dod,
+		ToolNames:    toolNamesFromInvocations(result.ToolCalls),
 	})
 
 	// Surface the verdict as a structured Event so non-obs-hook sinks
@@ -1527,6 +1544,23 @@ func filterDecisionLayer(reason string, class string) string {
 	default:
 		return "cheap_judge"
 	}
+}
+
+// toolNamesFromInvocations extracts the Name field from a slice of
+// bridle.ToolInvocations into a flat string slice — what the filter
+// judge needs to weight "thin text + real work via tools" as complete
+// rather than scratch. Nil/empty input returns nil.
+func toolNamesFromInvocations(invs []bridle.ToolInvocation) []string {
+	if len(invs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(invs))
+	for _, inv := range invs {
+		if inv.Name != "" {
+			out = append(out, inv.Name)
+		}
+	}
+	return out
 }
 
 // renderFilterVerdict formats the FilterDecision as a single text
