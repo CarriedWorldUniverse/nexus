@@ -403,6 +403,99 @@ func TestDeliberate_CompactsAtThreshold(t *testing.T) {
 	}
 }
 
+// TestDeliberate_CompactionFailureLimit_RotatesSession drives compact()
+// to fail three times in a row and verifies the funnel force-rotates
+// the session on the third failure (mirroring the PostTurn rewriter's
+// sustained-failure recovery). Prevents the "spam compact attempts
+// forever against a deterministic failure" mode.
+func TestDeliberate_CompactionFailureLimit_RotatesSession(t *testing.T) {
+	// Scripted sequence: turn 1 pushes past threshold; turns 2-4 each
+	// pair a failing compact attempt (empty FinalText) with a small
+	// main turn. Turn 4's compact attempt should trip the limit and
+	// force-rotate the session.
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		// Turn 1: high-token main turn that crosses threshold.
+		{
+			FinalText:    "big",
+			Usage:        bridle.Usage{InputTokens: 100_000, OutputTokens: 60_000},
+			SessionDelta: []bridle.SessionEvent{{Role: bridle.RoleAssistant, Content: "big"}},
+		},
+		// Turn 2: compact fails (empty), main runs.
+		{Usage: bridle.Usage{InputTokens: 100}}, // empty FinalText → compact error
+		{
+			FinalText:    "t2",
+			Usage:        bridle.Usage{InputTokens: 200, OutputTokens: 50},
+			SessionDelta: []bridle.SessionEvent{{Role: bridle.RoleAssistant, Content: "t2"}},
+		},
+		// Turn 3: compact fails, main runs.
+		{Usage: bridle.Usage{InputTokens: 100}},
+		{
+			FinalText:    "t3",
+			Usage:        bridle.Usage{InputTokens: 200, OutputTokens: 50},
+			SessionDelta: []bridle.SessionEvent{{Role: bridle.RoleAssistant, Content: "t3"}},
+		},
+		// Turn 4: compact fails (3rd time) → force-rotate, main runs in
+		// fresh session.
+		{Usage: bridle.Usage{InputTokens: 100}},
+		{
+			FinalText:    "t4-fresh",
+			Usage:        bridle.Usage{InputTokens: 200, OutputTokens: 50},
+			SessionDelta: []bridle.SessionEvent{{Role: bridle.RoleAssistant, Content: "t4-fresh"}},
+		},
+	}}
+	f, err := New(Config{
+		AspectID: "frame",
+		Harness:  bridle.NewHarness(prov),
+		Provider: "scripted",
+		Model:    "m",
+		Runner:   noopRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn 1: prime the funnel past the compaction threshold.
+	f.Receive(bridle.InboxItem{From: "op", Content: "go"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatalf("turn 1: %v", err)
+	}
+	preRotateSessionID := f.SessionID()
+	if f.CumulativeTokens() < 125_000 {
+		t.Fatalf("turn 1 didn't cross threshold; cumulative=%d", f.CumulativeTokens())
+	}
+
+	// Turns 2 and 3: compact fails but no rotation yet.
+	for i, label := range []string{"turn 2", "turn 3"} {
+		f.Receive(bridle.InboxItem{From: "op", Content: label})
+		if _, err := f.Deliberate(context.Background(), ""); err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		if f.compactionFailures != i+1 {
+			t.Errorf("after %s: compactionFailures=%d want %d", label, f.compactionFailures, i+1)
+		}
+		if f.SessionID() != preRotateSessionID {
+			t.Errorf("after %s: session rotated prematurely (was %q, now %q)", label, preRotateSessionID, f.SessionID())
+		}
+	}
+
+	// Turn 4: third consecutive failure trips the limit → rotation.
+	f.Receive(bridle.InboxItem{From: "op", Content: "turn 4"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatalf("turn 4: %v", err)
+	}
+	if f.compactionFailures != 0 {
+		t.Errorf("after rotation: compactionFailures=%d want 0 (reset)", f.compactionFailures)
+	}
+	if f.SessionID() == preRotateSessionID {
+		t.Error("session did NOT rotate after compactionFailureLimit failures")
+	}
+	// Cumulative should be just turn-4's contribution (250 = 200 in + 50 out)
+	// — sessionTail and counter were cleared by the rotation.
+	if got := f.CumulativeTokens(); got != 250 {
+		t.Errorf("post-rotation cumulative=%d want 250 (turn-4 only)", got)
+	}
+}
+
 // Compaction with empty tail should not call the provider — there's
 // nothing to summarize.
 func TestCompact_EmptyTail_NoOp(t *testing.T) {
