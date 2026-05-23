@@ -546,6 +546,78 @@ func TestDeliberate_PostTurnPanicSafe(t *testing.T) {
 	}
 }
 
+// TestDeliberate_TurnEndCarriesResolvedModel verifies the
+// EventTurnEnd payload surfaces bridle.TurnResult.ResolvedModel. This
+// is what downstream observability (plumb activity log, etc.) reads
+// to display the model id the upstream API actually answered with —
+// rather than the configured cfg.Model, which can diverge when per-
+// turn ProviderEnv routes the call to a different backend.
+func TestDeliberate_TurnEndCarriesResolvedModel(t *testing.T) {
+	// scriptedProvider doesn't surface ResolvedModel; for this test we
+	// need a provider that does. Inline a tiny variant.
+	prov := &resolvedModelProvider{
+		result: bridle.ProviderResult{
+			FinalText:     "ok",
+			Usage:         bridle.Usage{InputTokens: 1, OutputTokens: 1},
+			ResolvedModel: "deepseek-chat-v3-via-anthropic-shape",
+		},
+	}
+	sink := &recordingSink{}
+	f, err := New(Config{
+		AspectID: "frame",
+		Harness:  bridle.NewHarness(prov),
+		Provider: "scripted",
+		Model:    "claude-3-5-sonnet-20241022", // what was configured
+		Runner:   noopRunner{},
+		Events:   sink,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{From: "op", Content: "go"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatalf("deliberate: %v", err)
+	}
+
+	// Find the TurnEnd event and check its ResolvedModel.
+	var found bool
+	for _, ev := range sink.snapshot() {
+		if ev.Type != EventTurnEnd {
+			continue
+		}
+		p, ok := ev.Payload.(TurnEndPayload)
+		if !ok {
+			t.Fatalf("TurnEnd payload type = %T; want TurnEndPayload", ev.Payload)
+		}
+		if p.ResolvedModel != "deepseek-chat-v3-via-anthropic-shape" {
+			t.Errorf("TurnEnd ResolvedModel = %q; want deepseek-...", p.ResolvedModel)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("no TurnEnd event emitted")
+	}
+}
+
+// resolvedModelProvider returns a fixed ProviderResult with
+// ResolvedModel set — tests that the funnel propagates it onto
+// EventTurnEnd.
+type resolvedModelProvider struct {
+	result bridle.ProviderResult
+}
+
+func (p *resolvedModelProvider) Name() bridle.ProviderID { return "resolved-model-provider" }
+func (p *resolvedModelProvider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{Category: bridle.CategoryDirectAPI}
+}
+func (p *resolvedModelProvider) RunTurn(_ context.Context, _ bridle.ProviderRequest, _ bridle.EventSink) (bridle.ProviderResult, error) {
+	r := p.result
+	if r.StopReason == "" {
+		r.StopReason = bridle.StopReasonModelDone
+	}
+	return r, nil
+}
+
 // recordingLogHandler collects every slog Record emitted at WARN or
 // above so tests can assert the funnel's pressure warnings fire
 // once-per-event under hysteresis.

@@ -137,6 +137,17 @@ type TurnEndPayload struct {
 	StepCount  int               `json:"step_count"`
 	Duration   time.Duration     `json:"duration"`
 	ErrorClass string            `json:"error_class,omitempty"`
+
+	// ResolvedModel is the model id the upstream API actually returned
+	// (bridle.TurnResult.ResolvedModel). When per-turn ProviderEnv routes
+	// the call to a different backend than cfg.Model (operator's Anthropic
+	// pool vs. a DeepSeek-via-Anthropic-shape credential, etc.) the two
+	// will differ — surfacing this lets plumb's activity log match the
+	// session jsonl instead of showing the configured-but-not-actually-
+	// used id. Empty when the provider didn't surface a model id;
+	// consumers should fall back to whatever model id they had from
+	// TurnStartPayload.
+	ResolvedModel string `json:"resolved_model,omitempty"`
 }
 
 // CompactReason names what triggered compaction. Soft = threshold
