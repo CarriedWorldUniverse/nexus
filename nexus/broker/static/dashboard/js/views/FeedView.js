@@ -37,6 +37,7 @@ import { getOrCreateThread, peekThread } from '../models/threads.js';
 import { agentColors, replyTo } from '../state.js';
 import { ChatInput } from '../components/ChatInput.js';
 import { MessageBubble } from '../components/MessageBubble.js';
+import { PresenceStrip } from '../components/PresenceStrip.js';
 
 const { html, useState, useEffect, useRef } = window.__preact;
 
@@ -205,6 +206,7 @@ function ExpandedThread({ rootId }) {
 
   return html`
     <div class="feed-thread-expanded" onClick=${(e) => e.stopPropagation()}>
+      <${PresenceStrip} participants=${thread.participants} />
       ${root && html`
         <div class="feed-thread-expanded-root">
           <${MessageBubble} msg=${root} />
