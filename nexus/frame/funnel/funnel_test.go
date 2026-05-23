@@ -149,6 +149,92 @@ func TestNew_AppliesDefaultCompaction(t *testing.T) {
 	}
 }
 
+// blockingProvider holds RunTurn open on a release channel so a test
+// can fire a second Deliberate while the first is mid-flight.
+type blockingProvider struct {
+	release chan struct{}
+	entered chan struct{} // closed when RunTurn is actually inside the call
+}
+
+func (p *blockingProvider) Name() bridle.ProviderID { return "blocking" }
+func (p *blockingProvider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{Category: bridle.CategoryDirectAPI}
+}
+func (p *blockingProvider) RunTurn(ctx context.Context, _ bridle.ProviderRequest, _ bridle.EventSink) (bridle.ProviderResult, error) {
+	close(p.entered)
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+	}
+	return bridle.ProviderResult{FinalText: "released", StopReason: bridle.StopReasonModelDone}, nil
+}
+
+// TestDeliberate_ConcurrentCallReturnsSentinel verifies the single-
+// caller guard fires when a second Deliberate is launched while the
+// first is still inside the provider call. Pre-guard, the second call
+// would silently race on sessionHandle/sessionTail/cumulativeTokens
+// across the function's many short mutex sections.
+func TestDeliberate_ConcurrentCallReturnsSentinel(t *testing.T) {
+	prov := &blockingProvider{release: make(chan struct{}), entered: make(chan struct{})}
+	f, err := New(Config{
+		AspectID: "frame",
+		Harness:  bridle.NewHarness(prov),
+		Provider: "blocking",
+		Model:    "m",
+		Runner:   noopRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{MsgID: 1, From: "op", Content: "first"})
+	f.Receive(bridle.InboxItem{MsgID: 2, From: "op", Content: "second"})
+
+	// Fire the first call in the background; it'll block inside RunTurn
+	// until we close release.
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := f.Deliberate(context.Background(), "")
+		firstDone <- err
+	}()
+
+	// Wait for the first call to actually be inside Deliberate's
+	// provider invocation, then fire a second call from this goroutine.
+	<-prov.entered
+
+	_, err = f.Deliberate(context.Background(), "")
+	if !errors.Is(err, ErrConcurrentDeliberate) {
+		t.Errorf("second Deliberate err = %v; want ErrConcurrentDeliberate", err)
+	}
+
+	// Release the first call and let it complete cleanly. The guard
+	// clears via deferred f.deliberating.Store(false) — verified by
+	// the separate TestDeliberate_GuardClearsAfterCompletion below.
+	close(prov.release)
+	if err := <-firstDone; err != nil {
+		t.Errorf("first Deliberate err = %v; want nil", err)
+	}
+}
+
+// TestDeliberate_GuardClearsAfterCompletion verifies the single-caller
+// guard releases on the deferred path so a subsequent Deliberate
+// succeeds. Uses a vanilla scriptedProvider so the second call has
+// its own happy-path replay queue.
+func TestDeliberate_GuardClearsAfterCompletion(t *testing.T) {
+	f, _ := newTestFunnel(t,
+		bridle.ProviderResult{FinalText: "first", StopReason: bridle.StopReasonModelDone},
+		bridle.ProviderResult{FinalText: "second", StopReason: bridle.StopReasonModelDone},
+	)
+	f.Receive(bridle.InboxItem{MsgID: 1, From: "op", Content: "a"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatalf("first Deliberate: %v", err)
+	}
+
+	f.Receive(bridle.InboxItem{MsgID: 2, From: "op", Content: "b"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Errorf("second Deliberate err = %v; want nil (guard should have cleared after first)", err)
+	}
+}
+
 func TestDeliberate_EmptyInbox_Errors(t *testing.T) {
 	f, prov := newTestFunnel(t)
 	_, err := f.Deliberate(context.Background(), "")
