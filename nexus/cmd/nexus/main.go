@@ -449,6 +449,9 @@ func main() {
 		Aspects: func() []string {
 			return r.AspectNames()
 		},
+		ThreadParticipants: func(msgID int64) ([]string, error) {
+			return chatStore.ThreadParticipants(ctx, msgID)
+		},
 		FrameName: frameName,
 	}
 

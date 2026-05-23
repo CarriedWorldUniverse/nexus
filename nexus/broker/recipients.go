@@ -43,11 +43,23 @@ type ParentLookup func(msgID int64) (string, error)
 // callers that have a separate frame name should add it explicitly.
 type AspectLookup func() []string
 
+// ThreadParticipantsLookup returns every aspect name that has posted
+// into the thread containing the given message id. Used to auto-route
+// a reply to all active thread participants, matching Slack / Teams
+// semantics: replying in a thread reaches everyone in it without the
+// sender having to remember to @-tag each participant.
+//
+// The broker's implementation walks chat_messages by thread_root_msg_id;
+// a stub returning (nil, nil) is acceptable in tests and triggers the
+// parent-author-only fallback (graceful degradation).
+type ThreadParticipantsLookup func(msgID int64) ([]string, error)
+
 // RecipientPolicy captures the lookup callbacks. Held by the broker
 // once at construction; passed to Compute on each chat.send.
 type RecipientPolicy struct {
-	Parent  ParentLookup
-	Aspects AspectLookup
+	Parent             ParentLookup
+	Aspects            AspectLookup
+	ThreadParticipants ThreadParticipantsLookup
 
 	// FrameName is the embedded Frame's aspect name, if any. Frame
 	// is always included when @all fires; it's also the implicit
@@ -74,15 +86,33 @@ func (p RecipientPolicy) Compute(sender, content string, replyTo int64) []string
 
 	set := map[string]struct{}{}
 
-	// Parent author is included unless it's the sender (replying to
-	// yourself doesn't generate a notification to yourself).
-	if replyTo > 0 && p.Parent != nil {
+	// Thread participants — Slack / Teams semantics: every aspect
+	// that has posted in this thread receives the reply. Direct
+	// parent author is a participant, so this subsumes the legacy
+	// parent-only rule. Falls back to Parent lookup when
+	// ThreadParticipants isn't wired or returns empty (preserves
+	// the pre-thread-participants behaviour for callers / tests
+	// that don't provide one).
+	threadCovered := false
+	if replyTo > 0 && p.ThreadParticipants != nil {
+		if participants, err := p.ThreadParticipants(replyTo); err == nil && len(participants) > 0 {
+			threadCovered = true
+			for _, name := range participants {
+				if name != "" && name != sender {
+					set[name] = struct{}{}
+				}
+			}
+		}
+	}
+	if replyTo > 0 && !threadCovered && p.Parent != nil {
 		if author, _ := p.Parent(replyTo); author != "" && author != sender {
 			set[author] = struct{}{}
 		}
 	}
 
-	// Explicit @-mentions add named aspects.
+	// Explicit @-mentions add named aspects (including ones outside
+	// the thread — mentioning pulls an aspect into the conversation
+	// even if they haven't posted yet).
 	for _, m := range mentions {
 		if m != "" && m != sender {
 			set[m] = struct{}{}
