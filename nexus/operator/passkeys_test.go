@@ -326,6 +326,151 @@ func TestDeleteAll(t *testing.T) {
 	}
 }
 
+// UpdateAfterLogin is the actually-used login-completion path
+// (Auth.FinishLogin calls it; SaveSignCount has zero production
+// callers). It reimplements SaveSignCount's strict-greater +
+// zero-counter predicate logic plus a credential_json refresh, so
+// the rules need their own direct coverage — a regression in
+// UpdateAfterLogin's WHERE clause (e.g. < changed to <=) would slip
+// through CI because no test exercised it. These mirror the
+// SaveSignCount tests against UpdateAfterLogin's surface.
+
+func TestUpdateAfterLogin_StrictGreater(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cred, pub := fakeCred("ual-counter")
+	id, err := s.Register(ctx, cred, pub, "device", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 0 → 1 succeeds.
+	if err := s.UpdateAfterLogin(ctx, id, 1, `{"v":1}`); err != nil {
+		t.Fatalf("0→1: %v", err)
+	}
+	got, _ := s.GetByCredentialID(ctx, cred)
+	if got.SignCount != 1 {
+		t.Errorf("sign_count: got %d want 1", got.SignCount)
+	}
+	if got.LastUsedAt == "" {
+		t.Error("last_used_at must be set after UpdateAfterLogin")
+	}
+	if got.CredentialJSON != `{"v":1}` {
+		t.Errorf("credential_json not refreshed: got %q", got.CredentialJSON)
+	}
+
+	// 1 → 5 succeeds.
+	if err := s.UpdateAfterLogin(ctx, id, 5, `{"v":5}`); err != nil {
+		t.Fatalf("1→5: %v", err)
+	}
+
+	// 5 → 5 must fail (equal is replay).
+	if err := s.UpdateAfterLogin(ctx, id, 5, `{"v":"replay"}`); !errors.Is(err, ErrSignCountReplay) {
+		t.Errorf("5→5: expected ErrSignCountReplay, got %v", err)
+	}
+
+	// 5 → 3 must fail (lower is replay).
+	if err := s.UpdateAfterLogin(ctx, id, 3, `{"v":"replay"}`); !errors.Is(err, ErrSignCountReplay) {
+		t.Errorf("5→3: expected ErrSignCountReplay, got %v", err)
+	}
+
+	// Replays must not have mutated state — sign_count stays AND
+	// credential_json stays at the last accepted value.
+	got, _ = s.GetByCredentialID(ctx, cred)
+	if got.SignCount != 5 {
+		t.Errorf("after rejected replays sign_count must stay 5, got %d", got.SignCount)
+	}
+	if got.CredentialJSON != `{"v":5}` {
+		t.Errorf("after rejected replays credential_json must stay at last accepted, got %q", got.CredentialJSON)
+	}
+}
+
+func TestUpdateAfterLogin_ZeroAuthenticator(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cred, pub := fakeCred("ual-zero")
+	id, err := s.Register(ctx, cred, pub, "platform-auth", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 0 → 0 must succeed: stamp last_used_at + refresh credential_json,
+	// sign_count stays 0.
+	if err := s.UpdateAfterLogin(ctx, id, 0, `{"v":"zero"}`); err != nil {
+		t.Fatalf("0→0 must be accepted (no-counter authenticator): %v", err)
+	}
+	got, _ := s.GetByCredentialID(ctx, cred)
+	if got.SignCount != 0 {
+		t.Errorf("0→0 must keep sign_count at 0, got %d", got.SignCount)
+	}
+	if got.LastUsedAt == "" {
+		t.Error("0→0 must still stamp last_used_at")
+	}
+	if got.CredentialJSON != `{"v":"zero"}` {
+		t.Errorf("0→0 must still refresh credential_json: got %q", got.CredentialJSON)
+	}
+
+	// Repeated 0→0 stays fine.
+	if err := s.UpdateAfterLogin(ctx, id, 0, `{"v":"zero-again"}`); err != nil {
+		t.Errorf("repeated 0→0 must keep working: %v", err)
+	}
+}
+
+func TestUpdateAfterLogin_DowngradeIsReplay(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cred, pub := fakeCred("ual-downgrade")
+	id, err := s.Register(ctx, cred, pub, "device", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.UpdateAfterLogin(ctx, id, 7, `{"v":7}`); err != nil {
+		t.Fatalf("0→7: %v", err)
+	}
+
+	// 7 → 0 must reject (counter-supporting authenticator emitting 0
+	// is a downgrade/clone signal, not a no-counter device).
+	if err := s.UpdateAfterLogin(ctx, id, 0, `{"v":"forged"}`); !errors.Is(err, ErrSignCountReplay) {
+		t.Errorf("7→0 must be ErrSignCountReplay, got %v", err)
+	}
+	got, _ := s.GetByCredentialID(ctx, cred)
+	if got.SignCount != 7 {
+		t.Errorf("rejected downgrade must not mutate sign_count: got %d, want 7", got.SignCount)
+	}
+	if got.CredentialJSON != `{"v":7}` {
+		t.Errorf("rejected downgrade must not mutate credential_json: got %q", got.CredentialJSON)
+	}
+}
+
+func TestUpdateAfterLogin_RejectsNegative(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cred, pub := fakeCred("ual-neg")
+	id, _ := s.Register(ctx, cred, pub, "device", "{}")
+	err := s.UpdateAfterLogin(ctx, id, -1, "{}")
+	if err == nil {
+		t.Fatal("expected error for negative sign_count")
+	}
+	if errors.Is(err, ErrSignCountReplay) {
+		t.Error("negative input must surface as hard error, not replay")
+	}
+}
+
+func TestUpdateAfterLogin_RejectsEmptyCredentialJSON(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cred, pub := fakeCred("ual-empty")
+	id, _ := s.Register(ctx, cred, pub, "device", "{}")
+	err := s.UpdateAfterLogin(ctx, id, 1, "")
+	if err == nil {
+		t.Fatal("expected error for empty credential_json")
+	}
+	if errors.Is(err, ErrSignCountReplay) {
+		t.Error("empty credential_json must surface as input-validation error, not replay")
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
