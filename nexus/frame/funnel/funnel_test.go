@@ -496,6 +496,55 @@ func TestDeliberate_CompactionFailureLimit_RotatesSession(t *testing.T) {
 	}
 }
 
+// panickyPostTurn panics in every method. Verifies the funnel's
+// PostTurn call sites are panic-safe — a misbehaving rewriter
+// implementation must not crash deliberation.
+type panickyPostTurn struct {
+	// requestReset, when true, signals ShouldResetSession should
+	// (try to) return true. The panic still fires first; the funnel's
+	// recovery returns false regardless.
+	requestReset bool
+}
+
+func (p *panickyPostTurn) AfterTurn(context.Context) { panic("AfterTurn boom") }
+func (p *panickyPostTurn) ShouldResetSession() bool {
+	if p.requestReset {
+		panic("ShouldResetSession boom (asked for true)")
+	}
+	panic("ShouldResetSession boom")
+}
+func (p *panickyPostTurn) AcknowledgeReset() { panic("AcknowledgeReset boom") }
+
+// TestDeliberate_PostTurnPanicSafe verifies that a PostTurnHook
+// panicking inside any of its three methods does not crash
+// deliberation. The emit() and runFilter() paths have had panic
+// guards since v1; PostTurn was the missing one.
+func TestDeliberate_PostTurnPanicSafe(t *testing.T) {
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{FinalText: "ok", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
+	}}
+	f, err := New(Config{
+		AspectID: "frame",
+		Harness:  bridle.NewHarness(prov),
+		Provider: "scripted",
+		Model:    "m",
+		Runner:   noopRunner{},
+		PostTurn: &panickyPostTurn{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{From: "op", Content: "go"})
+
+	result, err := f.Deliberate(context.Background(), "")
+	if err != nil {
+		t.Fatalf("deliberation should succeed despite panicking PostTurn: %v", err)
+	}
+	if result.TurnResult.FinalText != "ok" {
+		t.Errorf("FinalText = %q; want ok", result.TurnResult.FinalText)
+	}
+}
+
 // Compaction with empty tail should not call the provider — there's
 // nothing to summarize.
 func TestCompact_EmptyTail_NoOp(t *testing.T) {
