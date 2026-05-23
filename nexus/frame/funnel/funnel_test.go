@@ -143,6 +143,79 @@ func TestNew_NormalizesClaudecodeAlias(t *testing.T) {
 	}
 }
 
+// TestNew_AutoDerivesFilterObservabilityHook verifies the auto-derive
+// added to eliminate the wire-one-forget-the-other footgun: when the
+// funnel has an ObservabilityHook but a wrapped/direct CheapModelFilter
+// has nil ObservabilityHook, New() populates it from the funnel's.
+// Honors an explicitly-set hook on the filter.
+func TestNew_AutoDerivesFilterObservabilityHook(t *testing.T) {
+	funnelHook := &nopObsHook{}
+	otherHook := &nopObsHook{}
+
+	cases := []struct {
+		name    string
+		filter  OutputFilter
+		want    ObservabilityHook
+		isInner bool // assert inner CheapModelFilter, not top-level
+	}{
+		{
+			name:   "direct CheapModelFilter — auto-derive",
+			filter: CheapModelFilter{},
+			want:   funnelHook,
+		},
+		{
+			name:   "direct CheapModelFilter — explicit hook preserved",
+			filter: CheapModelFilter{ObservabilityHook: otherHook},
+			want:   otherHook,
+		},
+		{
+			name:    "HardRulesFilter wrapping CheapModelFilter — auto-derive inner",
+			filter:  HardRulesFilter{Inner: CheapModelFilter{}},
+			want:    funnelHook,
+			isInner: true,
+		},
+		{
+			name:    "HardRulesFilter wrapping explicit — inner preserved",
+			filter:  HardRulesFilter{Inner: CheapModelFilter{ObservabilityHook: otherHook}},
+			want:    otherHook,
+			isInner: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := New(Config{
+				AspectID:          "frame",
+				Harness:           bridle.NewHarness(&scriptedProvider{}),
+				Provider:          "scripted",
+				Model:             "m",
+				Runner:            noopRunner{},
+				Filter:            tc.filter,
+				ObservabilityHook: funnelHook,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got ObservabilityHook
+			if tc.isInner {
+				got = f.cfg.Filter.(HardRulesFilter).Inner.(CheapModelFilter).ObservabilityHook
+			} else {
+				got = f.cfg.Filter.(CheapModelFilter).ObservabilityHook
+			}
+			if got != tc.want {
+				t.Errorf("CheapModelFilter.ObservabilityHook = %p; want %p", got, tc.want)
+			}
+		})
+	}
+}
+
+// nopObsHook is a noop ObservabilityHook used as a sentinel for
+// pointer-identity assertions.
+type nopObsHook struct{}
+
+func (*nopObsHook) BeginTurn(_, _, _, _ string, _ int64) {}
+func (*nopObsHook) OnBridleEvent(_ bridle.Event)         {}
+func (*nopObsHook) EndTurn()                             {}
+
 func TestNew_AppliesDefaultCompaction(t *testing.T) {
 	f, _ := newTestFunnel(t)
 	if f.cfg.Compaction.ThresholdTokens != 125_000 {
