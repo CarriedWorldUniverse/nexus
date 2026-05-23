@@ -242,7 +242,18 @@ export function MessageBubble({ msg, compact, parentMsg, onReply, agentOnly, rea
   // silently target the underlying message (replyTo signal /
   // toggleReaction API) on a stream the operator can't act on. Strip
   // the interactivity surface when readOnly is set.
-  const baseClass = 'msg' + (compact ? ' compact' : '') + (agentOnly ? ' agent-only' : '') + (isReplying ? ' replying' : '') + (readOnly ? ' read-only' : ' tappable');
+  //
+  // is-operator: visually distinguish messages the operator authored
+  // from agent chatter. Right-aligned + accent background so the
+  // operator can find "what did I last say" in a scrolling wall of
+  // text. See docs/2026-05-23-feed-trust-surface-spec.md.
+  const isOperator = msg.from === 'operator';
+  const baseClass = 'msg'
+    + (compact ? ' compact' : '')
+    + (agentOnly ? ' agent-only' : '')
+    + (isReplying ? ' replying' : '')
+    + (readOnly ? ' read-only' : ' tappable')
+    + (isOperator ? ' is-operator' : '');
   return html`
     <div class=${baseClass} id=${`msg-${msg.id}`}
       role=${readOnly ? null : 'button'}
