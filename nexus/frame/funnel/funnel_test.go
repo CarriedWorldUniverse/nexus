@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -542,6 +543,97 @@ func TestDeliberate_PostTurnPanicSafe(t *testing.T) {
 	}
 	if result.TurnResult.FinalText != "ok" {
 		t.Errorf("FinalText = %q; want ok", result.TurnResult.FinalText)
+	}
+}
+
+// recordingLogHandler collects every slog Record emitted at WARN or
+// above so tests can assert the funnel's pressure warnings fire
+// once-per-event under hysteresis.
+type recordingLogHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingLogHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= slog.LevelWarn
+}
+func (h *recordingLogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r)
+	return nil
+}
+func (h *recordingLogHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *recordingLogHandler) WithGroup(_ string) slog.Handler      { return h }
+
+func (h *recordingLogHandler) inboxPressureCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	count := 0
+	for _, r := range h.records {
+		if strings.Contains(r.Message, "inbox under pressure") {
+			count++
+		}
+	}
+	return count
+}
+
+// TestReceive_InboxPressureWarnsOnceWithHysteresis verifies the
+// inbox-pressure WARN fires once per breach (not on every Receive
+// above the threshold) and re-arms after the inbox drains to half.
+func TestReceive_InboxPressureWarnsOnceWithHysteresis(t *testing.T) {
+	logH := &recordingLogHandler{}
+	f, err := New(Config{
+		AspectID:           "frame",
+		Harness:            bridle.NewHarness(&scriptedProvider{}),
+		Provider:           "scripted",
+		Model:              "m",
+		Runner:             noopRunner{},
+		InboxWarnThreshold: 4, // small for test
+		Logger:             slog.New(logH),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Push 3 items — below threshold. No warning.
+	for i := 0; i < 3; i++ {
+		f.Receive(bridle.InboxItem{MsgID: int64(i + 1), From: "op", Content: "x"})
+	}
+	if got := logH.inboxPressureCount(); got != 0 {
+		t.Errorf("after 3 items: pressure warnings = %d; want 0", got)
+	}
+
+	// Push 4th — crosses threshold. One warning.
+	f.Receive(bridle.InboxItem{MsgID: 4, From: "op", Content: "x"})
+	if got := logH.inboxPressureCount(); got != 1 {
+		t.Errorf("after crossing threshold: pressure warnings = %d; want 1", got)
+	}
+
+	// Push more items above threshold — should NOT re-warn (latched).
+	for i := 5; i <= 10; i++ {
+		f.Receive(bridle.InboxItem{MsgID: int64(i), From: "op", Content: "x"})
+	}
+	if got := logH.inboxPressureCount(); got != 1 {
+		t.Errorf("after additional items while latched: pressure warnings = %d; want 1", got)
+	}
+
+	// Drain the inbox via Deliberate. Each call pops one. Threshold is
+	// 4; half is 2. After we've popped 9 items (10 → 1), we're below
+	// half and the latch clears.
+	for i := 0; i < 9; i++ {
+		if _, err := f.Deliberate(context.Background(), ""); err != nil {
+			t.Fatalf("deliberate %d: %v", i, err)
+		}
+	}
+
+	// One item left in inbox. Push more — should re-warn once we
+	// cross threshold again. Push 4 more (1 + 4 = 5, > 4).
+	for i := 11; i <= 14; i++ {
+		f.Receive(bridle.InboxItem{MsgID: int64(i), From: "op", Content: "x"})
+	}
+	if got := logH.inboxPressureCount(); got != 2 {
+		t.Errorf("after second breach: pressure warnings = %d; want 2 (re-armed after drain)", got)
 	}
 }
 
