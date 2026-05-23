@@ -9,11 +9,14 @@
 //   POST /api/operator/login/finish     → consume credential.get() result, mint JWT
 //
 // Begin handlers return a short-lived `session_token` the browser
-// must echo on the matching Finish call. Per-token state (the
-// webauthn.SessionData the lib needs to verify the response) lives
-// in an in-memory map gated by the session_token; entries TTL out
-// after 5m. Process restart drops live ceremonies — operators just
-// re-tap.
+// must echo back on the matching Finish call via the
+// X-Session-Token header (NOT a query parameter — query strings
+// land in access logs and browser history, and the token is the
+// only thing pinning the ceremony state in our in-memory map).
+// Per-token state (the webauthn.SessionData the lib needs to
+// verify the response) lives in an in-memory map gated by the
+// session_token; entries TTL out after 5m. Process restart drops
+// live ceremonies — operators just re-tap.
 //
 // Login success mints an HS256 JWT with sub:"operator" and a
 // 1h TTL (matched to KeyfileValidator.JWTTTL so admin endpoints
@@ -289,7 +292,7 @@ type registerFinishResponse struct {
 }
 
 func (l *OperatorLogin) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("session_token")
+	token := r.Header.Get("X-Session-Token")
 	if token == "" {
 		writeOpErr(w, http.StatusBadRequest, "session_token required")
 		return
@@ -346,7 +349,7 @@ type loginFinishResponse struct {
 }
 
 func (l *OperatorLogin) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("session_token")
+	token := r.Header.Get("X-Session-Token")
 	if token == "" {
 		writeOpErr(w, http.StatusBadRequest, "session_token required")
 		return

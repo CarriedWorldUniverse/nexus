@@ -53,9 +53,12 @@ export async function runLogin() {
   // simplewebauthn's startAuthentication takes { optionsJSON: options }.
   const assertion = await startAuthentication({ optionsJSON: begin.options.publicKey });
   // The browser's response goes back as the request body of finish.
+  // session_token rides in a header so it doesn't leak into broker
+  // access logs (which capture query strings) — see broker docs
+  // on operator_login.go.
   const finish = await fetchJSON(
-    `/api/operator/login/finish?session_token=${encodeURIComponent(begin.session_token)}`,
-    { body: assertion },
+    '/api/operator/login/finish',
+    { body: assertion, headers: { 'X-Session-Token': begin.session_token } },
   );
   return finish.session_jwt;
 }
@@ -79,8 +82,11 @@ export async function runRegister(label, jwt = null) {
   });
   const cred = await startRegistration({ optionsJSON: begin.options.publicKey });
   await fetchJSON(
-    `/api/operator/register/finish?session_token=${encodeURIComponent(begin.session_token)}`,
-    { body: cred },
+    '/api/operator/register/finish',
+    {
+      body: cred,
+      headers: { ...headers, 'X-Session-Token': begin.session_token },
+    },
   );
 }
 
