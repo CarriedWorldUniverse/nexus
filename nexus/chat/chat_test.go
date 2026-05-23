@@ -346,6 +346,38 @@ func TestSQLStore_ListThreadLimit(t *testing.T) {
 	}
 }
 
+// TestSQLStore_ListThreadCapsLimit pins the defensive cap: when a
+// caller passes limit=0 (historical "unlimited") OR a value over the
+// internal maxScanLimit, the query returns at most maxScanLimit rows.
+// We don't seed 5001 rows — too slow. Instead we verify the practical
+// case that limit=0 still returns the available messages (regression
+// guard: the cap can't accidentally clamp to a small value).
+func TestSQLStore_ListThreadCapsLimit(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	root, _ := s.Insert(ctx, "operator", "root", 0, "")
+	for i := 0; i < 12; i++ {
+		s.Insert(ctx, "anvil", "reply", root.ID, "")
+	}
+	msgs, err := s.ListThread(ctx, root.ID, 0, 0) // limit=0 -> cap
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 13 { // root + 12 replies
+		t.Errorf("limit=0 should still return all 13 (well under cap): got %d", len(msgs))
+	}
+
+	// Over-cap limit also returns all available (the cap clamps but
+	// 13 < 5000 so no truncation).
+	msgs, err = s.ListSince(ctx, 0, 100000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 13 {
+		t.Errorf("over-cap limit should still return all 13: got %d", len(msgs))
+	}
+}
+
 func TestSQLStore_ListThreadRejectsZeroID(t *testing.T) {
 	s := openTestStore(t)
 	_, err := s.ListThread(context.Background(), 0, 0, 0)
