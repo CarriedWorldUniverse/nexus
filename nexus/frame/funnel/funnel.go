@@ -502,7 +502,24 @@ type Funnel struct {
 	// read and cleared by Deliberate when constructing FilterInput.
 	// Empty when no goal is active.
 	goalDoD string
+
+	// compactionFailures counts consecutive compact() errors. Reset to
+	// zero on the next successful compact. When it reaches
+	// compactionFailureLimit, Deliberate force-rotates the session
+	// (mirrors the PostTurn rewriter's sustained-failure recovery) so
+	// we don't keep burning API calls on compaction attempts that
+	// won't succeed (broken cheap model, auth gone, prompt issue).
+	// Only accessed inside Deliberate, which is single-caller after
+	// the deliberating guard.
+	compactionFailures int
 }
+
+// compactionFailureLimit caps how many consecutive compact() errors
+// the funnel tolerates before force-rotating the session. Three is
+// generous enough to absorb a transient network blip; sustained
+// failure beyond that means the underlying issue won't self-heal and
+// we shouldn't keep retrying every turn.
+const compactionFailureLimit = 3
 
 // New constructs a Funnel from cfg. Returns an error if required fields
 // are missing.
@@ -830,11 +847,39 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 
 	if shouldCompact {
 		if err := f.compact(ctx, tail); err != nil {
-			f.log.Warn("funnel: compaction failed; continuing without it", "err", err)
-			// Don't fail the deliberation — proceed with the existing
-			// tail and let the provider's auto-compact handle it if
-			// the threshold is also crossed there.
+			f.compactionFailures++
+			f.log.Warn("funnel: compaction failed; continuing without it",
+				"err", err, "consecutive_failures", f.compactionFailures)
+			// Sustained failure: rotate the session as a last-resort
+			// recovery (mirrors the PostTurn rewriter's reset behavior
+			// in this same function). Drops sessionTail + resets
+			// cumulativeTokens so the next turn starts clean, no
+			// further compaction attempts on the broken state.
+			// Operator sees the WARN with discarded counts.
+			if f.compactionFailures >= compactionFailureLimit {
+				fresh := f.resolver.RotateGlobal()
+				f.mu.Lock()
+				oldID := f.sessionHandle.ID
+				oldTail := len(f.sessionTail)
+				oldTokens := f.cumulativeTokens
+				f.sessionHandle = fresh
+				f.sessionTail = nil
+				f.cumulativeTokens = 0
+				f.mu.Unlock()
+				f.log.Warn("funnel: forced session rotation after sustained compaction failures",
+					"consecutive_failures", f.compactionFailures,
+					"old_session", oldID, "new_session", fresh.ID,
+					"discarded_tail_events", oldTail, "discarded_tokens", oldTokens)
+				f.compactionFailures = 0
+				tail = nil
+				session = fresh
+			}
+			// On non-rotation failure paths: proceed with the existing
+			// tail. The provider's own auto-compact (when threshold is
+			// crossed there too) is a backup; we'll retry compact next
+			// turn until the counter trips the rotation above.
 		} else {
+			f.compactionFailures = 0
 			// Refresh local view post-compaction. compact() rotates the
 			// resolver's global handle, so re-resolve to pick up the
 			// fresh id for this turn.
