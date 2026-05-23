@@ -1113,6 +1113,88 @@
   border-bottom: 1px dashed var(--border-subtle);
 }
 
+/* ── Presence strip (trust surface) ──
+   Sticky pill row at the top of the focused thread. One pill per
+   participant aspect, dot colour + animation encodes activity state.
+   Operator scans this to know which agents are present and which
+   are currently thinking, without reading message content. See
+   docs/2026-05-23-feed-trust-surface-spec.md. */
+
+.presence-strip {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px;
+  margin: 0 calc(var(--space-md) * -1) var(--space-sm) -36px;
+  background: var(--bg-deep);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.presence-strip.empty {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 11px;
+}
+
+.presence-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 11px;
+}
+
+.presence-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted); /* offline default */
+  flex-shrink: 0;
+}
+
+.presence-pill.pres-online .presence-dot {
+  background: #4caf50; /* solid green = online + idle */
+}
+
+/* Mid-deliberation: pulse the dot so the operator can spot motion
+ * in their peripheral vision while the agents are working. */
+.presence-pill.state-thinking .presence-dot {
+  background: #4caf50;
+  animation: presence-pulse 1.1s ease-in-out infinite;
+}
+
+.presence-pill.state-tool .presence-dot {
+  background: var(--color-gold); /* yellow = in a tool call */
+  animation: presence-pulse 1.4s ease-in-out infinite;
+}
+
+.presence-pill.state-thinking,
+.presence-pill.state-tool {
+  /* Mid-activity pills get a slightly brighter border so they stand
+   * out from idle peers in a long strip. */
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+
+.presence-tool {
+  font-style: normal;
+  color: var(--color-gold);
+  font-weight: 600;
+}
+
+@keyframes presence-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
 .feed-thread-expanded-replies {
   display: flex;
   flex-direction: column;
