@@ -830,6 +830,16 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 	if err != nil {
 		f.log.Warn("funnel: provider env resolution failed; falling through to provider defaults", "err", err)
 	}
+	// Append the triage contract (when applicable) to the user message
+	// so the model sees it inside this turn's prompt. Moved out of
+	// bridle on 2026-05-23 — see triage_contract.go for the why.
+	if contract := triageContractFor(pending, f.cfg.Tools); contract != "" {
+		if userMessage != "" {
+			userMessage = userMessage + "\n\n" + contract
+		} else {
+			userMessage = contract
+		}
+	}
 	req := bridle.TurnRequest{
 		AspectID:           f.cfg.AspectID,
 		AppendSystemPrompt: systemPrompt,
