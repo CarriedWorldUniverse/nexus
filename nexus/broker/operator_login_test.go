@@ -240,7 +240,8 @@ func TestRegisterFinish_HappyPath(t *testing.T) {
 	_ = json.Unmarshal(beginRec.Body.Bytes(), &beginResp)
 
 	// Finish.
-	req := httptest.NewRequest("POST", "/api/operator/register/finish?session_token="+beginResp.SessionToken, strings.NewReader("{}"))
+	req := httptest.NewRequest("POST", "/api/operator/register/finish", strings.NewReader("{}"))
+	req.Header.Set("X-Session-Token", beginResp.SessionToken)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -253,7 +254,8 @@ func TestRegisterFinish_HappyPath(t *testing.T) {
 	}
 
 	// Replay must fail — session is one-shot.
-	req2 := httptest.NewRequest("POST", "/api/operator/register/finish?session_token="+beginResp.SessionToken, strings.NewReader("{}"))
+	req2 := httptest.NewRequest("POST", "/api/operator/register/finish", strings.NewReader("{}"))
+	req2.Header.Set("X-Session-Token", beginResp.SessionToken)
 	rec2 := httptest.NewRecorder()
 	mux.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusUnauthorized {
@@ -266,7 +268,8 @@ func TestRegisterFinish_UnknownToken(t *testing.T) {
 	l := newTestLogin(t, auth)
 	mux := newOperatorMux(l)
 
-	req := httptest.NewRequest("POST", "/api/operator/register/finish?session_token=ghost", strings.NewReader("{}"))
+	req := httptest.NewRequest("POST", "/api/operator/register/finish", strings.NewReader("{}"))
+	req.Header.Set("X-Session-Token", "ghost")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -293,7 +296,8 @@ func TestSessionExpires(t *testing.T) {
 	// Advance past TTL.
 	clock = clock.Add(ceremonyTTL + time.Second)
 
-	req := httptest.NewRequest("POST", "/api/operator/register/finish?session_token="+beginResp.SessionToken, strings.NewReader("{}"))
+	req := httptest.NewRequest("POST", "/api/operator/register/finish", strings.NewReader("{}"))
+	req.Header.Set("X-Session-Token", beginResp.SessionToken)
 	rec2 := httptest.NewRecorder()
 	mux.ServeHTTP(rec2, req)
 	if rec2.Code != http.StatusUnauthorized {
@@ -332,7 +336,8 @@ func TestLoginFinish_MintsValidJWT(t *testing.T) {
 	_ = json.Unmarshal(beginRec.Body.Bytes(), &beginResp)
 
 	// Finish → JWT.
-	req := httptest.NewRequest("POST", "/api/operator/login/finish?session_token="+beginResp.SessionToken, strings.NewReader("{}"))
+	req := httptest.NewRequest("POST", "/api/operator/login/finish", strings.NewReader("{}"))
+	req.Header.Set("X-Session-Token", beginResp.SessionToken)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -375,7 +380,8 @@ func TestLoginFinish_FailureSurfacesAs401(t *testing.T) {
 	var beginResp loginBeginResponse
 	_ = json.Unmarshal(beginRec.Body.Bytes(), &beginResp)
 
-	req := httptest.NewRequest("POST", "/api/operator/login/finish?session_token="+beginResp.SessionToken, strings.NewReader("{}"))
+	req := httptest.NewRequest("POST", "/api/operator/login/finish", strings.NewReader("{}"))
+	req.Header.Set("X-Session-Token", beginResp.SessionToken)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
