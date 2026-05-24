@@ -123,3 +123,12 @@ export function setCredentialDefaults(aspect, payload) {
     body: JSON.stringify(payload || {}),
   });
 }
+
+// GET /api/admin/credentials/{name}/audit?limit=N
+// Returns { audit: [AuditRow] } most-recent first. Backend caps limit
+// at 1000; default 100. AuditRow shape: { id, credential_name, aspect,
+// action, ts, details }.
+export function getCredentialAudit(name, opts) {
+  const limit = opts && opts.limit ? '?limit=' + encodeURIComponent(opts.limit) : '';
+  return adminFetch('/api/admin/credentials/' + encodeURIComponent(name) + '/audit' + limit);
+}

@@ -397,3 +397,62 @@
   font-size: 13px;
   font-weight: 500;
 }
+
+/* ── SettingsAudit (NEX-268) ── */
+
+.settings-audit-table {
+  table-layout: auto;
+}
+
+.settings-audit-row-clickable {
+  cursor: pointer;
+}
+
+.settings-audit-ts {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.settings-audit-aspect {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text);
+}
+
+.settings-audit-action {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  text-transform: lowercase;
+  letter-spacing: 0.4px;
+  background: rgba(100, 180, 255, 0.15);
+  color: #6cb4ff;
+}
+
+.settings-audit-action-failed {
+  background: rgba(255, 80, 80, 0.15);
+  color: #ff8080;
+}
+
+.settings-audit-detail-cell {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.settings-audit-detail-hint {
+  opacity: 0.6;
+  font-style: italic;
+}
+
+.settings-audit-detail {
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  padding: 8px;
+  margin: 4px 0 0 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}

@@ -21,6 +21,7 @@ import { Placeholder } from './Placeholder.js';
 import { SettingsAspects } from './SettingsAspects.js';
 import { SettingsCredentials } from './SettingsCredentials.js';
 import { SettingsDefaults } from './SettingsDefaults.js';
+import { SettingsAudit } from './SettingsAudit.js';
 
 const TABS = [
   { id: 'aspects',     label: 'Aspects' },
@@ -64,7 +65,7 @@ function SubRouteContent({ subRoute }) {
     case 'aspects':     return html`<${SettingsAspects} />`;
     case 'credentials': return html`<${SettingsCredentials} />`;
     case 'defaults':    return html`<${SettingsDefaults} />`;
-    case 'audit':       return html`<${Placeholder} name="Audit (NEX-268)" />`;
+    case 'audit':       return html`<${SettingsAudit} />`;
     default:            return html`<${Placeholder} name="Settings" />`;
   }
 }
