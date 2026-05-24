@@ -387,3 +387,13 @@
   text-transform: uppercase;
   letter-spacing: 0.3px;
 }
+
+/* ── SettingsDefaults (NEX-267) ── */
+
+.settings-defaults-label {
+  width: 180px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+}

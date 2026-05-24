@@ -101,3 +101,25 @@ export function deleteCredential(name) {
     method: 'DELETE',
   });
 }
+
+// GET /api/admin/aspects/{name}/credential-defaults
+// Returns { aspect, default_anthropic_credential?, default_openai_credential?,
+// default_jira_credential?, default_imap_credential? }. Fields are absent
+// (or null) when the default is unset.
+export function getCredentialDefaults(aspect) {
+  return adminFetch('/api/admin/aspects/' + encodeURIComponent(aspect) + '/credential-defaults');
+}
+
+// PUT /api/admin/aspects/{name}/credential-defaults
+// Partial update. payload uses the same field names as the GET response.
+//   field omitted        → no change
+//   field set to ""      → clear (NULL in column)
+//   field set to "name"  → set to that credential name
+// Backend validates that the named credential exists; 400 on mismatch.
+export function setCredentialDefaults(aspect, payload) {
+  return adminFetch('/api/admin/aspects/' + encodeURIComponent(aspect) + '/credential-defaults', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload || {}),
+  });
+}
