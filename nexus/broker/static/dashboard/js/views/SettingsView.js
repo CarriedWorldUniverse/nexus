@@ -19,6 +19,7 @@ const { html, useState, useEffect } = window.__preact;
 import { isAdmin } from '../state.js';
 import { Placeholder } from './Placeholder.js';
 import { SettingsAspects } from './SettingsAspects.js';
+import { SettingsCredentials } from './SettingsCredentials.js';
 
 const TABS = [
   { id: 'aspects',     label: 'Aspects' },
@@ -60,7 +61,7 @@ function SettingsTabBar({ activeTab }) {
 function SubRouteContent({ subRoute }) {
   switch (subRoute) {
     case 'aspects':     return html`<${SettingsAspects} />`;
-    case 'credentials': return html`<${Placeholder} name="Credentials (NEX-266)" />`;
+    case 'credentials': return html`<${SettingsCredentials} />`;
     case 'defaults':    return html`<${Placeholder} name="Defaults (NEX-267)" />`;
     case 'audit':       return html`<${Placeholder} name="Audit (NEX-268)" />`;
     default:            return html`<${Placeholder} name="Settings" />`;

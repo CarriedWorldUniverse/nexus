@@ -248,3 +248,142 @@
   font-size: 12px;
   margin-left: 4px;
 }
+
+/* ── SettingsCredentials (NEX-266) ── */
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.settings-table th,
+.settings-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-table th {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.settings-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-cred-name {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text);
+}
+
+.settings-cred-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+/* ── Modal (NEX-266) ── */
+
+.settings-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+.settings-modal {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  max-width: 480px;
+  width: 100%;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  color: var(--text);
+}
+
+.settings-modal-wide {
+  max-width: 640px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.settings-modal-title {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.settings-modal-section {
+  margin: 16px 0 8px 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.settings-modal-warn {
+  color: rgba(255, 130, 130, 0.85);
+  font-size: 13px;
+}
+
+.settings-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.settings-error-banner {
+  margin: 8px 0 0 0;
+  padding: 8px 10px;
+  background: rgba(255, 80, 80, 0.08);
+  border: 1px solid rgba(255, 80, 80, 0.3);
+  border-radius: 4px;
+}
+
+/* ── Bundle form (NEX-266) ── */
+
+.settings-bundle-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-bundle-note {
+  background: rgba(180, 140, 80, 0.10);
+  border: 1px solid rgba(180, 140, 80, 0.3);
+  color: rgba(255, 200, 130, 0.95);
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-field-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-field-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
