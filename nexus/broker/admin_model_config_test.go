@@ -152,7 +152,10 @@ func TestAdminModelConfig_PutClearsField(t *testing.T) {
 		strings.NewReader(`{"primary_model": "x"}`))
 	req.Header.Set("Authorization", "Bearer "+rig.adminToken)
 	req.Header.Set("Content-Type", "application/json")
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT set: %v", err)
+	}
 	resp.Body.Close()
 
 	// Clear primary_model via empty string.
@@ -160,12 +163,18 @@ func TestAdminModelConfig_PutClearsField(t *testing.T) {
 		strings.NewReader(`{"primary_model": ""}`))
 	req2.Header.Set("Authorization", "Bearer "+rig.adminToken)
 	req2.Header.Set("Content-Type", "application/json")
-	resp2, _ := http.DefaultClient.Do(req2)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("PUT clear: %v", err)
+	}
 	resp2.Body.Close()
 
 	req3, _ := http.NewRequest("GET", rig.url+"/api/admin/aspects/anvil/model-config", nil)
 	req3.Header.Set("Authorization", "Bearer "+rig.adminToken)
-	resp3, _ := http.DefaultClient.Do(req3)
+	resp3, err := http.DefaultClient.Do(req3)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
 	defer resp3.Body.Close()
 	var got credentials.AspectModelConfig
 	mustDecode(t, resp3, &got)
@@ -182,7 +191,10 @@ func TestAdminModelConfig_RejectsNonAdmin(t *testing.T) {
 		strings.NewReader(`{"primary_model":"x"}`))
 	req.Header.Set("Authorization", "Bearer "+rig.peerToken)
 	req.Header.Set("Content-Type", "application/json")
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("non-admin PUT status = %d; want 403", resp.StatusCode)
@@ -190,7 +202,10 @@ func TestAdminModelConfig_RejectsNonAdmin(t *testing.T) {
 
 	req2, _ := http.NewRequest("GET", rig.url+"/api/admin/aspects/anvil/model-config", nil)
 	req2.Header.Set("Authorization", "Bearer "+rig.peerToken)
-	resp2, _ := http.DefaultClient.Do(req2)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusForbidden {
 		t.Errorf("non-admin GET status = %d; want 403", resp2.StatusCode)
@@ -205,7 +220,10 @@ func TestAdminModelConfig_MalformedBody(t *testing.T) {
 		strings.NewReader(`{ not valid json`))
 	req.Header.Set("Authorization", "Bearer "+rig.adminToken)
 	req.Header.Set("Content-Type", "application/json")
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("malformed body status = %d; want 400", resp.StatusCode)
