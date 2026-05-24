@@ -694,6 +694,114 @@ func (s *Store) SetAspectDefault(ctx context.Context, aspect, defaultColumn, cre
 	return nil
 }
 
+// AspectModelConfig is the per-aspect, per-kind model + credential
+// override read from the aspects table (NEX-263). Each field is nullable
+// — nil means "no override; inherit the keyfile value at runtime".
+// Lives here rather than in a separate aspectconfig package because the
+// infrastructure (aspects-row CRUD) is identical and the credential
+// fields reference credential names this Store already manages.
+type AspectModelConfig struct {
+	Aspect            string  `json:"aspect"`
+	PrimaryModel      *string `json:"primary_model,omitempty"`
+	PrimaryCredential *string `json:"primary_credential,omitempty"`
+	JudgeModel        *string `json:"judge_model,omitempty"`
+	JudgeCredential   *string `json:"judge_credential,omitempty"`
+	CompactModel      *string `json:"compact_model,omitempty"`
+	CompactCredential *string `json:"compact_credential,omitempty"`
+}
+
+// modelConfigColumns is the allowed set of column names for
+// SetAspectModelField. Mirrored exactly in the schema migrations
+// added by NEX-263 — keep these in sync.
+var modelConfigColumns = map[string]bool{
+	"primary_model":      true,
+	"primary_credential": true,
+	"judge_model":        true,
+	"judge_credential":   true,
+	"compact_model":      true,
+	"compact_credential": true,
+}
+
+// GetAspectModelConfig reads the per-aspect model + credential override
+// columns for `aspect`. Returns AspectModelConfig with all-nil pointers
+// if the aspect row doesn't exist (mirrors GetAspectDefaults semantics).
+func (s *Store) GetAspectModelConfig(ctx context.Context, aspect string) (AspectModelConfig, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT primary_model, primary_credential,
+		       judge_model,   judge_credential,
+		       compact_model, compact_credential
+		  FROM aspects WHERE name = ?
+	`, aspect)
+	cfg := AspectModelConfig{Aspect: aspect}
+	var pm, pc, jm, jc, cm, cc sql.NullString
+	if err := row.Scan(&pm, &pc, &jm, &jc, &cm, &cc); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return cfg, nil
+		}
+		return cfg, fmt.Errorf("scan aspect model config: %w", err)
+	}
+	if pm.Valid {
+		v := pm.String
+		cfg.PrimaryModel = &v
+	}
+	if pc.Valid {
+		v := pc.String
+		cfg.PrimaryCredential = &v
+	}
+	if jm.Valid {
+		v := jm.String
+		cfg.JudgeModel = &v
+	}
+	if jc.Valid {
+		v := jc.String
+		cfg.JudgeCredential = &v
+	}
+	if cm.Valid {
+		v := cm.String
+		cfg.CompactModel = &v
+	}
+	if cc.Valid {
+		v := cc.String
+		cfg.CompactCredential = &v
+	}
+	return cfg, nil
+}
+
+// SetAspectModelField writes a single model-config column on the aspect
+// row. column must be one of primary_model / primary_credential /
+// judge_model / judge_credential / compact_model / compact_credential.
+// Pass value="" to clear (NULL in the column).
+//
+// For *_credential columns with a non-empty value, the credential's
+// existence is verified before write to surface clean errors at the
+// REST layer rather than producing a dangling reference.
+func (s *Store) SetAspectModelField(ctx context.Context, aspect, column, value string) error {
+	if !modelConfigColumns[column] {
+		return fmt.Errorf("credentials: unknown model-config column %q", column)
+	}
+	// Verify credential exists if we're naming one (not clearing, not a model field).
+	if value != "" && (column == "primary_credential" || column == "judge_credential" || column == "compact_credential") {
+		if _, err := s.Get(ctx, value); err != nil {
+			return fmt.Errorf("credentials: cannot set %s=%q for aspect %q: %w", column, value, aspect, err)
+		}
+	}
+	var arg any
+	if value == "" {
+		arg = nil
+	} else {
+		arg = value
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE aspects SET `+column+` = ? WHERE name = ?`, arg, aspect)
+	if err != nil {
+		return fmt.Errorf("update aspect model config: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("credentials: aspect %q not found (cannot set %s)", aspect, column)
+	}
+	return nil
+}
+
 // resolveAspectDefault is the shared lookup-and-allow-check for both
 // provider and non-provider default-credential resolution.
 func (s *Store) resolveAspectDefault(ctx context.Context, aspect, col string) (Credential, error) {

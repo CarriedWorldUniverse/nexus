@@ -263,6 +263,43 @@ var columnsToAdd = []columnAddition{
 		column: "default_imap_credential",
 		ddl:    "ALTER TABLE aspects ADD COLUMN default_imap_credential TEXT",
 	},
+	// NEX-263 — per-aspect model override columns. Null = inherit keyfile
+	// value (ProviderConfig.model / FilterProviderConfig.model /
+	// DistillerModel respectively). Operator sets these via the dashboard
+	// Settings → Aspects page (NEX-265) so model selection no longer
+	// requires editing keyfile JSON + restart. The matching *_credential
+	// columns name a broker credential to use for that kind; null falls
+	// back to the relevant default_<kind>_credential / keyfile config.
+	{
+		table:  "aspects",
+		column: "primary_model",
+		ddl:    "ALTER TABLE aspects ADD COLUMN primary_model TEXT",
+	},
+	{
+		table:  "aspects",
+		column: "primary_credential",
+		ddl:    "ALTER TABLE aspects ADD COLUMN primary_credential TEXT",
+	},
+	{
+		table:  "aspects",
+		column: "judge_model",
+		ddl:    "ALTER TABLE aspects ADD COLUMN judge_model TEXT",
+	},
+	{
+		table:  "aspects",
+		column: "judge_credential",
+		ddl:    "ALTER TABLE aspects ADD COLUMN judge_credential TEXT",
+	},
+	{
+		table:  "aspects",
+		column: "compact_model",
+		ddl:    "ALTER TABLE aspects ADD COLUMN compact_model TEXT",
+	},
+	{
+		table:  "aspects",
+		column: "compact_credential",
+		ddl:    "ALTER TABLE aspects ADD COLUMN compact_credential TEXT",
+	},
 	// Task #226 — linked-list thread model. parent_msg_id is the chain
 	// parent (NULL for thread roots). thread_root_msg_id is the
 	// canonical thread identity used by aspects for per-thread session
