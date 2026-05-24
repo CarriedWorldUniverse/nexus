@@ -384,3 +384,166 @@ func (c *jiraClient) CreateIssue(ctx context.Context, summary, descriptionMarkdo
 	}
 	return resp.Key, nil
 }
+
+// IssueLink is the projection returned by ListLinks.
+type IssueLink struct {
+	ID           string `json:"id"`
+	Type         string `json:"type"`      // e.g. "Relates", "Blocks"
+	Direction    string `json:"direction"` // "outward" | "inward"
+	OtherKey     string `json:"other_key"`
+	OtherSummary string `json:"other_summary,omitempty"`
+	OtherStatus  string `json:"other_status,omitempty"`
+}
+
+// Link creates a typed link between two issues. linkType is the Atlassian
+// link type name (e.g. "Blocks", "Relates", "Duplicate", "Cloners"). The
+// direction is established by the inward/outward keys: "Blocks" with
+// from=A,to=B means A blocks B.
+func (c *jiraClient) Link(ctx context.Context, fromKey, toKey, linkType string) error {
+	payload := map[string]any{
+		"type":         map[string]string{"name": linkType},
+		"inwardIssue":  map[string]string{"key": toKey},   // the target of the link
+		"outwardIssue": map[string]string{"key": fromKey}, // the source of the link
+	}
+	return c.do(ctx, http.MethodPost, "/rest/api/3/issueLink", payload, nil)
+}
+
+// Unlink removes an issue link by its ID. Caller obtains the ID via
+// ListLinks.
+func (c *jiraClient) Unlink(ctx context.Context, linkID string) error {
+	return c.do(ctx, http.MethodDelete, "/rest/api/3/issueLink/"+url.PathEscape(linkID), nil, nil)
+}
+
+// ListLinks returns the issue links on the given issue, flattened into
+// a direction-aware projection.
+func (c *jiraClient) ListLinks(ctx context.Context, key string) ([]IssueLink, error) {
+	var raw struct {
+		Fields struct {
+			IssueLinks []struct {
+				ID   string `json:"id"`
+				Type struct {
+					Name string `json:"name"`
+				} `json:"type"`
+				OutwardIssue *struct {
+					Key    string `json:"key"`
+					Fields struct {
+						Summary string `json:"summary"`
+						Status  struct {
+							Name string `json:"name"`
+						} `json:"status"`
+					} `json:"fields"`
+				} `json:"outwardIssue"`
+				InwardIssue *struct {
+					Key    string `json:"key"`
+					Fields struct {
+						Summary string `json:"summary"`
+						Status  struct {
+							Name string `json:"name"`
+						} `json:"status"`
+					} `json:"fields"`
+				} `json:"inwardIssue"`
+			} `json:"issuelinks"`
+		} `json:"fields"`
+	}
+	q := url.Values{}
+	q.Set("fields", "issuelinks")
+	if err := c.do(ctx, http.MethodGet, "/rest/api/3/issue/"+url.PathEscape(key)+"?"+q.Encode(), nil, &raw); err != nil {
+		return nil, err
+	}
+	out := make([]IssueLink, 0, len(raw.Fields.IssueLinks))
+	for _, l := range raw.Fields.IssueLinks {
+		link := IssueLink{ID: l.ID, Type: l.Type.Name}
+		switch {
+		case l.OutwardIssue != nil:
+			link.Direction = "outward"
+			link.OtherKey = l.OutwardIssue.Key
+			link.OtherSummary = l.OutwardIssue.Fields.Summary
+			link.OtherStatus = l.OutwardIssue.Fields.Status.Name
+		case l.InwardIssue != nil:
+			link.Direction = "inward"
+			link.OtherKey = l.InwardIssue.Key
+			link.OtherSummary = l.InwardIssue.Fields.Summary
+			link.OtherStatus = l.InwardIssue.Fields.Status.Name
+		}
+		out = append(out, link)
+	}
+	return out, nil
+}
+
+// Comment is the projection returned by ListComments.
+type Comment struct {
+	ID       string `json:"id"`
+	Author   string `json:"author"`
+	Created  string `json:"created"`
+	Updated  string `json:"updated,omitempty"`
+	BodyText string `json:"body_text"`
+}
+
+// ListComments returns the comments on an issue, oldest first.
+// Body is rendered from ADF to plain text — same convention as Get.
+func (c *jiraClient) ListComments(ctx context.Context, key string) ([]Comment, error) {
+	var raw struct {
+		Comments []struct {
+			ID     string `json:"id"`
+			Author struct {
+				DisplayName string `json:"displayName"`
+			} `json:"author"`
+			Created string         `json:"created"`
+			Updated string         `json:"updated"`
+			Body    map[string]any `json:"body"`
+		} `json:"comments"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/rest/api/3/issue/"+url.PathEscape(key)+"/comment", nil, &raw); err != nil {
+		return nil, err
+	}
+	out := make([]Comment, 0, len(raw.Comments))
+	for _, c := range raw.Comments {
+		out = append(out, Comment{
+			ID:       c.ID,
+			Author:   c.Author.DisplayName,
+			Created:  c.Created,
+			Updated:  c.Updated,
+			BodyText: adfToPlain(c.Body),
+		})
+	}
+	return out, nil
+}
+
+// UpdateFields holds the editable fields for Update. Empty / nil fields
+// are not sent — only provided fields are written. Use Labels=[]string{}
+// to clear all labels; nil leaves labels untouched.
+type UpdateFields struct {
+	Summary             *string  // nil = unchanged
+	DescriptionMarkdown *string  // nil = unchanged
+	Labels              []string // nil = unchanged, []string{} = clear
+	Component           *string  // nil = unchanged, "" string = clear
+	Priority            *string  // nil = unchanged
+}
+
+// Update edits the given issue. Only non-nil fields are written.
+func (c *jiraClient) Update(ctx context.Context, key string, f UpdateFields) error {
+	fields := map[string]any{}
+	if f.Summary != nil {
+		fields["summary"] = *f.Summary
+	}
+	if f.DescriptionMarkdown != nil {
+		fields["description"] = adfFromMarkdown(*f.DescriptionMarkdown)
+	}
+	if f.Labels != nil {
+		fields["labels"] = f.Labels
+	}
+	if f.Component != nil {
+		if *f.Component == "" {
+			fields["components"] = []any{}
+		} else {
+			fields["components"] = []map[string]string{{"name": *f.Component}}
+		}
+	}
+	if f.Priority != nil {
+		fields["priority"] = map[string]string{"name": *f.Priority}
+	}
+	if len(fields) == 0 {
+		return errors.New("jira: update called with no fields set")
+	}
+	return c.do(ctx, http.MethodPut, "/rest/api/3/issue/"+url.PathEscape(key), map[string]any{"fields": fields}, nil)
+}

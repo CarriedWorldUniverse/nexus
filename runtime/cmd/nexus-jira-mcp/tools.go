@@ -260,6 +260,145 @@ func registerTools(srv *mcpserver.MCPServer, c *jiraClient, native *nativeClient
 			},
 		},
 		{
+			name:        "jira.link",
+			description: "Add a typed link between two issues. link_type names the Atlassian link type (e.g. \"Blocks\", \"Relates\", \"Duplicate\", \"Cloners\"). The link reads as: from_key <link_type> to_key (e.g. NEX-1 Blocks NEX-2).",
+			schema: mcpgo.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]any{
+					"from_key":  map[string]any{"type": "string", "description": "Source issue key (the \"outward\" side)."},
+					"to_key":    map[string]any{"type": "string", "description": "Target issue key (the \"inward\" side)."},
+					"link_type": map[string]any{"type": "string", "description": "Atlassian link type name. Common values: Blocks, Relates, Duplicate, Cloners."},
+				},
+				Required: []string{"from_key", "to_key", "link_type"},
+			},
+			handler: func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+				from := req.GetString("from_key", "")
+				to := req.GetString("to_key", "")
+				linkType := req.GetString("link_type", "")
+				if from == "" || to == "" || linkType == "" {
+					return mcpErr("from_key, to_key and link_type are required"), nil
+				}
+				if err := c.Link(ctx, from, to, linkType); err != nil {
+					return mcpErr(err.Error()), nil
+				}
+				return mcpJSON(map[string]any{"linked": map[string]string{"from": from, "to": to, "type": linkType}}), nil
+			},
+		},
+		{
+			name:        "jira.unlink",
+			description: "Remove an issue link by its ID. Obtain the ID via jira.list_links.",
+			schema: mcpgo.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]any{
+					"link_id": map[string]any{"type": "string", "description": "Link ID (from jira.list_links)."},
+				},
+				Required: []string{"link_id"},
+			},
+			handler: func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+				id := req.GetString("link_id", "")
+				if id == "" {
+					return mcpErr("link_id is required"), nil
+				}
+				if err := c.Unlink(ctx, id); err != nil {
+					return mcpErr(err.Error()), nil
+				}
+				return mcpJSON(map[string]any{"unlinked": id}), nil
+			},
+		},
+		{
+			name:        "jira.list_links",
+			description: "List issue links on the given issue. Returns id (for unlink), type, direction (outward|inward), other_key, other_summary, other_status.",
+			schema: mcpgo.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]any{
+					"key": map[string]any{"type": "string", "description": "Issue key."},
+				},
+				Required: []string{"key"},
+			},
+			handler: func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+				key := req.GetString("key", "")
+				if key == "" {
+					return mcpErr("key is required"), nil
+				}
+				links, err := c.ListLinks(ctx, key)
+				if err != nil {
+					return mcpErr(err.Error()), nil
+				}
+				return mcpJSON(links), nil
+			},
+		},
+		{
+			name:        "jira.list_comments",
+			description: "List comments on an issue, oldest first. Returns id, author, created, updated, body_text (ADF rendered to plain).",
+			schema: mcpgo.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]any{
+					"key": map[string]any{"type": "string", "description": "Issue key."},
+				},
+				Required: []string{"key"},
+			},
+			handler: func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+				key := req.GetString("key", "")
+				if key == "" {
+					return mcpErr("key is required"), nil
+				}
+				comments, err := c.ListComments(ctx, key)
+				if err != nil {
+					return mcpErr(err.Error()), nil
+				}
+				return mcpJSON(comments), nil
+			},
+		},
+		{
+			name:        "jira.update",
+			description: "Edit an existing issue. Only provided fields are written. Pass labels as empty array to clear labels; component as empty string to clear component.",
+			schema: mcpgo.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]any{
+					"key":         map[string]any{"type": "string"},
+					"summary":     map[string]any{"type": "string", "description": "New summary. Omit to leave unchanged."},
+					"description": map[string]any{"type": "string", "description": "New body markdown (replaces existing). Omit to leave unchanged."},
+					"labels":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Replace label set. [] clears all labels. Omit to leave unchanged."},
+					"component":   map[string]any{"type": "string", "description": "Replace component. Empty string clears. Omit to leave unchanged."},
+					"priority":    map[string]any{"type": "string", "description": "New priority name (e.g. \"High\", \"Medium\"). Omit to leave unchanged."},
+				},
+				Required: []string{"key"},
+			},
+			handler: func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+				key := req.GetString("key", "")
+				if key == "" {
+					return mcpErr("key is required"), nil
+				}
+				args := req.GetArguments()
+				var f UpdateFields
+				if v, ok := args["summary"].(string); ok {
+					f.Summary = &v
+				}
+				if v, ok := args["description"].(string); ok {
+					f.DescriptionMarkdown = &v
+				}
+				if v, ok := args["labels"].([]any); ok {
+					labels := make([]string, 0, len(v))
+					for _, l := range v {
+						if s, ok := l.(string); ok {
+							labels = append(labels, s)
+						}
+					}
+					f.Labels = labels
+				}
+				if v, ok := args["component"].(string); ok {
+					f.Component = &v
+				}
+				if v, ok := args["priority"].(string); ok {
+					f.Priority = &v
+				}
+				if err := c.Update(ctx, key, f); err != nil {
+					return mcpErr(err.Error()), nil
+				}
+				return mcpJSON(map[string]any{"updated": key}), nil
+			},
+		},
+		{
 			name:        "jira.complete",
 			description: "Finish a claimed issue. Transitions to Done (or In Review when await_review=true), optionally with a final comment.",
 			schema: mcpgo.ToolInputSchema{
