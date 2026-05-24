@@ -1957,11 +1957,7 @@ func runQueueManager(ctx context.Context, f *funnel.Funnel, ledgerSvc *ledger.Se
 				continue // can't goal-pursue without a DoD
 			}
 
-			dispatchContent := fmt.Sprintf(
-				"@%s [TICKET %s] %s\n\nPriority: %s\nStatus: %s\n\nDefinition of Done:\n%s",
-				issue.AssigneeAspect, issue.Key, issue.Summary,
-				issue.Priority, issue.Status, issue.DefinitionOfDone,
-			)
+			dispatchContent := buildDispatchBrief(issue)
 
 			// Self-assigned tickets: inject directly into the Frame's
 			// own funnel and drive via goal-loop. Chat-send would
