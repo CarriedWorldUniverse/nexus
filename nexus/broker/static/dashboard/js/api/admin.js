@@ -1,0 +1,70 @@
+// admin.js — REST wrappers for /api/admin/* endpoints (NEX-265 onward).
+//
+// These hit the admin REST surface mounted by registerAdmin in
+// nexus/broker/admin.go, which is gated by requireAdmin server-side.
+// Token comes from the same in-memory holder api.js uses for other
+// REST + WS calls. A 403 here means the operator isn't admin
+// (shouldn't happen since SettingsView is admin-gated, but surfaces
+// cleanly if the gate is bypassed).
+//
+// Each wrapper returns the parsed JSON body on 2xx, throws on
+// non-2xx with an Error carrying the status + best-effort message.
+
+import { getAuthToken } from '../api.js';
+
+function authHeaders(extra) {
+  const h = { 'Authorization': 'Bearer ' + (getAuthToken() || '') };
+  if (extra) Object.assign(h, extra);
+  return h;
+}
+
+async function adminFetch(path, init) {
+  const res = await fetch(path, {
+    ...init,
+    headers: authHeaders((init && init.headers) || {}),
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    let msg = res.statusText;
+    try {
+      const body = await res.text();
+      if (body) msg = body;
+    } catch (_) { /* fall through */ }
+    const err = new Error('admin: ' + res.status + ' ' + msg);
+    err.status = res.status;
+    throw err;
+  }
+  // 204 (no content) returns null; other 2xx returns parsed JSON.
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+// GET /api/admin/aspects/{name}/model-config
+// Returns AspectModelConfig (per credentials.AspectModelConfig). All
+// override fields are null when unset (inherit keyfile).
+export function getModelConfig(aspect) {
+  return adminFetch('/api/admin/aspects/' + encodeURIComponent(aspect) + '/model-config');
+}
+
+// PUT /api/admin/aspects/{name}/model-config
+// payload is a partial object — only provided fields are written.
+// Empty-string fields clear the override (write NULL).
+//
+//   setModelConfig('anvil', { primary_model: 'claude-opus-4-7' })
+//     → set primary_model, leave others alone
+//   setModelConfig('anvil', { primary_model: '' })
+//     → clear primary_model override
+export function setModelConfig(aspect, payload) {
+  return adminFetch('/api/admin/aspects/' + encodeURIComponent(aspect) + '/model-config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+// GET /api/admin/credentials
+// Returns an array of credential metadata (name, kind, mode, allowed_aspects,
+// description, timestamps). No bundle material.
+export function listCredentials() {
+  return adminFetch('/api/admin/credentials');
+}
