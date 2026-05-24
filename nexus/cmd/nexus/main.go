@@ -297,6 +297,12 @@ func main() {
 			os.Exit(1)
 		}
 		embeddedFrame = ef
+		// NEX-263: apply per-aspect model + credential overrides from
+		// the credentials store on top of the keyfile-loaded cfg.
+		// Mutates ef.Aspect.Config in place so downstream funnel
+		// builders (buildChatRouter, resolveJudgeProviderAndModel,
+		// buildRewriterRunner) read the override-resolved values.
+		applyAspectModelOverrides(ctx, &embeddedFrame.Aspect.Config, credentialStore, logger)
 	} else {
 		// Pre-§6.5 fallback: no aspect dir configured, so no Frame to
 		// embed. Reconcile the legacy "frame" identity so existing
@@ -1230,6 +1236,73 @@ func envKeys(env map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// applyAspectModelOverrides reads NEX-263's per-aspect model + credential
+// override rows from the credentials store and mutates cfg in place. Each
+// override field overlays the corresponding keyfile value; null overrides
+// leave keyfile values untouched. Designed to be called once at startup
+// before any consumer (buildChatRouter, resolveJudgeProviderAndModel,
+// buildRewriterRunner) reads cfg, so all three see the resolved values.
+//
+// Phase 1 wires three model fields (primary / judge / compact) and the
+// judge credential. The primary and compact credential overrides are
+// stored but not yet runtime-injected; an operator-visible warn is
+// emitted when they're set so the gap is observable rather than silent.
+func applyAspectModelOverrides(ctx context.Context, cfg *schemas.AspectConfig, store *credentials.Store, log *slog.Logger) {
+	if store == nil || cfg == nil {
+		return
+	}
+	override, err := store.GetAspectModelConfig(ctx, cfg.Name)
+	if err != nil {
+		log.Warn("aspect model override read failed", "aspect", cfg.Name, "err", err)
+		return
+	}
+	if override.PrimaryModel != nil {
+		if cfg.ProviderConfig == nil {
+			cfg.ProviderConfig = map[string]any{}
+		}
+		prev, _ := cfg.ProviderConfig["model"].(string)
+		cfg.ProviderConfig["model"] = *override.PrimaryModel
+		log.Info("aspect model override applied",
+			"aspect", cfg.Name, "kind", "primary",
+			"from", prev, "to", *override.PrimaryModel, "model_source", "override")
+	}
+	if override.JudgeModel != nil {
+		if cfg.FilterProviderConfig == nil {
+			cfg.FilterProviderConfig = map[string]any{}
+		}
+		prev, _ := cfg.FilterProviderConfig["model"].(string)
+		cfg.FilterProviderConfig["model"] = *override.JudgeModel
+		log.Info("aspect model override applied",
+			"aspect", cfg.Name, "kind", "judge",
+			"from", prev, "to", *override.JudgeModel, "model_source", "override")
+	}
+	if override.CompactModel != nil {
+		if cfg.Rewriter == nil {
+			cfg.Rewriter = &schemas.RewriterConfig{}
+		}
+		prev := cfg.Rewriter.DistillerModel
+		cfg.Rewriter.DistillerModel = *override.CompactModel
+		log.Info("aspect model override applied",
+			"aspect", cfg.Name, "kind", "compact",
+			"from", prev, "to", *override.CompactModel, "model_source", "override")
+	}
+	if override.JudgeCredential != nil {
+		prev := cfg.FilterCredential
+		cfg.FilterCredential = *override.JudgeCredential
+		log.Info("aspect credential override applied",
+			"aspect", cfg.Name, "kind", "judge",
+			"from", prev, "to", *override.JudgeCredential, "model_source", "override")
+	}
+	if override.PrimaryCredential != nil {
+		log.Warn("aspect primary credential override stored but not yet wired into runtime",
+			"aspect", cfg.Name, "value", *override.PrimaryCredential)
+	}
+	if override.CompactCredential != nil {
+		log.Warn("aspect compact credential override stored but not yet wired into runtime",
+			"aspect", cfg.Name, "value", *override.CompactCredential)
+	}
 }
 
 // resolveJudgeProviderAndModel picks the cheap-tier provider+model for

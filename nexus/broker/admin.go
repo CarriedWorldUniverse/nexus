@@ -218,6 +218,13 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 			b.requireAdmin(http.HandlerFunc(b.handleAdminAspectDefaultsGet)))
 		mux.Handle("PUT /api/admin/aspects/{name}/credential-defaults",
 			b.requireAdmin(http.HandlerFunc(b.handleAdminAspectDefaultsSet)))
+		// Per-aspect model overrides (NEX-263). Read + write on the
+		// {primary,judge,compact}_{model,credential} columns on aspects.
+		// Each field is independently nullable; null = inherit keyfile.
+		mux.Handle("GET /api/admin/aspects/{name}/model-config",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminModelConfigGet)))
+		mux.Handle("PUT /api/admin/aspects/{name}/model-config",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminModelConfigSet)))
 		// Per-aspect MCP profiles (NEX-168). The stored blob holds
 		// ${credential:NAME.field} placeholders that get resolved at
 		// fetch time via credentials.Store.Substitute.

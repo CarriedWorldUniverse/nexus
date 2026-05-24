@@ -46,7 +46,14 @@ func newTestStore(t *testing.T) (*Store, *sql.DB) {
 			default_anthropic_credential TEXT,
 			default_openai_credential TEXT,
 			default_jira_credential TEXT,
-			default_imap_credential TEXT
+			default_imap_credential TEXT,
+			-- NEX-263 per-aspect model + credential overrides
+			primary_model TEXT,
+			primary_credential TEXT,
+			judge_model TEXT,
+			judge_credential TEXT,
+			compact_model TEXT,
+			compact_credential TEXT
 		);
 		CREATE TABLE mcp_profiles (
 			aspect_name TEXT PRIMARY KEY
@@ -524,5 +531,103 @@ func TestEnvForCredential_NonProviderKindFails(t *testing.T) {
 	c, _ := s.Get(ctx, "j")
 	if _, err := s.EnvForCredential(c); err == nil {
 		t.Error("EnvForCredential on jira kind should fail with ErrKindMismatch")
+	}
+}
+
+// NEX-263: per-aspect model override CRUD.
+
+func TestAspectModelConfig_Lifecycle(t *testing.T) {
+	s, db := newTestStore(t)
+	ctx := context.Background()
+	if _, err := db.Exec(`INSERT INTO aspects(name) VALUES ('keel')`); err != nil {
+		t.Fatalf("seed aspect: %v", err)
+	}
+	_ = s.Set(ctx, UpsertParams{
+		Name: "claude-api", Kind: KindProvider,
+		Bundle:         providerBundle(ShapeAnthropic, "https://api.anthropic.com", "sk-ant"),
+		AllowedAspects: []string{"*"}, Mode: ModeProxy,
+	})
+
+	// Initial read: all unset.
+	cfg, err := s.GetAspectModelConfig(ctx, "keel")
+	if err != nil {
+		t.Fatalf("get initial: %v", err)
+	}
+	if cfg.PrimaryModel != nil || cfg.JudgeModel != nil || cfg.CompactModel != nil ||
+		cfg.PrimaryCredential != nil || cfg.JudgeCredential != nil || cfg.CompactCredential != nil {
+		t.Errorf("expected all-nil config, got %+v", cfg)
+	}
+
+	// Set primary_model + primary_credential.
+	if err := s.SetAspectModelField(ctx, "keel", "primary_model", "claude-opus-4-7"); err != nil {
+		t.Fatalf("set primary_model: %v", err)
+	}
+	if err := s.SetAspectModelField(ctx, "keel", "primary_credential", "claude-api"); err != nil {
+		t.Fatalf("set primary_credential: %v", err)
+	}
+	cfg, _ = s.GetAspectModelConfig(ctx, "keel")
+	if cfg.PrimaryModel == nil || *cfg.PrimaryModel != "claude-opus-4-7" {
+		t.Errorf("primary_model: got %v", cfg.PrimaryModel)
+	}
+	if cfg.PrimaryCredential == nil || *cfg.PrimaryCredential != "claude-api" {
+		t.Errorf("primary_credential: got %v", cfg.PrimaryCredential)
+	}
+
+	// Clear primary_model only — primary_credential should survive.
+	if err := s.SetAspectModelField(ctx, "keel", "primary_model", ""); err != nil {
+		t.Fatalf("clear primary_model: %v", err)
+	}
+	cfg, _ = s.GetAspectModelConfig(ctx, "keel")
+	if cfg.PrimaryModel != nil {
+		t.Errorf("primary_model should be cleared, got %v", *cfg.PrimaryModel)
+	}
+	if cfg.PrimaryCredential == nil || *cfg.PrimaryCredential != "claude-api" {
+		t.Errorf("primary_credential lost during primary_model clear: %v", cfg.PrimaryCredential)
+	}
+}
+
+func TestSetAspectModelField_UnknownColumn(t *testing.T) {
+	s, db := newTestStore(t)
+	if _, err := db.Exec(`INSERT INTO aspects(name) VALUES ('keel')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	err := s.SetAspectModelField(context.Background(), "keel", "weird_column", "x")
+	if err == nil || !strings.Contains(err.Error(), "unknown model-config column") {
+		t.Errorf("expected unknown-column error, got %v", err)
+	}
+}
+
+func TestSetAspectModelField_UnknownCredential(t *testing.T) {
+	s, db := newTestStore(t)
+	if _, err := db.Exec(`INSERT INTO aspects(name) VALUES ('keel')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	err := s.SetAspectModelField(context.Background(), "keel", "judge_credential", "does-not-exist")
+	if err == nil {
+		t.Error("expected error setting judge_credential to nonexistent credential")
+	}
+	// Model fields don't validate against credentials store — bare strings are fine.
+	if err := s.SetAspectModelField(context.Background(), "keel", "judge_model", "any-string-model"); err != nil {
+		t.Errorf("model field should not validate against credentials store: %v", err)
+	}
+}
+
+func TestSetAspectModelField_UnknownAspect(t *testing.T) {
+	s, _ := newTestStore(t)
+	err := s.SetAspectModelField(context.Background(), "no-such-aspect", "primary_model", "x")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected aspect-not-found error, got %v", err)
+	}
+}
+
+func TestSetAspectModelField_ClearCredentialDoesNotValidate(t *testing.T) {
+	// Clearing (empty value) should never touch the credentials store —
+	// the credential being cleared may have already been deleted.
+	s, db := newTestStore(t)
+	if _, err := db.Exec(`INSERT INTO aspects(name) VALUES ('keel')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := s.SetAspectModelField(context.Background(), "keel", "judge_credential", ""); err != nil {
+		t.Errorf("clear should not validate against credentials store: %v", err)
 	}
 }
