@@ -210,6 +210,14 @@ export function IconSplit() {
   `);
 }
 
+// Cogwheel — admin/settings surface
+export function IconSettings() {
+  return svg(html`
+    <circle cx="12" cy="12" r="3"/>
+    <path d="M12 2 L12 5 M12 19 L12 22 M4.93 4.93 L7.05 7.05 M16.95 16.95 L19.07 19.07 M2 12 L5 12 M19 12 L22 12 M4.93 19.07 L7.05 16.95 M16.95 7.05 L19.07 4.93"/>
+  `);
+}
+
 // Map agent IDs to their glyphs
 export const AGENT_GLYPHS = {
   infra: GlyphFrame,

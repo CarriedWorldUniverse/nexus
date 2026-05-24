@@ -9,6 +9,18 @@ export const messages = signal([]);
 export const replyTo = signal(null);
 export const usageData = signal(null); // { period, by_agent, totals } from /api/usage
 
+// NEX-264: tracks whether the current session has admin privileges
+// (i.e. the operator persona). Drives the Settings nav visibility in
+// BottomBar.js and the admin-only guard in SettingsView.js. Backed by
+// /api/auth/check's role field (operator → admin, aspect → not). UI
+// gate only — server still enforces via requireAdmin on every endpoint,
+// so a forged client-side flip would just produce 403s.
+export const isAdmin = signal(false);
+
+export function setIsAdminFromRole(role) {
+  isAdmin.value = role === 'operator';
+}
+
 const AGENT_PALETTE = [
   '#cf6679', '#81d4fa', '#a5d6a7', '#ffcc80', '#ce93d8',
   '#80deea', '#f48fb1', '#b39ddb', '#80cbc4', '#ffab91',
