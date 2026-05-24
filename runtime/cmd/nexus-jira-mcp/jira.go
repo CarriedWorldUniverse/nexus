@@ -397,13 +397,20 @@ type IssueLink struct {
 
 // Link creates a typed link between two issues. linkType is the Atlassian
 // link type name (e.g. "Blocks", "Relates", "Duplicate", "Cloners"). The
-// direction is established by the inward/outward keys: "Blocks" with
-// from=A,to=B means A blocks B.
+// link reads as: fromKey <outwardDescription> toKey. For "Blocks" this
+// means fromKey blocks toKey.
+//
+// Atlassian's POST /issueLink uses inwardIssue/outwardIssue in a way that
+// is the inverse of how GET responses surface them: posting
+// outwardIssue=A, inwardIssue=B with type=Blocks stores the relationship
+// as "B blocks A". So to get "fromKey blocks toKey" we send fromKey as
+// inwardIssue and toKey as outwardIssue. Verified empirically against
+// Atlassian Cloud 2026-05-25.
 func (c *jiraClient) Link(ctx context.Context, fromKey, toKey, linkType string) error {
 	payload := map[string]any{
 		"type":         map[string]string{"name": linkType},
-		"inwardIssue":  map[string]string{"key": toKey},   // the target of the link
-		"outwardIssue": map[string]string{"key": fromKey}, // the source of the link
+		"inwardIssue":  map[string]string{"key": fromKey},
+		"outwardIssue": map[string]string{"key": toKey},
 	}
 	return c.do(ctx, http.MethodPost, "/rest/api/3/issueLink", payload, nil)
 }
