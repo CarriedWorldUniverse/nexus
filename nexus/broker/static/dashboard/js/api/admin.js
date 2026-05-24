@@ -63,8 +63,41 @@ export function setModelConfig(aspect, payload) {
 }
 
 // GET /api/admin/credentials
-// Returns an array of credential metadata (name, kind, mode, allowed_aspects,
-// description, timestamps). No bundle material.
-export function listCredentials() {
-  return adminFetch('/api/admin/credentials');
+// Returns { credentials: [Metadata] }. Optional kind filter passes
+// through as ?kind=<provider|jira|imap>. No bundle material returned.
+export function listCredentials(kind) {
+  const q = kind ? '?kind=' + encodeURIComponent(kind) : '';
+  return adminFetch('/api/admin/credentials' + q);
+}
+
+// GET /api/admin/credentials/{name}
+// Returns Metadata only (name, description, kind, allowed_aspects,
+// mode, timestamps). Bundle is never returned — Edit flow must
+// re-enter bundle fields.
+export function getCredential(name) {
+  return adminFetch('/api/admin/credentials/' + encodeURIComponent(name));
+}
+
+// PUT /api/admin/credentials/{name}
+// Upsert (create or replace). Body accepts:
+//   { kind: 'provider'|'jira'|'imap', bundle: {...kind-specific...},
+//     description, allowed_aspects: [...], mode: 'proxy'|'fetch'|'both' }
+// Bundle replaces entirely on update — operator must re-enter secret
+// fields. Backend validates kind-specific shape and rejects with 400 +
+// human-readable message.
+export function upsertCredential(name, payload) {
+  return adminFetch('/api/admin/credentials/' + encodeURIComponent(name), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload || {}),
+  });
+}
+
+// DELETE /api/admin/credentials/{name}
+// Removes the credential. Aspects with this as their default will fall
+// back to the next resolution step (keyfile / env) or fail.
+export function deleteCredential(name) {
+  return adminFetch('/api/admin/credentials/' + encodeURIComponent(name), {
+    method: 'DELETE',
+  });
 }
