@@ -1,6 +1,6 @@
 const { html } = window.__preact;
-import { IconChat, IconFiles, IconTickets, IconStatus, IconAgents, IconDocs, IconSplit } from '../icons.js';
-import { usageData } from '../state.js';
+import { IconChat, IconFiles, IconTickets, IconStatus, IconAgents, IconDocs, IconSplit, IconSettings } from '../icons.js';
+import { usageData, isAdmin } from '../state.js';
 
 // "Activity" rather than the old "Agents" label — the tab now points
 // at ObserveView (per-aspect observability stream), not the dead DM
@@ -13,6 +13,13 @@ const TABS = [
   { id: 'tickets',  label: 'Tickets',  Icon: IconTickets  },
   { id: 'docs',     label: 'Docs',     Icon: IconDocs     },
   { id: 'status',   label: 'Status',   Icon: IconStatus   },
+];
+
+// NEX-264: Settings tab appears only when the session is admin
+// (operator role). Kept separate from TABS so the conditional gate
+// stays explicit at the render site.
+const ADMIN_TABS = [
+  { id: 'settings', label: 'Settings', Icon: IconSettings },
 ];
 
 function fmtTokens(n) {
@@ -56,6 +63,16 @@ export function BottomBar({ activeRoute }) {
         <text x="22" y="33" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" font-size="14" font-weight="700" letter-spacing="3" fill="rgba(255,255,255,0.10)" filter="url(#etch)">NEXUS</text>
       </svg>
       ${TABS.map(tab => html`
+        <a
+          key=${tab.id}
+          href=${'#/' + tab.id}
+          class=${'bottom-bar-tab' + (highlightRoute === tab.id ? ' active' : '')}
+        >
+          <span class="bottom-bar-icon">${tab.Icon ? html`<${tab.Icon} />` : '🤖'}</span>
+          <span class="bottom-bar-label">${tab.label}</span>
+        </a>
+      `)}
+      ${isAdmin.value && ADMIN_TABS.map(tab => html`
         <a
           key=${tab.id}
           href=${'#/' + tab.id}

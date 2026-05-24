@@ -1,7 +1,7 @@
 const { h, html, signal, useEffect, useState } = window.__preact;
 
-import { setAgents, currentChannel } from './state.js';
-import { fetchAgents, setAuthToken } from './api.js';
+import { setAgents, currentChannel, setIsAdminFromRole } from './state.js';
+import { fetchAgents, setAuthToken, getAuthToken } from './api.js';
 import { Shell } from './components/Shell.js';
 import { Login } from './Login.js';
 import { open as commsOpen } from './comms.js';
@@ -14,6 +14,7 @@ import { Tickets } from './views/Tickets.js';
 import { Status } from './views/Status.js';
 import { DocsView } from './views/DocsView.js';
 import { SplitView } from './views/SplitView.js';
+import { SettingsView } from './views/SettingsView.js';
 
 function getRoute() {
   const hash = window.location.hash;
@@ -25,6 +26,7 @@ function getRoute() {
   if (hash === '#/status') return 'status';
   if (hash === '#/docs') return 'docs';
   if (hash === '#/split') return 'split';
+  if (hash.startsWith('#/settings')) return 'settings';
   return 'feed';
 }
 
@@ -44,6 +46,7 @@ function RouteView({ route }) {
     case 'status':   return html`<${Status} />`;
     case 'docs':     return html`<${DocsView} />`;
     case 'split':    return html`<${SplitView} />`;
+    case 'settings': return html`<${SettingsView} />`;
     default:         return html`<${FeedView} />`;
   }
 }
@@ -131,6 +134,16 @@ export function App() {
             });
             if (!cancelled && probe.ok) {
               setAuthToken(tok); // sync in-memory holder with localStorage
+              // NEX-264: server reports role on the check response;
+              // operator → admin (per ws.go:179). Drive the Settings
+              // nav visibility off this signal.
+              try {
+                const probeBody = await probe.json();
+                if (probeBody && probeBody.role) setIsAdminFromRole(probeBody.role);
+              } catch (_) {
+                // Body parse failure leaves isAdmin at its default (false).
+                // Worst case: operator doesn't see Settings tab and reloads.
+              }
               await commsOpen(tok);
               if (!cancelled) setAuthed(true);
               return;
@@ -159,6 +172,27 @@ export function App() {
     initMobileKeyboard();
     pollAgents();
     const interval = setInterval(pollAgents, 8000);
+
+    // NEX-264: probe role on every auth → admin transition. The resume
+    // path sets isAdmin inline before flipping authed, but fresh-login
+    // (Login.onComplete) hits this path with isAdmin still false, so
+    // re-probe to populate it. Cheap (returns from cache normally).
+    (async () => {
+      const tok = getAuthToken();
+      if (!tok) return;
+      try {
+        const res = await fetch('/api/auth/check', {
+          headers: { 'Authorization': 'Bearer ' + tok },
+          cache: 'no-store',
+        });
+        if (!res.ok) return;
+        const body = await res.json();
+        if (body && body.role) setIsAdminFromRole(body.role);
+      } catch (_) {
+        // Non-fatal; isAdmin defaults to false (Settings nav hidden).
+      }
+    })();
+
     return () => clearInterval(interval);
   }, [authed]);
 
