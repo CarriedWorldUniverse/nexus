@@ -395,75 +395,61 @@ func Spawn(cfg Config, candidates []Candidate) (*Supervisor, error) {
 	return sup, nil
 }
 
-// envAllowlist is the set of parent env variables forwarded to
-// autospawned children (#30). Anything else in os.Environ() is
-// dropped. Per operator decision (chat #9686) we ship a minimal list
-// and adjust as providers need more.
+// envOverriddenByConfig names parent env keys that autospawn drops
+// because configuration provides an authoritative replacement
+// downstream. Anything not in this set is forwarded to the child
+// unchanged — the operator's shell environment is the source of
+// truth, since this broker is single-operator local infrastructure
+// (not a multi-tenant sandbox).
 //
-//	PATH         — required for the harness binary to find tools
-//	HOME         — Unix home directory; provider configs read from here
-//	USERPROFILE  — Windows equivalent of HOME
-//	TEMP / TMP   — scratch dir for both Unix and Windows providers
-//	TMPDIR       — Unix variant (macOS, some Linux setups)
-//	APPDATA      — Windows: npm-installed CLIs (claude.cmd lives here)
-//	LOCALAPPDATA — Windows: per-user app data, used by VS / GH CLI / etc.
-//	SYSTEMROOT   — Windows: required by many shells + cmd.exe internals
-//	WINDIR       — Windows: required by tools that probe the install
-//	USERNAME     — Windows: shell prompts and tools that key on user id
+// Today the only superseded key is NEXUS_TOKEN: the AspectTokenResolver
+// emits a per-aspect token, and the legacy graceful-degrade path uses
+// BaseEnv's NEXUS_TOKEN. Letting the parent process's NEXUS_TOKEN leak
+// through would defeat per-aspect isolation when the resolver yields
+// nothing — the parent's master token would be visible to the child.
 //
-// Lookup is case-insensitive (strings.EqualFold) because Windows
-// represents the path variable as "Path" (TitleCase) rather than
-// "PATH". Pre-fix the case-sensitive map lookup stripped "Path"
-// entirely, leaving spawned aspects unable to find any executable —
-// the judge subprocess in particular failed with "executable file
-// not found in %PATH%" and the filter defaulted to fail-open,
-// cascading every aspect reply into chat (operator-observed
-// 2026-05-25).
+// Lookup is case-insensitive (strings.EqualFold). On Windows, env keys
+// like "Path" are TitleCase; an earlier allowlist regression
+// (2026-05-25 prod cascade) hinged on this and we preserve the
+// case-insensitive semantics here.
 //
-// Per-aspect NEXUS_TOKEN is added separately by the token resolver;
-// any NEXUS_TOKEN in BaseEnv (the legacy graceful-degrade path) is
-// also passed through. Other NEXUS_* env vars are NOT forwarded
-// wholesale — explicit BaseEnv entries are the audited path.
-var envAllowlist = []string{
-	"PATH",
-	"HOME",
-	"USERPROFILE",
-	"TEMP",
-	"TMP",
-	"TMPDIR",
-	"APPDATA",
-	"LOCALAPPDATA",
-	"SYSTEMROOT",
-	"WINDIR",
-	"USERNAME",
+// Earlier design (#30) was the inverse — allowlist by default, drop
+// everything else. That made sense for a hypothetical multi-tenant
+// sandbox; for the single-operator local broker it stripped legitimate
+// provider env (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, etc.) that
+// operators set in their shell expecting flow-through to children.
+// Reversed per operator decision 2026-05-25.
+var envOverriddenByConfig = []string{
+	"NEXUS_TOKEN",
 }
 
-// envAllowed reports whether key matches any allowlist entry under
-// case-insensitive comparison.
-func envAllowed(key string) bool {
-	for _, allowed := range envAllowlist {
-		if strings.EqualFold(allowed, key) {
+// envOverridden reports whether key is replaced downstream by
+// configuration, in which case autospawn drops the parent's value.
+// Case-insensitive — see envOverriddenByConfig.
+func envOverridden(key string) bool {
+	for _, k := range envOverriddenByConfig {
+		if strings.EqualFold(k, key) {
 			return true
 		}
 	}
 	return false
 }
 
-// scrubParentEnv applies envAllowlist to a parent env slice.
+// passthroughParentEnv forwards parent env to the child, dropping
+// only keys configuration supersedes (see envOverriddenByConfig).
 // Preserves first-occurrence order so tests are deterministic;
-// Go's exec honours LAST occurrence anyway. Tokens / app config
-// that need to flow to children must go through BaseEnv where the
-// operator can audit what's set.
-func scrubParentEnv(parent []string) []string {
-	out := make([]string, 0, len(envAllowlist))
+// Go's exec honours LAST occurrence anyway.
+func passthroughParentEnv(parent []string) []string {
+	out := make([]string, 0, len(parent))
 	for _, kv := range parent {
 		i := indexOfEqual(kv)
 		if i < 0 {
 			continue
 		}
-		if envAllowed(kv[:i]) {
-			out = append(out, kv)
+		if envOverridden(kv[:i]) {
+			continue
 		}
+		out = append(out, kv)
 	}
 	return out
 }
@@ -479,18 +465,19 @@ func indexOfEqual(s string) int {
 }
 
 // childEnv builds the environment slice for an autospawned child:
-// scrubbed parent env (per envAllowlist, #30) + BaseEnv, plus a
-// per-aspect NEXUS_TOKEN appended last when the resolver yields one.
-// Go's os.Exec applies the LAST occurrence of a duplicate key as the
-// effective value, so the per-aspect token overrides any NEXUS_TOKEN
-// in BaseEnv. When the resolver returns false, BaseEnv's NEXUS_TOKEN
-// remains in effect — the legacy graceful-degrade path for aspects
-// not yet reconciled.
+// passthrough parent env (minus keys overridden by config, see
+// envOverriddenByConfig) + BaseEnv, plus a per-aspect NEXUS_TOKEN
+// appended last when the resolver yields one. Go's os.Exec applies
+// the LAST occurrence of a duplicate key as the effective value, so
+// the per-aspect token overrides any NEXUS_TOKEN in BaseEnv. When
+// the resolver returns false, BaseEnv's NEXUS_TOKEN remains in
+// effect — the legacy graceful-degrade path for aspects not yet
+// reconciled.
 //
 // Pure helper for unit testing — no syscall side effects, takes the
 // "parent env" as a parameter so tests can pass their own.
 func childEnv(parent, base []string, tokens AspectTokenResolver, aspect string) []string {
-	scrubbed := scrubParentEnv(parent)
+	scrubbed := passthroughParentEnv(parent)
 	out := make([]string, 0, len(scrubbed)+len(base)+1)
 	out = append(out, scrubbed...)
 	out = append(out, base...)
