@@ -259,3 +259,67 @@ type nopRunner struct{}
 func (nopRunner) Run(_ context.Context, _ bridle.ToolCall) (json.RawMessage, error) {
 	return nil, nil
 }
+
+// TestNexusChatReturnHandler_NEX292_SystemNoticePostedBeforeReply pins
+// the in-band visibility piece of NEX-292. When FilterDecision carries
+// a SystemNotice (degradation entry or recovery from the cheap-judge
+// filter), the return handler must post it via SendChat ahead of the
+// normal auto-post so the notice appears above the reply it qualifies.
+func TestNexusChatReturnHandler_NEX292_SystemNoticePostedBeforeReply(t *testing.T) {
+	g := &fakeGateway{}
+	h := &NexusChatReturnHandler{Gateway: g}
+	trigger := TurnTrigger{MsgID: 4242, From: "operator"}
+	result := DeliberateResult{
+		TurnResult: bridle.TurnResult{FinalText: "Hello back."},
+		Filter: FilterDecision{
+			ShouldPost:   true,
+			SystemNotice: "anvil: judge unavailable — replies rate-limited (1 per 30s)",
+		},
+	}
+	if err := h.Handle(context.Background(), result, trigger); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(g.sentMessages) != 2 {
+		t.Fatalf("expected 2 SendChat calls (notice + reply), got %d", len(g.sentMessages))
+	}
+	// First post = system notice; second = actual reply. Both threaded
+	// under the trigger MsgID.
+	if g.sentMessages[0].Content != "anvil: judge unavailable — replies rate-limited (1 per 30s)" {
+		t.Errorf("first post should be the SystemNotice; got %q", g.sentMessages[0].Content)
+	}
+	if g.sentMessages[0].ReplyTo != 4242 {
+		t.Errorf("notice should reply under trigger; got ReplyTo=%d", g.sentMessages[0].ReplyTo)
+	}
+	if g.sentMessages[1].Content != "Hello back." {
+		t.Errorf("second post should be the reply; got %q", g.sentMessages[1].Content)
+	}
+}
+
+// TestNexusChatReturnHandler_NEX292_SystemNoticePostedWhenReplySuppressed
+// pins that the SystemNotice posts even when ShouldPost=false — this
+// covers the rate-limited-fail-closed case (degradation entry can fire
+// on a suppression too, though today's filter only emits notice on
+// fail-open posts) AND the recovery case where the recovery notice
+// rides on whatever decision the recovered judge returned.
+func TestNexusChatReturnHandler_NEX292_SystemNoticePostedEvenWithoutReply(t *testing.T) {
+	g := &fakeGateway{}
+	h := &NexusChatReturnHandler{Gateway: g}
+	trigger := TurnTrigger{MsgID: 4242, From: "operator"}
+	result := DeliberateResult{
+		TurnResult: bridle.TurnResult{FinalText: "thin reply"},
+		Filter: FilterDecision{
+			ShouldPost:   false,
+			Reason:       "scratch",
+			SystemNotice: "anvil: judge recovered",
+		},
+	}
+	if err := h.Handle(context.Background(), result, trigger); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(g.sentMessages) != 1 {
+		t.Fatalf("expected 1 SendChat (notice only, no reply), got %d", len(g.sentMessages))
+	}
+	if g.sentMessages[0].Content != "anvil: judge recovered" {
+		t.Errorf("only post should be the SystemNotice; got %q", g.sentMessages[0].Content)
+	}
+}

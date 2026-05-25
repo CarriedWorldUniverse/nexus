@@ -1567,14 +1567,15 @@ func (f *Funnel) buildTurnSink(replyTo int64) bridle.EventSink {
 }
 
 // applyFilterObsHookDefault walks the filter chain (HardRulesFilter
-// wrapping CheapModelFilter, or CheapModelFilter directly) and sets
+// wrapping *CheapModelFilter, or *CheapModelFilter directly) and sets
 // the ObservabilityHook on any CheapModelFilter that doesn't have
-// one. Other filter types are returned unchanged. Reconstructs the
-// chain because filters are value types — mutating a copy inside
-// the interface wouldn't reach the original.
+// one. Other filter types are returned unchanged. CheapModelFilter is
+// pointer-typed (it carries shared mutable degradation state for
+// NEX-292), so the hook assignment mutates the original in place.
+// HardRulesFilter is still a value type and is reconstructed.
 func applyFilterObsHookDefault(filter OutputFilter, hook ObservabilityHook) OutputFilter {
 	switch f := filter.(type) {
-	case CheapModelFilter:
+	case *CheapModelFilter:
 		if f.ObservabilityHook == nil {
 			f.ObservabilityHook = hook
 		}

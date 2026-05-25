@@ -106,14 +106,14 @@ func TestHardRulesFilter_DefaultInnerIsAlwaysPost(t *testing.T) {
 func TestCheapModelFilter_FailsOpenOnMisconfigured(t *testing.T) {
 	// Harness/Provider/Model all empty — should fail open with
 	// ShouldPost=true rather than blocking real content.
-	d := CheapModelFilter{}.Judge(context.Background(), FilterInput{FinalText: "real reply"})
+	d := (&CheapModelFilter{}).Judge(context.Background(), FilterInput{FinalText: "real reply"})
 	if !d.ShouldPost {
 		t.Errorf("misconfigured filter should fail open: got %+v", d)
 	}
 }
 
 func TestCheapModelFilter_SuppressesEmpty(t *testing.T) {
-	d := CheapModelFilter{}.Judge(context.Background(), FilterInput{FinalText: "  "})
+	d := (&CheapModelFilter{}).Judge(context.Background(), FilterInput{FinalText: "  "})
 	if d.ShouldPost {
 		t.Errorf("empty input always suppressed: got %+v", d)
 	}
@@ -141,7 +141,7 @@ func TestCheapModelFilter_ParsesJSON(t *testing.T) {
 					StopReason: bridle.StopReasonModelDone,
 				},
 			}}
-			f := CheapModelFilter{
+			f := &CheapModelFilter{
 				Harness:  bridle.NewHarness(prov),
 				Provider: "scripted",
 				Model:    "judge",
@@ -159,14 +159,14 @@ func TestCheapModelFilter_ParsesJSON(t *testing.T) {
 }
 
 func TestCheapModelFilter_FailsOpenOnProviderError(t *testing.T) {
-	f := CheapModelFilter{
+	f := &CheapModelFilter{
 		Harness:  bridle.NewHarness(erroringProvider{err: context.DeadlineExceeded}),
 		Provider: "erroring",
 		Model:    "m",
 	}
 	d := f.Judge(context.Background(), FilterInput{FinalText: "real reply", TurnID: "t1"})
 	if !d.ShouldPost {
-		t.Errorf("provider error should fail open (post): got %+v", d)
+		t.Errorf("first judge error should fail open (post): got %+v", d)
 	}
 }
 
@@ -449,5 +449,198 @@ func TestBuildJudgeUserMessage_OmitsSectionsWhenAbsent(t *testing.T) {
 	}
 	if strings.Contains(msg, "PARTIAL") {
 		t.Errorf("PARTIAL marker leaked when Partial=false; got:\n%s", msg)
+	}
+}
+
+// sequencedJudgeProvider returns a scripted mix of judge results /
+// errors per call, in order. Used to drive NEX-292 degradation tests
+// without a live model.
+type sequencedJudgeProvider struct {
+	items []sequencedJudgeItem
+	pos   int
+}
+
+type sequencedJudgeItem struct {
+	json string // when err == nil, returned as ProviderResult.FinalText
+	err  error
+}
+
+func (*sequencedJudgeProvider) Name() bridle.ProviderID { return "sequenced" }
+func (*sequencedJudgeProvider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{Category: bridle.CategoryDirectAPI}
+}
+func (p *sequencedJudgeProvider) RunTurn(_ context.Context, _ bridle.ProviderRequest, _ bridle.EventSink) (bridle.ProviderResult, error) {
+	if p.pos >= len(p.items) {
+		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
+	}
+	item := p.items[p.pos]
+	p.pos++
+	if item.err != nil {
+		return bridle.ProviderResult{}, item.err
+	}
+	return bridle.ProviderResult{
+		FinalText:  item.json,
+		StopReason: bridle.StopReasonModelDone,
+	}, nil
+}
+
+func newDegradedFilter(t *testing.T, items []sequencedJudgeItem, cooldown time.Duration) *CheapModelFilter {
+	t.Helper()
+	prov := &sequencedJudgeProvider{items: items}
+	return &CheapModelFilter{
+		Harness:          bridle.NewHarness(prov),
+		Provider:         "sequenced",
+		Model:            "haiku",
+		DegradedCooldown: cooldown,
+	}
+}
+
+// NEX-292: first judge error fails open AND emits an entry SystemNotice
+// AND marks the aspect as degraded so the cooldown floor engages on the
+// next call.
+func TestCheapModelFilter_NEX292_FirstJudgeErrorFailsOpenWithNotice(t *testing.T) {
+	f := newDegradedFilter(t, []sequencedJudgeItem{
+		{err: context.DeadlineExceeded},
+	}, 30*time.Second)
+
+	d := f.Judge(context.Background(), FilterInput{
+		FinalText: "candidate reply", AspectID: "anvil", TurnID: "t1",
+	})
+
+	if !d.ShouldPost {
+		t.Errorf("first judge error should still post (fail-open): got %+v", d)
+	}
+	if d.SystemNotice == "" {
+		t.Errorf("first judge error should emit entry SystemNotice; got empty")
+	}
+	if !strings.Contains(d.SystemNotice, "anvil") || !strings.Contains(d.SystemNotice, "judge unavailable") {
+		t.Errorf("SystemNotice should name the aspect + state degradation; got %q", d.SystemNotice)
+	}
+	if d.Reason != "judge-degraded-fail-open" {
+		t.Errorf("Reason should mark fail-open-degraded; got %q", d.Reason)
+	}
+}
+
+// NEX-292: a second judge error inside the cooldown window is
+// suppressed (ShouldPost=false). This is the cascade-prevention path —
+// without it, every echo-amplified inbound message would re-trigger
+// fail-open.
+func TestCheapModelFilter_NEX292_SecondErrorWithinCooldownIsSuppressed(t *testing.T) {
+	f := newDegradedFilter(t, []sequencedJudgeItem{
+		{err: context.DeadlineExceeded},
+		{err: context.DeadlineExceeded},
+	}, 1*time.Hour) // long cooldown so the second call definitely falls inside
+
+	_ = f.Judge(context.Background(), FilterInput{
+		FinalText: "first reply", AspectID: "anvil", TurnID: "t1",
+	})
+	d := f.Judge(context.Background(), FilterInput{
+		FinalText: "second reply", AspectID: "anvil", TurnID: "t2",
+	})
+
+	if d.ShouldPost {
+		t.Errorf("second judge error inside cooldown should suppress reply; got %+v", d)
+	}
+	if d.Reason != "judge-degraded-rate-limited" {
+		t.Errorf("rate-limited reason should be set; got %q", d.Reason)
+	}
+	if d.SystemNotice != "" {
+		t.Errorf("subsequent failures should not re-post the entry notice; got %q", d.SystemNotice)
+	}
+}
+
+// NEX-292: a second judge error AFTER the cooldown window passes
+// re-opens fail-open (the cooldown floor expired) — but does NOT
+// re-emit the entry notice because the aspect is still degraded;
+// the notice fires once per degradation period, not once per cooldown
+// window.
+func TestCheapModelFilter_NEX292_SecondErrorAfterCooldownFailsOpenSilently(t *testing.T) {
+	f := newDegradedFilter(t, []sequencedJudgeItem{
+		{err: context.DeadlineExceeded},
+		{err: context.DeadlineExceeded},
+	}, 1*time.Millisecond) // tiny cooldown so the second call passes the floor
+
+	_ = f.Judge(context.Background(), FilterInput{
+		FinalText: "first reply", AspectID: "anvil", TurnID: "t1",
+	})
+	time.Sleep(5 * time.Millisecond)
+	d := f.Judge(context.Background(), FilterInput{
+		FinalText: "second reply", AspectID: "anvil", TurnID: "t2",
+	})
+
+	if !d.ShouldPost {
+		t.Errorf("second judge error past cooldown should fail open again; got %+v", d)
+	}
+	if d.SystemNotice != "" {
+		t.Errorf("entry notice already posted; should not re-emit; got %q", d.SystemNotice)
+	}
+}
+
+// NEX-292: a successful verdict after a degradation window clears the
+// flag and emits a recovery SystemNotice so the operator/users see
+// the loop close.
+func TestCheapModelFilter_NEX292_RecoveryEmitsNotice(t *testing.T) {
+	f := newDegradedFilter(t, []sequencedJudgeItem{
+		{err: context.DeadlineExceeded},                                // enters degradation
+		{json: `{"class": "complete", "reason": "substantive"}`},       // recovery
+		{json: `{"class": "complete", "reason": "still substantive"}`}, // next healthy verdict
+	}, 30*time.Second)
+
+	_ = f.Judge(context.Background(), FilterInput{FinalText: "r1", AspectID: "anvil", TurnID: "t1"})
+	d2 := f.Judge(context.Background(), FilterInput{FinalText: "r2", AspectID: "anvil", TurnID: "t2"})
+
+	if !d2.ShouldPost {
+		t.Errorf("verdict 'complete' should post: got %+v", d2)
+	}
+	if d2.SystemNotice == "" || !strings.Contains(d2.SystemNotice, "recovered") {
+		t.Errorf("first healthy verdict after degradation should emit recovery notice; got %q", d2.SystemNotice)
+	}
+
+	d3 := f.Judge(context.Background(), FilterInput{FinalText: "r3", AspectID: "anvil", TurnID: "t3"})
+	if d3.SystemNotice != "" {
+		t.Errorf("subsequent healthy verdicts should not re-emit recovery notice; got %q", d3.SystemNotice)
+	}
+}
+
+// NEX-292: verdict path is untouched in the healthy case — no
+// SystemNotice, no degradation marker, behaviour is exactly as
+// pre-NEX-292.
+func TestCheapModelFilter_NEX292_HealthyVerdictPathUnchanged(t *testing.T) {
+	f := newDegradedFilter(t, []sequencedJudgeItem{
+		{json: `{"class": "complete", "reason": "substantive"}`},
+	}, 30*time.Second)
+
+	d := f.Judge(context.Background(), FilterInput{
+		FinalText: "candidate", AspectID: "anvil", TurnID: "t1",
+	})
+
+	if !d.ShouldPost {
+		t.Errorf("complete verdict should post: got %+v", d)
+	}
+	if d.SystemNotice != "" {
+		t.Errorf("healthy verdict should not emit any SystemNotice; got %q", d.SystemNotice)
+	}
+}
+
+// NEX-292: DegradedCooldown < 0 is the explicit opt-out — restores
+// pre-NEX-292 unconditional fail-open, no rate limit, no notice.
+// Safe only for single-aspect deployments.
+func TestCheapModelFilter_NEX292_NegativeCooldownDisablesRateLimit(t *testing.T) {
+	f := newDegradedFilter(t, []sequencedJudgeItem{
+		{err: context.DeadlineExceeded},
+		{err: context.DeadlineExceeded},
+		{err: context.DeadlineExceeded},
+	}, -1)
+
+	for i, turnID := range []string{"t1", "t2", "t3"} {
+		d := f.Judge(context.Background(), FilterInput{
+			FinalText: "reply", AspectID: "anvil", TurnID: turnID,
+		})
+		if !d.ShouldPost {
+			t.Errorf("call %d: legacy mode should always post on judge error; got %+v", i, d)
+		}
+		if d.SystemNotice != "" {
+			t.Errorf("call %d: legacy mode should not emit SystemNotice; got %q", i, d.SystemNotice)
+		}
 	}
 }

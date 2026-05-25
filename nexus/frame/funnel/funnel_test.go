@@ -160,23 +160,23 @@ func TestNew_AutoDerivesFilterObservabilityHook(t *testing.T) {
 	}{
 		{
 			name:   "direct CheapModelFilter — auto-derive",
-			filter: CheapModelFilter{},
+			filter: &CheapModelFilter{},
 			want:   funnelHook,
 		},
 		{
 			name:   "direct CheapModelFilter — explicit hook preserved",
-			filter: CheapModelFilter{ObservabilityHook: otherHook},
+			filter: &CheapModelFilter{ObservabilityHook: otherHook},
 			want:   otherHook,
 		},
 		{
 			name:    "HardRulesFilter wrapping CheapModelFilter — auto-derive inner",
-			filter:  HardRulesFilter{Inner: CheapModelFilter{}},
+			filter:  HardRulesFilter{Inner: &CheapModelFilter{}},
 			want:    funnelHook,
 			isInner: true,
 		},
 		{
 			name:    "HardRulesFilter wrapping explicit — inner preserved",
-			filter:  HardRulesFilter{Inner: CheapModelFilter{ObservabilityHook: otherHook}},
+			filter:  HardRulesFilter{Inner: &CheapModelFilter{ObservabilityHook: otherHook}},
 			want:    otherHook,
 			isInner: true,
 		},
@@ -197,9 +197,9 @@ func TestNew_AutoDerivesFilterObservabilityHook(t *testing.T) {
 			}
 			var got ObservabilityHook
 			if tc.isInner {
-				got = f.cfg.Filter.(HardRulesFilter).Inner.(CheapModelFilter).ObservabilityHook
+				got = f.cfg.Filter.(HardRulesFilter).Inner.(*CheapModelFilter).ObservabilityHook
 			} else {
-				got = f.cfg.Filter.(CheapModelFilter).ObservabilityHook
+				got = f.cfg.Filter.(*CheapModelFilter).ObservabilityHook
 			}
 			if got != tc.want {
 				t.Errorf("CheapModelFilter.ObservabilityHook = %p; want %p", got, tc.want)

@@ -111,6 +111,23 @@ func (h *NexusChatReturnHandler) Handle(ctx context.Context, result DeliberateRe
 		}
 	}
 
+	// NEX-292: filter SystemNotice posts an in-band message ahead of
+	// any reply. CheapModelFilter sets this on judge-degradation entry
+	// ("aspect: judge unavailable — replies rate-limited …") and exit
+	// ("aspect: judge recovered") so failure / recovery isn't silent.
+	// Posted as the aspect itself (no distinct system-author yet);
+	// the message reads as the aspect announcing the condition.
+	// Posted before the auto-post so the notice appears above the
+	// reply it qualifies.
+	if notice := strings.TrimSpace(result.Filter.SystemNotice); notice != "" {
+		if _, err := h.Gateway.SendChat(ctx, notice, trigger.MsgID, ""); err != nil {
+			h.warn("funnel: system notice post failed",
+				"trigger_msg_id", trigger.MsgID,
+				"err", err)
+			// Don't return — notice failure shouldn't block the reply.
+		}
+	}
+
 	// Auto-post the model's natural reply when filter approves.
 	// Skip when text was already streamed to chat during the turn —
 	// posting FinalText again would duplicate the last block.
