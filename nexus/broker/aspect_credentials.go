@@ -218,3 +218,69 @@ func (c *wsConn) recordCredentialAuditDenied(ctx context.Context, aspect, name, 
 			"aspect", aspect, "kind", kind, "reason", reason, "err", err)
 	}
 }
+
+// handleAspectModelConfigGet answers an aspect-issued
+// aspect.model_config.get request. Returns the AspectModelConfig
+// (NEX-263 per-aspect model + credential overrides) for the
+// requesting aspect, resolved from the conn's authenticated
+// identity. No payload fields — the conn's identity IS the
+// authorization (aspects can only read their own row).
+//
+// NEX-293: out-of-process aspects (anvil, harrow, etc. via
+// agentfunnel) need the same admin-override visibility the
+// in-process Frame already has via cmd/nexus/main.go's
+// applyAspectModelOverrides. This frame is the WS-side equivalent of
+// that direct credentials.Store.GetAspectModelConfig call.
+//
+// Empty/missing aspect row → all-empty-string result (mirrors the
+// store's all-nil-pointers semantics). Genuine errors (DB down, etc.)
+// surface as operator-error frames so the aspect can fall back to
+// keyfile-only config rather than spin on a poison response.
+func (c *wsConn) handleAspectModelConfigGet(env frames.Envelope) {
+	cstore := c.broker.cfg.Credentials
+	if cstore == nil {
+		c.operatorError(env, "credentials store not configured")
+		return
+	}
+	aspect := c.registeredAs
+	if aspect == "" {
+		aspect = c.auth.AgentID
+	}
+	if aspect == "" {
+		c.operatorError(env, "aspect.model_config.get: no aspect identity (neither registered nor JWT-bound)")
+		return
+	}
+
+	ctx, cancel := c.opCtx()
+	defer cancel()
+
+	cfg, err := cstore.GetAspectModelConfig(ctx, aspect)
+	if err != nil {
+		c.log.Warn("aspect.model_config.get: store read failed",
+			"aspect", aspect, "err", err)
+		c.operatorError(env, "internal error reading aspect model config")
+		return
+	}
+
+	resp, err := frames.NewResponse(frames.KindAspectModelConfigGetResult, env.ID, frames.AspectModelConfigGetResultPayload{
+		Aspect:            cfg.Aspect,
+		PrimaryModel:      strOrEmpty(cfg.PrimaryModel),
+		PrimaryCredential: strOrEmpty(cfg.PrimaryCredential),
+		JudgeModel:        strOrEmpty(cfg.JudgeModel),
+		JudgeCredential:   strOrEmpty(cfg.JudgeCredential),
+		CompactModel:      strOrEmpty(cfg.CompactModel),
+		CompactCredential: strOrEmpty(cfg.CompactCredential),
+	})
+	if err != nil {
+		c.log.Warn("aspect.model_config.get: build response failed", "err", err)
+		return
+	}
+	c.send(resp)
+}
+
+func strOrEmpty(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}

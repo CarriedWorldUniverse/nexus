@@ -44,6 +44,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	goruntime "runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -54,6 +55,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/rewriter"
 	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
+	"github.com/CarriedWorldUniverse/nexus/runtime/brokercreds"
 	"github.com/CarriedWorldUniverse/nexus/runtime/keyfile"
 	"github.com/CarriedWorldUniverse/nexus/runtime/obsforward"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
@@ -232,16 +234,30 @@ func main() {
 		log,
 	)
 
+	// NEX-293: fetch the per-aspect admin model_config overrides
+	// before constructing the filter. agentfunnel runs out-of-process
+	// so it doesn't have direct access to the broker's credentials
+	// store — we read it over the same WS the rest of the funnel uses.
+	//
+	// Best-effort: if the fetch fails (broker DB hiccup, frame
+	// rejected, etc.) we log and fall through with empty overrides.
+	// Filter still works via shell-env passthrough (PR #146) or
+	// subscription auth; we don't want a transient broker hiccup to
+	// take the aspect down entirely.
+	judgeModelOverride, judgeEnv := fetchAspectJudgeOverrides(wsClient, res.AspectName, log)
+
 	// Build the output filter (cheap-judge by default). Mirrors the
-	// Frame's buildOutputFilter but simpler: agentfunnel doesn't have
-	// aspect.json on the host (identity comes from Nexus validation), so
-	// there's no operator-level filter override yet — we default to
-	// hard-rules + cheap-model judge for claude-flavoured providers, and
-	// to hard-rules-only otherwise. Constructed AFTER obsHook so the
-	// CheapModelFilter can publish its judge turn through the same
-	// observability stream as the main turn — otherwise the judge runs
-	// invisibly and operators can't see why a reply was suppressed.
-	outputFilter := buildAgentFunnelFilter(provider, bridle.ProviderID(res.Provider), res.Model, log, obsHook)
+	// Frame's buildOutputFilter but simpler: identity comes from Nexus
+	// validation, not aspect.json on the host. The admin model_config
+	// row (judge model + judge credential) IS available though, via
+	// fetchAspectJudgeOverrides above — that's the NEX-293 parity work
+	// that brings agentfunnels in line with the in-process Frame.
+	//
+	// Constructed AFTER obsHook so the CheapModelFilter can publish its
+	// judge turn through the same observability stream as the main
+	// turn — otherwise the judge runs invisibly and operators can't see
+	// why a reply was suppressed.
+	outputFilter := buildAgentFunnelFilter(provider, bridle.ProviderID(res.Provider), judgeModelOverride, judgeEnv, log, obsHook)
 
 	// Rewriter wiring: default-on for claude-code-flavored providers,
 	// no-op otherwise. The session jsonl path is resolved lazily
@@ -497,25 +513,142 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 //     judge yet; ollama/openai support comes when the operator gains a
 //     filter override path).
 //
+// judgeModelOverride / providerEnv come from NEX-293 — the per-aspect
+// admin model_config row + the resolved FilterCredential's env
+// overlay. Empty model = use "haiku" default; nil env = inherit
+// ambient process env (legacy / no override configured). Both are
+// resolved upstream from the broker over WS.
+//
 // Without this every reply through the funnel hits chat unfiltered —
 // observed 2026-05-12 as noisy multi-aspect threads bypassing the
 // suppression the keel Frame applies.
-func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.ProviderID, _ string, log *slog.Logger, obsHook funnel.ObservabilityHook) funnel.OutputFilter {
+func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.ProviderID, judgeModelOverride string, providerEnv map[string]string, log *slog.Logger, obsHook funnel.ObservabilityHook) funnel.OutputFilter {
 	if !isClaudeFlavor(providerID) {
 		log.Info("agentfunnel: filter=hard (no cheap-judge for non-claude provider)", "provider", providerID)
 		return funnel.HardRulesFilter{}
 	}
+	model := judgeModelOverride
+	if model == "" {
+		model = "haiku"
+	}
 	log.Info("agentfunnel: filter=cheap (hard rules + cheap-model judge)",
-		"judge_provider", providerID, "judge_model", "haiku")
+		"judge_provider", providerID,
+		"judge_model", model,
+		"judge_env_keys", envKeyNames(providerEnv))
 	return funnel.HardRulesFilter{
 		Inner: &funnel.CheapModelFilter{
 			Harness:           bridle.NewHarness(bareJudgeProvider(provider, providerID)),
 			Provider:          providerID,
-			Model:             "haiku",
+			Model:             model,
 			Logger:            log,
 			ObservabilityHook: obsHook,
+			ProviderEnv:       providerEnv,
 		},
 	}
+}
+
+// fetchAspectJudgeOverrides retrieves the judge model + judge
+// credential overrides (NEX-263) for this aspect from the broker over
+// WS, and resolves the credential bundle into an env overlay. Returns
+// (modelOverride, envOverlay) — either may be empty when no override
+// is configured.
+//
+// Best-effort: every failure path logs and returns empty values so
+// the funnel falls through to legacy behaviour (haiku default model,
+// ambient process env) rather than refusing to start. The cascade
+// observed 2026-05-25 happened with NO admin overrides at all, so
+// "no overrides resolved" is the legitimate baseline state.
+//
+// NEX-293: this brings out-of-process aspects (agentfunnel) onto the
+// same per-aspect admin-override plane the in-process Frame already
+// uses via applyAspectModelOverrides + resolveFilterCredentialEnv.
+func fetchAspectJudgeOverrides(ws brokercreds.Requester, aspectName string, log *slog.Logger) (modelOverride string, env map[string]string) {
+	if ws == nil {
+		return "", nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cfg, err := brokercreds.FetchAspectModelConfig(ctx, ws)
+	if err != nil {
+		log.Warn("agentfunnel: fetch aspect model config failed; falling back to defaults",
+			"aspect", aspectName, "err", err)
+		return "", nil
+	}
+	if cfg.JudgeModel != "" {
+		log.Info("agentfunnel: admin override applied",
+			"aspect", aspectName, "kind", "judge_model",
+			"to", cfg.JudgeModel)
+		modelOverride = cfg.JudgeModel
+	}
+	if cfg.JudgeCredential == "" {
+		return modelOverride, nil
+	}
+
+	// Fetch the credential bundle and translate to env. Mirror of the
+	// broker-side Store.EnvForCredential anthropic / openai mapping.
+	credCtx, credCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer credCancel()
+	resolvedName, bundle, err := brokercreds.FetchProvider(credCtx, ws, cfg.JudgeCredential)
+	if err != nil {
+		log.Warn("agentfunnel: fetch judge credential failed; judge inherits ambient env",
+			"aspect", aspectName,
+			"credential", cfg.JudgeCredential,
+			"err", err)
+		return modelOverride, nil
+	}
+	env = providerBundleToEnv(bundle)
+	if env == nil {
+		log.Warn("agentfunnel: judge credential has no env mapping for api_shape; judge inherits ambient env",
+			"aspect", aspectName,
+			"credential", resolvedName,
+			"api_shape", bundle.APIShape)
+		return modelOverride, nil
+	}
+	log.Info("agentfunnel: judge credential resolved",
+		"aspect", aspectName,
+		"credential", resolvedName,
+		"api_shape", bundle.APIShape,
+		"env_keys", envKeyNames(env))
+	return modelOverride, env
+}
+
+// providerBundleToEnv mirrors credentials.Store.EnvForCredential's
+// shape mapping. Anthropic-shape emits ANTHROPIC_API_KEY +
+// optional ANTHROPIC_BASE_URL; OpenAI-shape emits the OPENAI_*
+// equivalents. Returns nil for unknown shapes so the caller can fall
+// back to ambient env.
+func providerBundleToEnv(b brokercreds.ProviderBundle) map[string]string {
+	switch b.APIShape {
+	case "anthropic":
+		env := map[string]string{"ANTHROPIC_API_KEY": b.Key}
+		if b.BaseURL != "" {
+			env["ANTHROPIC_BASE_URL"] = b.BaseURL
+		}
+		return env
+	case "openai":
+		env := map[string]string{"OPENAI_API_KEY": b.Key}
+		if b.BaseURL != "" {
+			env["OPENAI_BASE_URL"] = b.BaseURL
+		}
+		return env
+	default:
+		return nil
+	}
+}
+
+// envKeyNames returns the keys of env (sorted) for log output. Just
+// names, never values — values are credential material.
+func envKeyNames(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(env))
+	for k := range env {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // bareJudgeProvider mirrors cmd/nexus/main.go: when the judge runs

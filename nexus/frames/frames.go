@@ -99,6 +99,17 @@ const (
 	KindCredentialFetch       Kind = "credential.fetch"
 	KindCredentialFetchResult Kind = "credential.fetch.result"
 
+	// Per-aspect model + credential override fetch. NEX-293.
+	// agentfunnel issues this at startup to retrieve the admin-managed
+	// AspectModelConfig overrides (NEX-263) so out-of-process aspects
+	// see the same per-aspect judge model + credential routing the
+	// in-process Frame already sees via applyAspectModelOverrides.
+	// Authentication: same JWT/registered identity gate as
+	// credential.fetch; the conn's identity is the aspect whose row
+	// is read (aspects can't read another aspect's overrides).
+	KindAspectModelConfigGet       Kind = "aspect.model_config.get"
+	KindAspectModelConfigGetResult Kind = "aspect.model_config.get.result"
+
 	// Session observability — projection upward for dashboard view.
 	// Local aspect JSONL is source of truth; Nexus keeps a read-only
 	// mirror for rendering.
@@ -299,6 +310,7 @@ func IsKnown(k Kind) bool {
 		KindAspectActivity,
 		KindKnowledgeStore, KindKnowledgeSearch, KindKnowledgeSearchResult,
 		KindCredentialFetch, KindCredentialFetchResult,
+		KindAspectModelConfigGet, KindAspectModelConfigGetResult,
 		KindSessionEntryAppended, KindSessionRewind, KindSessionFork,
 		KindSessionRefresh, KindSessionRefreshResult,
 		KindShutdown,

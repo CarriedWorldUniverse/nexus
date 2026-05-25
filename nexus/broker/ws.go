@@ -466,6 +466,8 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleAspectKnowledgeStore(env)
 	case frames.KindCredentialFetch:
 		c.handleAspectCredentialFetch(env)
+	case frames.KindAspectModelConfigGet:
+		c.handleAspectModelConfigGet(env)
 	case frames.KindSwitchSurface:
 		c.handleSwitchSurfaceFrame(env)
 	default:

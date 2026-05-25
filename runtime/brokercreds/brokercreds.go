@@ -34,6 +34,22 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/runtime/wsclient"
 )
 
+// Requester is the minimal WS client surface this package needs.
+// Both *wsclient.Client (used by the MCPs) and *wsasp.Client (used by
+// agentfunnel) implement this with the same signature, so the same
+// fetch helpers serve every caller.
+//
+// Decoupled from a concrete type so brokercreds doesn't take a hard
+// dep on either ws-client package; callers pass whichever they hold.
+type Requester interface {
+	Request(ctx context.Context, env frames.Envelope) (frames.Envelope, error)
+}
+
+// Compile-time assertion: *wsclient.Client satisfies Requester. If
+// wsclient's surface drifts, this fails to compile rather than
+// surprising callers at runtime.
+var _ Requester = (*wsclient.Client)(nil)
+
 // JiraBundle mirrors credentials.JiraBundle (broker side). Kept as a
 // local type so this package doesn't take a build-time dep on the
 // nexus/credentials package — JSON-tag-compatible duplication, same
@@ -93,7 +109,7 @@ var ErrUnexpectedKind = errors.New("brokercreds: broker returned unexpected kind
 // in-flight cancellation. A 15-second timeout at the call site is a
 // reasonable upper bound for any sane broker round-trip; this package
 // doesn't impose its own.
-func Fetch(ctx context.Context, ws *wsclient.Client, kind, name string) (resolvedName string, bundle map[string]any, err error) {
+func Fetch(ctx context.Context, ws Requester, kind, name string) (resolvedName string, bundle map[string]any, err error) {
 	if ws == nil {
 		return "", nil, errors.New("brokercreds.Fetch: ws client is nil")
 	}
@@ -147,7 +163,7 @@ func Fetch(ctx context.Context, ws *wsclient.Client, kind, name string) (resolve
 
 // FetchJira fetches a kind="jira" credential and decodes the bundle
 // into a JiraBundle. Sugar over Fetch.
-func FetchJira(ctx context.Context, ws *wsclient.Client, name string) (resolvedName string, bundle JiraBundle, err error) {
+func FetchJira(ctx context.Context, ws Requester, name string) (resolvedName string, bundle JiraBundle, err error) {
 	resolvedName, raw, err := Fetch(ctx, ws, "jira", name)
 	if err != nil {
 		return "", JiraBundle{}, err
@@ -164,7 +180,7 @@ func FetchJira(ctx context.Context, ws *wsclient.Client, name string) (resolvedN
 
 // FetchIMAP fetches a kind="imap" credential and decodes the bundle
 // into an IMAPBundle. Sugar over Fetch.
-func FetchIMAP(ctx context.Context, ws *wsclient.Client, name string) (resolvedName string, bundle IMAPBundle, err error) {
+func FetchIMAP(ctx context.Context, ws Requester, name string) (resolvedName string, bundle IMAPBundle, err error) {
 	resolvedName, raw, err := Fetch(ctx, ws, "imap", name)
 	if err != nil {
 		return "", IMAPBundle{}, err
@@ -183,7 +199,7 @@ func FetchIMAP(ctx context.Context, ws *wsclient.Client, name string) (resolvedN
 // handler, provider fetches require a non-empty name (broker can't
 // resolve a default without the api_shape context). Returns
 // ErrBrokerRejected with the broker's diagnostic if name is empty.
-func FetchProvider(ctx context.Context, ws *wsclient.Client, name string) (resolvedName string, bundle ProviderBundle, err error) {
+func FetchProvider(ctx context.Context, ws Requester, name string) (resolvedName string, bundle ProviderBundle, err error) {
 	resolvedName, raw, err := Fetch(ctx, ws, "provider", name)
 	if err != nil {
 		return "", ProviderBundle{}, err
@@ -195,6 +211,76 @@ func FetchProvider(ctx context.Context, ws *wsclient.Client, name string) (resol
 		return "", ProviderBundle{}, errors.New("brokercreds.FetchProvider: broker returned bundle with empty key")
 	}
 	return resolvedName, bundle, nil
+}
+
+// AspectModelConfig mirrors credentials.AspectModelConfig (broker
+// side). Each field is an empty string when no override is set —
+// callers should leave keyfile values untouched in that case.
+// Same JSON shape as frames.AspectModelConfigGetResultPayload.
+type AspectModelConfig struct {
+	Aspect            string `json:"aspect"`
+	PrimaryModel      string `json:"primary_model,omitempty"`
+	PrimaryCredential string `json:"primary_credential,omitempty"`
+	JudgeModel        string `json:"judge_model,omitempty"`
+	JudgeCredential   string `json:"judge_credential,omitempty"`
+	CompactModel      string `json:"compact_model,omitempty"`
+	CompactCredential string `json:"compact_credential,omitempty"`
+}
+
+// FetchAspectModelConfig retrieves the admin-managed per-aspect
+// model + credential overrides (NEX-263) from the broker.
+// agentfunnel calls this at startup so out-of-process aspects see
+// the same overrides the in-process Frame already applies via
+// applyAspectModelOverrides. NEX-293.
+//
+// The broker identifies the aspect from the conn's authenticated
+// identity — no aspect name in the request payload. Returns an
+// AspectModelConfig with empty fields when no overrides are
+// configured (mirrors the broker's "all-nil-pointers" semantics for
+// a missing row).
+//
+// ctx bounds the request; brokercreds doesn't impose its own timeout.
+// A 5-10 second cap at the call site is reasonable.
+func FetchAspectModelConfig(ctx context.Context, ws Requester) (AspectModelConfig, error) {
+	if ws == nil {
+		return AspectModelConfig{}, errors.New("brokercreds.FetchAspectModelConfig: ws is nil")
+	}
+	env, err := frames.NewRequest(frames.KindAspectModelConfigGet, frames.AspectModelConfigGetPayload{})
+	if err != nil {
+		return AspectModelConfig{}, fmt.Errorf("brokercreds.FetchAspectModelConfig: encode: %w", err)
+	}
+	resp, err := ws.Request(ctx, env)
+	if err != nil {
+		return AspectModelConfig{}, fmt.Errorf("brokercreds.FetchAspectModelConfig: WS request: %w", err)
+	}
+	// Error envelope shape mirrors credential.fetch.
+	if string(resp.Kind) == string(frames.KindAspectModelConfigGet)+".error" {
+		var errPayload struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(resp.Payload, &errPayload)
+		if errPayload.Error == "" {
+			errPayload.Error = "broker returned aspect.model_config.get.error with no message"
+		}
+		return AspectModelConfig{}, fmt.Errorf("%w: %s", ErrBrokerRejected, errPayload.Error)
+	}
+	if resp.Kind != frames.KindAspectModelConfigGetResult {
+		return AspectModelConfig{}, fmt.Errorf("%w: got %q, want %q",
+			ErrUnexpectedKind, resp.Kind, frames.KindAspectModelConfigGetResult)
+	}
+	var result frames.AspectModelConfigGetResultPayload
+	if err := json.Unmarshal(resp.Payload, &result); err != nil {
+		return AspectModelConfig{}, fmt.Errorf("brokercreds.FetchAspectModelConfig: decode result: %w", err)
+	}
+	return AspectModelConfig{
+		Aspect:            result.Aspect,
+		PrimaryModel:      result.PrimaryModel,
+		PrimaryCredential: result.PrimaryCredential,
+		JudgeModel:        result.JudgeModel,
+		JudgeCredential:   result.JudgeCredential,
+		CompactModel:      result.CompactModel,
+		CompactCredential: result.CompactCredential,
+	}, nil
 }
 
 // remap round-trips a map[string]any through JSON into a typed struct.
