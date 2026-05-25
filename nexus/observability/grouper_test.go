@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -532,5 +533,80 @@ func TestGrouperLabelRouting(t *testing.T) {
 				t.Errorf("Label = %q, want %q", last.Label, tc.want)
 			}
 		})
+	}
+}
+
+// NEX-100: regression coverage for tool_call serialization. The
+// reported "stripped tool_call data" symptom was likely from a fixed
+// pre-rewrite era — current code preserves Input round-trip. Locking
+// it in so a future refactor catches if Input vanishes from the
+// marshalled payload.
+
+func TestGrouperToolCallInputRoundTrip(t *testing.T) {
+	c := &capture{}
+	g := NewGrouperWithClock("plumb", c.emit, fixedClock())
+	g.BeginTurn("turn-1", "", "m", "p", 0)
+	args := `{"file_path":"/etc/hosts","limit":50,"offset":0}`
+	g.OnBridleEvent(bridle.ToolCallStart{ID: "t1", Name: "Read", Args: json.RawMessage(args)})
+	g.OnBridleEvent(bridle.TurnDone{})
+	g.EndTurn()
+	last, _ := c.lastOf(FrameTurn)
+	tf := decodeTurn(t, last)
+	if len(tf.Events) != 1 || tf.Events[0].Tool == nil {
+		t.Fatalf("events: %+v", tf.Events)
+	}
+	tc := tf.Events[0].Tool
+	if tc.Name != "Read" {
+		t.Errorf("Name lost: got %q", tc.Name)
+	}
+	if string(tc.Input) != args {
+		t.Errorf("Input lost or mangled\n got:  %s\n want: %s", string(tc.Input), args)
+	}
+}
+
+func TestGrouperToolCallNilArgsNormalizedToEmptyObject(t *testing.T) {
+	// NEX-100: some providers (bedrock) emit ToolCallStart without Args.
+	// Pre-fix the activity log carried "input":null which read as "data
+	// stripped". Post-fix it carries "input":{} (truthful empty-args).
+	c := &capture{}
+	g := NewGrouperWithClock("plumb", c.emit, fixedClock())
+	g.BeginTurn("turn-1", "", "m", "p", 0)
+	g.OnBridleEvent(bridle.ToolCallStart{ID: "t1", Name: "Bash"}) // no Args
+	g.OnBridleEvent(bridle.TurnDone{})
+	g.EndTurn()
+	last, _ := c.lastOf(FrameTurn)
+	if !bytes.Contains(last.Payload, []byte(`"input":{}`)) {
+		t.Errorf("expected \"input\":{} in payload, got %s", string(last.Payload))
+	}
+	if bytes.Contains(last.Payload, []byte(`"input":null`)) {
+		t.Errorf("unexpected \"input\":null in payload — normalization failed: %s", string(last.Payload))
+	}
+}
+
+func TestGrouperOrphanResultPlaceholderLockedBehavior(t *testing.T) {
+	// NEX-100: orphan results (ToolCallResult without matching Start)
+	// surface as a placeholder with empty Name + Input=null. This is
+	// CORRECT — there's no prior data to populate from. Locking the
+	// shape so future refactors don't accidentally hide orphans.
+	c := &capture{}
+	g := NewGrouperWithClock("plumb", c.emit, fixedClock())
+	g.BeginTurn("turn-1", "", "m", "p", 0)
+	g.OnBridleEvent(bridle.ToolCallResult{ID: "ghost", Result: json.RawMessage(`"orphaned"`)})
+	g.OnBridleEvent(bridle.TurnDone{})
+	g.EndTurn()
+	last, _ := c.lastOf(FrameTurn)
+	tf := decodeTurn(t, last)
+	if len(tf.Events) != 1 || tf.Events[0].Kind != TurnEventOrphanResult {
+		t.Fatalf("orphan event missing: %+v", tf.Events)
+	}
+	tc := tf.Events[0].Tool
+	// After JSON round-trip through emitTurnSnapshot, nil json.RawMessage
+	// stored on the orphan becomes the literal bytes "null" when
+	// unmarshalled back. Check the raw bytes rather than nil-ness.
+	if tc.ID != "ghost" || tc.Name != "" || string(tc.Input) != "null" {
+		t.Errorf("orphan shape changed: %+v (Input=%s)", tc, string(tc.Input))
+	}
+	if tc.Result == nil || tc.Result.Preview != `"orphaned"` {
+		t.Errorf("orphan result lost: %+v", tc.Result)
 	}
 }
