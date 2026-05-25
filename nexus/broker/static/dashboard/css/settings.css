@@ -183,6 +183,15 @@
   color: var(--text-muted);
 }
 
+/* NEX-294 Slice 3: aspect kind-row source badge for "applying via
+   network default" — distinct visual from "override" (per-aspect)
+   and "keyfile" (legacy) so the operator can tell at a glance which
+   resolution layer is producing the effective value. */
+.settings-source-network_default {
+  background: rgba(120, 200, 140, 0.15);
+  color: #78c88c;
+}
+
 .settings-input,
 .settings-select {
   background: var(--bg);
@@ -192,6 +201,27 @@
   padding: 4px 8px;
   font-size: 13px;
   font-family: inherit;
+}
+
+/* NEX-294 Slice 3: descriptive note above the Network Defaults
+   panel's fields, explaining when the values apply. */
+.settings-defaults-note {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin: 6px 0 12px;
+  line-height: 1.4;
+}
+
+/* NEX-294 Slice 3: visual divider between the single-row Network
+   Defaults panel and the per-aspect cards listed below it. */
+.settings-aspects-subheader {
+  color: var(--text-muted);
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 24px 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
 }
 
 .settings-input {
