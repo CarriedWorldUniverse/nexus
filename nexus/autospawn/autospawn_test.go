@@ -219,20 +219,20 @@ func TestChildEnvNilResolver(t *testing.T) {
 	}
 }
 
-// Regression for issue #30: parent env outside the allowlist is
-// dropped before being passed to the child. Today autospawn forwards
-// os.Environ() wholesale; PR-F restricts to PATH/HOME/USERPROFILE/TEMP
-// plus per-aspect token injection.
-func TestChildEnvScrubsParentEnv(t *testing.T) {
+// Passthrough policy (2026-05-25): parent env flows through to the
+// child unchanged except for keys configuration supersedes. Operator
+// shell env is the source of truth for single-operator local broker
+// deployments — provider credentials (ANTHROPIC_API_KEY, etc.) and
+// arbitrary tooling vars all need to reach autospawned aspects.
+// Today the only superseded key is NEXUS_TOKEN.
+func TestChildEnvPassesThroughExceptOverridden(t *testing.T) {
 	parent := []string{
 		"PATH=/usr/bin",
 		"HOME=/home/keel",
-		"USERPROFILE=C:\\Users\\keel",
-		"TEMP=/tmp",
-		"AWS_SECRET_ACCESS_KEY=should-not-leak",
-		"GITHUB_TOKEN=ghp_should-not-leak",
-		"NEXUS_TOKEN=parent-master",   // legacy fallback only via BaseEnv
-		"DATABASE_URL=postgres://...", // app config, not the child's business
+		"ANTHROPIC_API_KEY=sk-deepseek-foo",
+		"ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic",
+		"GITHUB_TOKEN=ghp_op_set_this_intentionally",
+		"NEXUS_TOKEN=parent-master", // overridden — resolver / BaseEnv only
 	}
 	base := []string{"NEXUS_UPSTREAM=ws://x"}
 	tr := AspectTokenResolverFunc(func(string) (string, bool) {
@@ -241,27 +241,47 @@ func TestChildEnvScrubsParentEnv(t *testing.T) {
 
 	env := childEnv(parent, base, tr, "wren")
 
-	got := map[string]bool{}
+	got := map[string]string{}
 	for _, kv := range env {
 		i := indexOfEqual(kv)
 		if i >= 0 {
-			got[kv[:i]] = true
+			got[kv[:i]] = kv[i+1:]
 		}
 	}
-	for _, want := range []string{"PATH", "HOME", "USERPROFILE", "TEMP"} {
-		if !got[want] {
-			t.Errorf("expected %s in scrubbed env, missing", want)
+	// Everything operator-set in shell flows through. The judge needs
+	// these for DeepSeek bare-mode, and operators expect "I set it,
+	// the child sees it" semantics.
+	for _, want := range []string{
+		"PATH", "HOME",
+		"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
+		"GITHUB_TOKEN",
+	} {
+		if got[want] == "" {
+			t.Errorf("expected %s to flow through to child, missing", want)
 		}
 	}
-	for _, leaked := range []string{"AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "DATABASE_URL"} {
-		if got[leaked] {
-			t.Errorf("%s leaked through scrub", leaked)
-		}
-	}
-	// The parent's NEXUS_TOKEN must NOT be forwarded — only BaseEnv
-	// or the resolver's per-aspect token may set NEXUS_TOKEN.
+	// NEXUS_TOKEN from parent must NOT reach the child — the resolver
+	// (or BaseEnv fallback) is the authoritative source. Per-aspect
+	// token wins because Go honours the LAST occurrence.
 	if lastNexusToken(env) != "wren-tok" {
 		t.Errorf("expected per-aspect token to win, got %q", lastNexusToken(env))
+	}
+}
+
+// NEXUS_TOKEN is the only env key autospawn drops from parent env.
+// Verify the drop is case-insensitive — same lesson as the Path
+// regression: env-key matching must not assume canonical casing.
+func TestChildEnvDropsNexusTokenCaseInsensitive(t *testing.T) {
+	parent := []string{
+		"PATH=/usr/bin",
+		"Nexus_Token=parent-master-mixed",
+	}
+	env := childEnv(parent, nil, nil, "wren")
+	for _, kv := range env {
+		i := indexOfEqual(kv)
+		if i >= 0 && strings.EqualFold(kv[:i], "NEXUS_TOKEN") {
+			t.Errorf("parent NEXUS_TOKEN (mixed case) leaked through: %q", kv)
+		}
 	}
 }
 
@@ -301,24 +321,22 @@ func TestChildEnvCaseInsensitivePathPassthrough(t *testing.T) {
 	}
 }
 
-func TestEnvAllowed_CaseInsensitive(t *testing.T) {
+func TestEnvOverridden_CaseInsensitive(t *testing.T) {
 	cases := []struct {
 		key string
 		ok  bool
 	}{
-		{"PATH", true},     // canonical Unix
-		{"Path", true},     // Windows TitleCase — the bug
-		{"path", true},     // lowercase variant
-		{"APPDATA", true},  // Windows-essential
-		{"AppData", true},  // case-flex
+		{"NEXUS_TOKEN", true}, // canonical
+		{"Nexus_Token", true}, // mixed case
+		{"nexus_token", true}, // lowercase
+		{"PATH", false},
+		{"ANTHROPIC_API_KEY", false},
 		{"GITHUB_TOKEN", false},
-		{"AWS_SECRET_ACCESS_KEY", false},
-		{"NEXUS_TOKEN", false}, // handled via BaseEnv + resolver, not allowlist
 		{"", false},
 	}
 	for _, c := range cases {
-		if got := envAllowed(c.key); got != c.ok {
-			t.Errorf("envAllowed(%q) = %v, want %v", c.key, got, c.ok)
+		if got := envOverridden(c.key); got != c.ok {
+			t.Errorf("envOverridden(%q) = %v, want %v", c.key, got, c.ok)
 		}
 	}
 }
