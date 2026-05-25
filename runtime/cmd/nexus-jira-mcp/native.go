@@ -52,6 +52,58 @@ func (n *nativeClient) MirrorAssign(ctx context.Context, key, aspect, actor stri
 	}
 }
 
+// jiraLinkTypeToLedger maps a Jira link-type name to the ledger's
+// link-type vocabulary. Returns (ledgerType, true) when a mapping
+// exists, otherwise ("", false). Used by jira.link's dual-write
+// path — unsupported Jira types skip the ledger mirror.
+//
+// v1 mappings — extend as ledger adds more link types:
+//
+//	Jira "Blocks"  → ledger "blocks"
+//	Jira "Relates" → ledger "relates-to"
+//
+// Other Jira types (Duplicate, Cloners, Implements, ...) intentionally
+// don't mirror — ledger's vocabulary is deliberately narrow to keep
+// the scheduler's IsBlocked / Blockers logic tractable.
+func jiraLinkTypeToLedger(jiraType string) (string, bool) {
+	switch jiraType {
+	case "Blocks":
+		return "blocks", true
+	case "Relates":
+		return "relates-to", true
+	default:
+		return "", false
+	}
+}
+
+// MirrorLink dual-writes a Jira link operation into the ledger graph
+// (NEX-270). linkType uses ledger's vocabulary ("blocks", "relates-to")
+// — translated from the Jira link-type name at the call site so the
+// translation lives in one spot (tools.go) per kind.
+func (n *nativeClient) MirrorLink(ctx context.Context, fromKey, toKey, linkType, actor string) {
+	if !n.enabled() {
+		return
+	}
+	body := map[string]any{"to_key": toKey, "type": linkType, "actor": actor}
+	if err := n.do(ctx, http.MethodPost, "/api/issues/"+url.PathEscape(fromKey)+"/links", body, nil); err != nil {
+		n.log.Warn("dual-write link failed", "err", err, "from", fromKey, "to", toKey, "type", linkType)
+	}
+}
+
+// MirrorUnlink dual-writes a Jira unlink operation. The ledger doesn't
+// expose links by ID (the unique edge key is the tuple fromKey/toKey/
+// type), so the caller has to pass all three. nexus-jira-mcp resolves
+// these from Jira's link-id via a list_links lookup before invoking.
+func (n *nativeClient) MirrorUnlink(ctx context.Context, fromKey, toKey, linkType, actor string) {
+	if !n.enabled() {
+		return
+	}
+	body := map[string]any{"to_key": toKey, "type": linkType, "actor": actor}
+	if err := n.do(ctx, http.MethodDelete, "/api/issues/"+url.PathEscape(fromKey)+"/links", body, nil); err != nil {
+		n.log.Warn("dual-write unlink failed", "err", err, "from", fromKey, "to", toKey, "type", linkType)
+	}
+}
+
 func (n *nativeClient) do(ctx context.Context, method, path string, in, out any) error {
 	body, _ := json.Marshal(in)
 	req, _ := http.NewRequestWithContext(ctx, method, n.base+path, bytes.NewReader(body))

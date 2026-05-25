@@ -546,8 +546,22 @@ func main() {
 		// listener. The registrar runs inside ListenAndServe with the
 		// broker's internal mux, so /healthz/ledger lives alongside
 		// /health and /api/* on the same port.
+		//
+		// NEX-208 / NEX-270: mount the ledger's /api/issues/* endpoints
+		// on the same listener so nexus-jira-mcp's dual-write shim
+		// (and future ledger UI clients) can reach the issue tracker
+		// over HTTPS rather than via a separate process. We forward to
+		// ledgerSvc.Handler() — its internal mux dispatches GET/POST/
+		// PATCH/DELETE on the issue subpaths. Ledger's /api/admin/*
+		// routes are deliberately NOT forwarded; nexus owns that prefix
+		// for credential + aspect admin (NEX-76, NEX-263 et al.) and the
+		// two surfaces are kept distinct.
 		HTTPRegistrar: func(mux *http.ServeMux) {
 			mux.Handle("/healthz/ledger", ledgerSvc.HealthzHandler())
+			ledgerHandler := ledgerSvc.Handler()
+			mux.Handle("/api/issues", ledgerHandler)
+			mux.Handle("/api/issues/", ledgerHandler)
+			mux.Handle("/healthz/issues", ledgerHandler)
 		},
 	}, r)
 
