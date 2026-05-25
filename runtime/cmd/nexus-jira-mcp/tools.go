@@ -281,6 +281,18 @@ func registerTools(srv *mcpserver.MCPServer, c *jiraClient, native *nativeClient
 				if err := c.Link(ctx, from, to, linkType); err != nil {
 					return mcpErr(err.Error()), nil
 				}
+				// NEX-270 dual-write: mirror to ledger when the Jira link
+				// type maps cleanly to ledger's vocabulary. Unsupported
+				// types (Duplicate, Cloners, etc.) skip the mirror — the
+				// Jira link still lands; the ledger graph just doesn't
+				// gain an edge for it.
+				if native != nil && native.enabled() {
+					if ledgerType, ok := jiraLinkTypeToLedger(linkType); ok {
+						native.MirrorLink(ctx, from, to, ledgerType, native.aspect)
+					} else {
+						log.Debug("jira.link: type not mirrored to ledger", "link_type", linkType)
+					}
+				}
 				return mcpJSON(map[string]any{"linked": map[string]string{"from": from, "to": to, "type": linkType}}), nil
 			},
 		},
