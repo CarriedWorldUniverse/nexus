@@ -32,6 +32,46 @@ import (
 	"github.com/CarriedWorldUniverse/bridle"
 )
 
+// judgeVerdictSchema is the strict-JSON-schema enforced on cheap-
+// judge responses (NEX-300). When the provider supports
+// response_format=json_schema strict (OpenAI, DeepSeek's /v1),
+// the model is GUARANTEED to emit a payload matching this shape —
+// NEX-292's parse_failure fail-open path becomes effectively
+// unreachable.
+//
+// Providers that ignore response_format (Anthropic's Messages API as
+// of writing) fall through to the existing parseJudgeJSON path,
+// which tolerates both this new four-class shape and the legacy
+// {post: bool, reason: string} shape from older judge models. So
+// the strict schema is a tightening on capable providers + a no-op
+// degradation elsewhere.
+//
+// Constraints required by OpenAI strict mode:
+//   - additionalProperties must be false
+//   - every property must appear in required
+//   - enum bounds the class to the four NEX-210 verdict labels
+const judgeVerdictSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "class":  {"type": "string", "enum": ["complete", "scratch", "goal_not_met", "blocked"]},
+    "reason": {"type": "string"}
+  },
+  "required": ["class", "reason"]
+}`
+
+// judgeMaxOutputTokens caps cheap-judge response length. Verdicts
+// are tiny JSON objects (well under 100 output tokens in practice);
+// 150 leaves headroom for unusually long "reason" strings without
+// letting a runaway model exhaust the cheap-tier budget. NEX-300.
+const judgeMaxOutputTokens = 150
+
+// judgeTemperature is 0 so the cheap-judge produces deterministic
+// verdicts for the same input. Classifier work, not creative —
+// determinism aids cross-aspect consistency (NEX-294's motivation)
+// + makes "why did the filter suppress X" debuggable.
+const judgeTemperature = 0.0
+
 // OutputFilter judges a turn's natural final reply. Returns shouldPost
 // true if the reply is substantive enough to surface in chat, false to
 // suppress. Reason is a short string for telemetry; ignored when
@@ -502,6 +542,15 @@ func (f *CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterD
 	// (we never resume any of them) but zero risk of UUID-validation
 	// surprises and no UUID-gen dep needed. Surfaced 2026-05-12 by the
 	// judge-decision logging — see task #186 for the discovery trail.
+	// NEX-300: tighten the judge call with the standard provider knobs
+	// bridle now exposes (NEX-299 Pass 2). Temperature=0 makes the
+	// classifier deterministic; response_format=json_schema strict
+	// guarantees parseable output on providers that support it
+	// (OpenAI, DeepSeek /v1); MaxOutputTokens bounds runaway cost.
+	// Providers that don't support response_format (claude REST,
+	// claude-code) silently ignore — the existing parseJudgeJSON
+	// fallback path still tolerates both verdict shapes.
+	temperature := judgeTemperature
 	req := bridle.TurnRequest{
 		AspectID:           in.AspectID,
 		AppendSystemPrompt: filterJudgePrompt,
@@ -511,6 +560,15 @@ func (f *CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterD
 		MaxSteps:           1, // pure text; no tools
 		Cwd:                f.AspectHome,
 		ProviderEnv:        f.ProviderEnv,
+		Temperature:        &temperature,
+		MaxOutputTokens:    judgeMaxOutputTokens,
+		ResponseFormat: &bridle.ResponseFormat{
+			Type:        "json_schema",
+			Name:        "judge_verdict",
+			Description: "Cheap-judge classifier verdict for a candidate aspect reply.",
+			Strict:      true,
+			Schema:      json.RawMessage(judgeVerdictSchema),
+		},
 	}
 
 	// Phase E: bracket the judge turn under "filter-judge" label.
