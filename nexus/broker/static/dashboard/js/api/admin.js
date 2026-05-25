@@ -124,6 +124,30 @@ export function setCredentialDefaults(aspect, payload) {
   });
 }
 
+// GET /api/admin/network-defaults (NEX-294 Slice 2)
+// Returns NetworkDefaults: { judge_model, judge_credential,
+// compact_model, compact_credential } — each an empty string when
+// unset. Applies as fallback when per-aspect override is blank.
+// Primary fields intentionally absent (primary is per-aspect).
+export function getNetworkDefaults() {
+  return adminFetch('/api/admin/network-defaults');
+}
+
+// PUT /api/admin/network-defaults (NEX-294 Slice 2)
+// Partial update — same semantics as setModelConfig:
+//   field omitted        → no change
+//   field set to ""      → clear (NULL in column)
+//   field set to "name"  → set to that credential name (or model id)
+// Backend validates credential existence on judge_credential /
+// compact_credential. Returns the post-update NetworkDefaults.
+export function setNetworkDefaults(payload) {
+  return adminFetch('/api/admin/network-defaults', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload || {}),
+  });
+}
+
 // GET /api/admin/credentials/{name}/audit?limit=N
 // Returns { audit: [AuditRow] } most-recent first. Backend caps limit
 // at 1000; default 100. AuditRow shape: { id, credential_name, aspect,

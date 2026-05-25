@@ -18,7 +18,7 @@
 
 const { html, useState, useEffect } = window.__preact;
 import { fetchAgents } from '../api.js';
-import { getModelConfig, setModelConfig, listCredentials } from '../api/admin.js';
+import { getModelConfig, setModelConfig, listCredentials, getNetworkDefaults } from '../api/admin.js';
 
 const KINDS = [
   { id: 'primary', label: 'Primary' },
@@ -27,21 +27,39 @@ const KINDS = [
 ];
 
 // Pulls the override row + roster row apart into a per-kind view
-// model: { model, credential, keyfileModel, hasOverride, source }.
-function summarizeKind(kind, override, rosterRow) {
+// model: { model, credential, keyfileModel, networkDefaultModel,
+// networkDefaultCredential, hasOverride, source }.
+//
+// source values:
+//   "override"        — per-aspect override set (NEX-263)
+//   "network_default" — no override, but a NEX-294 network default applies
+//                       (judge / compact only; primary has no network default)
+//   "keyfile"         — neither set; runtime falls back to keyfile / hardcoded
+function summarizeKind(kind, override, rosterRow, networkDefaults) {
   const overrideModel      = override ? override[kind + '_model']      : null;
   const overrideCredential = override ? override[kind + '_credential'] : null;
   // Roster surfaces primary only (rosterRow.model). Judge + compact
   // have no roster-side data; their keyfile values are visible to the
   // funnel at startup but not to this UI.
   const keyfileModel = (kind === 'primary' && rosterRow && rosterRow.model) || '';
+  // Primary is intentionally NOT defaultable at the network level
+  // (NEX-294 design); only judge + compact pick up network defaults.
+  const ndModel = (kind !== 'primary' && networkDefaults && networkDefaults[kind + '_model']) || '';
+  const ndCredential = (kind !== 'primary' && networkDefaults && networkDefaults[kind + '_credential']) || '';
   const hasOverride = !!(overrideModel || overrideCredential);
+  const hasNetworkDefault = !!(ndModel || ndCredential);
+  let source = 'keyfile';
+  if (hasOverride) source = 'override';
+  else if (hasNetworkDefault) source = 'network_default';
   return {
     model:        overrideModel || '',
     credential:   overrideCredential || '',
     keyfileModel,
+    networkDefaultModel:      ndModel,
+    networkDefaultCredential: ndCredential,
     hasOverride,
-    source:       hasOverride ? 'override' : 'keyfile',
+    hasNetworkDefault,
+    source,
   };
 }
 
@@ -83,10 +101,18 @@ function KindRow({ aspect, kind, vm, credentials, onSave, onClear, busy }) {
     );
   }
 
-  const displayModel = vm.hasOverride
-    ? vm.model
-    : (vm.keyfileModel || '(keyfile default)');
-  const displayCredential = vm.credential || '—';
+  // Display priority: override > network default > keyfile/legacy.
+  // NEX-294 Slice 3 hint: when no per-aspect override but a network
+  // default applies (judge/compact only), surface that value so the
+  // operator sees the EFFECTIVE state without flipping pages.
+  let displayModel;
+  if (vm.hasOverride) displayModel = vm.model;
+  else if (vm.hasNetworkDefault) displayModel = vm.networkDefaultModel || '(no network default model)';
+  else displayModel = (vm.keyfileModel || '(keyfile default)');
+  let displayCredential;
+  if (vm.credential) displayCredential = vm.credential;
+  else if (vm.hasNetworkDefault && vm.networkDefaultCredential) displayCredential = vm.networkDefaultCredential;
+  else displayCredential = '—';
 
   return html`
     <div class="settings-kind-row">
@@ -132,7 +158,7 @@ function KindRow({ aspect, kind, vm, credentials, onSave, onClear, busy }) {
   `;
 }
 
-function AspectCard({ aspect, override, rosterRow, credentials, onSaved }) {
+function AspectCard({ aspect, override, rosterRow, credentials, networkDefaults, onSaved }) {
   const [busy, setBusy] = useState(false);
   const [needsReload, setNeedsReload] = useState(false);
 
@@ -179,7 +205,7 @@ function AspectCard({ aspect, override, rosterRow, credentials, onSaved }) {
           key=${k.id}
           aspect=${aspect}
           kind=${k.id}
-          vm=${summarizeKind(k.id, override, rosterRow)}
+          vm=${summarizeKind(k.id, override, rosterRow, networkDefaults)}
           credentials=${credentials}
           onSave=${onSave}
           onClear=${onClear}
@@ -199,12 +225,21 @@ export function SettingsAspects() {
   const [aspects, setAspects] = useState([]);
   const [overrides, setOverrides] = useState({});
   const [credentials, setCredentials] = useState([]);
+  const [networkDefaults, setNetworkDefaults] = useState(null);
 
   async function loadAll() {
     setLoading(true);
     setError('');
     try {
-      const [agents, creds] = await Promise.all([fetchAgents(), listCredentials()]);
+      // Network defaults fetch is best-effort — if the new endpoint
+      // isn't deployed yet (rolling upgrade), fall through to null
+      // and the "network_default" hint stays off; per-aspect view
+      // still works identically to pre-NEX-294.
+      const [agents, creds, nd] = await Promise.all([
+        fetchAgents(),
+        listCredentials(),
+        getNetworkDefaults().catch(() => null),
+      ]);
       const namedAgents = (agents || []).filter((a) => a && (a.name || a.id));
       const overridesByName = {};
       // Fetch overrides per aspect in parallel. Per-aspect failures
@@ -222,6 +257,7 @@ export function SettingsAspects() {
       setAspects(namedAgents);
       setOverrides(overridesByName);
       setCredentials(creds || []);
+      setNetworkDefaults(nd);
     } catch (e) {
       setError(e.message || 'load failed');
     } finally {
@@ -265,6 +301,7 @@ export function SettingsAspects() {
             rosterRow=${a}
             override=${overrides[name]}
             credentials=${credentials}
+            networkDefaults=${networkDefaults}
             onSaved=${onSaved}
           />
         `;

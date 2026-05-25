@@ -14,7 +14,11 @@
 
 const { html, useState, useEffect, useMemo } = window.__preact;
 import { fetchAgents } from '../api.js';
-import { listCredentials, getCredentialDefaults, setCredentialDefaults } from '../api/admin.js';
+import {
+  listCredentials,
+  getCredentialDefaults, setCredentialDefaults,
+  getNetworkDefaults, setNetworkDefaults,
+} from '../api/admin.js';
 
 // Each row corresponds to one column in the request schema (see
 // adminAspectDefaultsReq in admin_credentials.go). The label is what
@@ -99,6 +103,135 @@ function AspectDefaultsCard({ aspect, defaults, credentialsByKind, onSaved }) {
   `;
 }
 
+// NetworkDefaultsPanel (NEX-294 Slice 3) — single-row network-wide
+// judge + compact defaults. Layers UNDER per-aspect overrides
+// (NEX-263) and OVER the legacy hardcoded fallback ("haiku" model,
+// ambient env credential).
+//
+// Model fields are free-form text (model ids are provider-specific
+// strings; no validation server-side). Credential fields are
+// dropdowns sourced from the provider credentials in the store.
+// Empty string clears the default. Primary fields are intentionally
+// absent — primary is per-aspect by design.
+function NetworkDefaultsPanel({ providerCreds }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [nd, setNd] = useState({
+    judge_model: '', judge_credential: '',
+    compact_model: '', compact_credential: '',
+  });
+
+  async function load() {
+    setLoading(true);
+    setError('');
+    try {
+      const fresh = await getNetworkDefaults();
+      setNd({
+        judge_model: (fresh && fresh.judge_model) || '',
+        judge_credential: (fresh && fresh.judge_credential) || '',
+        compact_model: (fresh && fresh.compact_model) || '',
+        compact_credential: (fresh && fresh.compact_credential) || '',
+      });
+    } catch (e) {
+      setError(e.message || 'load failed');
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => { load(); }, []);
+
+  async function save(field, value) {
+    setBusy(true);
+    setError('');
+    try {
+      const fresh = await setNetworkDefaults({ [field]: value });
+      setNd({
+        judge_model: (fresh && fresh.judge_model) || '',
+        judge_credential: (fresh && fresh.judge_credential) || '',
+        compact_model: (fresh && fresh.compact_model) || '',
+        compact_credential: (fresh && fresh.compact_credential) || '',
+      });
+    } catch (e) {
+      setError(e.message || 'save failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (loading) {
+    return html`<div class="settings-aspect-card"><div class="settings-loading">Loading network defaults…</div></div>`;
+  }
+
+  const credPlaceholder = providerCreds.length === 0
+    ? '(no provider credentials — create one in Credentials tab)'
+    : '(none — falls through to per-aspect / legacy)';
+
+  return html`
+    <div class="settings-aspect-card">
+      <div class="settings-aspect-header">
+        <span class="settings-aspect-name">Network defaults (judge + compact)</span>
+      </div>
+      <div class="settings-defaults-note">
+        Applies when an aspect has no per-aspect override.
+        Primary model + credential are per-aspect only (set on the Aspects tab).
+      </div>
+      ${error && html`<div class="settings-error">${error}</div>`}
+
+      <div class="settings-kind-row">
+        <div class="settings-defaults-label">Judge model:</div>
+        <input
+          class="settings-input"
+          type="text"
+          placeholder="e.g. deepseek-chat or haiku"
+          value=${nd.judge_model}
+          disabled=${busy}
+          onChange=${(e) => save('judge_model', e.target.value)}
+        />
+      </div>
+      <div class="settings-kind-row">
+        <div class="settings-defaults-label">Judge credential:</div>
+        <select
+          class="settings-select"
+          value=${nd.judge_credential}
+          disabled=${busy || providerCreds.length === 0}
+          onChange=${(e) => save('judge_credential', e.target.value)}
+        >
+          <option value="">${credPlaceholder}</option>
+          ${providerCreds.map((c) => html`
+            <option key=${c.name} value=${c.name}>${c.name}${c.description ? ' · ' + c.description : ''}</option>
+          `)}
+        </select>
+      </div>
+      <div class="settings-kind-row">
+        <div class="settings-defaults-label">Compact model:</div>
+        <input
+          class="settings-input"
+          type="text"
+          placeholder="e.g. deepseek-chat or haiku"
+          value=${nd.compact_model}
+          disabled=${busy}
+          onChange=${(e) => save('compact_model', e.target.value)}
+        />
+      </div>
+      <div class="settings-kind-row">
+        <div class="settings-defaults-label">Compact credential:</div>
+        <select
+          class="settings-select"
+          value=${nd.compact_credential}
+          disabled=${busy || providerCreds.length === 0}
+          onChange=${(e) => save('compact_credential', e.target.value)}
+        >
+          <option value="">${credPlaceholder}</option>
+          ${providerCreds.map((c) => html`
+            <option key=${c.name} value=${c.name}>${c.name}${c.description ? ' · ' + c.description : ''}</option>
+          `)}
+        </select>
+      </div>
+    </div>
+  `;
+}
+
 export function SettingsDefaults() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -166,9 +299,11 @@ export function SettingsDefaults() {
   return html`
     <div class="settings-aspects">
       <div class="settings-aspects-header">
-        <span class="settings-aspects-title">Credential Defaults (${aspects.length} aspects)</span>
+        <span class="settings-aspects-title">Defaults</span>
         <button class="settings-btn" onClick=${loadAll}>Reload</button>
       </div>
+      <${NetworkDefaultsPanel} providerCreds=${credentialsByKind.provider || []} />
+      <div class="settings-aspects-subheader">Per-aspect credential defaults (${aspects.length} aspects)</div>
       ${aspects.map((a) => {
         const name = a.name || a.id;
         return html`
