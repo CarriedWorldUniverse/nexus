@@ -1269,6 +1269,13 @@ func envKeys(env map[string]string) []string {
 // judge credential. The primary and compact credential overrides are
 // stored but not yet runtime-injected; an operator-visible warn is
 // emitted when they're set so the gap is observable rather than silent.
+//
+// NEX-294: judge + compact (model AND credential) now fall back to
+// network_defaults when no per-aspect override is set. Primary model
+// + primary credential stay per-aspect only by design (whole point of
+// primary is differentiation). Log `model_source` distinguishes
+// "override" (per-aspect) from "network_default" so operators can
+// see which layer fired.
 func applyAspectModelOverrides(ctx context.Context, cfg *schemas.AspectConfig, store *credentials.Store, log *slog.Logger) {
 	if store == nil || cfg == nil {
 		return
@@ -1278,6 +1285,18 @@ func applyAspectModelOverrides(ctx context.Context, cfg *schemas.AspectConfig, s
 		log.Warn("aspect model override read failed", "aspect", cfg.Name, "err", err)
 		return
 	}
+	defaults, err := store.GetNetworkDefaults(ctx)
+	if err != nil {
+		// Non-fatal: log + proceed with per-aspect overrides only.
+		// Caller's existing legacy fallback (haiku model, ambient env
+		// credential) handles the path that would otherwise have
+		// consulted network defaults.
+		log.Warn("network defaults read failed; falling back to per-aspect only",
+			"aspect", cfg.Name, "err", err)
+		defaults = credentials.NetworkDefaults{}
+	}
+
+	// Primary model — per-aspect only (no network default by design).
 	if override.PrimaryModel != nil {
 		if cfg.ProviderConfig == nil {
 			cfg.ProviderConfig = map[string]any{}
@@ -1288,32 +1307,39 @@ func applyAspectModelOverrides(ctx context.Context, cfg *schemas.AspectConfig, s
 			"aspect", cfg.Name, "kind", "primary",
 			"from", prev, "to", *override.PrimaryModel, "model_source", "override")
 	}
-	if override.JudgeModel != nil {
+
+	// Judge model — per-aspect override wins, network default
+	// applies when override blank.
+	if judgeModel, src := pickModelOverride(override.JudgeModel, defaults.JudgeModel); src != "" {
 		if cfg.FilterProviderConfig == nil {
 			cfg.FilterProviderConfig = map[string]any{}
 		}
 		prev, _ := cfg.FilterProviderConfig["model"].(string)
-		cfg.FilterProviderConfig["model"] = *override.JudgeModel
+		cfg.FilterProviderConfig["model"] = judgeModel
 		log.Info("aspect model override applied",
 			"aspect", cfg.Name, "kind", "judge",
-			"from", prev, "to", *override.JudgeModel, "model_source", "override")
+			"from", prev, "to", judgeModel, "model_source", src)
 	}
-	if override.CompactModel != nil {
+
+	// Compact model — same pattern.
+	if compactModel, src := pickModelOverride(override.CompactModel, defaults.CompactModel); src != "" {
 		if cfg.Rewriter == nil {
 			cfg.Rewriter = &schemas.RewriterConfig{}
 		}
 		prev := cfg.Rewriter.DistillerModel
-		cfg.Rewriter.DistillerModel = *override.CompactModel
+		cfg.Rewriter.DistillerModel = compactModel
 		log.Info("aspect model override applied",
 			"aspect", cfg.Name, "kind", "compact",
-			"from", prev, "to", *override.CompactModel, "model_source", "override")
+			"from", prev, "to", compactModel, "model_source", src)
 	}
-	if override.JudgeCredential != nil {
+
+	// Judge credential — per-aspect override > network default.
+	if judgeCred, src := pickModelOverride(override.JudgeCredential, defaults.JudgeCredential); src != "" {
 		prev := cfg.FilterCredential
-		cfg.FilterCredential = *override.JudgeCredential
+		cfg.FilterCredential = judgeCred
 		log.Info("aspect credential override applied",
 			"aspect", cfg.Name, "kind", "judge",
-			"from", prev, "to", *override.JudgeCredential, "model_source", "override")
+			"from", prev, "to", judgeCred, "model_source", src)
 	}
 	if override.PrimaryCredential != nil {
 		log.Warn("aspect primary credential override stored but not yet wired into runtime",
@@ -1323,6 +1349,24 @@ func applyAspectModelOverrides(ctx context.Context, cfg *schemas.AspectConfig, s
 		log.Warn("aspect compact credential override stored but not yet wired into runtime",
 			"aspect", cfg.Name, "value", *override.CompactCredential)
 	}
+}
+
+// pickModelOverride implements the NEX-294 resolution: per-aspect
+// override wins when set (non-nil + non-empty); otherwise network
+// default applies when set (non-empty); otherwise neither (return
+// "" and src=""). Returns (value, source) so callers can log which
+// layer fired — useful when an operator asks "why is anvil using
+// model X?".
+//
+// source is "override" | "network_default" | "" (neither).
+func pickModelOverride(perAspect *string, networkDefault string) (value, source string) {
+	if perAspect != nil && *perAspect != "" {
+		return *perAspect, "override"
+	}
+	if networkDefault != "" {
+		return networkDefault, "network_default"
+	}
+	return "", ""
 }
 
 // resolveJudgeProviderAndModel picks the cheap-tier provider+model for
