@@ -1182,7 +1182,7 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 			"aspect", aspectName, "judge_provider", judgeProviderID, "judge_model", judgeModel,
 			"filter_credential", cfg.FilterCredential, "judge_env_keys", envKeys(judgeEnv))
 		return funnel.HardRulesFilter{
-			Inner: funnel.CheapModelFilter{
+			Inner: &funnel.CheapModelFilter{
 				Harness:           bridle.NewHarness(bareJudgeProvider(judgeProvider, judgeProviderID)),
 				Provider:          judgeProviderID,
 				Model:             judgeModel,
@@ -1200,7 +1200,7 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 			return funnel.HardRulesFilter{}
 		}
 		return funnel.HardRulesFilter{
-			Inner: funnel.CheapModelFilter{
+			Inner: &funnel.CheapModelFilter{
 				Harness:           bridle.NewHarness(bareJudgeProvider(judgeProvider, judgeProviderID)),
 				Provider:          judgeProviderID,
 				Model:             judgeModel,

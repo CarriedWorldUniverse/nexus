@@ -508,7 +508,7 @@ func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.Provider
 	log.Info("agentfunnel: filter=cheap (hard rules + cheap-model judge)",
 		"judge_provider", providerID, "judge_model", "haiku")
 	return funnel.HardRulesFilter{
-		Inner: funnel.CheapModelFilter{
+		Inner: &funnel.CheapModelFilter{
 			Harness:           bridle.NewHarness(bareJudgeProvider(provider, providerID)),
 			Provider:          providerID,
 			Model:             "haiku",

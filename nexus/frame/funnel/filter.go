@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/CarriedWorldUniverse/bridle"
@@ -136,6 +137,13 @@ type FilterDecision struct {
 	// should treat empty-Class as "complete" when ShouldPost and
 	// "scratch" when !ShouldPost.
 	Class string
+
+	// SystemNotice, when non-empty, instructs the funnel's return
+	// handler to post a separate system-author message to the thread
+	// (in addition to any normal reply driven by ShouldPost). Used by
+	// CheapModelFilter to surface judge-degradation entry/exit in-band
+	// so failures aren't silent. Empty = no notice. NEX-292.
+	SystemNotice string
 }
 
 // FilterClass values for the four-class judge (NEX-210).
@@ -288,7 +296,37 @@ type CheapModelFilter struct {
 	// construction time. Resolver-driven per-call dispatch lands
 	// when NEX-103's schema migration lands.
 	ProviderEnv map[string]string
+
+	// DegradedCooldown bounds fail-open posts during periods when the
+	// judge subprocess can't return a verdict (harness error: crash,
+	// auth failure, network blip, timeout). Inside the cooldown window
+	// after the last fail-open post, subsequent judge errors return
+	// ShouldPost=false — preventing the cascade pattern observed
+	// 2026-05-25 where a broken judge + unconditional fail-open + the
+	// multi-aspect echo topology produced exponential reply storms.
+	//
+	// Zero = default 30s. Negative = no rate limit (legacy unconditional
+	// fail-open; safe only for single-aspect deployments). Verdict-path
+	// (judge returned a yes/no) is never rate-limited — only the
+	// harness-error path engages this. NEX-292.
+	DegradedCooldown time.Duration
+
+	// degradedMu guards degraded / lastDegradedPost. Per-aspect state
+	// because a single CheapModelFilter instance can in principle be
+	// shared across aspects (today it's per-aspect, but the map keyed
+	// by AspectID keeps the contract correct either way).
+	degradedMu sync.Mutex
+	// degraded[aspect] = true means we've already posted the entry
+	// system notice for this degradation window. Cleared on first
+	// successful verdict after the window.
+	degraded map[string]bool
+	// lastDegradedPost[aspect] = time of last fail-open post during
+	// degradation. Used for cooldown rate-limit math.
+	lastDegradedPost map[string]time.Time
 }
+
+// defaultDegradedCooldown is applied when DegradedCooldown is zero.
+const defaultDegradedCooldown = 30 * time.Second
 
 // filterJudgeTimeout is a safety bound for a fully hung judge —
 // "model is broken / network gone" backstop, not a "make it snappy"
@@ -438,7 +476,7 @@ func buildJudgeUserMessage(in FilterInput) string {
 // posted via operator_bypass (should have been suppressed). The right
 // shape: judge runs on every reply; if it gets calibration wrong, that's
 // signal we ACT on, not signal we hide behind a bypass.
-func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDecision {
+func (f *CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDecision {
 	if strings.TrimSpace(in.FinalText) == "" {
 		return FilterDecision{ShouldPost: false, Reason: FilterReasonEmpty}
 	}
@@ -489,13 +527,7 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 		f.ObservabilityHook.EndTurn()
 	}
 	if err != nil {
-		if f.Logger != nil {
-			f.Logger.Warn("filter judge: harness error — failing open",
-				"aspect", in.AspectID, "turn_id", in.TurnID, "err", err)
-		}
-		// Fail open: posting a thin reply is better than suppressing
-		// a real one because the filter timed out or errored.
-		return FilterDecision{ShouldPost: true}
+		return f.judgeErrorDecision(in.AspectID, in.TurnID, err)
 	}
 
 	// Parse JSON verdict from model. The prompt asks for a single JSON
@@ -508,8 +540,18 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 		// Fail open on parse failure — suppressing a real reply
 		// because the cheap model emitted bad JSON is worse than
 		// posting a thin one. Reason surfaces parse_failure so it's
-		// visible in audit logs.
+		// visible in audit logs. NEX-292 deliberately does NOT
+		// rate-limit parse_failure: a model that emits bad JSON
+		// once probably emits good JSON next turn, and the cascade
+		// scenario was specifically "judge can't respond at all".
 		decision = FilterDecision{ShouldPost: true, Reason: "parse_failure"}
+	} else {
+		// Real verdict — clear degradation if we were in one and
+		// emit a recovery notice in-band so the operator/users see
+		// the loop close (NEX-292).
+		if notice := f.clearDegradationIfRecovered(in.AspectID); notice != "" {
+			decision.SystemNotice = notice
+		}
 	}
 
 	// Always log the judge round-trip so post-hoc analysis can pair
@@ -539,6 +581,90 @@ func (f CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterDe
 			"input_preview", preview)
 	}
 	return decision
+}
+
+// judgeErrorDecision implements NEX-292's rate-limited fail-open on
+// harness errors (subprocess crash, auth failure, network blip,
+// timeout). The first failure per cooldown window per aspect posts
+// the reply (preserves pre-NEX-292 fail-open behaviour) and — on the
+// first failure of a fresh degradation window — emits a SystemNotice
+// for in-band visibility. Subsequent failures within the cooldown
+// return ShouldPost=false (judge-degraded-rate-limited) so the
+// cascade-amplification pattern observed 2026-05-25 can't recur:
+// rate-limited replies have a hard ceiling regardless of inbound echo
+// volume. The verdict path (judge returned a yes/no) clears the
+// degradation marker and emits a recovery SystemNotice — see
+// clearDegradationIfRecovered.
+//
+// DegradedCooldown == 0 → defaults to defaultDegradedCooldown (30s).
+// DegradedCooldown < 0 → opt-out, unconditional fail-open (legacy
+// behaviour; safe only for single-aspect deployments).
+func (f *CheapModelFilter) judgeErrorDecision(aspect, turnID string, err error) FilterDecision {
+	cooldown := f.DegradedCooldown
+	if cooldown == 0 {
+		cooldown = defaultDegradedCooldown
+	}
+	if cooldown < 0 {
+		if f.Logger != nil {
+			f.Logger.Warn("filter judge: harness error — failing open (rate-limit disabled)",
+				"aspect", aspect, "turn_id", turnID, "err", err)
+		}
+		return FilterDecision{ShouldPost: true, Reason: "judge-degraded-fail-open"}
+	}
+	f.degradedMu.Lock()
+	defer f.degradedMu.Unlock()
+	if f.degraded == nil {
+		f.degraded = map[string]bool{}
+	}
+	if f.lastDegradedPost == nil {
+		f.lastDegradedPost = map[string]time.Time{}
+	}
+	now := time.Now()
+	if last, ok := f.lastDegradedPost[aspect]; ok && now.Sub(last) < cooldown {
+		if f.Logger != nil {
+			f.Logger.Warn("filter judge: harness error — rate-limited (degraded)",
+				"aspect", aspect, "turn_id", turnID,
+				"cooldown_remaining", (cooldown - now.Sub(last)).String(),
+				"err", err)
+		}
+		return FilterDecision{ShouldPost: false, Reason: "judge-degraded-rate-limited"}
+	}
+	// Allow this fail-open; mark cooldown floor and emit entry notice
+	// on first failure of this degradation window.
+	var notice string
+	if !f.degraded[aspect] {
+		notice = aspect + ": judge unavailable — replies rate-limited (1 per " + cooldown.String() + ")"
+		f.degraded[aspect] = true
+	}
+	f.lastDegradedPost[aspect] = now
+	if f.Logger != nil {
+		f.Logger.Warn("filter judge: harness error — failing open (rate-limited)",
+			"aspect", aspect, "turn_id", turnID,
+			"cooldown", cooldown.String(),
+			"first_in_window", notice != "",
+			"err", err)
+	}
+	return FilterDecision{
+		ShouldPost:   true,
+		Reason:       "judge-degraded-fail-open",
+		SystemNotice: notice,
+	}
+}
+
+// clearDegradationIfRecovered clears the per-aspect degradation
+// markers on first successful verdict after a fail-open window.
+// Returns a recovery notice string when the aspect was previously
+// degraded (so the funnel can post it in-band), or "" if no
+// degradation was in flight.
+func (f *CheapModelFilter) clearDegradationIfRecovered(aspect string) string {
+	f.degradedMu.Lock()
+	defer f.degradedMu.Unlock()
+	if !f.degraded[aspect] {
+		return ""
+	}
+	delete(f.degraded, aspect)
+	delete(f.lastDegradedPost, aspect)
+	return aspect + ": judge recovered"
 }
 
 // parseJudgeJSON extracts the verdict from the cheap-model's JSON
