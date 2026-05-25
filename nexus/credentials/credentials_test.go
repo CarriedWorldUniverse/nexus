@@ -61,6 +61,16 @@ func newTestStore(t *testing.T) (*Store, *sql.DB) {
 			profile     TEXT NOT NULL DEFAULT '{}',
 			updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 		);
+		-- NEX-294 network-wide judge + compact defaults (single-row).
+		CREATE TABLE network_defaults (
+			singleton            INTEGER PRIMARY KEY CHECK (singleton = 1),
+			judge_model          TEXT,
+			judge_credential     TEXT,
+			compact_model        TEXT,
+			compact_credential   TEXT,
+			updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		INSERT OR IGNORE INTO network_defaults (singleton) VALUES (1);
 	`)
 	if err != nil {
 		t.Fatalf("schema: %v", err)
@@ -629,5 +639,161 @@ func TestSetAspectModelField_ClearCredentialDoesNotValidate(t *testing.T) {
 	}
 	if err := s.SetAspectModelField(context.Background(), "keel", "judge_credential", ""); err != nil {
 		t.Errorf("clear should not validate against credentials store: %v", err)
+	}
+}
+
+// NEX-294: fresh DB returns zero NetworkDefaults — singleton row
+// exists (INSERT OR IGNORE on bootstrap) but no columns set.
+func TestGetNetworkDefaults_Empty(t *testing.T) {
+	s, _ := newTestStore(t)
+	nd, err := s.GetNetworkDefaults(context.Background())
+	if err != nil {
+		t.Fatalf("GetNetworkDefaults: %v", err)
+	}
+	if nd != (NetworkDefaults{}) {
+		t.Errorf("expected zero defaults on fresh store; got %+v", nd)
+	}
+}
+
+// NEX-294: SetNetworkDefaultField writes a single column; GetNetworkDefaults
+// reflects it.
+func TestSetGetNetworkDefaults_Roundtrip(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+	// Seed a credential the JudgeCredential default can reference (the
+	// setter validates existence for *_credential fields).
+	if err := s.Set(ctx, UpsertParams{
+		Name:           "deepseek-judge",
+		Description:    "test",
+		Kind:           KindProvider,
+		Bundle:         providerBundle(ShapeAnthropic, "https://api.deepseek.com/anthropic", "sk-test"),
+		AllowedAspects: []string{"*"},
+		Mode:           ModeProxy,
+	}); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	if err := s.SetNetworkDefaultField(ctx, "judge_model", "deepseek-chat"); err != nil {
+		t.Fatalf("set judge_model: %v", err)
+	}
+	if err := s.SetNetworkDefaultField(ctx, "judge_credential", "deepseek-judge"); err != nil {
+		t.Fatalf("set judge_credential: %v", err)
+	}
+	if err := s.SetNetworkDefaultField(ctx, "compact_model", "deepseek-chat"); err != nil {
+		t.Fatalf("set compact_model: %v", err)
+	}
+
+	nd, err := s.GetNetworkDefaults(ctx)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if nd.JudgeModel != "deepseek-chat" {
+		t.Errorf("JudgeModel = %q, want deepseek-chat", nd.JudgeModel)
+	}
+	if nd.JudgeCredential != "deepseek-judge" {
+		t.Errorf("JudgeCredential = %q, want deepseek-judge", nd.JudgeCredential)
+	}
+	if nd.CompactModel != "deepseek-chat" {
+		t.Errorf("CompactModel = %q, want deepseek-chat", nd.CompactModel)
+	}
+	if nd.CompactCredential != "" {
+		t.Errorf("CompactCredential = %q, want empty (unset)", nd.CompactCredential)
+	}
+}
+
+// NEX-294: SetNetworkDefaultField rejects unknown columns + missing
+// credential references.
+func TestSetNetworkDefaultField_Validations(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+	if err := s.SetNetworkDefaultField(ctx, "primary_model", "x"); err == nil {
+		t.Error("primary_model should be rejected (not defaultable at network level)")
+	}
+	if err := s.SetNetworkDefaultField(ctx, "judge_credential", "does-not-exist"); err == nil {
+		t.Error("setting judge_credential to unknown credential should error")
+	}
+	// Clearing (empty value) should NOT validate against the store.
+	if err := s.SetNetworkDefaultField(ctx, "judge_credential", ""); err != nil {
+		t.Errorf("clearing judge_credential should not error: %v", err)
+	}
+}
+
+// NEX-294 resolution: per-aspect override wins, network default
+// fills the gap, neither = empty (caller's legacy fallback).
+func TestEffectiveJudge_Resolution(t *testing.T) {
+	ctx := context.Background()
+	s, db := newTestStore(t)
+	if _, err := db.Exec(`INSERT INTO aspects(name) VALUES ('anvil'), ('harrow')`); err != nil {
+		t.Fatalf("seed aspects: %v", err)
+	}
+	if err := s.Set(ctx, UpsertParams{
+		Name:           "deepseek-judge",
+		Kind:           KindProvider,
+		Bundle:         providerBundle(ShapeAnthropic, "https://api.deepseek.com/v1", "sk-test"),
+		AllowedAspects: []string{"*"},
+		Mode:           ModeProxy,
+	}); err != nil {
+		t.Fatalf("seed cred: %v", err)
+	}
+	if err := s.Set(ctx, UpsertParams{
+		Name:           "anthropic-judge",
+		Kind:           KindProvider,
+		Bundle:         providerBundle(ShapeAnthropic, "https://api.anthropic.com", "sk-ant-test"),
+		AllowedAspects: []string{"*"},
+		Mode:           ModeProxy,
+	}); err != nil {
+		t.Fatalf("seed cred: %v", err)
+	}
+
+	// Network default: judge_model + judge_credential -> deepseek
+	if err := s.SetNetworkDefaultField(ctx, "judge_model", "deepseek-chat"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNetworkDefaultField(ctx, "judge_credential", "deepseek-judge"); err != nil {
+		t.Fatal(err)
+	}
+	// Per-aspect override on anvil only: judge -> anthropic
+	if err := s.SetAspectModelField(ctx, "anvil", "judge_model", "haiku-special"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAspectModelField(ctx, "anvil", "judge_credential", "anthropic-judge"); err != nil {
+		t.Fatal(err)
+	}
+
+	// anvil: override wins
+	if m, err := s.EffectiveJudgeModel(ctx, "anvil"); err != nil || m != "haiku-special" {
+		t.Errorf("anvil EffectiveJudgeModel = %q err=%v, want haiku-special", m, err)
+	}
+	if c, err := s.EffectiveJudgeCredential(ctx, "anvil"); err != nil || c != "anthropic-judge" {
+		t.Errorf("anvil EffectiveJudgeCredential = %q err=%v, want anthropic-judge", c, err)
+	}
+	// harrow: no override, network default applies
+	if m, err := s.EffectiveJudgeModel(ctx, "harrow"); err != nil || m != "deepseek-chat" {
+		t.Errorf("harrow EffectiveJudgeModel = %q err=%v, want deepseek-chat (network default)", m, err)
+	}
+	if c, err := s.EffectiveJudgeCredential(ctx, "harrow"); err != nil || c != "deepseek-judge" {
+		t.Errorf("harrow EffectiveJudgeCredential = %q err=%v, want deepseek-judge (network default)", c, err)
+	}
+
+	// Clear network defaults: harrow should now return empty (legacy fallback territory)
+	_ = s.SetNetworkDefaultField(ctx, "judge_model", "")
+	_ = s.SetNetworkDefaultField(ctx, "judge_credential", "")
+	if m, err := s.EffectiveJudgeModel(ctx, "harrow"); err != nil || m != "" {
+		t.Errorf("harrow with no defaults: EffectiveJudgeModel = %q err=%v, want empty", m, err)
+	}
+}
+
+// NEX-294: compact-side resolution mirrors judge.
+func TestEffectiveCompact_Resolution(t *testing.T) {
+	ctx := context.Background()
+	s, db := newTestStore(t)
+	if _, err := db.Exec(`INSERT INTO aspects(name) VALUES ('wren')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNetworkDefaultField(ctx, "compact_model", "deepseek-chat"); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := s.EffectiveCompactModel(ctx, "wren"); err != nil || m != "deepseek-chat" {
+		t.Errorf("wren EffectiveCompactModel = %q err=%v, want deepseek-chat", m, err)
 	}
 }

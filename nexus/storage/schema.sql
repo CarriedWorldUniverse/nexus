@@ -566,6 +566,36 @@ CREATE TABLE IF NOT EXISTS mcp_profiles (
 );
 
 -- -------------------------------------------------------------------
+-- Network-wide model defaults — NEX-294
+-- -------------------------------------------------------------------
+-- Single-row table holding fallback model + credential values that
+-- apply when an aspect doesn't have a per-aspect override (NEX-263
+-- columns on aspects). Resolution order at runtime:
+--
+--   1. Per-aspect override (aspects.judge_model etc.) — wins if set
+--   2. Network default (this table)
+--   3. Legacy hardcoded fallback ("haiku" model, ambient env cred)
+--
+-- The `singleton` CHECK enforces exactly-one-row semantics — no
+-- conflicting defaults rows possible. INSERT OR IGNORE on bootstrap
+-- so a re-run doesn't duplicate-key error.
+--
+-- Primary model + primary credential are intentionally NOT defaultable
+-- at the network level: the whole point of primary config is per-aspect
+-- differentiation (different aspects pick different models). Only judge
+-- + compact have the "should be uniform across the network" property
+-- that motivates a default.
+CREATE TABLE IF NOT EXISTS network_defaults (
+  singleton            INTEGER PRIMARY KEY CHECK (singleton = 1),
+  judge_model          TEXT,
+  judge_credential     TEXT,
+  compact_model        TEXT,
+  compact_credential   TEXT,
+  updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT OR IGNORE INTO network_defaults (singleton) VALUES (1);
+
+-- -------------------------------------------------------------------
 -- Schema metadata — marker only. Real migrations defer until first
 -- backwards-incompatible change (per §10 of registration spec).
 -- -------------------------------------------------------------------

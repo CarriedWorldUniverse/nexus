@@ -262,14 +262,31 @@ func (c *wsConn) handleAspectModelConfigGet(env frames.Envelope) {
 		return
 	}
 
+	// NEX-294: return the EFFECTIVE values (per-aspect override layered
+	// over network defaults) so out-of-process aspects see the same
+	// merged view the in-process Frame computes via
+	// applyAspectModelOverrides. Without this layering, agentfunnel
+	// would only see per-aspect rows + miss any network-wide judge /
+	// compact policy the operator set.
+	defaults, derr := cstore.GetNetworkDefaults(ctx)
+	if derr != nil {
+		// Non-fatal: log + treat defaults as empty. Per-aspect values
+		// still flow through and the aspect's own legacy fallback
+		// covers what would otherwise have been the default layer.
+		c.log.Warn("aspect.model_config.get: network defaults read failed; returning per-aspect only",
+			"aspect", aspect, "err", derr)
+		defaults = credentials.NetworkDefaults{}
+	}
+
 	resp, err := frames.NewResponse(frames.KindAspectModelConfigGetResult, env.ID, frames.AspectModelConfigGetResultPayload{
-		Aspect:            cfg.Aspect,
-		PrimaryModel:      strOrEmpty(cfg.PrimaryModel),
+		Aspect:       cfg.Aspect,
+		PrimaryModel: strOrEmpty(cfg.PrimaryModel),
+		// Primary credential stays per-aspect-only by design (NEX-294).
 		PrimaryCredential: strOrEmpty(cfg.PrimaryCredential),
-		JudgeModel:        strOrEmpty(cfg.JudgeModel),
-		JudgeCredential:   strOrEmpty(cfg.JudgeCredential),
-		CompactModel:      strOrEmpty(cfg.CompactModel),
-		CompactCredential: strOrEmpty(cfg.CompactCredential),
+		JudgeModel:        pickEffective(cfg.JudgeModel, defaults.JudgeModel),
+		JudgeCredential:   pickEffective(cfg.JudgeCredential, defaults.JudgeCredential),
+		CompactModel:      pickEffective(cfg.CompactModel, defaults.CompactModel),
+		CompactCredential: pickEffective(cfg.CompactCredential, defaults.CompactCredential),
 	})
 	if err != nil {
 		c.log.Warn("aspect.model_config.get: build response failed", "err", err)
@@ -283,4 +300,15 @@ func strOrEmpty(p *string) string {
 		return ""
 	}
 	return *p
+}
+
+// pickEffective implements NEX-294's resolution at the WS-reply
+// layer: per-aspect override wins when set, otherwise the network
+// default. Empty result = neither layer set + caller falls through
+// to its own legacy fallback.
+func pickEffective(perAspect *string, networkDefault string) string {
+	if perAspect != nil && *perAspect != "" {
+		return *perAspect
+	}
+	return networkDefault
 }

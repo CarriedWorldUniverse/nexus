@@ -802,6 +802,172 @@ func (s *Store) SetAspectModelField(ctx context.Context, aspect, column, value s
 	return nil
 }
 
+// NetworkDefaults is the single-row fallback for judge + compact
+// model/credential configuration that applies when no per-aspect
+// override is set (NEX-294). Each field is nullable — empty string
+// = "no network default; caller falls through to legacy hardcoded
+// fallback (haiku model, ambient env credential)".
+//
+// Primary model + primary credential are NOT defaultable at the
+// network level by design — primary is per-aspect differentiation.
+// Only judge + compact have the "should be uniform" property that
+// motivates a network default.
+type NetworkDefaults struct {
+	JudgeModel        string
+	JudgeCredential   string
+	CompactModel      string
+	CompactCredential string
+}
+
+// networkDefaultColumns is the allowed set of column names for
+// SetNetworkDefaultField. Mirrors the schema.sql definition;
+// keep in sync.
+var networkDefaultColumns = map[string]bool{
+	"judge_model":        true,
+	"judge_credential":   true,
+	"compact_model":      true,
+	"compact_credential": true,
+}
+
+// GetNetworkDefaults reads the single-row network_defaults table.
+// Returns a zero-valued NetworkDefaults (all-empty-strings) when the
+// row exists but no columns are set — distinguishable from an error,
+// caller treats every empty field as "no default; fall through".
+//
+// The singleton row is INSERT OR IGNORE'd on schema bootstrap so a
+// missing row would indicate corruption or a fresh DB pre-bootstrap.
+// We treat sql.ErrNoRows as the zero NetworkDefaults case so callers
+// don't need defensive plumbing.
+func (s *Store) GetNetworkDefaults(ctx context.Context) (NetworkDefaults, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT judge_model, judge_credential,
+		       compact_model, compact_credential
+		  FROM network_defaults WHERE singleton = 1
+	`)
+	var jm, jc, cm, cc sql.NullString
+	if err := row.Scan(&jm, &jc, &cm, &cc); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return NetworkDefaults{}, nil
+		}
+		return NetworkDefaults{}, fmt.Errorf("scan network defaults: %w", err)
+	}
+	nd := NetworkDefaults{}
+	if jm.Valid {
+		nd.JudgeModel = jm.String
+	}
+	if jc.Valid {
+		nd.JudgeCredential = jc.String
+	}
+	if cm.Valid {
+		nd.CompactModel = cm.String
+	}
+	if cc.Valid {
+		nd.CompactCredential = cc.String
+	}
+	return nd, nil
+}
+
+// SetNetworkDefaultField writes a single column on the network_defaults
+// singleton row. column must be one of judge_model / judge_credential
+// / compact_model / compact_credential. Pass value="" to clear (NULL).
+//
+// For *_credential columns with a non-empty value, the credential's
+// existence is verified before write — same pattern as
+// SetAspectModelField.
+func (s *Store) SetNetworkDefaultField(ctx context.Context, column, value string) error {
+	if !networkDefaultColumns[column] {
+		return fmt.Errorf("credentials: unknown network-default column %q", column)
+	}
+	if value != "" && (column == "judge_credential" || column == "compact_credential") {
+		if _, err := s.Get(ctx, value); err != nil {
+			return fmt.Errorf("credentials: cannot set network default %s=%q: %w", column, value, err)
+		}
+	}
+	var arg any
+	if value == "" {
+		arg = nil
+	} else {
+		arg = value
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE network_defaults SET `+column+` = ?, updated_at = datetime('now') WHERE singleton = 1`, arg)
+	if err != nil {
+		return fmt.Errorf("update network defaults: %w", err)
+	}
+	return nil
+}
+
+// EffectiveJudgeModel returns the model id the cheap-judge should
+// use for `aspect`, applying NEX-294 resolution: per-aspect override
+// > network default > "" (caller's legacy fallback).
+//
+// Empty result is meaningful — it means neither layer has a value
+// set, and the caller (CheapModelFilter / agentfunnel) should use
+// whatever hardcoded default it has ("haiku" today).
+func (s *Store) EffectiveJudgeModel(ctx context.Context, aspect string) (string, error) {
+	overrides, err := s.GetAspectModelConfig(ctx, aspect)
+	if err != nil {
+		return "", err
+	}
+	if overrides.JudgeModel != nil && *overrides.JudgeModel != "" {
+		return *overrides.JudgeModel, nil
+	}
+	nd, err := s.GetNetworkDefaults(ctx)
+	if err != nil {
+		return "", err
+	}
+	return nd.JudgeModel, nil
+}
+
+// EffectiveJudgeCredential mirrors EffectiveJudgeModel for the
+// credential lookup. Empty = caller inherits ambient env.
+func (s *Store) EffectiveJudgeCredential(ctx context.Context, aspect string) (string, error) {
+	overrides, err := s.GetAspectModelConfig(ctx, aspect)
+	if err != nil {
+		return "", err
+	}
+	if overrides.JudgeCredential != nil && *overrides.JudgeCredential != "" {
+		return *overrides.JudgeCredential, nil
+	}
+	nd, err := s.GetNetworkDefaults(ctx)
+	if err != nil {
+		return "", err
+	}
+	return nd.JudgeCredential, nil
+}
+
+// EffectiveCompactModel / EffectiveCompactCredential mirror the
+// judge-side helpers for the compaction (rewriter) path.
+func (s *Store) EffectiveCompactModel(ctx context.Context, aspect string) (string, error) {
+	overrides, err := s.GetAspectModelConfig(ctx, aspect)
+	if err != nil {
+		return "", err
+	}
+	if overrides.CompactModel != nil && *overrides.CompactModel != "" {
+		return *overrides.CompactModel, nil
+	}
+	nd, err := s.GetNetworkDefaults(ctx)
+	if err != nil {
+		return "", err
+	}
+	return nd.CompactModel, nil
+}
+
+func (s *Store) EffectiveCompactCredential(ctx context.Context, aspect string) (string, error) {
+	overrides, err := s.GetAspectModelConfig(ctx, aspect)
+	if err != nil {
+		return "", err
+	}
+	if overrides.CompactCredential != nil && *overrides.CompactCredential != "" {
+		return *overrides.CompactCredential, nil
+	}
+	nd, err := s.GetNetworkDefaults(ctx)
+	if err != nil {
+		return "", err
+	}
+	return nd.CompactCredential, nil
+}
+
 // resolveAspectDefault is the shared lookup-and-allow-check for both
 // provider and non-provider default-credential resolution.
 func (s *Store) resolveAspectDefault(ctx context.Context, aspect, col string) (Credential, error) {
