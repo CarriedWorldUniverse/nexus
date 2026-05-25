@@ -59,6 +59,20 @@ func NewHaikuDistiller(harness *bridle.Harness, provider bridle.ProviderID, mode
 	}, nil
 }
 
+// distillerTemperature is low but non-zero. Distillation is mostly
+// deterministic (compress, don't editorialise) but a little
+// flexibility helps the model produce idiomatic prose at the
+// byte-cap rather than aggressive truncation artifacts. NEX-300.
+const distillerTemperature = 0.2
+
+// distillerMaxOutputTokens caps the distillation response at roughly
+// 4x the prompt-stated byte hard-cap (200/150 bytes), translated to
+// tokens with conservative budgeting. Allows a misbehaving model
+// some headroom for over-shoot without letting it exhaust the
+// cheap-tier budget on a runaway. Providers that ignore the field
+// silently fall back to their account default. NEX-300.
+const distillerMaxOutputTokens = 128
+
 const (
 	// distillerSystemPromptToolResult is the system prompt for tool
 	// result distillation. Per-tool prompts (below) are bolted onto
@@ -101,6 +115,14 @@ func (d *HaikuDistiller) runDistill(parent context.Context, systemPrompt, userMe
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
+	// NEX-300 (rewriter slice): set the standard provider knobs bridle
+	// exposes via NEX-299 Pass 2. Temperature stays low (not 0 — some
+	// flexibility helps distillation read naturally) and MaxOutputTokens
+	// caps generation a few multiples above the prompt's byte hard-cap
+	// so a misbehaving model can't run away with the cheap-tier budget.
+	// Providers that ignore these fields fall back to their own
+	// defaults — same no-op-degradation pattern as the judge path.
+	temperature := distillerTemperature
 	req := bridle.TurnRequest{
 		AspectID:           d.AspectID,
 		AppendSystemPrompt: systemPrompt,
@@ -108,11 +130,13 @@ func (d *HaikuDistiller) runDistill(parent context.Context, systemPrompt, userMe
 		// The session ID is sufficiently unique that there's no
 		// collision risk, and bridle's claude-api provider treats it
 		// as a new conversation.
-		Session:     bridle.SessionHandle{ID: distillerSessionID(sessionTag), New: true},
-		UserMessage: userMessage,
-		Provider:    d.Provider,
-		Model:       d.Model,
-		MaxSteps:    1, // pure text in/out; no tool use
+		Session:         bridle.SessionHandle{ID: distillerSessionID(sessionTag), New: true},
+		UserMessage:     userMessage,
+		Provider:        d.Provider,
+		Model:           d.Model,
+		MaxSteps:        1, // pure text in/out; no tool use
+		Temperature:     &temperature,
+		MaxOutputTokens: distillerMaxOutputTokens,
 	}
 
 	result, err := d.Harness.RunTurn(ctx, req, &noopRunner{}, &noopSink{})
