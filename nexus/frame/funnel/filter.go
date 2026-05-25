@@ -33,18 +33,24 @@ import (
 )
 
 // judgeVerdictSchema is the strict-JSON-schema enforced on cheap-
-// judge responses (NEX-300). When the provider supports
-// response_format=json_schema strict (OpenAI, DeepSeek's /v1),
-// the model is GUARANTEED to emit a payload matching this shape —
-// NEX-292's parse_failure fail-open path becomes effectively
-// unreachable.
+// judge responses when EnforceJSONSchema is opted in (NEX-300 +
+// NEX-297 L2 finding). On providers that support OpenAI's structured
+// outputs (real api.openai.com), the model is GUARANTEED to emit a
+// payload matching this shape — NEX-292's parse_failure path becomes
+// effectively unreachable.
 //
-// Providers that ignore response_format (Anthropic's Messages API as
-// of writing) fall through to the existing parseJudgeJSON path,
-// which tolerates both this new four-class shape and the legacy
-// {post: bool, reason: string} shape from older judge models. So
-// the strict schema is a tightening on capable providers + a no-op
-// degradation elsewhere.
+// IMPORTANT: NOT portable across "OpenAI-compatible" third-party
+// endpoints. NEX-297 L2 live-verified 2026-05-26 that DeepSeek's
+// /v1 returns 400 "This response_format type is unavailable now"
+// when this strict variant is sent — the looser json_object IS
+// supported. So strict mode is opt-in (EnforceJSONSchema=true on the
+// filter) for verified-capable providers; default is json_object
+// which works on both OpenAI and DeepSeek.
+//
+// Providers that ignore response_format entirely (Anthropic Messages
+// API, claude-code subprocess) fall through to the existing
+// parseJudgeJSON path, which tolerates both the four-class shape and
+// the legacy {post: bool, reason: string} from older judge models.
 //
 // Constraints required by OpenAI strict mode:
 //   - additionalProperties must be false
@@ -65,6 +71,34 @@ const judgeVerdictSchema = `{
 // 150 leaves headroom for unusually long "reason" strings without
 // letting a runaway model exhaust the cheap-tier budget. NEX-300.
 const judgeMaxOutputTokens = 150
+
+// judgeResponseFormat returns the response_format spec for the judge
+// turn. NEX-297 L2 + NEX-300 follow-up:
+//
+//   strict=false (default): json_object — guarantees the model
+//     returns valid JSON but doesn't enforce shape. Portable across
+//     OpenAI AND DeepSeek /v1 AND OpenAI-compatible third-party
+//     endpoints. The prompt + parseJudgeJSON tolerance handle shape.
+//
+//   strict=true (operator opt-in via EnforceJSONSchema): json_schema
+//     with judgeVerdictSchema and Strict=true. Model is GUARANTEED to
+//     emit a payload matching the schema. NEX-292's parse_failure
+//     path becomes effectively unreachable. Only safe on verified-
+//     capable providers (real api.openai.com); flagged off-by-default
+//     because DeepSeek /v1 rejects this variant with 400 "type
+//     unavailable" and every judge call would error.
+func judgeResponseFormat(strict bool) *bridle.ResponseFormat {
+	if strict {
+		return &bridle.ResponseFormat{
+			Type:        "json_schema",
+			Name:        "judge_verdict",
+			Description: "Cheap-judge classifier verdict for a candidate aspect reply.",
+			Strict:      true,
+			Schema:      json.RawMessage(judgeVerdictSchema),
+		}
+	}
+	return &bridle.ResponseFormat{Type: "json_object"}
+}
 
 // judgeTemperature is 0 so the cheap-judge produces deterministic
 // verdicts for the same input. Classifier work, not creative —
@@ -337,6 +371,21 @@ type CheapModelFilter struct {
 	// when NEX-103's schema migration lands.
 	ProviderEnv map[string]string
 
+	// EnforceJSONSchema opts the judge into OpenAI's strict structured-
+	// outputs mode (response_format=json_schema with Strict=true and
+	// judgeVerdictSchema). Only safe on providers that support the
+	// strict variant — verified working on real api.openai.com;
+	// verified NOT supported on DeepSeek's /v1 (returns 400 "type
+	// unavailable", live-tested NEX-297 L2 2026-05-26).
+	//
+	// Default (false) sends response_format=json_object — looser but
+	// portable. Model must return valid JSON; shape conformance falls
+	// to parseJudgeJSON tolerance + the explicit prompt instructions.
+	// This is the safe default that works on both OpenAI and DeepSeek
+	// /v1; flip true per-aspect or network-wide when operator knows
+	// the configured provider supports strict mode.
+	EnforceJSONSchema bool
+
 	// DegradedCooldown bounds fail-open posts during periods when the
 	// judge subprocess can't return a verdict (harness error: crash,
 	// auth failure, network blip, timeout). Inside the cooldown window
@@ -543,13 +592,20 @@ func (f *CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterD
 	// surprises and no UUID-gen dep needed. Surfaced 2026-05-12 by the
 	// judge-decision logging — see task #186 for the discovery trail.
 	// NEX-300: tighten the judge call with the standard provider knobs
-	// bridle now exposes (NEX-299 Pass 2). Temperature=0 makes the
-	// classifier deterministic; response_format=json_schema strict
-	// guarantees parseable output on providers that support it
-	// (OpenAI, DeepSeek /v1); MaxOutputTokens bounds runaway cost.
-	// Providers that don't support response_format (claude REST,
-	// claude-code) silently ignore — the existing parseJudgeJSON
-	// fallback path still tolerates both verdict shapes.
+	// bridle exposes (NEX-299 Pass 2). Temperature=0 makes the
+	// classifier deterministic; MaxOutputTokens bounds runaway cost;
+	// response_format guarantees the model returns valid JSON.
+	//
+	// ResponseFormat default is json_object (portable across OpenAI
+	// AND DeepSeek /v1 — NEX-297 L2 finding 2026-05-26: DeepSeek
+	// returns 400 for json_schema strict). Operators with verified-
+	// capable providers (real api.openai.com) can opt into strict via
+	// EnforceJSONSchema=true for the additional schema-shape guarantee.
+	//
+	// Providers that ignore response_format entirely (claude REST,
+	// claude-code subprocess) silently ignore both variants — the
+	// existing parseJudgeJSON fallback path still tolerates the
+	// verdict shapes either way.
 	temperature := judgeTemperature
 	req := bridle.TurnRequest{
 		AspectID:           in.AspectID,
@@ -562,13 +618,7 @@ func (f *CheapModelFilter) Judge(parent context.Context, in FilterInput) FilterD
 		ProviderEnv:        f.ProviderEnv,
 		Temperature:        &temperature,
 		MaxOutputTokens:    judgeMaxOutputTokens,
-		ResponseFormat: &bridle.ResponseFormat{
-			Type:        "json_schema",
-			Name:        "judge_verdict",
-			Description: "Cheap-judge classifier verdict for a candidate aspect reply.",
-			Strict:      true,
-			Schema:      json.RawMessage(judgeVerdictSchema),
-		},
+		ResponseFormat:     judgeResponseFormat(f.EnforceJSONSchema),
 	}
 
 	// Phase E: bracket the judge turn under "filter-judge" label.

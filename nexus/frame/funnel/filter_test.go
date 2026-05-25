@@ -629,7 +629,13 @@ func TestCheapModelFilter_NEX292_HealthyVerdictPathUnchanged(t *testing.T) {
 // to make the parse_failure fail-open path effectively unreachable
 // on capable providers (OpenAI, DeepSeek /v1). Asserts via the
 // scripted provider's captured-request inspection; no live API.
-func TestCheapModelFilter_NEX300_JudgeTurnRequestCarriesStrictParams(t *testing.T) {
+// NEX-300 + NEX-297 L2 follow-up: by default the judge sends
+// response_format=json_object — the PORTABLE variant that works on
+// both OpenAI and DeepSeek /v1. NEX-297 L2 found that json_schema
+// strict (the original NEX-300 default) returns 400 on DeepSeek /v1,
+// so strict is now opt-in via EnforceJSONSchema. Temperature=0 +
+// MaxOutputTokens still apply regardless.
+func TestCheapModelFilter_NEX300_DefaultUsesJSONObjectResponseFormat(t *testing.T) {
 	prov := &scriptedProvider{results: []bridle.ProviderResult{
 		{
 			FinalText:  `{"class": "complete", "reason": "substantive"}`,
@@ -641,6 +647,7 @@ func TestCheapModelFilter_NEX300_JudgeTurnRequestCarriesStrictParams(t *testing.
 		Harness:  bridle.NewHarness(prov),
 		Provider: "scripted",
 		Model:    "judge",
+		// EnforceJSONSchema deliberately false — pin the default behaviour.
 	}
 	_ = f.Judge(context.Background(), FilterInput{
 		FinalText: "candidate reply",
@@ -648,32 +655,65 @@ func TestCheapModelFilter_NEX300_JudgeTurnRequestCarriesStrictParams(t *testing.
 		TurnID:    "t1",
 	})
 
-	if prov.last.Temperature == nil {
-		t.Fatal("judge TurnRequest should set Temperature *float64 (got nil)")
+	if prov.last.Temperature == nil || *prov.last.Temperature != 0.0 {
+		t.Errorf("judge Temperature = %v, want 0.0", prov.last.Temperature)
 	}
-	if *prov.last.Temperature != 0.0 {
-		t.Errorf("judge Temperature = %v, want 0.0 for deterministic classifier", *prov.last.Temperature)
-	}
-	if prov.last.MaxOutputTokens <= 0 {
+	if prov.last.MaxOutputTokens <= 0 || prov.last.MaxOutputTokens > 500 {
 		t.Errorf("judge MaxOutputTokens = %d, want bounded positive value", prov.last.MaxOutputTokens)
-	}
-	if prov.last.MaxOutputTokens > 500 {
-		t.Errorf("judge MaxOutputTokens = %d, suspiciously high for a tiny JSON verdict", prov.last.MaxOutputTokens)
 	}
 	rf := prov.last.ResponseFormat
 	if rf == nil {
 		t.Fatal("judge TurnRequest should set ResponseFormat (got nil)")
 	}
+	if rf.Type != "json_object" {
+		t.Errorf("default judge ResponseFormat.Type = %q, want json_object (portable across OpenAI + DeepSeek /v1)", rf.Type)
+	}
+	if rf.Strict {
+		t.Errorf("default judge ResponseFormat.Strict = true, want false (strict is opt-in only)")
+	}
+	if len(rf.Schema) != 0 {
+		t.Errorf("default judge ResponseFormat.Schema should be empty for json_object; got %s", string(rf.Schema))
+	}
+}
+
+// NEX-300 + NEX-297 L2 follow-up: when an operator sets
+// EnforceJSONSchema=true (per-aspect or network-default) the judge
+// upgrades to OpenAI's strict structured-outputs mode. Only safe on
+// verified-capable providers — see judgeResponseFormat doc + NEX-298.
+func TestCheapModelFilter_NEX300_EnforceJSONSchemaOptsIntoStrict(t *testing.T) {
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{
+			FinalText:  `{"class": "complete", "reason": "substantive"}`,
+			Usage:      bridle.Usage{InputTokens: 5, OutputTokens: 1},
+			StopReason: bridle.StopReasonModelDone,
+		},
+	}}
+	f := &CheapModelFilter{
+		Harness:           bridle.NewHarness(prov),
+		Provider:          "scripted",
+		Model:             "judge",
+		EnforceJSONSchema: true,
+	}
+	_ = f.Judge(context.Background(), FilterInput{
+		FinalText: "candidate reply",
+		AspectID:  "anvil",
+		TurnID:    "t1",
+	})
+
+	rf := prov.last.ResponseFormat
+	if rf == nil {
+		t.Fatal("opt-in strict mode: ResponseFormat is nil")
+	}
 	if rf.Type != "json_schema" {
-		t.Errorf("judge ResponseFormat.Type = %q, want json_schema", rf.Type)
+		t.Errorf("opt-in: ResponseFormat.Type = %q, want json_schema", rf.Type)
 	}
 	if !rf.Strict {
-		t.Errorf("judge ResponseFormat.Strict = false, want true for parse-failure-proof verdicts")
+		t.Errorf("opt-in: ResponseFormat.Strict = false, want true")
 	}
 	if rf.Name == "" {
-		t.Errorf("judge ResponseFormat.Name must be non-empty (OpenAI requires it)")
+		t.Errorf("opt-in: ResponseFormat.Name must be non-empty (OpenAI strict mode requires it)")
 	}
-	// Schema must decode to a valid object schema with the four-class enum.
+	// Schema must decode and carry the four-class enum.
 	var parsed struct {
 		Type                 string                     `json:"type"`
 		AdditionalProperties bool                       `json:"additionalProperties"`
@@ -681,30 +721,30 @@ func TestCheapModelFilter_NEX300_JudgeTurnRequestCarriesStrictParams(t *testing.
 		Properties           map[string]json.RawMessage `json:"properties"`
 	}
 	if err := json.Unmarshal(rf.Schema, &parsed); err != nil {
-		t.Fatalf("judge ResponseFormat.Schema invalid JSON: %v", err)
+		t.Fatalf("opt-in: Schema invalid JSON: %v", err)
 	}
 	if parsed.Type != "object" {
-		t.Errorf("schema.type = %q, want object", parsed.Type)
+		t.Errorf("opt-in: schema.type = %q, want object", parsed.Type)
 	}
 	if parsed.AdditionalProperties {
-		t.Errorf("schema.additionalProperties must be false for OpenAI strict mode")
+		t.Errorf("opt-in: schema.additionalProperties must be false for strict mode")
 	}
 	wantReqFields := map[string]bool{"class": true, "reason": true}
 	for _, r := range parsed.Required {
 		delete(wantReqFields, r)
 	}
 	if len(wantReqFields) > 0 {
-		t.Errorf("schema.required missing fields: %v (OpenAI strict requires every property in required)", wantReqFields)
+		t.Errorf("opt-in: schema.required missing fields: %v", wantReqFields)
 	}
 	classRaw, hasClass := parsed.Properties["class"]
 	if !hasClass {
-		t.Fatalf("schema.properties.class missing")
+		t.Fatalf("opt-in: schema.properties.class missing")
 	}
 	if !strings.Contains(string(classRaw), `"complete"`) ||
 		!strings.Contains(string(classRaw), `"scratch"`) ||
 		!strings.Contains(string(classRaw), `"goal_not_met"`) ||
 		!strings.Contains(string(classRaw), `"blocked"`) {
-		t.Errorf("schema.properties.class should enum the four NEX-210 verdict labels; got %s", string(classRaw))
+		t.Errorf("opt-in: class enum should cover the four NEX-210 labels; got %s", string(classRaw))
 	}
 }
 
