@@ -34,6 +34,10 @@ import (
 //   Description:
 //   <description>              (whole section omitted when empty)
 //
+//   External:                  (omitted when no refs)
+//     [<tracker>] <key> — <url>
+//     ...
+//
 //   Definition of Done:
 //   <dod>
 //
@@ -56,6 +60,19 @@ func buildDispatchBrief(issue *ledger.Issue) string {
 	}
 	if strings.TrimSpace(issue.Description) != "" {
 		fmt.Fprintf(&sb, "\nDescription:\n%s\n", issue.Description)
+	}
+	// NEX-272: surface cross-tracker provenance so the dispatched aspect
+	// can navigate directly to the source ticket (Jira, GitHub, ...) for
+	// background context without scraping the description for keys.
+	if len(issue.ExternalRefs) > 0 {
+		sb.WriteString("\nExternal:\n")
+		for _, ref := range issue.ExternalRefs {
+			fmt.Fprintf(&sb, "  [%s] %s — %s", ref.Tracker, ref.Key, ref.URL)
+			if ref.Description != "" {
+				fmt.Fprintf(&sb, " (%s)", ref.Description)
+			}
+			sb.WriteString("\n")
+		}
 	}
 	fmt.Fprintf(&sb, "\nDefinition of Done:\n%s", issue.DefinitionOfDone)
 	return sb.String()

@@ -90,3 +90,45 @@ func TestBuildDispatchBrief_WhitespaceOnlyDescriptionTreatedAsEmpty(t *testing.T
 		t.Errorf("whitespace-only description should be omitted\n--- got ---\n%s", got)
 	}
 }
+
+// NEX-272: external_refs rendering.
+
+func TestBuildDispatchBrief_RendersExternalRefs(t *testing.T) {
+	issue := &ledger.Issue{
+		Key:              "NEX-10",
+		Status:           "Ready",
+		Summary:          "with refs",
+		Priority:         "High",
+		AssigneeAspect:   "anvil",
+		DefinitionOfDone: "x",
+		ExternalRefs: []ledger.ExternalRef{
+			{Tracker: "jira", Key: "JIRA-7", URL: "https://example/JIRA-7"},
+			{Tracker: "github", Key: "owner/repo#9", URL: "https://github.com/owner/repo/issues/9", Description: "upstream report"},
+		},
+	}
+	got := buildDispatchBrief(issue)
+	for _, want := range []string{
+		"External:",
+		"[jira] JIRA-7 — https://example/JIRA-7",
+		"[github] owner/repo#9 — https://github.com/owner/repo/issues/9 (upstream report)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("brief missing %q\n--- got ---\n%s", want, got)
+		}
+	}
+}
+
+func TestBuildDispatchBrief_OmitsExternalSectionWhenEmpty(t *testing.T) {
+	issue := &ledger.Issue{
+		Key:              "NEX-11",
+		Status:           "Ready",
+		Summary:          "no refs",
+		Priority:         "Medium",
+		AssigneeAspect:   "anvil",
+		DefinitionOfDone: "x",
+	}
+	got := buildDispatchBrief(issue)
+	if strings.Contains(got, "External:") {
+		t.Errorf("empty refs should not produce External: section\n--- got ---\n%s", got)
+	}
+}
