@@ -225,6 +225,13 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 			b.requireAdmin(http.HandlerFunc(b.handleAdminModelConfigGet)))
 		mux.Handle("PUT /api/admin/aspects/{name}/model-config",
 			b.requireAdmin(http.HandlerFunc(b.handleAdminModelConfigSet)))
+		// Network-wide judge + compact defaults (NEX-294 Slice 2).
+		// Single-row config that layers under per-aspect overrides.
+		// Primary-* intentionally absent — primary is per-aspect by design.
+		mux.Handle("GET /api/admin/network-defaults",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminNetworkDefaultsGet)))
+		mux.Handle("PUT /api/admin/network-defaults",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminNetworkDefaultsSet)))
 		// Per-aspect MCP profiles (NEX-168). The stored blob holds
 		// ${credential:NAME.field} placeholders that get resolved at
 		// fetch time via credentials.Store.Substitute.
