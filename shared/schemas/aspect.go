@@ -108,6 +108,20 @@ type AspectConfig struct {
 	// updates this field at runtime to flip surfaces without identity loss.
 	PrimarySurface Surface `json:"primary_surface,omitempty"`
 
+	// MainTurnSampling configures sampling + output knobs for the
+	// aspect's main deliberation turn (NEX-300 main-turn slice).
+	// All fields optional; zero/nil = provider default.
+	//
+	// Maps directly to bridle.TurnRequest fields of the same name
+	// (NEX-299 Pass 2). Providers translate the fields they support
+	// + silently ignore the rest (TopK is claude-only, ResponseFormat
+	// is openai-only, etc.).
+	//
+	// Operator surface: today this is editable via aspect.json. A
+	// future admin-UI / NEX-263 store extension exposes it without
+	// requiring file edits + restart.
+	MainTurnSampling *MainTurnSampling `json:"main_turn_sampling,omitempty"`
+
 	// Rewriter configures the per-turn session-jsonl rewriter (see
 	// nexus/frame/funnel/rewriter). Only meaningful for claude-code-
 	// backed aspects — direct-API providers don't replay a jsonl, so
@@ -116,6 +130,32 @@ type AspectConfig struct {
 	Rewriter *RewriterConfig `json:"rewriter,omitempty"`
 
 	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// MainTurnSampling carries per-aspect overrides for the standard
+// provider sampling + output knobs on the main deliberation turn
+// (NEX-300 main-turn slice). All fields are optional; nil pointers
+// and zero/empty values fall through to the provider's own default.
+//
+// Operator can use these to:
+//   - Pin Temperature for reproducibility-sensitive aspects (judge
+//     and rewriter have their own defaults; this is for the MAIN turn)
+//   - Cap MaxOutputTokens to bound cost on tool-using aspects
+//     with chatty providers
+//   - Set StopSequences for aspects that should halt at specific
+//     markers (e.g. structured-output aspects)
+//
+// Wire shape mirrors bridle.TurnRequest's same-named fields exactly,
+// so the funnel pass-through is a literal field copy. Provider-
+// specific fields (TopK = claude-only, Seed = openai-only) are
+// silently ignored by providers that don't honour them.
+type MainTurnSampling struct {
+	Temperature      *float64 `json:"temperature,omitempty"`
+	TopP             *float64 `json:"top_p,omitempty"`
+	TopK             *int     `json:"top_k,omitempty"`
+	Seed             *int     `json:"seed,omitempty"`
+	MaxOutputTokens  int      `json:"max_output_tokens,omitempty"`
+	StopSequences    []string `json:"stop_sequences,omitempty"`
 }
 
 // RewriterConfig controls the per-turn jsonl rewriter. All fields are
