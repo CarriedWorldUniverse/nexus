@@ -89,6 +89,60 @@ func TestHaikuDistiller_NEX300_TurnRequestCarriesSamplingFields(t *testing.T) {
 	}
 }
 
+// NEX-301: when CompactCredential resolves to an env overlay (via
+// admin-managed CompactCredential per NEX-263 + NEX-294), the
+// distiller's TurnRequest carries the ProviderEnv map, routing the
+// compact-tier call to the operator-configured auth domain instead
+// of inheriting ambient process env. Mirror of the CheapModelFilter
+// ProviderEnv pattern.
+func TestHaikuDistiller_NEX301_ProviderEnvThreadsToTurnRequest(t *testing.T) {
+	prov := &recordingProvider{reply: "tight"}
+	d := &HaikuDistiller{
+		Harness:  bridle.NewHarness(prov),
+		Provider: "recording",
+		Model:    "haiku",
+		ProviderEnv: map[string]string{
+			"ANTHROPIC_API_KEY":  "sk-deepseek-compact",
+			"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+		},
+	}
+	if _, err := d.DistillAssistantText(context.Background(), "verbose reasoning"); err != nil {
+		t.Fatalf("DistillAssistantText: %v", err)
+	}
+	last := prov.last.Load().(bridle.ProviderRequest)
+	if last.ProviderEnv == nil {
+		t.Fatal("distiller ProviderEnv should flow through to TurnRequest")
+	}
+	if last.ProviderEnv["ANTHROPIC_API_KEY"] != "sk-deepseek-compact" {
+		t.Errorf("ANTHROPIC_API_KEY = %q, want sk-deepseek-compact",
+			last.ProviderEnv["ANTHROPIC_API_KEY"])
+	}
+	if last.ProviderEnv["ANTHROPIC_BASE_URL"] != "https://api.deepseek.com/anthropic" {
+		t.Errorf("ANTHROPIC_BASE_URL = %q, want DeepSeek endpoint",
+			last.ProviderEnv["ANTHROPIC_BASE_URL"])
+	}
+}
+
+// NEX-301 back-compat: nil/empty ProviderEnv means the distiller
+// inherits ambient process env — pre-NEX-301 behaviour preserved
+// when operator hasn't configured a compact credential.
+func TestHaikuDistiller_NEX301_NilProviderEnvOmittedFromRequest(t *testing.T) {
+	prov := &recordingProvider{reply: "tight"}
+	d := &HaikuDistiller{
+		Harness:  bridle.NewHarness(prov),
+		Provider: "recording",
+		Model:    "haiku",
+		// ProviderEnv intentionally unset.
+	}
+	if _, err := d.DistillAssistantText(context.Background(), "x"); err != nil {
+		t.Fatalf("DistillAssistantText: %v", err)
+	}
+	last := prov.last.Load().(bridle.ProviderRequest)
+	if last.ProviderEnv != nil {
+		t.Errorf("ProviderEnv should stay nil when unset on distiller; got %v", last.ProviderEnv)
+	}
+}
+
 // NEX-300 (rewriter slice): same assertion for the tool-result
 // distillation path. Both DistillToolResult and DistillAssistantText
 // share runDistill; this test guards against accidental divergence

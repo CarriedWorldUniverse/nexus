@@ -244,7 +244,11 @@ func main() {
 	// Filter still works via shell-env passthrough (PR #146) or
 	// subscription auth; we don't want a transient broker hiccup to
 	// take the aspect down entirely.
-	judgeModelOverride, judgeEnv := fetchAspectJudgeOverrides(wsClient, res.AspectName, log)
+	// NEX-293 + NEX-301: fetch judge AND compact admin overrides in one
+	// WS round-trip. judge values flow into buildAgentFunnelFilter;
+	// compact values flow into buildAgentFunnelRewriter below.
+	overrides := fetchAspectModelOverrides(wsClient, res.AspectName, log)
+	judgeModelOverride, judgeEnv := overrides.JudgeModel, overrides.JudgeEnv
 
 	// Build the output filter (cheap-judge by default). Mirrors the
 	// Frame's buildOutputFilter but simpler: identity comes from Nexus
@@ -269,7 +273,7 @@ func main() {
 			return ""
 		}
 		return funnelPtr.SessionID()
-	}, log)
+	}, overrides.CompactModel, overrides.CompactEnv, log)
 
 	systemPrompt := composeSystemPrompt(res)
 	f, err := funnel.New(funnel.Config{
@@ -547,24 +551,36 @@ func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.Provider
 	}
 }
 
-// fetchAspectJudgeOverrides retrieves the judge model + judge
-// credential overrides (NEX-263) for this aspect from the broker over
-// WS, and resolves the credential bundle into an env overlay. Returns
-// (modelOverride, envOverlay) — either may be empty when no override
-// is configured.
+// aspectOverrides bundles the resolved admin-override knobs for an
+// agentfunnel-spawned aspect. Each pair (model, env) is independent
+// — judge and compact have separate credential lookups so they can
+// route to different providers (e.g. judge → DeepSeek bare, compact
+// → claude-haiku). Empty values mean "no override; caller's legacy
+// fallback applies".
+type aspectOverrides struct {
+	JudgeModel   string
+	JudgeEnv     map[string]string
+	CompactModel string
+	CompactEnv   map[string]string
+}
+
+// fetchAspectModelOverrides retrieves the judge + compact model +
+// credential overrides (NEX-263 + NEX-294 effective values) for this
+// aspect from the broker over WS, and resolves each credential into
+// an env overlay. NEX-301 extends NEX-293's judge-only path to also
+// cover compact, so out-of-process aspects pick up the same admin
+// + network-default plane the in-process Frame uses via
+// applyAspectModelOverrides.
 //
-// Best-effort: every failure path logs and returns empty values so
-// the funnel falls through to legacy behaviour (haiku default model,
-// ambient process env) rather than refusing to start. The cascade
-// observed 2026-05-25 happened with NO admin overrides at all, so
-// "no overrides resolved" is the legitimate baseline state.
-//
-// NEX-293: this brings out-of-process aspects (agentfunnel) onto the
-// same per-aspect admin-override plane the in-process Frame already
-// uses via applyAspectModelOverrides + resolveFilterCredentialEnv.
-func fetchAspectJudgeOverrides(ws brokercreds.Requester, aspectName string, log *slog.Logger) (modelOverride string, env map[string]string) {
+// Best-effort: every failure path logs and returns the partial
+// result. A failed credential fetch leaves that side's env nil
+// (subprocess inherits ambient process env); a failed model_config
+// fetch returns zero values across the board so the funnel falls
+// through to legacy hardcoded defaults rather than refusing to start.
+func fetchAspectModelOverrides(ws brokercreds.Requester, aspectName string, log *slog.Logger) aspectOverrides {
+	out := aspectOverrides{}
 	if ws == nil {
-		return "", nil
+		return out
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -573,45 +589,63 @@ func fetchAspectJudgeOverrides(ws brokercreds.Requester, aspectName string, log 
 	if err != nil {
 		log.Warn("agentfunnel: fetch aspect model config failed; falling back to defaults",
 			"aspect", aspectName, "err", err)
-		return "", nil
-	}
-	if cfg.JudgeModel != "" {
-		log.Info("agentfunnel: admin override applied",
-			"aspect", aspectName, "kind", "judge_model",
-			"to", cfg.JudgeModel)
-		modelOverride = cfg.JudgeModel
-	}
-	if cfg.JudgeCredential == "" {
-		return modelOverride, nil
+		return out
 	}
 
-	// Fetch the credential bundle and translate to env. Mirror of the
-	// broker-side Store.EnvForCredential anthropic / openai mapping.
+	// Judge side (NEX-293).
+	if cfg.JudgeModel != "" {
+		log.Info("agentfunnel: admin override applied",
+			"aspect", aspectName, "kind", "judge_model", "to", cfg.JudgeModel)
+		out.JudgeModel = cfg.JudgeModel
+	}
+	out.JudgeEnv = resolveCredentialEnv(ws, aspectName, "judge", cfg.JudgeCredential, log)
+
+	// Compact side (NEX-301). Symmetric with judge.
+	if cfg.CompactModel != "" {
+		log.Info("agentfunnel: admin override applied",
+			"aspect", aspectName, "kind", "compact_model", "to", cfg.CompactModel)
+		out.CompactModel = cfg.CompactModel
+	}
+	out.CompactEnv = resolveCredentialEnv(ws, aspectName, "compact", cfg.CompactCredential, log)
+
+	return out
+}
+
+// resolveCredentialEnv fetches a named credential's provider bundle
+// over WS and translates it to an env overlay (ANTHROPIC_API_KEY +
+// optional ANTHROPIC_BASE_URL for Anthropic-shape; OPENAI_* for
+// OpenAI-shape). Returns nil on any failure path or when the
+// credential name is empty — caller falls back to ambient env.
+//
+// kindTag is just for log lines ("judge" / "compact") so operators
+// can grep for the specific side when debugging.
+func resolveCredentialEnv(ws brokercreds.Requester, aspectName, kindTag, credentialName string, log *slog.Logger) map[string]string {
+	if credentialName == "" {
+		return nil
+	}
 	credCtx, credCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer credCancel()
-	resolvedName, bundle, err := brokercreds.FetchProvider(credCtx, ws, cfg.JudgeCredential)
+	resolvedName, bundle, err := brokercreds.FetchProvider(credCtx, ws, credentialName)
 	if err != nil {
-		log.Warn("agentfunnel: fetch judge credential failed; judge inherits ambient env",
-			"aspect", aspectName,
-			"credential", cfg.JudgeCredential,
-			"err", err)
-		return modelOverride, nil
+		log.Warn("agentfunnel: fetch credential failed; inherits ambient env",
+			"aspect", aspectName, "kind", kindTag,
+			"credential", credentialName, "err", err)
+		return nil
 	}
-	env = providerBundleToEnv(bundle)
+	env := providerBundleToEnv(bundle)
 	if env == nil {
-		log.Warn("agentfunnel: judge credential has no env mapping for api_shape; judge inherits ambient env",
-			"aspect", aspectName,
-			"credential", resolvedName,
-			"api_shape", bundle.APIShape)
-		return modelOverride, nil
+		log.Warn("agentfunnel: credential has no env mapping for api_shape; inherits ambient env",
+			"aspect", aspectName, "kind", kindTag,
+			"credential", resolvedName, "api_shape", bundle.APIShape)
+		return nil
 	}
-	log.Info("agentfunnel: judge credential resolved",
-		"aspect", aspectName,
-		"credential", resolvedName,
-		"api_shape", bundle.APIShape,
+	log.Info("agentfunnel: credential resolved",
+		"aspect", aspectName, "kind", kindTag,
+		"credential", resolvedName, "api_shape", bundle.APIShape,
 		"env_keys", envKeyNames(env))
-	return modelOverride, env
+	return env
 }
+
 
 // providerBundleToEnv mirrors credentials.Store.EnvForCredential's
 // shape mapping. Anthropic-shape emits ANTHROPIC_API_KEY +
@@ -806,37 +840,60 @@ func resolveCursorDir(flagVal string) string {
 
 // buildAgentFunnelRewriter wires the per-turn jsonl rewriter for
 // aspects spawned via agentfunnel. Symmetric with the Frame-side
-// wiring in cmd/nexus/main.go but simpler — no aspect.json on the
-// host, so config defaults are inferred from the provider and
-// thresholds use spec defaults.
+// wiring in cmd/nexus/main.go.
+//
+// NEX-301: now consumes admin-managed compact model + credential
+// overrides (NEX-263) layered under network defaults (NEX-294),
+// fetched over WS at startup via fetchAspectModelOverrides. Without
+// this wiring the distiller hardcoded "claude-haiku-4-5" on the
+// aspect's main provider regardless of operator config — parity gap
+// with the in-process Frame.
 //
 // Rules:
-//   - claude-code-flavored providers → enabled, claude-haiku-4-5 as
-//     distiller (Frame's provider reused)
+//   - claude-code-flavored providers → enabled, distiller model =
+//     compactModelOverride or "claude-haiku-4-5" fallback
 //   - direct-api providers (claude-api etc.) → no-op (no jsonl to
 //     compress)
 //   - any error during construction → no-op + WARN; never blocks
 //     funnel startup
 //
+// compactEnv (when non-nil) is the resolved ProviderEnv overlay for
+// the compact credential. The distiller's claudecode subprocess
+// inherits these env vars, routing the compact-tier call to whatever
+// auth domain the credential points at (DeepSeek, separate Anthropic
+// account, etc.) — same pattern as the judge's ProviderEnv.
+//
 // The session path is resolved lazily so funnel session rotations
 // land correctly without a config refresh.
-func buildAgentFunnelRewriter(aspectName, providerName string, frameProvider bridle.Provider, frameModel string, sessionIDFn func() string, log *slog.Logger) funnel.PostTurnHook {
+func buildAgentFunnelRewriter(aspectName, providerName string, frameProvider bridle.Provider, frameModel string, sessionIDFn func() string, compactModelOverride string, compactEnv map[string]string, log *slog.Logger) funnel.PostTurnHook {
 	if !isClaudeCodeProvider(providerName) {
 		log.Info("agentfunnel: rewriter disabled (provider has no session jsonl)",
 			"aspect", aspectName, "provider", providerName)
 		return funnel.NoopPostTurn{}
 	}
 
-	// Distiller: reuse the frame provider with claude-haiku-4-5 as the
-	// model. Operator override would land via a future rewriter
-	// section in the validation response — out of scope for v1.
-	haiku, err := rewriter.NewHaikuDistiller(bridle.NewHarness(frameProvider), bridle.ProviderID(providerName), "claude-haiku-4-5")
+	// Pick the effective distiller model: operator override > legacy
+	// hardcoded haiku fallback.
+	const defaultDistillerModel = "claude-haiku-4-5"
+	model := compactModelOverride
+	if model == "" {
+		model = defaultDistillerModel
+	}
+
+	// Distiller harness reuses the aspect's main provider — claudecode
+	// subprocess inherits env via per-TurnRequest ProviderEnv, so a
+	// separate provider instance per credential isn't needed (the
+	// distinct env routes the subprocess to the operator-chosen auth
+	// domain). Same architecture as CheapModelFilter's ProviderEnv
+	// pattern.
+	haiku, err := rewriter.NewHaikuDistiller(bridle.NewHarness(frameProvider), bridle.ProviderID(providerName), model)
 	if err != nil {
 		log.Warn("agentfunnel: rewriter haiku construction failed; disabling rewriter",
 			"aspect", aspectName, "err", err)
 		return funnel.NoopPostTurn{}
 	}
 	haiku.AspectID = aspectName
+	haiku.ProviderEnv = compactEnv
 
 	cwd, _ := os.Getwd()
 	rw, err := rewriter.New(rewriter.Config{
@@ -848,7 +905,7 @@ func buildAgentFunnelRewriter(aspectName, providerName string, frameProvider bri
 			return rewriter.SessionPath(cwd, id)
 		},
 		Distiller: haiku,
-		ModelName: "claude-haiku-4-5",
+		ModelName: model,
 		Logger:    log,
 	})
 	if err != nil {
@@ -859,7 +916,9 @@ func buildAgentFunnelRewriter(aspectName, providerName string, frameProvider bri
 
 	log.Info("agentfunnel: rewriter enabled",
 		"aspect", aspectName, "provider", providerName,
-		"distiller_model", "claude-haiku-4-5", "cwd", cwd)
+		"distiller_model", model,
+		"distiller_env_keys", envKeyNames(compactEnv),
+		"cwd", cwd)
 	return rewriter.NewRunner(rw, log)
 }
 

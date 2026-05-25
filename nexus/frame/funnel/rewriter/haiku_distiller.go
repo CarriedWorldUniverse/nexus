@@ -37,6 +37,21 @@ type HaikuDistiller struct {
 	// usage attribution. Empty is fine for tests; production should
 	// pass the Frame's aspect name.
 	AspectID string
+
+	// ProviderEnv overlays env vars onto each distillation TurnRequest
+	// (NEX-301). Mirrors funnel.CheapModelFilter.ProviderEnv — lets
+	// the operator route the compact-tier call to a separate auth
+	// domain (DeepSeek's compat endpoint, a separate Anthropic
+	// account, etc.) without touching the aspect's main provider's
+	// auth. Empty map / nil = inherit ambient process env.
+	//
+	// Populated from the per-aspect compact_credential admin override
+	// (NEX-263) layered under network defaults (NEX-294), resolved
+	// via brokercreds.FetchProvider + providerBundleToEnv at
+	// agentfunnel startup. The in-process Frame applies the same
+	// overlay via applyAspectModelOverrides + the rewriter wiring in
+	// cmd/nexus/main.go.
+	ProviderEnv map[string]string
 }
 
 // NewHaikuDistiller returns a configured HaikuDistiller. Returns error
@@ -137,6 +152,9 @@ func (d *HaikuDistiller) runDistill(parent context.Context, systemPrompt, userMe
 		MaxSteps:        1, // pure text in/out; no tool use
 		Temperature:     &temperature,
 		MaxOutputTokens: distillerMaxOutputTokens,
+		// NEX-301: route compact call through operator-configured
+		// auth domain when set; nil = inherit ambient process env.
+		ProviderEnv: d.ProviderEnv,
 	}
 
 	result, err := d.Harness.RunTurn(ctx, req, &noopRunner{}, &noopSink{})
