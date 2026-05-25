@@ -36,6 +36,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -250,6 +251,14 @@ func main() {
 	overrides := fetchAspectModelOverrides(wsClient, res.AspectName, log)
 	judgeModelOverride, judgeEnv := overrides.JudgeModel, overrides.JudgeEnv
 
+	// NEX-302: read MainTurnSampling from the aspect's own aspect.json
+	// on disk (autospawn convention: aspect.json lives at the aspect's
+	// home dir, which is our cwd). Symmetric source-of-truth with the
+	// in-process Frame's NEX-300 wiring (which also reads aspect.json).
+	// Best-effort — missing file / malformed JSON / absent block all
+	// return a zero MainTurnSampling, preserving provider defaults.
+	mainTurnSampling := readMainTurnSamplingFromAspectJSON(cwd, log)
+
 	// Build the output filter (cheap-judge by default). Mirrors the
 	// Frame's buildOutputFilter but simpler: identity comes from Nexus
 	// validation, not aspect.json on the host. The admin model_config
@@ -309,6 +318,12 @@ func main() {
 		ChatGateway:       gateway,
 		StreamTextToChat:  true, // NEX-240: stream text blocks to chat as they arrive
 		AspectHome:        cwd,  // NEX-241: stderr log + session isolation anchor
+		// NEX-302: per-aspect main-turn sampling overrides from
+		// aspect.json on the aspect's home dir. Empty / unset block
+		// leaves funnel's pass-through with zero-valued
+		// MainTurnSampling -> bridle TurnRequest fields stay unset
+		// -> provider defaults preserved (back-compat).
+		MainTurnSampling: mainTurnSampling,
 		Filter:            outputFilter,
 		PostTurn:          postTurn,
 		ObservabilityHook: obsHook,
@@ -646,6 +661,67 @@ func resolveCredentialEnv(ws brokercreds.Requester, aspectName, kindTag, credent
 	return env
 }
 
+
+// readMainTurnSamplingFromAspectJSON loads the aspect's aspect.json
+// from `aspectHome/aspect.json`, extracts the main_turn_sampling
+// block, and translates it to funnel.MainTurnSampling. Best-effort:
+// missing file, malformed JSON, or absent block all return a zero
+// MainTurnSampling so the funnel falls through to provider defaults
+// — same back-compat semantics as the in-process Frame's NEX-300
+// wiring when no main_turn_sampling block is present.
+//
+// NEX-302: provides parity with the Frame's main-turn sampling
+// surface for autospawn'd aspects. Operator edits aspect.json on
+// the aspect's home dir + restarts the aspect → sampling applies.
+// Identical workflow to the Frame's case (cmd/nexus/main.go); the
+// aspect home is just a different directory.
+//
+// Future admin-managed sampling (broker-side overrides analogous to
+// NEX-263's model + credential) would extend the WS frame
+// AspectModelConfigGetResultPayload + this helper merges/layers
+// admin > aspect.json. Not in scope today — the broker has no
+// source for sampling values.
+func readMainTurnSamplingFromAspectJSON(aspectHome string, log *slog.Logger) funnel.MainTurnSampling {
+	if aspectHome == "" {
+		return funnel.MainTurnSampling{}
+	}
+	jsonPath := filepath.Join(aspectHome, "aspect.json")
+	raw, err := os.ReadFile(jsonPath)
+	if err != nil {
+		// Aspect.json absent is the normal case for many autospawn
+		// setups — only operators wanting sampling overrides put one
+		// there. Debug-level so it's quiet in steady state.
+		log.Debug("agentfunnel: no aspect.json found for main-turn sampling; using provider defaults",
+			"path", jsonPath)
+		return funnel.MainTurnSampling{}
+	}
+	var cfg schemas.AspectConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		log.Warn("agentfunnel: aspect.json malformed; main-turn sampling not applied",
+			"path", jsonPath, "err", err)
+		return funnel.MainTurnSampling{}
+	}
+	if cfg.MainTurnSampling == nil {
+		return funnel.MainTurnSampling{}
+	}
+	out := funnel.MainTurnSampling{
+		Temperature:     cfg.MainTurnSampling.Temperature,
+		TopP:            cfg.MainTurnSampling.TopP,
+		TopK:            cfg.MainTurnSampling.TopK,
+		Seed:            cfg.MainTurnSampling.Seed,
+		MaxOutputTokens: cfg.MainTurnSampling.MaxOutputTokens,
+		StopSequences:   cfg.MainTurnSampling.StopSequences,
+	}
+	log.Info("agentfunnel: main-turn sampling loaded from aspect.json",
+		"path", jsonPath,
+		"temperature_set", out.Temperature != nil,
+		"top_p_set", out.TopP != nil,
+		"top_k_set", out.TopK != nil,
+		"seed_set", out.Seed != nil,
+		"max_output_tokens", out.MaxOutputTokens,
+		"stop_sequences_count", len(out.StopSequences))
+	return out
+}
 
 // providerBundleToEnv mirrors credentials.Store.EnvForCredential's
 // shape mapping. Anthropic-shape emits ANTHROPIC_API_KEY +

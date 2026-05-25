@@ -1,6 +1,10 @@
 package main
 
 import (
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -94,4 +98,92 @@ func TestEnvKeyNames(t *testing.T) {
 	if got := envKeyNames(map[string]string{}); got != nil {
 		t.Errorf("empty env should produce nil; got %v", got)
 	}
+}
+
+// NEX-302: agentfunnel reads MainTurnSampling from its aspect's
+// aspect.json (autospawn convention: file lives at the aspect's home
+// dir). Parses cleanly + populates funnel.MainTurnSampling.
+func TestReadMainTurnSamplingFromAspectJSON_Populated(t *testing.T) {
+	dir := t.TempDir()
+	body := `{
+		"name": "anvil",
+		"provider": "claude-code",
+		"main_turn_sampling": {
+			"temperature":       0.7,
+			"top_p":             0.95,
+			"top_k":             40,
+			"seed":              1234,
+			"max_output_tokens": 2048,
+			"stop_sequences":    ["</done>", "STOP"]
+		}
+	}`
+	if err := writeTestFile(dir, "aspect.json", body); err != nil {
+		t.Fatalf("write aspect.json: %v", err)
+	}
+	got := readMainTurnSamplingFromAspectJSON(dir, newTestLogger())
+	if got.Temperature == nil || *got.Temperature != 0.7 {
+		t.Errorf("Temperature = %v, want 0.7", got.Temperature)
+	}
+	if got.TopP == nil || *got.TopP != 0.95 {
+		t.Errorf("TopP = %v, want 0.95", got.TopP)
+	}
+	if got.TopK == nil || *got.TopK != 40 {
+		t.Errorf("TopK = %v, want 40", got.TopK)
+	}
+	if got.Seed == nil || *got.Seed != 1234 {
+		t.Errorf("Seed = %v, want 1234", got.Seed)
+	}
+	if got.MaxOutputTokens != 2048 {
+		t.Errorf("MaxOutputTokens = %d, want 2048", got.MaxOutputTokens)
+	}
+	if len(got.StopSequences) != 2 || got.StopSequences[0] != "</done>" {
+		t.Errorf("StopSequences = %v, want [</done> STOP]", got.StopSequences)
+	}
+}
+
+// NEX-302 back-compat: aspect.json without a main_turn_sampling
+// block returns zero MainTurnSampling — provider defaults preserved.
+func TestReadMainTurnSamplingFromAspectJSON_AbsentBlock(t *testing.T) {
+	dir := t.TempDir()
+	body := `{"name": "anvil", "provider": "claude-code"}`
+	if err := writeTestFile(dir, "aspect.json", body); err != nil {
+		t.Fatal(err)
+	}
+	got := readMainTurnSamplingFromAspectJSON(dir, newTestLogger())
+	if got.Temperature != nil || got.TopP != nil || got.TopK != nil ||
+		got.Seed != nil || got.MaxOutputTokens != 0 || len(got.StopSequences) != 0 {
+		t.Errorf("absent block should produce zero MainTurnSampling; got %+v", got)
+	}
+}
+
+// NEX-302 back-compat: missing aspect.json file is the common case
+// for many autospawn setups — return zero, log at debug, never error.
+func TestReadMainTurnSamplingFromAspectJSON_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	// No aspect.json written.
+	got := readMainTurnSamplingFromAspectJSON(dir, newTestLogger())
+	if got.Temperature != nil || got.MaxOutputTokens != 0 || len(got.StopSequences) != 0 {
+		t.Errorf("missing file should produce zero MainTurnSampling; got %+v", got)
+	}
+}
+
+// NEX-302: malformed JSON is logged + returns zero (never crashes
+// the aspect startup just because aspect.json got corrupted).
+func TestReadMainTurnSamplingFromAspectJSON_MalformedJSON(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeTestFile(dir, "aspect.json", "{ this is not valid json"); err != nil {
+		t.Fatal(err)
+	}
+	got := readMainTurnSamplingFromAspectJSON(dir, newTestLogger())
+	if got.Temperature != nil || got.MaxOutputTokens != 0 || len(got.StopSequences) != 0 {
+		t.Errorf("malformed JSON should produce zero MainTurnSampling; got %+v", got)
+	}
+}
+
+func writeTestFile(dir, name, content string) error {
+	return os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644)
+}
+
+func newTestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
