@@ -240,3 +240,109 @@ func TestFetchJira_IncompleteBundle(t *testing.T) {
 		t.Errorf("err = %v, want incomplete-bundle diagnostic", err)
 	}
 }
+
+// replyModelConfig crafts the broker's success-path reply for
+// aspect.model_config.get. NEX-293 helper.
+func replyModelConfig(wsc *websocket.Conn, inReplyTo string, p frames.AspectModelConfigGetResultPayload) error {
+	resp, err := frames.NewResponse(frames.KindAspectModelConfigGetResult, inReplyTo, p)
+	if err != nil {
+		return err
+	}
+	raw, err := frames.Encode(resp)
+	if err != nil {
+		return err
+	}
+	return wsc.Write(context.Background(), websocket.MessageText, raw)
+}
+
+// NEX-293: round-trip a populated AspectModelConfig through the
+// aspect.model_config.get frame.
+func TestFetchAspectModelConfig_Populated(t *testing.T) {
+	srv := fakeBroker(t, func(wsc *websocket.Conn, env frames.Envelope) {
+		if env.Kind != frames.KindAspectModelConfigGet {
+			return
+		}
+		_ = replyModelConfig(wsc, env.ID, frames.AspectModelConfigGetResultPayload{
+			Aspect:          "anvil",
+			JudgeModel:      "haiku",
+			JudgeCredential: "anvil-judge-deepseek",
+		})
+	})
+	cli, cancel := startClient(t, srv)
+	defer cancel()
+
+	ctx, cctx := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cctx()
+	cfg, err := FetchAspectModelConfig(ctx, cli)
+	if err != nil {
+		t.Fatalf("FetchAspectModelConfig: %v", err)
+	}
+	if cfg.Aspect != "anvil" {
+		t.Errorf("Aspect = %q, want anvil", cfg.Aspect)
+	}
+	if cfg.JudgeModel != "haiku" {
+		t.Errorf("JudgeModel = %q, want haiku", cfg.JudgeModel)
+	}
+	if cfg.JudgeCredential != "anvil-judge-deepseek" {
+		t.Errorf("JudgeCredential = %q, want anvil-judge-deepseek", cfg.JudgeCredential)
+	}
+}
+
+// NEX-293: when no admin overrides are configured the broker returns
+// an empty (all-empty-string) result. The fetcher must surface that
+// cleanly, not as an error.
+func TestFetchAspectModelConfig_Empty(t *testing.T) {
+	srv := fakeBroker(t, func(wsc *websocket.Conn, env frames.Envelope) {
+		if env.Kind != frames.KindAspectModelConfigGet {
+			return
+		}
+		_ = replyModelConfig(wsc, env.ID, frames.AspectModelConfigGetResultPayload{
+			Aspect: "anvil",
+		})
+	})
+	cli, cancel := startClient(t, srv)
+	defer cancel()
+
+	ctx, cctx := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cctx()
+	cfg, err := FetchAspectModelConfig(ctx, cli)
+	if err != nil {
+		t.Fatalf("FetchAspectModelConfig: %v", err)
+	}
+	if cfg.JudgeModel != "" || cfg.JudgeCredential != "" ||
+		cfg.PrimaryModel != "" || cfg.PrimaryCredential != "" ||
+		cfg.CompactModel != "" || cfg.CompactCredential != "" {
+		t.Errorf("empty broker response should produce empty config; got %+v", cfg)
+	}
+}
+
+// NEX-293: broker-side error response (e.g. credentials store not
+// configured, identity not resolved) surfaces as ErrBrokerRejected
+// with the broker's diagnostic string. Caller is expected to log +
+// fall back to defaults, not crash.
+func TestFetchAspectModelConfig_BrokerError(t *testing.T) {
+	srv := fakeBroker(t, func(wsc *websocket.Conn, env frames.Envelope) {
+		if env.Kind != frames.KindAspectModelConfigGet {
+			return
+		}
+		errKind := frames.Kind(string(frames.KindAspectModelConfigGet) + ".error")
+		resp, _ := frames.NewResponse(errKind, env.ID, map[string]string{"error": "no aspect identity"})
+		raw, _ := frames.Encode(resp)
+		_ = wsc.Write(context.Background(), websocket.MessageText, raw)
+	})
+	cli, cancel := startClient(t, srv)
+	defer cancel()
+
+	ctx, cctx := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cctx()
+	_, err := FetchAspectModelConfig(ctx, cli)
+	if err == nil {
+		t.Fatal("expected error from broker .error envelope")
+	}
+	if !errors.Is(err, ErrBrokerRejected) {
+		t.Errorf("err = %v, want wraps ErrBrokerRejected", err)
+	}
+	if !strings.Contains(err.Error(), "no aspect identity") {
+		t.Errorf("err = %v, want broker diagnostic surfaced", err)
+	}
+}

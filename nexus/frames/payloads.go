@@ -380,6 +380,38 @@ type CredentialFetchResultPayload struct {
 }
 
 // -------------------------------------------------------------------
+// Per-aspect model + credential overrides (NEX-293) — agentfunnel
+// fetches the AspectModelConfig the broker holds in its credentials
+// store so out-of-process aspects see the same per-aspect admin
+// overrides as the in-process Frame.
+// -------------------------------------------------------------------
+
+// AspectModelConfigGetPayload is the (intentionally empty) request
+// body. The broker resolves the requesting aspect from the conn's
+// authenticated identity — aspects can't request another aspect's
+// overrides by passing a name.
+type AspectModelConfigGetPayload struct{}
+
+// AspectModelConfigGetResultPayload returns the AspectModelConfig row
+// for the requesting aspect. Each field is nullable (empty string =
+// "no override" — caller leaves keyfile value untouched). Mirrors the
+// shape of credentials.AspectModelConfig but JSON-friendly (omitempty
+// instead of pointer-to-string).
+//
+// Aspect echoes back the resolved name so callers can log what they
+// got vs what they asked for; identical to the credential.fetch
+// pattern.
+type AspectModelConfigGetResultPayload struct {
+	Aspect            string `json:"aspect"`
+	PrimaryModel      string `json:"primary_model,omitempty"`
+	PrimaryCredential string `json:"primary_credential,omitempty"`
+	JudgeModel        string `json:"judge_model,omitempty"`
+	JudgeCredential   string `json:"judge_credential,omitempty"`
+	CompactModel      string `json:"compact_model,omitempty"`
+	CompactCredential string `json:"compact_credential,omitempty"`
+}
+
+// -------------------------------------------------------------------
 // Operator dashboard request/response (dashboard-ws-port spec §3.2)
 //
 // All operator frames carry a correlation_id (Envelope.ID); the
