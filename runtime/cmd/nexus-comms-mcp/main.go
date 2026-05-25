@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -117,9 +118,46 @@ func main() {
 	// MCP startup, resolveAuth fails earlier at the validate POST
 	// and the MCP still exits. Wrapping resolveAuth in a retry loop
 	// is a separate, larger change.)
+	// NEX-237: JWT expires after the broker-side TTL (~12h default).
+	// When wsclient reconnects (sleep/wake, network blip, broker
+	// restart) it dials with the cached JWT — if that JWT has
+	// expired the broker returns 401, kicking off an exponential-
+	// backoff loop that never recovers without manual MCP restart.
+	// TokenProvider re-validates the keyfile to mint a fresh JWT
+	// before each dial when the cache is empty or near-expiry.
+	//
+	// Operator-token auth has no keyfile to refresh against — that
+	// path falls through to using the static AuthToken, matching
+	// pre-NEX-237 behaviour. Operator must rotate the token
+	// out-of-band when it expires.
+	tokenCache := &jwtCache{}
+	tokenCache.Set(auth.jwt, auth.expiresAt)
+	var tokenProvider func(ctx context.Context) (string, error)
+	if auth.keyfile != nil && auth.keyfileClient != nil {
+		kf := auth.keyfile
+		client := auth.keyfileClient
+		tokenProvider = func(ctx context.Context) (string, error) {
+			jwt, expires := tokenCache.Get()
+			if jwt != "" && time.Until(expires) > 1*time.Minute {
+				return jwt, nil
+			}
+			fresh, ferr := client.Validate(ctx, kf)
+			if ferr != nil {
+				log.Warn("nexus-comms-mcp: TokenProvider re-validate failed, using cached token",
+					"err", ferr)
+				return "", ferr
+			}
+			tokenCache.Set(fresh.SessionJWT, fresh.SessionExpiresAt)
+			log.Info("nexus-comms-mcp: TokenProvider re-validated via keyfile",
+				"expires", fresh.SessionExpiresAt.Format(time.RFC3339))
+			return fresh.SessionJWT, nil
+		}
+	}
+
 	wsCli, err := wsclient.New(wsclient.Config{
 		URL:              auth.wsURL,
 		AuthToken:        auth.jwt,
+		TokenProvider:    tokenProvider,
 		Handler:          wsHandler,
 		Logger:           log,
 		FailFirstConnect: false,
@@ -222,6 +260,42 @@ type authInfo struct {
 	// operator-token auth (operator never sends register).
 	provider string
 	model    string
+
+	// keyfile + keyfileClient are non-nil ONLY for keyfile auth.
+	// Cached on authInfo so the TokenProvider closure (NEX-237) can
+	// re-validate against the broker when the cached JWT expires,
+	// without round-tripping back through resolveAuth. Nil for
+	// operator-token auth — there's no keyfile to re-validate against,
+	// the operator must rotate the token externally.
+	keyfile       *keyfile.Keyfile
+	keyfileClient *keyfile.Client
+}
+
+// jwtCache holds the current JWT + expiry, mutex-protected so the
+// TokenProvider callback (called from the wsclient reconnect loop)
+// can read concurrently with the refresh path that writes.
+//
+// Inlined here rather than reusing agentfunnel's sessionState because
+// nexus-comms-mcp is a transport-only MCP — it doesn't have the
+// session-refresh frame plumbing agentfunnel needs, so the bigger
+// state machine would be overkill.
+type jwtCache struct {
+	mu      sync.Mutex
+	jwt     string
+	expires time.Time
+}
+
+func (c *jwtCache) Get() (string, time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.jwt, c.expires
+}
+
+func (c *jwtCache) Set(jwt string, expires time.Time) {
+	c.mu.Lock()
+	c.jwt = jwt
+	c.expires = expires
+	c.mu.Unlock()
 }
 
 // resolveAuth normalises the two auth modes into a single authInfo.
@@ -284,6 +358,12 @@ func resolveKeyfileAuth(path, urlOverride string, tlsCfg *tls.Config, log *slog.
 		tls:       tlsCfg,
 		provider:  res.Provider,
 		model:     res.Model,
+		// NEX-237: stash for the TokenProvider closure to re-validate
+		// when the JWT expires. Operator-token auth leaves these nil
+		// (no keyfile to refresh against — that's the operator's
+		// responsibility out-of-band).
+		keyfile:       kf,
+		keyfileClient: client,
 	}, nil
 }
 
