@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
@@ -397,30 +398,62 @@ func Spawn(cfg Config, candidates []Candidate) (*Supervisor, error) {
 // envAllowlist is the set of parent env variables forwarded to
 // autospawned children (#30). Anything else in os.Environ() is
 // dropped. Per operator decision (chat #9686) we ship a minimal list
-// and adjust later if a provider needs more:
+// and adjust as providers need more.
 //
 //	PATH         — required for the harness binary to find tools
 //	HOME         — Unix home directory; provider configs read from here
 //	USERPROFILE  — Windows equivalent of HOME
-//	TEMP         — used by some providers for scratch files
+//	TEMP / TMP   — scratch dir for both Unix and Windows providers
+//	TMPDIR       — Unix variant (macOS, some Linux setups)
+//	APPDATA      — Windows: npm-installed CLIs (claude.cmd lives here)
+//	LOCALAPPDATA — Windows: per-user app data, used by VS / GH CLI / etc.
+//	SYSTEMROOT   — Windows: required by many shells + cmd.exe internals
+//	WINDIR       — Windows: required by tools that probe the install
+//	USERNAME     — Windows: shell prompts and tools that key on user id
+//
+// Lookup is case-insensitive (strings.EqualFold) because Windows
+// represents the path variable as "Path" (TitleCase) rather than
+// "PATH". Pre-fix the case-sensitive map lookup stripped "Path"
+// entirely, leaving spawned aspects unable to find any executable —
+// the judge subprocess in particular failed with "executable file
+// not found in %PATH%" and the filter defaulted to fail-open,
+// cascading every aspect reply into chat (operator-observed
+// 2026-05-25).
 //
 // Per-aspect NEXUS_TOKEN is added separately by the token resolver;
 // any NEXUS_TOKEN in BaseEnv (the legacy graceful-degrade path) is
 // also passed through. Other NEXUS_* env vars are NOT forwarded
 // wholesale — explicit BaseEnv entries are the audited path.
-var envAllowlist = map[string]struct{}{
-	"PATH":        {},
-	"HOME":        {},
-	"USERPROFILE": {},
-	"TEMP":        {},
+var envAllowlist = []string{
+	"PATH",
+	"HOME",
+	"USERPROFILE",
+	"TEMP",
+	"TMP",
+	"TMPDIR",
+	"APPDATA",
+	"LOCALAPPDATA",
+	"SYSTEMROOT",
+	"WINDIR",
+	"USERNAME",
+}
+
+// envAllowed reports whether key matches any allowlist entry under
+// case-insensitive comparison.
+func envAllowed(key string) bool {
+	for _, allowed := range envAllowlist {
+		if strings.EqualFold(allowed, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // scrubParentEnv applies envAllowlist to a parent env slice.
-// Preserves order of the allowed keys' first occurrence (Go's exec
-// honors LAST occurrence anyway, but a stable order makes test
-// output deterministic). Tokens / app config that need to flow to
-// children must go through BaseEnv where the operator can audit
-// what's set.
+// Preserves first-occurrence order so tests are deterministic;
+// Go's exec honours LAST occurrence anyway. Tokens / app config
+// that need to flow to children must go through BaseEnv where the
+// operator can audit what's set.
 func scrubParentEnv(parent []string) []string {
 	out := make([]string, 0, len(envAllowlist))
 	for _, kv := range parent {
@@ -428,8 +461,7 @@ func scrubParentEnv(parent []string) []string {
 		if i < 0 {
 			continue
 		}
-		key := kv[:i]
-		if _, ok := envAllowlist[key]; ok {
+		if envAllowed(kv[:i]) {
 			out = append(out, kv)
 		}
 	}

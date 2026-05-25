@@ -265,6 +265,64 @@ func TestChildEnvScrubsParentEnv(t *testing.T) {
 	}
 }
 
+// Regression for the 2026-05-25 prod cascade: Windows represents the
+// path variable as "Path" (TitleCase), not "PATH". The pre-fix
+// case-sensitive map lookup stripped "Path" entirely, leaving
+// autospawned aspects unable to find executables — judge subprocess
+// failed with "executable file not found in %PATH%", filter
+// defaulted to fail-open, every aspect cascaded into chat.
+func TestChildEnvCaseInsensitivePathPassthrough(t *testing.T) {
+	parent := []string{
+		"Path=C:\\Windows\\System32;C:\\Users\\jacin\\AppData\\Roaming\\npm", // Windows TitleCase
+		"USERPROFILE=C:\\Users\\jacin",
+		"APPDATA=C:\\Users\\jacin\\AppData\\Roaming",                          // claude.cmd install dir
+		"LOCALAPPDATA=C:\\Users\\jacin\\AppData\\Local",
+		"SYSTEMROOT=C:\\Windows",
+		"WINDIR=C:\\Windows",
+		"TEMP=C:\\Users\\jacin\\AppData\\Local\\Temp",
+	}
+	env := childEnv(parent, nil, nil, "wren")
+	got := map[string]string{}
+	for _, kv := range env {
+		i := indexOfEqual(kv)
+		if i >= 0 {
+			got[kv[:i]] = kv[i+1:]
+		}
+	}
+	// Path (TitleCase) must come through — the cascade-causing case.
+	if got["Path"] == "" {
+		t.Errorf("Path (Windows TitleCase) was stripped — child can't find executables: %v", got)
+	}
+	// Windows-essential vars added for npm-installed CLI lookup.
+	for _, want := range []string{"APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "WINDIR"} {
+		if got[want] == "" {
+			t.Errorf("%s should be allowed through for Windows tool lookup", want)
+		}
+	}
+}
+
+func TestEnvAllowed_CaseInsensitive(t *testing.T) {
+	cases := []struct {
+		key string
+		ok  bool
+	}{
+		{"PATH", true},     // canonical Unix
+		{"Path", true},     // Windows TitleCase — the bug
+		{"path", true},     // lowercase variant
+		{"APPDATA", true},  // Windows-essential
+		{"AppData", true},  // case-flex
+		{"GITHUB_TOKEN", false},
+		{"AWS_SECRET_ACCESS_KEY", false},
+		{"NEXUS_TOKEN", false}, // handled via BaseEnv + resolver, not allowlist
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := envAllowed(c.key); got != c.ok {
+			t.Errorf("envAllowed(%q) = %v, want %v", c.key, got, c.ok)
+		}
+	}
+}
+
 // Regression for issue #21: DiscoverRoots merges multiple aspect-dir
 // scans, deduping by aspect name (first root wins on conflict).
 func TestDiscoverRoots_MergesMultipleRoots(t *testing.T) {
