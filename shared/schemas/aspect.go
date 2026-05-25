@@ -102,6 +102,20 @@ type AspectConfig struct {
 	// ProviderEnvResolver; until then this is a static per-aspect knob.
 	FilterCredential string `json:"filter_credential,omitempty"`
 
+	// CompactCredential names a provider credential whose env overlay
+	// is injected into the rewriter's haiku-distiller TurnRequest
+	// (NEX-301). Mirrors FilterCredential for the compact-tier path
+	// — lets operators route compact calls to a separate auth domain
+	// (DeepSeek, secondary Anthropic account) without touching the
+	// main deliberation or judge auth.
+	//
+	// Populated at startup by applyAspectModelOverrides from the
+	// admin-managed AspectModelConfig (per-aspect override OR
+	// network default, NEX-263 + NEX-294). Empty = compact inherits
+	// the aspect's main provider auth (subscription claudecode,
+	// process-env keys), matching legacy behaviour.
+	CompactCredential string `json:"compact_credential,omitempty"`
+
 	// PrimarySurface selects which runtime binary the aspect runs as.
 	// "funnel" (default/empty) → agentfunnel.exe; "agora" → agora.exe.
 	// Autospawn uses this to pick the correct binary. Self-switch

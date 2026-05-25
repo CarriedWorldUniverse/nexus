@@ -1216,6 +1216,30 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 	}
 }
 
+// resolveCompactCredentialEnv mirrors resolveFilterCredentialEnv
+// for the compact-tier (rewriter / haiku distiller) path. NEX-301.
+// Empty CompactCredential / nil store → returns nil → distiller
+// inherits ambient process env. Same best-effort error handling as
+// the filter side.
+func resolveCompactCredentialEnv(cfg schemas.AspectConfig, store *credentials.Store, log *slog.Logger) map[string]string {
+	if cfg.CompactCredential == "" || store == nil {
+		return nil
+	}
+	c, err := store.Get(context.Background(), cfg.CompactCredential)
+	if err != nil {
+		log.Warn("compact credential: lookup failed; distiller inherits ambient env",
+			"aspect", cfg.Name, "credential", cfg.CompactCredential, "err", err)
+		return nil
+	}
+	env, err := store.EnvForCredential(c)
+	if err != nil {
+		log.Warn("compact credential: env materialization failed; distiller inherits ambient env",
+			"aspect", cfg.Name, "credential", cfg.CompactCredential, "err", err)
+		return nil
+	}
+	return env
+}
+
 // resolveFilterCredentialEnv looks up the named filter credential and
 // returns its env overlay (typically ANTHROPIC_API_KEY +
 // ANTHROPIC_BASE_URL for Anthropic-shape providers). Empty
@@ -1345,9 +1369,15 @@ func applyAspectModelOverrides(ctx context.Context, cfg *schemas.AspectConfig, s
 		log.Warn("aspect primary credential override stored but not yet wired into runtime",
 			"aspect", cfg.Name, "value", *override.PrimaryCredential)
 	}
-	if override.CompactCredential != nil {
-		log.Warn("aspect compact credential override stored but not yet wired into runtime",
-			"aspect", cfg.Name, "value", *override.CompactCredential)
+	// Compact credential — per-aspect override > network default
+	// (NEX-294). Wired into runtime via the rewriter construction
+	// site below (NEX-301).
+	if compactCred, src := pickModelOverride(override.CompactCredential, defaults.CompactCredential); src != "" {
+		prev := cfg.CompactCredential
+		cfg.CompactCredential = compactCred
+		log.Info("aspect credential override applied",
+			"aspect", cfg.Name, "kind", "compact",
+			"from", prev, "to", compactCred, "model_source", src)
 	}
 }
 
@@ -1561,7 +1591,12 @@ func toolsForProvider(id bridle.ProviderID) []bridle.ToolDef {
 // The session path is resolved lazily through sessionIDFn so the
 // funnel's session id rotations (compaction, rewriter-driven reset)
 // are picked up automatically.
-func buildRewriterRunner(cfg schemas.AspectConfig, aspectCwd string, frameProviderID bridle.ProviderID, frameProvider bridle.Provider, frameModel string, sessionIDFn func() string, log *slog.Logger) funnel.PostTurnHook {
+// NEX-301: compactEnv overlays env vars on the distiller's
+// TurnRequest, routing compact-tier calls to whatever auth domain
+// the resolved compact_credential points at (DeepSeek, secondary
+// Anthropic). Nil = inherit ambient process env (legacy behaviour).
+// Caller resolves via resolveCompactCredentialEnv.
+func buildRewriterRunner(cfg schemas.AspectConfig, aspectCwd string, frameProviderID bridle.ProviderID, frameProvider bridle.Provider, frameModel string, sessionIDFn func() string, compactEnv map[string]string, log *slog.Logger) funnel.PostTurnHook {
 	rwCfg := cfg.Rewriter
 	claudeFlavor := isClaudeFlavor(frameProviderID)
 	enabledByDefault := claudeFlavor
@@ -1624,6 +1659,9 @@ func buildRewriterRunner(cfg schemas.AspectConfig, aspectCwd string, frameProvid
 		return funnel.NoopPostTurn{}
 	}
 	haiku.AspectID = cfg.Name
+	// NEX-301: route compact calls through operator-configured auth
+	// domain when CompactCredential resolved to an env overlay.
+	haiku.ProviderEnv = compactEnv
 
 	// Thresholds: zero falls back to spec defaults inside rewriter.New.
 	var trThreshold, atThreshold int
@@ -1765,7 +1803,7 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 			return ""
 		}
 		return funnelPtr.SessionID()
-	}, log)
+	}, resolveCompactCredentialEnv(ef.Aspect.Config, credentialStore, log), log)
 	f, err := funnel.New(funnel.Config{
 		AspectID:   ef.Aspect.Name,
 		AspectHome: aspectHome,
