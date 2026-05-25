@@ -1323,3 +1323,86 @@ func TestStreamTextToChat_DisabledPreservesAutoPost(t *testing.T) {
 		t.Errorf("text=%q want 'Buffered text'", chat.sends[0].Text)
 	}
 }
+
+// NEX-300 main-turn slice: Config.MainTurnSampling fields flow
+// through to the bridle.TurnRequest the funnel builds. Asserts via
+// the scripted-provider's captured-request inspection. Pins both
+// directions: explicit values land, zero/nil values stay unset on
+// the request so providers fall through to their own defaults.
+func TestDeliberate_NEX300_MainTurnSamplingThreadsToRequest(t *testing.T) {
+	temp := 0.7
+	topP := 0.95
+	seed := 1234
+	prov := &scriptedProvider{results: []bridle.ProviderResult{{
+		FinalText: "ok",
+		Usage:     bridle.Usage{InputTokens: 5, OutputTokens: 1},
+	}}}
+	f, err := New(Config{
+		AspectID:     "frame",
+		SystemPrompt: "test",
+		Harness:      bridle.NewHarness(prov),
+		Provider:     "scripted",
+		Model:        "test-model",
+		Runner:       noopRunner{},
+		MainTurnSampling: MainTurnSampling{
+			Temperature:     &temp,
+			TopP:            &topP,
+			Seed:            &seed,
+			MaxOutputTokens: 4096,
+			StopSequences:   []string{"</done>"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Deliberate(context.Background(), "ping"); err != nil {
+		t.Fatal(err)
+	}
+	if prov.last.Temperature == nil || *prov.last.Temperature != 0.7 {
+		t.Errorf("Temperature = %v, want 0.7", prov.last.Temperature)
+	}
+	if prov.last.TopP == nil || *prov.last.TopP != 0.95 {
+		t.Errorf("TopP = %v, want 0.95", prov.last.TopP)
+	}
+	if prov.last.Seed == nil || *prov.last.Seed != 1234 {
+		t.Errorf("Seed = %v, want 1234", prov.last.Seed)
+	}
+	if prov.last.MaxOutputTokens != 4096 {
+		t.Errorf("MaxOutputTokens = %d, want 4096", prov.last.MaxOutputTokens)
+	}
+	if len(prov.last.StopSequences) != 1 || prov.last.StopSequences[0] != "</done>" {
+		t.Errorf("StopSequences = %v, want [</done>]", prov.last.StopSequences)
+	}
+	// TopK left unset by operator — should stay nil on the wire.
+	if prov.last.TopK != nil {
+		t.Errorf("TopK should be nil when unset; got %v", *prov.last.TopK)
+	}
+}
+
+// NEX-300 main-turn slice back-compat: a Config with zero
+// MainTurnSampling leaves every sampling field unset on the bridle
+// request — provider defaults preserved, no behaviour change for
+// callers that don't opt in.
+func TestDeliberate_NEX300_ZeroMainTurnSamplingPreservesDefaults(t *testing.T) {
+	f, prov := newTestFunnel(t,
+		bridle.ProviderResult{FinalText: "k", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
+	)
+	if _, err := f.Deliberate(context.Background(), "ping"); err != nil {
+		t.Fatal(err)
+	}
+	if prov.last.Temperature != nil {
+		t.Errorf("Temperature should be nil when not configured; got %v", *prov.last.Temperature)
+	}
+	if prov.last.TopP != nil {
+		t.Errorf("TopP should be nil; got %v", *prov.last.TopP)
+	}
+	if prov.last.Seed != nil {
+		t.Errorf("Seed should be nil; got %v", *prov.last.Seed)
+	}
+	if prov.last.MaxOutputTokens != 0 {
+		t.Errorf("MaxOutputTokens should be 0; got %d", prov.last.MaxOutputTokens)
+	}
+	if len(prov.last.StopSequences) != 0 {
+		t.Errorf("StopSequences should be empty; got %v", prov.last.StopSequences)
+	}
+}

@@ -1351,6 +1351,29 @@ func applyAspectModelOverrides(ctx context.Context, cfg *schemas.AspectConfig, s
 	}
 }
 
+// mainTurnSamplingFromConfig maps the optional aspect.json
+// main_turn_sampling block (schemas.MainTurnSampling) to funnel's
+// internal Config.MainTurnSampling shape. Field-for-field copy —
+// the two structs have identical layout, kept as separate types so
+// the funnel package doesn't take a hard dep on shared/schemas.
+//
+// nil input -> zero-valued MainTurnSampling (all fields unset),
+// which funnel pass-through translates to "leave bridle TurnRequest
+// fields unset" -> provider default. NEX-300 main-turn slice.
+func mainTurnSamplingFromConfig(s *schemas.MainTurnSampling) funnel.MainTurnSampling {
+	if s == nil {
+		return funnel.MainTurnSampling{}
+	}
+	return funnel.MainTurnSampling{
+		Temperature:     s.Temperature,
+		TopP:            s.TopP,
+		TopK:            s.TopK,
+		Seed:            s.Seed,
+		MaxOutputTokens: s.MaxOutputTokens,
+		StopSequences:   s.StopSequences,
+	}
+}
+
 // pickModelOverride implements the NEX-294 resolution: per-aspect
 // override wins when set (non-nil + non-empty); otherwise network
 // default applies when set (non-empty); otherwise neither (return
@@ -1780,6 +1803,12 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		UsageRecorder:  recorder,
 		Triage:         triageStore,
 		PostTurn:       postTurn,
+		// NEX-300 main-turn slice: per-aspect sampling + output overrides
+		// from aspect.json's optional main_turn_sampling block. Empty /
+		// absent block produces a zero-valued MainTurnSampling — funnel
+		// pass-through leaves bridle's TurnRequest fields unset →
+		// provider defaults preserved (back-compat).
+		MainTurnSampling: mainTurnSamplingFromConfig(ef.Aspect.Config.MainTurnSampling),
 		// Phase E: hand the embedded Frame's funnel the per-aspect
 		// Grouper from the broker's observability Hub. Same-process
 		// wiring — broker and funnel share the heap, so the Grouper

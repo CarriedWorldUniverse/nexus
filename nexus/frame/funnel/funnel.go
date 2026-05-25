@@ -226,6 +226,25 @@ func (r *SessionResolver) Mode() ContextMode {
 
 // Config wires the funnel's dependencies. All fields except the
 // optional ones are required.
+// MainTurnSampling carries per-aspect sampling + output overrides
+// for the main deliberation turn (NEX-300 main-turn slice). Mirrors
+// schemas.MainTurnSampling — kept as a local type so the funnel
+// package doesn't take a hard dep on shared/schemas for its internal
+// Config surface. Callers (cmd/nexus, runtime/cmd/agentfunnel) copy
+// fields field-for-field at the construction seam.
+//
+// All fields optional; nil pointers + zero/empty values fall through
+// to provider defaults. Maps directly to the bridle.TurnRequest
+// same-named fields the providers translate.
+type MainTurnSampling struct {
+	Temperature     *float64
+	TopP            *float64
+	TopK            *int
+	Seed            *int
+	MaxOutputTokens int
+	StopSequences   []string
+}
+
 type Config struct {
 	// Identity & framing
 	AspectID     string // the Frame's name (operator-chosen)
@@ -303,6 +322,19 @@ type Config struct {
 	// MaxStepsPerTurn caps tool-call rounds inside a single bridle turn.
 	// 0 = unlimited (bridle's default).
 	MaxStepsPerTurn int
+
+	// MainTurnSampling carries per-aspect sampling + output overrides
+	// for the main deliberation turn (NEX-300 main-turn slice). All
+	// fields optional; nil pointers / zero values fall through to
+	// provider defaults. Mirrors schemas.MainTurnSampling — funnel
+	// callers (cmd/nexus, runtime/cmd/agentfunnel) typically copy
+	// AspectConfig.MainTurnSampling fields into this surface.
+	//
+	// Why on Config rather than per-Deliberate-call: the operator's
+	// per-aspect intent is fixed for the lifetime of the aspect
+	// process; per-call would invite mid-session drift.
+	MainTurnSampling MainTurnSampling
+
 
 	// Routing — used by the Frame to decide what reaches the funnel.
 	// Not consumed inside Deliberate, but stored here so callers have
@@ -1040,6 +1072,16 @@ func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, user
 		MaxSteps:           f.cfg.MaxStepsPerTurn,
 		Cwd:                f.cfg.AspectHome,
 		ProviderEnv:        providerEnv,
+		// NEX-300 main-turn slice: per-aspect sampling + output
+		// overrides flow through to the wire. Nil pointers / zero
+		// values stay unset on the request → bridle providers fall
+		// through to their own defaults (existing back-compat).
+		Temperature:     f.cfg.MainTurnSampling.Temperature,
+		TopP:            f.cfg.MainTurnSampling.TopP,
+		TopK:            f.cfg.MainTurnSampling.TopK,
+		Seed:            f.cfg.MainTurnSampling.Seed,
+		MaxOutputTokens: f.cfg.MainTurnSampling.MaxOutputTokens,
+		StopSequences:   f.cfg.MainTurnSampling.StopSequences,
 	}
 }
 
