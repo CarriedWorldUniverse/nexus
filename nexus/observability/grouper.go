@@ -248,10 +248,21 @@ func (g *Grouper) appendText(text string) {
 }
 
 func (g *Grouper) startToolCall(e bridle.ToolCallStart) {
+	// NEX-100: normalize missing/empty Args to "{}" so the marshalled
+	// activity log entry renders as "input":{} (truthful empty-args
+	// representation) instead of "input":null. Some upstream providers
+	// (e.g. bedrock) emit ToolCallStart without Args; previously the
+	// activity log carried "null" which read as "data stripped" rather
+	// than "tool had no args". The byte slice is shared so the cost is
+	// just two literal bytes per call.
+	input := e.Args
+	if len(input) == 0 {
+		input = json.RawMessage("{}")
+	}
 	tc := &ToolCall{
 		ID:    e.ID,
 		Name:  e.Name,
-		Input: e.Args,
+		Input: input,
 	}
 	if art, err := ParseArtifact(e.Name, e.Args); err != nil {
 		tc.ArtifactParseErr = err.Error()
