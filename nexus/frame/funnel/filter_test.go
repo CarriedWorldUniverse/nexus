@@ -2,6 +2,7 @@ package funnel
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -619,6 +620,91 @@ func TestCheapModelFilter_NEX292_HealthyVerdictPathUnchanged(t *testing.T) {
 	}
 	if d.SystemNotice != "" {
 		t.Errorf("healthy verdict should not emit any SystemNotice; got %q", d.SystemNotice)
+	}
+}
+
+// NEX-300: judge TurnRequest carries Temperature=0, bounded
+// MaxOutputTokens, and a strict json_schema ResponseFormat
+// matching the four-class verdict shape — leaning on NEX-299 Pass 2
+// to make the parse_failure fail-open path effectively unreachable
+// on capable providers (OpenAI, DeepSeek /v1). Asserts via the
+// scripted provider's captured-request inspection; no live API.
+func TestCheapModelFilter_NEX300_JudgeTurnRequestCarriesStrictParams(t *testing.T) {
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{
+			FinalText:  `{"class": "complete", "reason": "substantive"}`,
+			Usage:      bridle.Usage{InputTokens: 5, OutputTokens: 1},
+			StopReason: bridle.StopReasonModelDone,
+		},
+	}}
+	f := &CheapModelFilter{
+		Harness:  bridle.NewHarness(prov),
+		Provider: "scripted",
+		Model:    "judge",
+	}
+	_ = f.Judge(context.Background(), FilterInput{
+		FinalText: "candidate reply",
+		AspectID:  "anvil",
+		TurnID:    "t1",
+	})
+
+	if prov.last.Temperature == nil {
+		t.Fatal("judge TurnRequest should set Temperature *float64 (got nil)")
+	}
+	if *prov.last.Temperature != 0.0 {
+		t.Errorf("judge Temperature = %v, want 0.0 for deterministic classifier", *prov.last.Temperature)
+	}
+	if prov.last.MaxOutputTokens <= 0 {
+		t.Errorf("judge MaxOutputTokens = %d, want bounded positive value", prov.last.MaxOutputTokens)
+	}
+	if prov.last.MaxOutputTokens > 500 {
+		t.Errorf("judge MaxOutputTokens = %d, suspiciously high for a tiny JSON verdict", prov.last.MaxOutputTokens)
+	}
+	rf := prov.last.ResponseFormat
+	if rf == nil {
+		t.Fatal("judge TurnRequest should set ResponseFormat (got nil)")
+	}
+	if rf.Type != "json_schema" {
+		t.Errorf("judge ResponseFormat.Type = %q, want json_schema", rf.Type)
+	}
+	if !rf.Strict {
+		t.Errorf("judge ResponseFormat.Strict = false, want true for parse-failure-proof verdicts")
+	}
+	if rf.Name == "" {
+		t.Errorf("judge ResponseFormat.Name must be non-empty (OpenAI requires it)")
+	}
+	// Schema must decode to a valid object schema with the four-class enum.
+	var parsed struct {
+		Type                 string                     `json:"type"`
+		AdditionalProperties bool                       `json:"additionalProperties"`
+		Required             []string                   `json:"required"`
+		Properties           map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(rf.Schema, &parsed); err != nil {
+		t.Fatalf("judge ResponseFormat.Schema invalid JSON: %v", err)
+	}
+	if parsed.Type != "object" {
+		t.Errorf("schema.type = %q, want object", parsed.Type)
+	}
+	if parsed.AdditionalProperties {
+		t.Errorf("schema.additionalProperties must be false for OpenAI strict mode")
+	}
+	wantReqFields := map[string]bool{"class": true, "reason": true}
+	for _, r := range parsed.Required {
+		delete(wantReqFields, r)
+	}
+	if len(wantReqFields) > 0 {
+		t.Errorf("schema.required missing fields: %v (OpenAI strict requires every property in required)", wantReqFields)
+	}
+	classRaw, hasClass := parsed.Properties["class"]
+	if !hasClass {
+		t.Fatalf("schema.properties.class missing")
+	}
+	if !strings.Contains(string(classRaw), `"complete"`) ||
+		!strings.Contains(string(classRaw), `"scratch"`) ||
+		!strings.Contains(string(classRaw), `"goal_not_met"`) ||
+		!strings.Contains(string(classRaw), `"blocked"`) {
+		t.Errorf("schema.properties.class should enum the four NEX-210 verdict labels; got %s", string(classRaw))
 	}
 }
 
