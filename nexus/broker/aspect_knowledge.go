@@ -5,12 +5,18 @@
 // knowledge store via nexus-comms-mcp without needing the operator's
 // dashboard WS or operator JWT.
 //
-// Funnel-driven aspects (anvil, harrow, etc.) reach the same
-// underlying store via the in-process KnowledgeGateway in
-// frame/funnel/comms.go — they don't take this WS path because their
-// turn-execution context can call the store directly. This file is
-// the wire surface that the spec at frame/funnel/comms.go:111 calls
-// out as "until a wire surface is specified."
+// Funnel-driven remote aspects (anvil, harrow, etc.) reach this
+// surface in TWO ways:
+//   1. via their agentfunnel CommsRunner using the wsasp.Knowledge-
+//      Gateway adapter (PR #174) — that connection IS registered;
+//   2. via a co-located nexus-comms-mcp using its own WS connection
+//      — that connection may NOT be registered if the agentfunnel
+//      already owns the aspect's roster slot (sendRegister fails
+//      with ErrAlreadyRegistered). The auth middleware still has
+//      proven the connection's identity (aspect JWT), so the
+//      handlers fall back to c.auth.AgentID when c.registeredAs is
+//      empty. Operator-reported 2026-05-27: "harrow tried to store
+//      — broker rejected with 'connection not registered'".
 
 package broker
 
@@ -20,6 +26,26 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 )
+
+// aspectIdentity returns the connection's aspect identity for
+// knowledge-frame handlers. Prefers c.registeredAs (the live-roster
+// slot) so a registered aspect's identity is unambiguous. Falls
+// back to c.auth.AgentID (the JWT-verified identity from the auth
+// middleware) for connections that authenticated as an aspect but
+// failed to register because the aspect already had a live slot
+// (the nexus-comms-mcp-alongside-agentfunnel case).
+//
+// Returns "" only if both are empty — which the auth middleware
+// should make impossible for non-operator connections.
+//
+// Operator connections never reach here: dispatchOperatorFrame
+// intercepts knowledge.* frames upstream.
+func (c *wsConn) aspectIdentity() string {
+	if c.registeredAs != "" {
+		return c.registeredAs
+	}
+	return c.auth.AgentID
+}
 
 // handleAspectKnowledgeSearch answers an aspect-issued knowledge.search.
 // Scope is restricted to the caller's own entries + shared (operator-
@@ -32,8 +58,9 @@ func (c *wsConn) handleAspectKnowledgeSearch(env frames.Envelope) {
 		c.operatorError(env, "knowledge store not configured")
 		return
 	}
-	if c.registeredAs == "" {
-		c.operatorError(env, "knowledge.search: connection not registered")
+	aspectID := c.aspectIdentity()
+	if aspectID == "" {
+		c.operatorError(env, "knowledge.search: no aspect identity (connection not authenticated as aspect)")
 		return
 	}
 	var p frames.KnowledgeSearchPayload
@@ -62,7 +89,7 @@ func (c *wsConn) handleAspectKnowledgeSearch(env frames.Envelope) {
 	q := knowledge.Query{
 		Text: p.Text,
 		Scope: knowledge.Scope{
-			Agent:    c.registeredAs,
+			Agent:    aspectID,
 			OwnAgent: ownAgent,
 			Shared:   shared,
 			Peers:    p.Peers,
@@ -108,8 +135,9 @@ func (c *wsConn) handleAspectKnowledgeStore(env frames.Envelope) {
 		c.operatorError(env, "knowledge store not configured")
 		return
 	}
-	if c.registeredAs == "" {
-		c.operatorError(env, "knowledge.store: connection not registered")
+	aspectID := c.aspectIdentity()
+	if aspectID == "" {
+		c.operatorError(env, "knowledge.store: no aspect identity (connection not authenticated as aspect)")
 		return
 	}
 	var p frames.KnowledgeStorePayload
@@ -123,7 +151,7 @@ func (c *wsConn) handleAspectKnowledgeStore(env frames.Envelope) {
 	}
 	ctx, cancel := c.opCtx()
 	defer cancel()
-	id, err := kstore.Put(ctx, c.registeredAs, p.Topic, p.Content, knowledge.PutOptions{Shared: p.Shared})
+	id, err := kstore.Put(ctx, aspectID, p.Topic, p.Content, knowledge.PutOptions{Shared: p.Shared})
 	if err != nil {
 		c.operatorError(env, "store: "+err.Error())
 		return
