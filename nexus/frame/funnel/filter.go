@@ -170,6 +170,16 @@ type FilterInput struct {
 	// — the judge operates in legacy binary post/suppress mode.
 	DoD string
 
+	// PriorTurnFinalText is the natural reply from the previous turn
+	// in a goal-pursuit loop (NEX-249). Provided so the judge can
+	// detect "looping, same output as prior turn, no new artifacts"
+	// (its prompt's blocked criterion). Without it the judge sees one
+	// turn at a time and can't catch repetition; the prefer-continue
+	// bias then keeps returning goal_not_met until the MaxTurns cap.
+	// Empty on the first goal-loop turn (no prior) and on turns
+	// outside any goal-pursuit.
+	PriorTurnFinalText string
+
 	// ToolNames lists the tool names the model invoked during this
 	// turn (provider-order). Empty for text-only turns. The judge uses
 	// this to distinguish "thin text but real work happened via tools"
@@ -512,6 +522,18 @@ func buildJudgeUserMessage(in FilterInput) string {
 			dod = dod[:maxDoDLen] + "…"
 		}
 		msg += "\n\nDEFINITION OF DONE:\n" + dod
+	}
+	// NEX-249: prior turn's final text, when available. Surfaces the
+	// repetition signal the judge prompt's "blocked" criterion already
+	// names ("same output as prior turn, looping, no new artifacts").
+	// Bounded — long candidates are already capped at maxJudgeCandidateLen
+	// and the same shape applies here.
+	if prior := strings.TrimSpace(in.PriorTurnFinalText); prior != "" {
+		const maxPriorTurnLen = 2000
+		if len(prior) > maxPriorTurnLen {
+			prior = prior[:maxPriorTurnLen] + "…"
+		}
+		msg += "\n\nPRIOR TURN OUTPUT (the candidate below must show forward progress vs this; near-identical output is the blocked signal):\n" + prior
 	}
 	// Surface tool usage so the judge can weight "thin text + real
 	// work via tools" as complete rather than scratch. Bounded list

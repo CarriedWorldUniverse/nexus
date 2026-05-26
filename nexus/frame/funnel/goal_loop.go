@@ -46,17 +46,28 @@ type GoalResult struct {
 	// "complete") or the loop cap was reached.
 	Done bool
 
-	// Blocked is true when the judge returned "blocked".
+	// Blocked is true when the judge returned "blocked" or when the
+	// repeat-goal_not_met safety cap escalated to blocked (NEX-249).
 	Blocked bool
 
 	// TurnsRun is how many turns the goal-loop executed in this
 	// Pursue call. May be zero when no work was pending.
 	TurnsRun int
 
-	// Reason is a short label for the terminal state:
-	// "complete", "blocked", "loop_cap", "empty_inbox".
+	// Reason is a short label for the terminal state. Documented
+	// values: "complete", "scratch", "blocked", "loop_cap",
+	// "empty_inbox", "no_dod", "unknown_class", "goal_not_met"
+	// (intermediate), "repeated_goal_not_met" (NEX-249 safety cap).
 	Reason string
 }
+
+// consecutiveGoalNotMetCap is the NEX-249 safety net. When the judge
+// returns goal_not_met this many turns in a row, the loop terminates
+// as Blocked regardless of judge verdict — covers the case where
+// fix A (prior-turn-aware judge) misfires or the judge model
+// degrades. Three is empirical: enough to absorb a brief stall, low
+// enough to keep the failure window short.
+const consecutiveGoalNotMetCap = 3
 
 // GoalLoop wraps a Funnel for ticket-driven goal pursuit.
 // Safe for a single calling goroutine (the Frame's main loop).
@@ -64,6 +75,15 @@ type GoalLoop struct {
 	funnel    *Funnel
 	cfg       GoalConfig
 	turnCount int
+
+	// priorFinalText is the prior turn's natural reply, threaded into
+	// the next judge invocation (NEX-249 fix A) so it can detect
+	// "looping, same output as prior turn". Empty on the first turn.
+	priorFinalText string
+
+	// consecutiveGoalNotMet counts consecutive goal_not_met verdicts.
+	// Reset on any non-goal_not_met class. NEX-249 fix B safety cap.
+	consecutiveGoalNotMet int
 }
 
 // NewGoalLoop creates a goal-loop wrapping the given funnel.
@@ -103,6 +123,9 @@ func (g *GoalLoop) Pursue(ctx context.Context) (GoalResult, error) {
 
 	// Set the DoD for this turn's judge.
 	g.funnel.SetDoD(g.cfg.DoD)
+	// NEX-249 fix A: thread the prior turn's reply to the judge so it
+	// can detect zero forward progress. Empty on the first turn.
+	g.funnel.SetPriorTurnFinalText(g.priorFinalText)
 
 	result, err := g.funnel.Deliberate(ctx, "")
 	if err != nil {
@@ -113,6 +136,10 @@ func (g *GoalLoop) Pursue(ctx context.Context) (GoalResult, error) {
 	}
 
 	g.turnCount++
+	// Always remember this turn's reply for the next judge call. Saved
+	// before any return so even the goal_not_met branch (which is the
+	// only one that loops) carries it forward.
+	g.priorFinalText = result.TurnResult.FinalText
 
 	class := result.Filter.Class
 	if class == "" {
@@ -122,6 +149,12 @@ func (g *GoalLoop) Pursue(ctx context.Context) (GoalResult, error) {
 		} else {
 			class = FilterClassScratch
 		}
+	}
+
+	// Reset the consecutive counter on any non-goal_not_met outcome.
+	// Counter only matters as a "stuck in a row" signal.
+	if class != FilterClassGoalNotMet {
+		g.consecutiveGoalNotMet = 0
 	}
 
 	switch class {
@@ -134,6 +167,20 @@ func (g *GoalLoop) Pursue(ctx context.Context) (GoalResult, error) {
 		return GoalResult{Done: true, TurnsRun: g.turnCount, Reason: "scratch"}, nil
 
 	case FilterClassGoalNotMet:
+		g.consecutiveGoalNotMet++
+		// NEX-249 fix B: safety cap. If the judge keeps returning
+		// goal_not_met without forward progress (fix A's prior-turn
+		// signal would normally surface this as blocked, but if the
+		// judge ignores it the loop would still run to MaxTurns), force
+		// terminate as blocked so the operator sees the stall instead
+		// of N more vacuous chat posts.
+		if g.consecutiveGoalNotMet >= consecutiveGoalNotMetCap {
+			return GoalResult{
+				Blocked:  true,
+				TurnsRun: g.turnCount,
+				Reason:   "repeated_goal_not_met",
+			}, nil
+		}
 		if g.turnCount >= g.cfg.MaxTurns {
 			return GoalResult{Done: true, TurnsRun: g.turnCount, Reason: "loop_cap"}, nil
 		}
@@ -185,8 +232,11 @@ func (g *GoalLoop) buildContinuationBrief(priorFinalText string) string {
 	)
 }
 
-// Reset clears the turn counter for a new goal pursuit. Call when
-// the operator manually unblocks or overrides the loop cap.
+// Reset clears the turn counter + repetition tracking for a new goal
+// pursuit. Call when the operator manually unblocks or overrides the
+// loop cap.
 func (g *GoalLoop) Reset() {
 	g.turnCount = 0
+	g.priorFinalText = ""
+	g.consecutiveGoalNotMet = 0
 }

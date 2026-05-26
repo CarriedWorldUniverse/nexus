@@ -429,6 +429,54 @@ func TestBuildJudgeUserMessage_TruncatesLongToolList(t *testing.T) {
 	}
 }
 
+// NEX-249 fix A: prior turn's final text surfaces in the judge prompt
+// so the "looping, same output as prior turn" rule the prompt already
+// names becomes actionable. Without this, the judge can't catch
+// repetition and the prefer-continue bias keeps returning goal_not_met
+// until the MaxTurns cap.
+func TestBuildJudgeUserMessage_IncludesPriorTurn(t *testing.T) {
+	msg := buildJudgeUserMessage(FilterInput{
+		AspectID:           "plumb",
+		FinalText:          "No @mention. Continuing to lurk.",
+		PriorTurnFinalText: "No @mention. Nothing to respond to.",
+		DoD:                "Respond to operator's dispatch",
+	})
+	if !strings.Contains(msg, "PRIOR TURN OUTPUT") {
+		t.Errorf("judge prompt missing PRIOR TURN OUTPUT header; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "Nothing to respond to") {
+		t.Errorf("judge prompt missing prior-turn body; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "blocked signal") {
+		t.Errorf("judge prompt should explain that near-identical output IS the blocked signal; got:\n%s", msg)
+	}
+}
+
+// NEX-249 fix A: prior-turn text is bounded so a pathological 50KB
+// prior reply can't blow the judge prompt.
+func TestBuildJudgeUserMessage_TruncatesLongPriorTurn(t *testing.T) {
+	msg := buildJudgeUserMessage(FilterInput{
+		AspectID:           "plumb",
+		FinalText:          "x",
+		PriorTurnFinalText: strings.Repeat("y", 5000),
+	})
+	if !strings.Contains(msg, "…") {
+		t.Errorf("expected ellipsis suffix on long prior-turn text; got tail:\n%s", msg[len(msg)-200:])
+	}
+}
+
+// NEX-249 fix A: PRIOR TURN OUTPUT section omits when PriorTurnFinalText
+// is empty so non-goal-loop turns aren't burdened with the marker.
+func TestBuildJudgeUserMessage_OmitsPriorTurnWhenAbsent(t *testing.T) {
+	msg := buildJudgeUserMessage(FilterInput{
+		AspectID:  "shadow",
+		FinalText: "hello",
+	})
+	if strings.Contains(msg, "PRIOR TURN OUTPUT") {
+		t.Errorf("PRIOR TURN OUTPUT leaked when PriorTurnFinalText empty; got:\n%s", msg)
+	}
+}
+
 func TestBuildJudgeUserMessage_IncludesPartialMarker(t *testing.T) {
 	msg := buildJudgeUserMessage(FilterInput{
 		AspectID:  "shadow",
