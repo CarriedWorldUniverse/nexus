@@ -113,7 +113,13 @@ func (b *Broker) handleAdminCredentialUpsert(w http.ResponseWriter, r *http.Requ
 	}
 	mode := credentials.Mode(req.Mode)
 	if mode == "" {
-		mode = credentials.ModeProxy
+		// Default is fetch — the only mode that actually works today.
+		// proxy mode is reserved for a broker-side proxy implementation
+		// that doesn't exist yet for any provider, so creating a
+		// credential as proxy silently produces a non-functional row
+		// (the operator hit this 2026-05-27). Flip until the proxy
+		// path is implemented.
+		mode = credentials.ModeFetch
 	}
 	allowed := req.AllowedAspects
 	if len(allowed) == 0 {
@@ -124,6 +130,13 @@ func (b *Broker) handleAdminCredentialUpsert(w http.ResponseWriter, r *http.Requ
 	//   - req.Kind set (NEX-76 path):  use the explicit kind + bundle.
 	//   - req.Kind empty (legacy path): provider-only — pack top-level
 	//     legacy fields into a provider bundle.
+	//
+	// Bundle-omit semantics (2026-05-27, operator pain): if Kind is set
+	// but Bundle is omitted AND the credential already exists, reuse
+	// the existing bundle + kind. Lets the operator flip mode (or
+	// description / allowed_aspects) without re-entering the secret —
+	// previously a bundle-less PUT was rejected outright, forcing the
+	// operator to re-type the API key just to change the mode.
 	var (
 		kind   credentials.Kind
 		bundle map[string]any
@@ -135,10 +148,30 @@ func (b *Broker) handleAdminCredentialUpsert(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		if req.Bundle == nil {
-			writeError(w, http.StatusBadRequest, "bundle required when kind is set")
-			return
+			existing, err := b.cfg.Credentials.Get(r.Context(), name)
+			if err != nil {
+				if errors.Is(err, credentials.ErrNotFound) {
+					writeError(w, http.StatusBadRequest, "bundle required when creating a new credential")
+					return
+				}
+				b.log.Error("admin credentials upsert: fetch existing for bundle preserve", "err", err)
+				writeError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+			if existing.Kind != kind {
+				writeError(w, http.StatusBadRequest, "kind mismatch with existing credential; provide bundle to change kind")
+				return
+			}
+			prevBundle, err := b.cfg.Credentials.Bundle(existing)
+			if err != nil {
+				b.log.Error("admin credentials upsert: decrypt existing bundle", "err", err)
+				writeError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+			bundle = prevBundle
+		} else {
+			bundle = req.Bundle
 		}
-		bundle = req.Bundle
 	} else {
 		// Legacy provider-shape — back-compat with pre-NEX-76 callers
 		// (curl scripts, agent-network admin tooling). Pack the
