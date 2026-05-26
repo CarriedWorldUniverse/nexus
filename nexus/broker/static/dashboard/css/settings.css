@@ -13,8 +13,8 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--bg);
-  color: var(--text);
+  background: var(--bg-deep);
+  color: var(--text-primary);
   font-family: var(--font-display);
 }
 
@@ -23,7 +23,7 @@
   flex-direction: row;
   gap: 4px;
   padding: 12px 20px 0 20px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-default);
   flex-shrink: 0;
 }
 
@@ -38,11 +38,11 @@
 }
 
 .settings-tab:hover {
-  color: var(--text);
+  color: var(--text-primary);
 }
 
 .settings-tab.active {
-  color: var(--text);
+  color: var(--text-primary);
   border-bottom-color: var(--accent);
 }
 
@@ -70,7 +70,7 @@
   background: rgba(255, 80, 80, 0.08);
   border: 1px solid rgba(255, 80, 80, 0.3);
   border-radius: 6px;
-  color: var(--text);
+  color: var(--text-primary);
   max-width: 500px;
 }
 
@@ -90,7 +90,7 @@
 .settings-aspects-title {
   font-size: 16px;
   font-weight: 600;
-  color: var(--text);
+  color: var(--text-primary);
 }
 
 .settings-aspect-card {
@@ -99,7 +99,7 @@
   gap: 8px;
   padding: 16px;
   background: var(--bg-elevated, rgba(255, 255, 255, 0.03));
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-default);
   border-radius: 6px;
 }
 
@@ -109,13 +109,13 @@
   gap: 12px;
   flex-wrap: wrap;
   padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .settings-aspect-name {
   font-weight: 600;
   font-size: 15px;
-  color: var(--text);
+  color: var(--text-primary);
 }
 
 .settings-aspect-meta {
@@ -156,7 +156,7 @@
 
 .settings-kind-model {
   font-family: var(--font-mono, ui-monospace, monospace);
-  color: var(--text);
+  color: var(--text-primary);
 }
 
 .settings-kind-credential {
@@ -194,9 +194,9 @@
 
 .settings-input,
 .settings-select {
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
   border-radius: 4px;
   padding: 4px 8px;
   font-size: 13px;
@@ -221,7 +221,7 @@
   letter-spacing: 0.5px;
   margin: 24px 0 8px;
   padding-bottom: 4px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .settings-input {
@@ -235,7 +235,7 @@
 .settings-btn {
   background: transparent;
   color: var(--text-muted);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-default);
   border-radius: 4px;
   padding: 4px 10px;
   font-size: 12px;
@@ -245,7 +245,7 @@
 }
 
 .settings-btn:hover:not(:disabled) {
-  color: var(--text);
+  color: var(--text-primary);
   border-color: var(--text-muted);
 }
 
@@ -256,12 +256,12 @@
 
 .settings-btn-primary {
   background: var(--accent);
-  color: var(--bg);
+  color: var(--bg-abyss);
   border-color: var(--accent);
 }
 
 .settings-btn-primary:hover:not(:disabled) {
-  color: var(--bg);
+  color: var(--bg-abyss);
   filter: brightness(1.1);
 }
 
@@ -291,7 +291,7 @@
 .settings-table td {
   padding: 10px 12px;
   text-align: left;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .settings-table th {
@@ -308,7 +308,7 @@
 
 .settings-cred-name {
   font-family: var(--font-mono, ui-monospace, monospace);
-  color: var(--text);
+  color: var(--text-primary);
 }
 
 .settings-cred-actions {
@@ -331,14 +331,14 @@
 }
 
 .settings-modal {
-  background: var(--bg);
-  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
   border-radius: 8px;
   padding: 20px;
   max-width: 480px;
   width: 100%;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
-  color: var(--text);
+  color: var(--text-primary);
 }
 
 .settings-modal-wide {
@@ -447,7 +447,7 @@
 
 .settings-audit-aspect {
   font-family: var(--font-mono, ui-monospace, monospace);
-  color: var(--text);
+  color: var(--text-primary);
 }
 
 .settings-audit-action {
@@ -484,5 +484,5 @@
   font-size: 11px;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--text);
+  color: var(--text-primary);
 }
