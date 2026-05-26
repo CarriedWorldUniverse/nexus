@@ -168,6 +168,16 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 	mux.Handle("POST /api/admin/rewind", b.requireAdmin(http.HandlerFunc(b.handleAdminRewind)))
 	mux.Handle("GET /api/admin/dispatch-status", b.requireAdmin(http.HandlerFunc(b.handleAdminDispatchStatus)))
 	mux.Handle("GET /api/admin/roster", b.requireAdmin(http.HandlerFunc(b.handleAdminRoster)))
+	// All known aspects (live + offline). /api/admin/roster only lists
+	// the LIVE-registered set; this surface walks the aspects DB and
+	// cross-references the roster so the Settings UI can show offline
+	// aspects too (operator-flagged 2026-05-27: "doesnt show aspects
+	// who arent connected"). Gated on the same KeyfileValidator.Store
+	// path that personality + switch-surface use.
+	if b.cfg.KeyfileValidator != nil && b.cfg.KeyfileValidator.Store != nil {
+		mux.Handle("GET /api/admin/aspects/all",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminAspectsAll)))
+	}
 	// NEX-134: online-safe aspect minting. CLI generates the keypair
 	// locally, posts the pubkey, broker is the single DB writer.
 	mux.Handle("POST /api/admin/aspects/mint", b.requireAdmin(http.HandlerFunc(b.handleAdminAspectMint)))
@@ -354,6 +364,52 @@ func (b *Broker) handleAdminRoster(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"aspects": b.roster.List(),
 	})
+}
+
+// adminAspectAll is one row in the /api/admin/aspects/all response.
+// Includes the DB-side identity (name, status, provider, model) PLUS
+// a `live` flag derived from the roster — true when an aspect's WS
+// is currently registered.
+type adminAspectAll struct {
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Live     bool   `json:"live"`
+}
+
+// handleAdminAspectsAll lists every aspect known to the broker —
+// active + retired, live + offline — so the Settings UI can edit
+// configuration for aspects that aren't currently connected.
+//
+// Operator-reported 2026-05-27: Settings only showed live aspects
+// (fetchAgents → roster.list → live-only); offline aspects had no row
+// to attach an override or default to, so config was effectively
+// gated on the aspect being up at the moment.
+func (b *Broker) handleAdminAspectsAll(w http.ResponseWriter, r *http.Request) {
+	store, ok := b.keyfileStore()
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "aspects store not configured")
+		return
+	}
+	rows, err := store.List(r.Context())
+	if err != nil {
+		b.log.Error("admin aspects/all: list", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	out := make([]adminAspectAll, 0, len(rows))
+	for _, a := range rows {
+		_, live := b.roster.Get(a.Name)
+		out = append(out, adminAspectAll{
+			Name:     a.Name,
+			Status:   string(a.Status),
+			Provider: a.Provider,
+			Model:    a.Model,
+			Live:     live,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"aspects": out})
 }
 
 // handleAdminOp returns an op's current status. 404 for unknown ids.

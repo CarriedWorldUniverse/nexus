@@ -39,6 +39,15 @@ async function adminFetch(path, init) {
   return res.json();
 }
 
+// GET /api/admin/aspects/all
+// Returns every known aspect (active + retired, live + offline) with
+// {name, status, provider, model, live}. Use this instead of the
+// roster-only fetchAgents() when Settings needs to render rows for
+// offline aspects too.
+export function listAllAspects() {
+  return adminFetch('/api/admin/aspects/all').then((b) => (b && b.aspects) || []);
+}
+
 // GET /api/admin/aspects/{name}/model-config
 // Returns AspectModelConfig (per credentials.AspectModelConfig). All
 // override fields are null when unset (inherit keyfile).

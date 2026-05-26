@@ -17,8 +17,7 @@
 // shipped here to keep the slice tight.
 
 const { html, useState, useEffect } = window.__preact;
-import { fetchAgents } from '../api.js';
-import { getModelConfig, setModelConfig, listCredentials, getNetworkDefaults } from '../api/admin.js';
+import { getModelConfig, setModelConfig, listCredentials, getNetworkDefaults, listAllAspects } from '../api/admin.js';
 
 const KINDS = [
   { id: 'primary', label: 'Primary' },
@@ -198,6 +197,8 @@ function AspectCard({ aspect, override, rosterRow, credentials, networkDefaults,
       <div class="settings-aspect-header">
         <span class="settings-aspect-name">${aspect}</span>
         ${rosterRow && rosterRow.provider && html`<span class="settings-aspect-meta">provider: ${rosterRow.provider}</span>`}
+        ${rosterRow && rosterRow.live === false && html`<span class="settings-aspect-offline">offline</span>`}
+        ${rosterRow && rosterRow.status === 'retired' && html`<span class="settings-aspect-retired">retired</span>`}
         ${needsReload && html`<span class="settings-reload-banner">Saved. Restart ${aspect} to apply.</span>`}
       </div>
       ${KINDS.map((k) => html`
@@ -235,8 +236,12 @@ export function SettingsAspects() {
       // isn't deployed yet (rolling upgrade), fall through to null
       // and the "network_default" hint stays off; per-aspect view
       // still works identically to pre-NEX-294.
+      // listAllAspects (NEX-308) returns every known aspect — including
+      // offline ones — so the operator can edit overrides on aspects
+      // that aren't currently connected. Pre-fix this used the roster-
+      // only fetchAgents and offline aspects were invisible here.
       const [agents, creds, nd] = await Promise.all([
-        fetchAgents(),
+        listAllAspects(),
         listCredentials(),
         getNetworkDefaults().catch(() => null),
       ]);
