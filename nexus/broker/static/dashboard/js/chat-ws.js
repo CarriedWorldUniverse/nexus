@@ -49,6 +49,14 @@ class ChatWS {
         // Map it across so MessageBubble's existing renderer works.
         created_at: payload.received_at || '',
         topic: payload.topic || '',
+        // thread_root is the broker's canonical thread identity (task
+        // #226). Thread.js's filter prefers this over the reply_to
+        // chain — pre-fix we dropped it here, so the filter fell
+        // through to `m.reply_to === rootId`, which only matches
+        // replies DIRECTLY under the root. Replies to child messages
+        // (the natural "reply to specific msg" UX) didn't match and
+        // the operator had to page-refresh to see them.
+        thread_root: payload.thread_root || 0,
       };
       this.fire('message.created', { type: 'message.created', msg });
     });
