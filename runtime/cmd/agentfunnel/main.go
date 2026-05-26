@@ -220,7 +220,16 @@ func main() {
 	}
 
 	gateway := wsasp.NewGateway(wsClient)
-	commsRunner := funnel.CommsRunner{Gateway: gateway}
+	// NEX-knowledge-fix (operator 2026-05-27): wire knowledge gateway
+	// over WS so remote aspects (harrow, anvil, plumb) can use the
+	// search_knowledge / store_knowledge tools. Pre-fix the Knowledge
+	// field was nil → CommsRunner returned "knowledge gateway not
+	// configured" on every call.
+	commsRunner := funnel.CommsRunner{
+		Gateway:   gateway,
+		Knowledge: wsasp.NewKnowledgeGateway(wsClient),
+		AspectID:  res.AspectName,
+	}
 
 	// Phase E remote forwarding: agentfunnel's funnel runs in a
 	// different process from the broker's observability Hub, so the
