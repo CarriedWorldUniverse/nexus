@@ -38,7 +38,7 @@ function CredentialRow({ row, onEdit, onDelete, busy }) {
     <tr>
       <td class="settings-cred-name">${row.name}</td>
       <td>${row.kind || 'provider'}</td>
-      <td>${row.mode || 'proxy'}</td>
+      <td>${row.mode || 'fetch'}</td>
       <td title=${aspectsLabel}>${aspectsLabel.length > 28 ? aspectsLabel.slice(0, 25) + '…' : aspectsLabel}</td>
       <td class="settings-cred-actions">
         <button class="settings-btn" onClick=${() => onEdit(row)} disabled=${busy}>Edit</button>
@@ -78,8 +78,14 @@ function CredentialModal({ mode, initial, onSave, onCancel, busy }) {
   const [allowedAspects, setAllowedAspects] = useState(
     (initial?.allowed_aspects || ['*']).join(', '),
   );
-  const [credMode, setCredMode] = useState(initial?.mode || 'proxy');
+  const [credMode, setCredMode] = useState(initial?.mode || 'fetch');
   const [bundle, setBundle] = useState(emptyBundleFor(initial?.kind || 'provider'));
+  // Edit-mode toggle: default OFF (keep existing bundle on server).
+  // When OFF, submit omits the bundle and the backend preserves what's
+  // stored — operator can flip mode / description / allowed-aspects
+  // without re-entering the API key. Toggle ON only when actually
+  // rotating the secret. Create mode is unaffected (must enter bundle).
+  const [rotateBundle, setRotateBundle] = useState(false);
   const [error, setError] = useState('');
 
   // When kind changes on Create, reset bundle to that kind's shape.
@@ -93,10 +99,15 @@ function CredentialModal({ mode, initial, onSave, onCancel, busy }) {
       setError('Name is required.');
       return;
     }
-    const bundleErr = validateBundleClient(kind, bundle);
-    if (bundleErr) {
-      setError(bundleErr);
-      return;
+    // Only validate the bundle when we're going to send it — either
+    // a fresh create or an explicit rotate.
+    const sendBundle = !isEdit || rotateBundle;
+    if (sendBundle) {
+      const bundleErr = validateBundleClient(kind, bundle);
+      if (bundleErr) {
+        setError(bundleErr);
+        return;
+      }
     }
     const allowed = allowedAspects
       .split(',')
@@ -105,11 +116,13 @@ function CredentialModal({ mode, initial, onSave, onCancel, busy }) {
     if (allowed.length === 0) allowed.push('*');
     const payload = {
       kind,
-      bundle,
       description: description.trim(),
       allowed_aspects: allowed,
       mode: credMode,
     };
+    if (sendBundle) {
+      payload.bundle = bundle;
+    }
     onSave(name.trim(), payload).then(
       () => { /* parent closes modal */ },
       (err) => setError(err.message || 'save failed'),
@@ -168,12 +181,24 @@ function CredentialModal({ mode, initial, onSave, onCancel, busy }) {
         </div>
 
         <h4 class="settings-modal-section">Bundle (${kind})</h4>
-        <${CredentialBundleForm}
-          kind=${kind}
-          bundle=${bundle}
-          onChange=${setBundle}
-          editing=${isEdit}
-        />
+        ${isEdit && html`
+          <label class="settings-field" style="margin-bottom: 8px;">
+            <input
+              type="checkbox"
+              checked=${rotateBundle}
+              onChange=${(e) => setRotateBundle(e.target.checked)}
+            />
+            <span style="margin-left: 6px;">Re-enter bundle (rotate secret) — leave unchecked to keep the stored bundle</span>
+          </label>
+        `}
+        ${(!isEdit || rotateBundle) && html`
+          <${CredentialBundleForm}
+            kind=${kind}
+            bundle=${bundle}
+            onChange=${setBundle}
+            editing=${isEdit}
+          />
+        `}
 
         ${error && html`<div class="settings-error settings-error-banner">${error}</div>`}
 

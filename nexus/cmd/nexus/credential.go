@@ -153,7 +153,10 @@ func runCredentialSet(args []string) int {
 	}
 	credMode := credentials.Mode(*mode)
 	if credMode == "" {
-		credMode = credentials.ModeProxy
+		// Default fetch — proxy mode has no broker-side proxy
+		// implementation yet, so proxy-created credentials silently
+		// don't work for any aspect. Operator-flagged 2026-05-27.
+		credMode = credentials.ModeFetch
 	}
 	allowedList := splitCSV(*allowed)
 	if len(allowedList) == 0 {
