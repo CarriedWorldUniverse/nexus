@@ -200,20 +200,10 @@ func (b *Broker) resolveUpgradeAuth(r *http.Request) (TokenInfo, bool) {
 		token = r.URL.Query().Get("token")
 	}
 	if token != "" {
-		if info, ok := b.cfg.Tokens.ResolveToken(token); ok {
-			return info, true
-		}
-		// JWT fallback for operator tokens.
-		if info, ok := b.tryVerifyOperatorJWT(token); ok {
-			return info, true
-		}
-		// JWT fallback for aspect keyfile-issued tokens. Aspects use
-		// /api/aspect/validate to exchange their keyfile for a session
-		// JWT (same signing secret, sub=aspect_name). Without this
-		// path the keyfile flow only works for the operator login —
-		// aspect WS upgrades 401. Surfaced on 2026-05-11 cutover when
-		// anvil's first agentfunnel boot couldn't dial.
-		if info, ok := b.tryVerifyAspectJWT(token); ok {
+		// Shared cascade with REST's b.auth — see resolveBearerToken
+		// for the rationale on JWT fallbacks (TokenStore restart
+		// survives JWT validity, keyfile validate exchanges, etc.).
+		if info, ok := b.resolveBearerToken(token); ok {
 			return info, true
 		}
 	}

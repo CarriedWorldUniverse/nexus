@@ -223,6 +223,79 @@ func TestResolveUpgradeAuth_NilNow(t *testing.T) {
 	}
 }
 
+// TestAuth_OperatorJWT_AcceptsAfterTokenStoreMiss is the 2026-05-27
+// regression test. Before the fix, b.auth only consulted TokenStore;
+// after a broker restart wiped the in-memory store, valid operator
+// JWTs were rejected with 401 "invalid bearer token" on every REST
+// call (including /api/admin/*), while WS upgrades kept working
+// because resolveUpgradeAuth had a JWT fallback. The Settings page
+// surfacing this was the operator-visible symptom.
+//
+// b.auth now goes through resolveBearerToken which mirrors the
+// 3-step cascade (TokenStore → operator JWT → aspect JWT).
+func TestAuth_OperatorJWT_AcceptsAfterTokenStoreMiss(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	clock := func() time.Time { return now }
+	secret := []byte("test-secret-32-bytes-padding-vvvv")
+	b := newBrokerWithOperatorLogin(t, secret, clock)
+
+	tok := mintOperatorJWT(t, secret, "operator", now.Add(time.Hour))
+
+	// Sanity: token is NOT in TokenStore (post-restart shape).
+	if _, ok := b.cfg.Tokens.ResolveToken(tok); ok {
+		t.Fatal("setup error: token should not be in TokenStore")
+	}
+
+	called := false
+	handler := b.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		info, ok := AuthUserFromContext(r.Context())
+		if !ok {
+			t.Error("AuthUserFromContext returned no info")
+			return
+		}
+		if info.AgentID != "operator" || !info.Admin || !info.Operator {
+			t.Errorf("resolved info = %+v; want operator+admin+operator", info)
+		}
+	}))
+
+	req := httptest.NewRequest("GET", "/api/admin/whatever", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if !called {
+		t.Errorf("downstream handler not called; status=%d body=%q",
+			rr.Code, rr.Body.String())
+	}
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200; body=%q", rr.Code, rr.Body.String())
+	}
+}
+
+// TestAuth_InvalidJWT_StillRejected guards against the fallback
+// over-accepting: a bogus token (no TokenStore entry, bad JWT
+// signature) must still 401 — not silently let through.
+func TestAuth_InvalidJWT_StillRejected(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	clock := func() time.Time { return now }
+	secret := []byte("test-secret-32-bytes-padding-vvvv")
+	b := newBrokerWithOperatorLogin(t, secret, clock)
+
+	handler := b.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("downstream handler must NOT be called on bogus token")
+	}))
+
+	req := httptest.NewRequest("GET", "/api/admin/whatever", nil)
+	req.Header.Set("Authorization", "Bearer not-a-real-jwt-or-token")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401; body=%q", rr.Code, rr.Body.String())
+	}
+}
+
 // http.Request type-assert to ensure tests compile against the
 // actual signature even if it changes.
 var _ http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})

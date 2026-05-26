@@ -705,6 +705,14 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 // known identity. The resolved TokenInfo is stashed on the request
 // context so handlers downstream can read it via authUserFromContext.
 // Health is left unauthenticated so process supervisors can poll it.
+//
+// Uses the same 3-step cascade as resolveUpgradeAuth (TokenStore →
+// operator JWT verify → aspect JWT verify) via the shared
+// resolveBearerToken helper. Without the JWT fallbacks, a broker
+// restart that wiped the in-memory TokenStore left WS upgrades
+// working (resolveUpgradeAuth's JWT fallback caught them) while
+// every REST call returned 401 "invalid bearer token" — the
+// operator-reported "settings load 401" symptom on 2026-05-27.
 func (b *Broker) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := ExtractBearer(r.Header.Get("Authorization"))
@@ -725,13 +733,36 @@ func (b *Broker) auth(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "missing bearer token")
 			return
 		}
-		info, ok := b.cfg.Tokens.ResolveToken(token)
+		info, ok := b.resolveBearerToken(token)
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "invalid bearer token")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(withAuthUser(r.Context(), info)))
 	})
+}
+
+// resolveBearerToken runs the standard 3-step cascade used by every
+// authenticated entry point on the broker: TokenStore lookup →
+// operator JWT verify → aspect JWT verify. Returns the first hit
+// or (zero, false) if none match.
+//
+// Shared between b.auth (REST) and resolveUpgradeAuth (WS upgrade).
+// They had drifted out of sync — REST had only the TokenStore step,
+// WS had all three — which surfaced as the 2026-05-27 "Settings
+// 401 invalid bearer" mismatch where chat (WS) kept working through
+// a broker restart but every /api/admin/* call rejected the JWT.
+func (b *Broker) resolveBearerToken(token string) (TokenInfo, bool) {
+	if info, ok := b.cfg.Tokens.ResolveToken(token); ok {
+		return info, true
+	}
+	if info, ok := b.tryVerifyOperatorJWT(token); ok {
+		return info, true
+	}
+	if info, ok := b.tryVerifyAspectJWT(token); ok {
+		return info, true
+	}
+	return TokenInfo{}, false
 }
 
 // authUserCtxKey is the unexported context key under which the
