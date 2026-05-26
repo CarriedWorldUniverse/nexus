@@ -25,6 +25,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -97,18 +98,33 @@ func commonDataDirFlag(fs *flag.FlagSet) *string {
 	return fs.String("data-dir", "", "data directory holding nexus.db (falls back to NEXUS_DATA_DIR env, then ./data)")
 }
 
-// runCredentialSet — `nexus credential set <name> --kind <kind> --bundle <json> ...`
+// runCredentialSet — `nexus credential set <name> --kind <kind> {--bundle <json> | --bundle-file <path> | --bundle-stdin} ...`
 //
 // Bundle is a JSON object whose shape is kind-specific:
 //
 //	--kind=provider  --bundle='{"api_shape":"anthropic","base_url":"https://api.anthropic.com","key":"sk-..."}'
 //	--kind=jira      --bundle='{"atlassian_email":"...","atlassian_token":"...","atlassian_subdomain":"..."}'
 //	--kind=imap      --bundle='{"host":"...","port":993,"user":"...","password":"...","ssl":true}'
+//
+// Three input modes for the bundle, exactly one of which must be set:
+//
+//	--bundle <json>          — JSON inline. CONVENIENT for non-secret
+//	                            test bundles only; the JSON ends up
+//	                            in shell history + ps output + audit
+//	                            logs. DO NOT use for real secrets.
+//	--bundle-file <path>     — Read JSON from file (mode 0600 ideally).
+//	                            Safe for secrets — bytes never cross
+//	                            process-arg boundary.
+//	--bundle-stdin           — Read JSON from stdin. Composable with
+//	                            password managers / `pass show` / vault
+//	                            CLIs that emit on stdout.
 func runCredentialSet(args []string) int {
 	fs := flag.NewFlagSet("credential set", flag.ContinueOnError)
 	dataDir := commonDataDirFlag(fs)
 	kind := fs.String("kind", "", "credential kind (provider|jira|imap)")
-	bundleStr := fs.String("bundle", "", "credential bundle as JSON object (kind-specific shape)")
+	bundleStr := fs.String("bundle", "", "credential bundle as JSON object inline (UNSAFE for secrets — use --bundle-file or --bundle-stdin)")
+	bundleFile := fs.String("bundle-file", "", "path to a file containing the credential bundle JSON (safe for secrets)")
+	bundleStdin := fs.Bool("bundle-stdin", false, "read the credential bundle JSON from stdin (safe for secrets; composable with password-manager CLIs)")
 	mode := fs.String("mode", "", "access mode: proxy|fetch|both (default: proxy)")
 	desc := fs.String("description", "", "human-readable description")
 	allowed := fs.String("allowed-aspects", "*", "comma-separated aspect names, or '*' for all")
@@ -125,13 +141,14 @@ func runCredentialSet(args []string) int {
 		fmt.Fprintln(os.Stderr, "credential set: --kind required (provider|jira|imap)")
 		return 2
 	}
-	if *bundleStr == "" {
-		fmt.Fprintln(os.Stderr, "credential set: --bundle required (JSON object)")
+	bundleBytes, err := readBundle(*bundleStr, *bundleFile, *bundleStdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "credential set: %v\n", err)
 		return 2
 	}
 	var bundle map[string]any
-	if err := json.Unmarshal([]byte(*bundleStr), &bundle); err != nil {
-		fmt.Fprintf(os.Stderr, "credential set: --bundle is not valid JSON: %v\n", err)
+	if err := json.Unmarshal(bundleBytes, &bundle); err != nil {
+		fmt.Fprintf(os.Stderr, "credential set: bundle is not valid JSON: %v\n", err)
 		return 2
 	}
 	credMode := credentials.Mode(*mode)
@@ -439,5 +456,56 @@ func (o *optionalString) get() *string {
 	}
 	v := o.val
 	return &v
+}
+
+// readBundle resolves the credential bundle JSON from exactly one of
+// --bundle (inline), --bundle-file (path), or --bundle-stdin. Returns
+// an error when none or more than one is set. Inline mode is preserved
+// for backwards-compat + non-secret test bundles; file + stdin modes
+// are the safe paths for real secrets (no shell history, no ps output,
+// no audit-log spill).
+//
+// Implementation note: the inline path is left in place rather than
+// removed because the audit-trail trade-off ("secret never crossed
+// the process arg boundary") only matters for kinds that ARE secrets.
+// Operator with a non-secret bundle (e.g. just a base_url, or a key
+// already in a public test vault) shouldn't be forced through the
+// file dance. Documentation calls out the trade-off; the tool stays
+// flexible.
+func readBundle(inline, filePath string, fromStdin bool) ([]byte, error) {
+	count := 0
+	if inline != "" {
+		count++
+	}
+	if filePath != "" {
+		count++
+	}
+	if fromStdin {
+		count++
+	}
+	switch count {
+	case 0:
+		return nil, errors.New("exactly one of --bundle / --bundle-file / --bundle-stdin must be set")
+	case 1:
+		// good
+	default:
+		return nil, errors.New("--bundle, --bundle-file, --bundle-stdin are mutually exclusive — pick one")
+	}
+	if inline != "" {
+		return []byte(inline), nil
+	}
+	if filePath != "" {
+		b, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("read --bundle-file %q: %w", filePath, err)
+		}
+		return b, nil
+	}
+	// fromStdin
+	b, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return nil, fmt.Errorf("read bundle from stdin: %w", err)
+	}
+	return b, nil
 }
 
