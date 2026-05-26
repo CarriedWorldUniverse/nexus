@@ -200,7 +200,7 @@
 .msg-content a { color: var(--accent-blue, #58a6ff); text-decoration: underline; }
 .msg-content table { border-collapse: collapse; margin: 6px 0; font-size: 12px; }
 .msg-content th { background: var(--bg-raised); color: var(--text-primary); font-weight: 600; padding: 4px 10px; border: 1px solid var(--border-subtle); }
-.msg-content td { padding: 3px 10px; border: 1px solid var(--border); }
+.msg-content td { padding: 3px 10px; border: 1px solid var(--border-subtle); }
 
 .msg-content img {
   max-width: 300px;
