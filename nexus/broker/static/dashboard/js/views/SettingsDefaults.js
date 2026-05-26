@@ -13,11 +13,11 @@
 // REST surface) but address different concerns.
 
 const { html, useState, useEffect, useMemo } = window.__preact;
-import { fetchAgents } from '../api.js';
 import {
   listCredentials,
   getCredentialDefaults, setCredentialDefaults,
   getNetworkDefaults, setNetworkDefaults,
+  listAllAspects,
 } from '../api/admin.js';
 
 // Each row corresponds to one column in the request schema (see
@@ -69,7 +69,7 @@ function DefaultsKindRow({ aspect, kind, current, options, onSave, busy }) {
   `;
 }
 
-function AspectDefaultsCard({ aspect, defaults, credentialsByKind, onSaved }) {
+function AspectDefaultsCard({ aspect, aspectRow, defaults, credentialsByKind, onSaved }) {
   const [busy, setBusy] = useState(false);
 
   async function onSave(column, value) {
@@ -87,6 +87,8 @@ function AspectDefaultsCard({ aspect, defaults, credentialsByKind, onSaved }) {
     <div class="settings-aspect-card">
       <div class="settings-aspect-header">
         <span class="settings-aspect-name">${aspect}</span>
+        ${aspectRow && aspectRow.live === false && html`<span class="settings-aspect-offline">offline</span>`}
+        ${aspectRow && aspectRow.status === 'retired' && html`<span class="settings-aspect-retired">retired</span>`}
       </div>
       ${KINDS.map((k) => html`
         <${DefaultsKindRow}
@@ -304,7 +306,9 @@ export function SettingsDefaults() {
     setLoading(true);
     setError('');
     try {
-      const [agents, credsBody] = await Promise.all([fetchAgents(), listCredentials()]);
+      // listAllAspects (NEX-308) — show offline aspects too. Pre-fix
+      // used the live-only roster; offline aspects had no row here.
+      const [agents, credsBody] = await Promise.all([listAllAspects(), listCredentials()]);
       const named = (agents || []).filter((a) => a && (a.name || a.id));
       const map = {};
       const settled = await Promise.allSettled(
@@ -371,6 +375,7 @@ export function SettingsDefaults() {
           <${AspectDefaultsCard}
             key=${name}
             aspect=${name}
+            aspectRow=${a}
             defaults=${defaultsByAspect[name]}
             credentialsByKind=${credentialsByKind}
             onSaved=${onSaved}

@@ -123,6 +123,31 @@
   color: var(--text-muted);
 }
 
+/* Offline / retired badges on aspect rows (NEX-308). The row stays
+   visible so the operator can edit configuration on aspects that
+   aren't currently connected; the badge signals state. */
+.settings-aspect-offline {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  background: var(--bg-deep);
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border-default);
+}
+
+.settings-aspect-retired {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+  background: var(--bg-deep);
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--accent-dim);
+}
+
 .settings-reload-banner {
   font-size: 12px;
   color: var(--accent);
