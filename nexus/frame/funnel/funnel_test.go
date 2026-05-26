@@ -309,6 +309,56 @@ func TestDeliberate_GuardClearsAfterCompletion(t *testing.T) {
 	}
 }
 
+// panickingReturnHandler crashes on OnTurnStart. Used by the
+// NEX-204 regression test to exercise the top-level recover in
+// Deliberate.
+type panickingReturnHandler struct{}
+
+func (panickingReturnHandler) OnTurnStart(context.Context, TurnTrigger) error {
+	panic("synthetic OnTurnStart panic")
+}
+func (panickingReturnHandler) Handle(context.Context, DeliberateResult, TurnTrigger) error {
+	return nil
+}
+
+// NEX-204: a panic inside any phase of Deliberate (here: the Return
+// handler's OnTurnStart) must NOT propagate out and crash the aspect
+// goroutine. The top-level recover catches it, logs at error, returns
+// a clean error to the caller, and the deliberating guard clears so
+// the next Deliberate call can proceed.
+//
+// Pre-fix the original 2026-05-17 incident: plumb crashed on a chat
+// message with markdown + emoji content. The exact trigger was opaque
+// (no logs preserved), but the symptom is "any panic in Deliberate
+// kills the aspect goroutine". This guard closes the symptom
+// regardless of which code path produces the panic.
+func TestDeliberate_TopLevelRecoverKeepsAspectAlive(t *testing.T) {
+	f, _ := newTestFunnel(t,
+		bridle.ProviderResult{FinalText: "post-recover", StopReason: bridle.StopReasonModelDone},
+	)
+	// Swap the default Return handler for one that panics on every
+	// OnTurnStart.
+	f.cfg.Return = panickingReturnHandler{}
+	f.Receive(bridle.InboxItem{MsgID: 1, From: "op", Content: "edge case"})
+
+	// Call must NOT panic out — recover catches and returns error.
+	_, err := f.Deliberate(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error on panicking Return handler; got nil (recover not catching?)")
+	}
+	if !strings.Contains(err.Error(), "panicked") {
+		t.Errorf("error message should mention the panic; got %q", err.Error())
+	}
+
+	// Crucially: the deliberating guard must have cleared. Verify by
+	// swapping in a clean Return handler and calling Deliberate again.
+	f.cfg.Return = NoopReturnHandler{}
+	f.Receive(bridle.InboxItem{MsgID: 2, From: "op", Content: "next msg"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Errorf("second Deliberate after recovered panic: %v (guard should have cleared)", err)
+	}
+}
+
 func TestDeliberate_EmptyInbox_Errors(t *testing.T) {
 	f, prov := newTestFunnel(t)
 	_, err := f.Deliberate(context.Background(), "")

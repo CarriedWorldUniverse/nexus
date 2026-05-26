@@ -845,7 +845,7 @@ func (f *Funnel) InboxLen() int {
 // Callers consult FilterDecision.ShouldPost to decide whether to
 // surface result.FinalText to chat. The funnel's auto-post path uses
 // the popped item's msg_id as reply_to, so threading is intrinsic.
-func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (DeliberateResult, error) {
+func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (result DeliberateResult, err error) {
 	// Single-caller guard. CompareAndSwap returns false if another
 	// Deliberate is already in flight on this Funnel — bail with the
 	// sentinel rather than silently racing on sessionHandle/sessionTail/
@@ -857,6 +857,24 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 		return DeliberateResult{}, ErrConcurrentDeliberate
 	}
 	defer f.deliberating.Store(false)
+
+	// NEX-204: top-level panic recovery. The inner phase calls already
+	// have local guards on emit / runFilter / PostTurn hooks; this
+	// catch-all defends against any other code path (Runner, Filter
+	// non-default impls, future code) that could panic on a hostile
+	// chat-content edge case (large markdown / unicode / emoji
+	// combinations were the original 2026-05-17 trigger). On panic
+	// the aspect survives — error returned to caller, deliberation
+	// loop continues with the next inbox item instead of the entire
+	// aspect goroutine crashing.
+	defer func() {
+		if r := recover(); r != nil {
+			f.log.Error("funnel: Deliberate panicked; aspect survives, turn discarded",
+				"aspect", f.cfg.AspectID, "panic", r)
+			result = DeliberateResult{}
+			err = fmt.Errorf("funnel: Deliberate panicked: %v", r)
+		}
+	}()
 
 	st, err := f.popHeadForTurn(userMessage)
 	if err != nil {
@@ -877,17 +895,17 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (Deliberate
 
 	req := f.buildTurnRequest(ctx, st, userMessage)
 
-	result, err := f.runMainTurn(ctx, st, req)
+	turnResult, err := f.runMainTurn(ctx, st, req)
 
 	if err != nil {
-		return f.handleTurnError(ctx, st, result, err)
+		return f.handleTurnError(ctx, st, turnResult, err)
 	}
 
-	f.commitTurnState(ctx, st, result)
+	f.commitTurnState(ctx, st, turnResult)
 
-	decision := f.judgeTurn(ctx, st, result)
+	decision := f.judgeTurn(ctx, st, turnResult)
 
-	return f.dispatchReturn(ctx, st, result, decision), nil
+	return f.dispatchReturn(ctx, st, turnResult, decision), nil
 }
 
 // deliberateState carries per-turn working state across Deliberate's
