@@ -529,6 +529,16 @@ type Funnel struct {
 	// Empty when no goal is active.
 	goalDoD string
 
+	// goalPriorTurnFinalText is the prior turn's natural reply in a
+	// goal-pursuit loop (NEX-249). Set by GoalLoop via
+	// SetPriorTurnFinalText before each Pursue's Deliberate; read and
+	// cleared by Deliberate when constructing FilterInput. The judge
+	// uses this to detect the "looping, same output as prior turn,
+	// no new artifacts" case its prompt already names as blocked —
+	// without prior-turn context the judge can't actuate that rule
+	// and defaults to goal_not_met under the prefer-continue bias.
+	goalPriorTurnFinalText string
+
 	// compactionFailures counts consecutive compact() errors. Reset to
 	// zero on the next successful compact. When it reaches
 	// compactionFailureLimit, Deliberate force-rotates the session
@@ -764,6 +774,26 @@ func (f *Funnel) takeDoD() string {
 	d := f.goalDoD
 	f.goalDoD = ""
 	return d
+}
+
+// SetPriorTurnFinalText records the prior goal-loop turn's final text
+// for the next judge invocation (NEX-249). Called by GoalLoop before
+// each Pursue's Deliberate. The judge consumes it via FilterInput so
+// it can detect zero forward progress against the DoD.
+func (f *Funnel) SetPriorTurnFinalText(text string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.goalPriorTurnFinalText = text
+}
+
+// takePriorTurnFinalText reads and clears the prior turn's final
+// text. Called by Deliberate once per turn.
+func (f *Funnel) takePriorTurnFinalText() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t := f.goalPriorTurnFinalText
+	f.goalPriorTurnFinalText = ""
+	return t
 }
 
 // ReceiveSynthetic enqueues a synthetic inbox item — one that didn't
@@ -1315,16 +1345,19 @@ func (f *Funnel) judgeTurn(ctx context.Context, st *deliberateState, result brid
 
 	// Read and clear the goal DoD for this turn (NEX-210).
 	dod := f.takeDoD()
+	// Read and clear the prior goal-loop turn's final text (NEX-249).
+	priorTurn := f.takePriorTurnFinalText()
 
 	decision := f.runFilter(ctx, FilterInput{
-		FinalText:    result.FinalText,
-		AspectID:     f.cfg.AspectID,
-		TurnID:       st.turnID,
-		TriggerFrom:  st.triggerFrom,
-		TriggerText:  st.triggerContent,
-		TriggerMsgID: st.triggerMsgID,
-		DoD:          dod,
-		ToolNames:    toolNamesFromInvocations(result.ToolCalls),
+		FinalText:          result.FinalText,
+		AspectID:           f.cfg.AspectID,
+		TurnID:             st.turnID,
+		TriggerFrom:        st.triggerFrom,
+		TriggerText:        st.triggerContent,
+		TriggerMsgID:       st.triggerMsgID,
+		DoD:                dod,
+		PriorTurnFinalText: priorTurn,
+		ToolNames:          toolNamesFromInvocations(result.ToolCalls),
 	})
 
 	// Surface the verdict as a structured Event so non-obs-hook sinks
