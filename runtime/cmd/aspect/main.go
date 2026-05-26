@@ -163,7 +163,15 @@ func main() {
 	// substituting wsasp.Gateway for framecomms.Gateway and
 	// wsasp.Bridge for the in-process Receive call.
 	gateway := wsasp.NewGateway(wsClient)
-	commsRunner := funnel.CommsRunner{Gateway: gateway}
+	// Wire WS knowledge gateway so search_knowledge / store_knowledge
+	// tool calls reach the broker. Same fix as agentfunnel — without
+	// this, runStoreKnowledge / runSearchKnowledge return
+	// "knowledge gateway not configured".
+	commsRunner := funnel.CommsRunner{
+		Gateway:   gateway,
+		Knowledge: wsasp.NewKnowledgeGateway(wsClient),
+		AspectID:  cfg.Name,
+	}
 
 	f, err := funnel.New(funnel.Config{
 		AspectID:   cfg.Name,
