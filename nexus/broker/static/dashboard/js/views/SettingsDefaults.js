@@ -113,14 +113,68 @@ function AspectDefaultsCard({ aspect, defaults, credentialsByKind, onSaved }) {
 // dropdowns sourced from the provider credentials in the store.
 // Empty string clears the default. Primary fields are intentionally
 // absent — primary is per-aspect by design.
+// CommittedField is a text input that defers save until the user
+// finishes typing — committed on blur or Enter. Pre-fix the parent
+// fired save() on every onChange (every keystroke), which set
+// busy=true and disabled the input mid-type. Operator-reported
+// 2026-05-27: "still cant edit the defaults". A select-style input
+// fires onChange exactly once per user action, so selects didn't
+// hit the same issue, but the text inputs were unusable.
+//
+// status: 'saved' | 'saving' | 'error' — drives a tiny indicator
+// to the right of the field so the operator can see what happened.
+function CommittedField({ initial, placeholder, onCommit, status }) {
+  const [local, setLocal] = useState(initial || '');
+  // Re-sync when the server-side initial changes (e.g. after a save
+  // round-trips and we want to reflect the canonical value).
+  useEffect(() => { setLocal(initial || ''); }, [initial]);
+
+  function commit() {
+    const next = local;
+    if (next === (initial || '')) return; // no-op
+    onCommit(next);
+  }
+
+  function onKeyDown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.target.blur(); // triggers onBlur → commit
+    } else if (e.key === 'Escape') {
+      setLocal(initial || '');
+      e.target.blur();
+    }
+  }
+
+  let indicator = '';
+  if (status === 'saving') indicator = '…';
+  else if (status === 'saved') indicator = '✓';
+  else if (status === 'error') indicator = '✗';
+
+  return html`
+    <input
+      class="settings-input"
+      type="text"
+      placeholder=${placeholder}
+      value=${local}
+      onInput=${(e) => setLocal(e.target.value)}
+      onBlur=${commit}
+      onKeyDown=${onKeyDown}
+    />
+    <span class="settings-defaults-status" aria-label=${status || ''}>${indicator}</span>
+  `;
+}
+
 function NetworkDefaultsPanel({ providerCreds }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
   const [nd, setNd] = useState({
     judge_model: '', judge_credential: '',
     compact_model: '', compact_credential: '',
   });
+  // Per-field save status — 'idle' | 'saving' | 'saved' | 'error'.
+  // Lets each row show its own indicator instead of one panel-wide
+  // busy lockout that pre-fix disabled all inputs together.
+  const [status, setStatus] = useState({});
 
   async function load() {
     setLoading(true);
@@ -142,7 +196,7 @@ function NetworkDefaultsPanel({ providerCreds }) {
   useEffect(() => { load(); }, []);
 
   async function save(field, value) {
-    setBusy(true);
+    setStatus((s) => ({ ...s, [field]: 'saving' }));
     setError('');
     try {
       const fresh = await setNetworkDefaults({ [field]: value });
@@ -152,10 +206,10 @@ function NetworkDefaultsPanel({ providerCreds }) {
         compact_model: (fresh && fresh.compact_model) || '',
         compact_credential: (fresh && fresh.compact_credential) || '',
       });
+      setStatus((s) => ({ ...s, [field]: 'saved' }));
     } catch (e) {
-      setError(e.message || 'save failed');
-    } finally {
-      setBusy(false);
+      setError(`${field}: ${e.message || 'save failed'}`);
+      setStatus((s) => ({ ...s, [field]: 'error' }));
     }
   }
 
@@ -174,19 +228,18 @@ function NetworkDefaultsPanel({ providerCreds }) {
       </div>
       <div class="settings-defaults-note">
         Applies when an aspect has no per-aspect override.
+        Text fields commit on blur or Enter (Esc to cancel).
         Primary model + credential are per-aspect only (set on the Aspects tab).
       </div>
       ${error && html`<div class="settings-error">${error}</div>`}
 
       <div class="settings-kind-row">
         <div class="settings-defaults-label">Judge model:</div>
-        <input
-          class="settings-input"
-          type="text"
+        <${CommittedField}
+          initial=${nd.judge_model}
           placeholder="e.g. deepseek-chat or haiku"
-          value=${nd.judge_model}
-          disabled=${busy}
-          onChange=${(e) => save('judge_model', e.target.value)}
+          status=${status.judge_model}
+          onCommit=${(v) => save('judge_model', v)}
         />
       </div>
       <div class="settings-kind-row">
@@ -194,7 +247,7 @@ function NetworkDefaultsPanel({ providerCreds }) {
         <select
           class="settings-select"
           value=${nd.judge_credential}
-          disabled=${busy || providerCreds.length === 0}
+          disabled=${providerCreds.length === 0}
           onChange=${(e) => save('judge_credential', e.target.value)}
         >
           <option value="">${credPlaceholder}</option>
@@ -202,16 +255,19 @@ function NetworkDefaultsPanel({ providerCreds }) {
             <option key=${c.name} value=${c.name}>${c.name}${c.description ? ' · ' + c.description : ''}</option>
           `)}
         </select>
+        <span class="settings-defaults-status">
+          ${status.judge_credential === 'saving' ? '…' :
+            status.judge_credential === 'saved' ? '✓' :
+            status.judge_credential === 'error' ? '✗' : ''}
+        </span>
       </div>
       <div class="settings-kind-row">
         <div class="settings-defaults-label">Compact model:</div>
-        <input
-          class="settings-input"
-          type="text"
+        <${CommittedField}
+          initial=${nd.compact_model}
           placeholder="e.g. deepseek-chat or haiku"
-          value=${nd.compact_model}
-          disabled=${busy}
-          onChange=${(e) => save('compact_model', e.target.value)}
+          status=${status.compact_model}
+          onCommit=${(v) => save('compact_model', v)}
         />
       </div>
       <div class="settings-kind-row">
@@ -219,7 +275,7 @@ function NetworkDefaultsPanel({ providerCreds }) {
         <select
           class="settings-select"
           value=${nd.compact_credential}
-          disabled=${busy || providerCreds.length === 0}
+          disabled=${providerCreds.length === 0}
           onChange=${(e) => save('compact_credential', e.target.value)}
         >
           <option value="">${credPlaceholder}</option>
@@ -227,6 +283,11 @@ function NetworkDefaultsPanel({ providerCreds }) {
             <option key=${c.name} value=${c.name}>${c.name}${c.description ? ' · ' + c.description : ''}</option>
           `)}
         </select>
+        <span class="settings-defaults-status">
+          ${status.compact_credential === 'saving' ? '…' :
+            status.compact_credential === 'saved' ? '✓' :
+            status.compact_credential === 'error' ? '✗' : ''}
+        </span>
       </div>
     </div>
   `;
