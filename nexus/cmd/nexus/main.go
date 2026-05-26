@@ -1851,6 +1851,15 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		Runner: funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
 		Filter:         outputFilter,
 		ChatGateway:    gateway,
+		// NEX-239: stream per-text-block to chat for parity with
+		// agentfunnel. Operator stance (2026-05-26): the embedded Frame
+		// is a standard agentfunnel that happens to auto-start with the
+		// broker; behavioural divergence isn't intentional. Without this,
+		// pre-tool exploratory text is dropped (claudecode resets
+		// finalText on every tool_use) — the same chat-loss pattern
+		// NEX-239 reported for anvil before NEX-240 wired streaming for
+		// remote agentfunnel aspects.
+		StreamTextToChat: true,
 		Threads:        threads,
 		Pulser:         pulser,
 		UsageRecorder:  recorder,
