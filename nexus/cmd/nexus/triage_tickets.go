@@ -460,6 +460,65 @@ func (c *triageJiraClient) postComment(ctx context.Context, key, body string) er
 	return c.do(ctx, http.MethodPost, "/rest/api/3/issue/"+url.PathEscape(key)+"/comment", payload, nil)
 }
 
+// getStatus returns the human-readable status name of an issue
+// ("To Do", "In Progress", "Done", etc.). NEX-303 uses this for
+// idempotent close-on-merge: if already Done, skip the transition.
+func (c *triageJiraClient) getStatus(ctx context.Context, key string) (string, error) {
+	q := url.Values{}
+	q.Set("fields", "status")
+	var raw struct {
+		Fields struct {
+			Status struct {
+				Name string `json:"name"`
+			} `json:"status"`
+		} `json:"fields"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/rest/api/3/issue/"+url.PathEscape(key)+"?"+q.Encode(), nil, &raw); err != nil {
+		return "", err
+	}
+	return raw.Fields.Status.Name, nil
+}
+
+// transitionTo moves the issue to a status by Jira-display-name
+// (case-sensitive — "Done", "In Progress", etc.). Lists available
+// transitions first because Jira's transition IDs are
+// instance-specific; matches by destination status name. NEX-303.
+//
+// Optional comment is posted BEFORE the transition fires so the
+// audit history threads correctly (mirrors nexus-jira-mcp/jira.go's
+// TransitionTo shape).
+func (c *triageJiraClient) transitionTo(ctx context.Context, key, target, comment string) error {
+	if comment != "" {
+		if err := c.postComment(ctx, key, comment); err != nil {
+			return fmt.Errorf("pre-transition comment: %w", err)
+		}
+	}
+	var resp struct {
+		Transitions []struct {
+			ID string `json:"id"`
+			To struct {
+				Name string `json:"name"`
+			} `json:"to"`
+		} `json:"transitions"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/rest/api/3/issue/"+url.PathEscape(key)+"/transitions", nil, &resp); err != nil {
+		return fmt.Errorf("list transitions: %w", err)
+	}
+	for _, t := range resp.Transitions {
+		if t.To.Name == target {
+			return c.do(ctx, http.MethodPost,
+				"/rest/api/3/issue/"+url.PathEscape(key)+"/transitions",
+				map[string]any{"transition": map[string]string{"id": t.ID}},
+				nil)
+		}
+	}
+	avail := make([]string, 0, len(resp.Transitions))
+	for _, t := range resp.Transitions {
+		avail = append(avail, t.To.Name)
+	}
+	return fmt.Errorf("no transition to %q from current state; available: %v", target, avail)
+}
+
 // adfFromPlain wraps plain text in ADF paragraphs split on newlines.
 // Minimal — only what's needed for the triage comment shape.
 func adfFromPlain(text string) map[string]any {
