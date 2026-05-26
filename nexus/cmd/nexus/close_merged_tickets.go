@@ -39,11 +39,41 @@ import (
 	"time"
 )
 
-// nexTicketPattern matches NEX-\d+ case-insensitively. Bound to
-// word boundaries so "NEX-100" inside "ANEX-1000" doesn't false-
-// positive. The Atlassian ticket key shape is project-key plus
-// digits; we only care about the NEX project.
-var nexTicketPattern = regexp.MustCompile(`(?i)\bNEX-(\d+)\b`)
+// titleLeadPattern matches the convention "NEX-247: …" at the
+// START of a PR title with a colon IMMEDIATELY after the key —
+// the existing PR-naming convention for "this PR implements the
+// whole ticket".
+//
+// Deliberately excludes partial-slice forms like "NEX-247 Slice 2:"
+// or "NEX-297 L1:" — those PRs ship one slice of a multi-slice
+// ticket, and closing the parent ticket on the first slice's
+// merge would corrupt state (verified during NEX-303 dry-run
+// 2026-05-26: NEX-297 was being flagged for close because the
+// L1/L2/L3 PR titles tripped the looser ` ?` matcher; L3 is
+// still pending).
+//
+// Operator with a partial-slice PR who wants close-on-this-PR
+// behaviour can write "Closes NEX-N" in the body — that path
+// fires via bodyCloseKeywordPattern.
+var titleLeadPattern = regexp.MustCompile(`(?i)^\s*NEX-(\d+):`)
+
+// bodyCloseKeywordPattern matches the GitHub-style closing-keyword
+// + ticket-key shape in PR bodies: "Closes NEX-247", "fixes nex-100",
+// "Resolves: NEX-50", "Closed NEX-99". Mirrors GitHub's own auto-
+// close behaviour but for Jira refs.
+//
+// Bare mentions ("see NEX-100", "related to NEX-200", "supersedes
+// NEX-3") DO NOT match — those are context cross-refs, not close
+// intents. Dry-run against the past week of PRs (2026-05-26) showed
+// the naive regex catches ~3x too many tickets because PR
+// descriptions routinely cross-reference siblings + parent epics
+// for context. Closing them would silently corrupt ticket state.
+//
+// Allowed keywords: close, closes, closed, fix, fixes, fixed,
+// resolve, resolves, resolved. Optional `:` between keyword and
+// key. One whitespace required (prevents "closesNEX-1" false-
+// positive but a typo'd "closes  NEX-1" is fine).
+var bodyCloseKeywordPattern = regexp.MustCompile(`(?i)\b(?:close[ds]?|fix(?:e[ds])?|resolve[ds]?)\s*:?\s+NEX-(\d+)\b`)
 
 // repeatableStringFlag implements flag.Value for collecting --repo N
 // times into a slice. Lets operator specify multiple repos in one
@@ -180,11 +210,13 @@ func listMergedPRs(ctx context.Context, ghPath, repo string, since time.Duration
 	return prs, nil
 }
 
-// processPR finds NEX-* references in one PR + closes each
-// referenced ticket (unless already Done).
+// processPR finds CLOSE-INTENT NEX-* references in one PR + closes
+// each referenced ticket (unless already Done). Bare cross-refs do
+// NOT fire close — see extractCloseIntentKeys for the precise
+// match-shape rationale.
 func processPR(ctx context.Context, jc *triageJiraClient, pr mergedPR, dryRun bool, stats *closeStats, log *slog.Logger) {
 	stats.prsInspected++
-	keys := extractNexKeys(pr.Title + "\n" + pr.Body)
+	keys := extractCloseIntentKeys(pr.Title, pr.Body)
 	if len(keys) == 0 {
 		return
 	}
@@ -230,18 +262,35 @@ func closeOne(ctx context.Context, jc *triageJiraClient, key string, pr mergedPR
 	stats.closed++
 }
 
-// extractNexKeys returns unique NEX-* keys (uppercased) from text.
-// Case-insensitive match handles both "NEX-247" and "nex-247" + any
-// future casing drift. Sorted for deterministic ordering across
-// callers / logs / tests.
-func extractNexKeys(text string) []string {
-	matches := nexTicketPattern.FindAllStringSubmatch(text, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(matches))
-	for _, m := range matches {
+// extractCloseIntentKeys returns unique NEX-* keys (uppercased)
+// that this PR INTENDS to close. Two extraction sources:
+//
+//   - title: NEX-N at the start of the title (existing PR-naming
+//     convention — "NEX-247: TicketTriage classifier ...")
+//   - body:  GitHub-style closing keywords ("Closes NEX-247",
+//     "fixes nex-100", "Resolves: NEX-50")
+//
+// Bare body mentions ("see NEX-247", "related to NEX-243",
+// "supersedes NEX-100") DO NOT match. PR descriptions routinely
+// cross-reference sibling tickets, parent epics, and unfixed
+// root-cause tickets for context; closing them would silently
+// corrupt ticket state. Verified during NEX-303 dry-run 2026-05-26:
+// the naive any-mention regex caught 33 candidates including 4
+// false-positives (epic parent, two siblings, an unfixed root-
+// cause); the close-intent regex correctly narrows to the ~one
+// genuinely-closed ticket per PR.
+//
+// Sorted for deterministic ordering across callers / logs / tests.
+func extractCloseIntentKeys(title, body string) []string {
+	seen := make(map[string]struct{}, 4)
+	if m := titleLeadPattern.FindStringSubmatch(title); m != nil {
 		seen["NEX-"+m[1]] = struct{}{}
+	}
+	for _, m := range bodyCloseKeywordPattern.FindAllStringSubmatch(body, -1) {
+		seen["NEX-"+m[1]] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
 	}
 	out := make([]string, 0, len(seen))
 	for k := range seen {
