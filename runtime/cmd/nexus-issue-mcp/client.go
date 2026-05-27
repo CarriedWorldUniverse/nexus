@@ -53,6 +53,26 @@ func (c *client) post(ctx context.Context, path string, in, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+func (c *client) patch(ctx context.Context, path string, in, out any) error {
+	body, _ := json.Marshal(in)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPatch, c.base+path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.jwt)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%s %s: %d %s", req.Method, path, resp.StatusCode, string(b))
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
 func (c *client) del(ctx context.Context, path string, in, out any) error {
 	body, _ := json.Marshal(in)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, c.base+path, bytes.NewReader(body))
