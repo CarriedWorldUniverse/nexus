@@ -54,10 +54,17 @@ var _ Requester = (*wsclient.Client)(nil)
 // local type so this package doesn't take a build-time dep on the
 // nexus/credentials package — JSON-tag-compatible duplication, same
 // rationale as keyfile's PersonalityBundle.
+//
+// ProjectKey (NEX-88): optional default project key carried alongside
+// the secret material. Lets a single credential carry both "how to
+// auth" and "where to file by default" so individual aspects don't
+// each need a per-keyfile project_key. Consumers (e.g. nexus-jira-mcp)
+// fall back to this when their keyfile doesn't specify one.
 type JiraBundle struct {
-	Email     string `json:"atlassian_email"`
-	Token     string `json:"atlassian_token"`
-	Subdomain string `json:"atlassian_subdomain"`
+	Email      string `json:"atlassian_email"`
+	Token      string `json:"atlassian_token"`
+	Subdomain  string `json:"atlassian_subdomain"`
+	ProjectKey string `json:"project_key,omitempty"`
 }
 
 // IMAPBundle mirrors credentials.IMAPBundle (broker side).

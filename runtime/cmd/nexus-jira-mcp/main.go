@@ -152,8 +152,15 @@ func main() {
 		site = b.Subdomain + ".atlassian.net"
 		email = b.Email
 		token = b.Token
-		if kf.Jira != nil {
+		// project_key resolution (NEX-88): keyfile wins (legacy aspect-
+		// pinned default), then credential-bundle (operator-curated
+		// default shared across aspects fetching this credential). Both
+		// empty → projectKey stays "" and the CLI falls back to the
+		// per-call `project` param (NEX-315).
+		if kf.Jira != nil && kf.Jira.ProjectKey != "" {
 			projectKey = kf.Jira.ProjectKey
+		} else if b.ProjectKey != "" {
+			projectKey = b.ProjectKey
 		}
 	}
 

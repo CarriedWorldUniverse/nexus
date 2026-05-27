@@ -139,6 +139,78 @@ func TestFetchJira_Default(t *testing.T) {
 	}
 }
 
+// NEX-88: FetchJira surfaces ProjectKey when the broker includes it
+// in the credential bundle. Lets aspects fetching a credential pick
+// up the operator-curated default project without per-keyfile setup.
+func TestFetchJira_WithProjectKey(t *testing.T) {
+	srv := fakeBroker(t, func(wsc *websocket.Conn, env frames.Envelope) {
+		if env.Kind != frames.KindCredentialFetch {
+			return
+		}
+		var p frames.CredentialFetchPayload
+		_ = frames.PayloadAs(env, &p)
+		if p.Kind != "jira" {
+			_ = replyError(wsc, env.ID, "unexpected kind")
+			return
+		}
+		_ = replyResult(wsc, env.ID, "jira", "wks-jira", map[string]any{
+			"atlassian_email":     "wren@example.com",
+			"atlassian_token":     "secret-token",
+			"atlassian_subdomain": "carriedworlduniverse",
+			"project_key":         "WKS",
+		})
+	})
+	c, cancel := startClient(t, srv)
+	defer cancel()
+
+	ctx, ccancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer ccancel()
+	name, b, err := FetchJira(ctx, c, "wks-jira")
+	if err != nil {
+		t.Fatalf("FetchJira: %v", err)
+	}
+	if name != "wks-jira" {
+		t.Errorf("name = %q, want wks-jira", name)
+	}
+	if b.ProjectKey != "WKS" {
+		t.Errorf("ProjectKey = %q, want WKS (broker default project must flow to consumer)", b.ProjectKey)
+	}
+	if b.Email != "wren@example.com" {
+		t.Errorf("Email round-trip broken: %q", b.Email)
+	}
+}
+
+// NEX-88: a broker that omits project_key (legacy / not-yet-set)
+// produces a JiraBundle with empty ProjectKey but other fields intact.
+// Consumer's resolution chain then falls back to keyfile / per-call.
+func TestFetchJira_WithoutProjectKey_BackCompat(t *testing.T) {
+	srv := fakeBroker(t, func(wsc *websocket.Conn, env frames.Envelope) {
+		if env.Kind != frames.KindCredentialFetch {
+			return
+		}
+		_ = replyResult(wsc, env.ID, "jira", "legacy-jira", map[string]any{
+			"atlassian_email":     "legacy@example.com",
+			"atlassian_token":     "secret",
+			"atlassian_subdomain": "carriedworlduniverse",
+		})
+	})
+	c, cancel := startClient(t, srv)
+	defer cancel()
+
+	ctx, ccancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer ccancel()
+	_, b, err := FetchJira(ctx, c, "legacy-jira")
+	if err != nil {
+		t.Fatalf("FetchJira: %v", err)
+	}
+	if b.ProjectKey != "" {
+		t.Errorf("ProjectKey should be empty on a pre-NEX-88 bundle; got %q", b.ProjectKey)
+	}
+	if b.Email != "legacy@example.com" {
+		t.Errorf("Email round-trip broken: %q", b.Email)
+	}
+}
+
 func TestFetchIMAP_ByName(t *testing.T) {
 	srv := fakeBroker(t, func(wsc *websocket.Conn, env frames.Envelope) {
 		if env.Kind != frames.KindCredentialFetch {

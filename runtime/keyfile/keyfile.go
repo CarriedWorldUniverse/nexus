@@ -128,6 +128,14 @@ type JiraConfig struct {
 
 	// ProjectKey is the default Jira project key (e.g. "NEX") used
 	// when an MCP tool call doesn't specify one. Optional.
+	//
+	// NEX-88: as of 2026-05-27 the credential bundle (JiraBundle in
+	// nexus/credentials) can ALSO carry project_key. The keyfile value
+	// (this field) wins when both are set — keyfile is the per-aspect
+	// override; credential bundle is the operator-curated default
+	// shared across aspects fetching that credential. Either can be
+	// empty; the consumer falls back through keyfile → bundle → empty
+	// (caller must then supply project per-call).
 	ProjectKey string `json:"project_key,omitempty"`
 }
 

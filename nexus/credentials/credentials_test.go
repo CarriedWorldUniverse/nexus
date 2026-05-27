@@ -167,6 +167,77 @@ func TestSetGetJiraRoundTrip(t *testing.T) {
 	}
 }
 
+// NEX-88: optional ProjectKey on JiraBundle survives store round-trip
+// AND is omitted from the encrypted payload when unset (omitempty —
+// keeps existing rows on disk byte-compatible with the new schema).
+func TestSetGetJiraRoundTrip_WithProjectKey(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	err := s.Set(ctx, UpsertParams{
+		Name: "jira-wks",
+		Kind: KindJira,
+		Bundle: map[string]any{
+			"atlassian_email":     "ops@example.com",
+			"atlassian_token":     "tok-abc-123",
+			"atlassian_subdomain": "myorg",
+			"project_key":         "WKS",
+		},
+		AllowedAspects: []string{"*"},
+		Mode:           ModeFetch,
+	})
+	if err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	c, err := s.Get(ctx, "jira-wks")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	jb, err := s.JiraBundle(c)
+	if err != nil {
+		t.Fatalf("JiraBundle: %v", err)
+	}
+	if jb.ProjectKey != "WKS" {
+		t.Errorf("ProjectKey: got %q want WKS", jb.ProjectKey)
+	}
+	if jb.Email != "ops@example.com" {
+		t.Errorf("Email round-trip broken: got %q", jb.Email)
+	}
+}
+
+// NEX-88: omitting project_key in the bundle preserves the back-compat
+// contract — Get returns a JiraBundle with ProjectKey == "" and the
+// other fields intact. Existing credential rows (created pre-NEX-88)
+// must continue working without migration.
+func TestSetGetJiraRoundTrip_WithoutProjectKey(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	err := s.Set(ctx, UpsertParams{
+		Name: "jira-legacy",
+		Kind: KindJira,
+		Bundle: map[string]any{
+			"atlassian_email":     "ops@example.com",
+			"atlassian_token":     "tok-abc-123",
+			"atlassian_subdomain": "myorg",
+		},
+		AllowedAspects: []string{"*"},
+		Mode:           ModeFetch,
+	})
+	if err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	c, _ := s.Get(ctx, "jira-legacy")
+	jb, err := s.JiraBundle(c)
+	if err != nil {
+		t.Fatalf("JiraBundle: %v", err)
+	}
+	if jb.ProjectKey != "" {
+		t.Errorf("ProjectKey should be empty on a legacy bundle; got %q", jb.ProjectKey)
+	}
+	if jb.Email != "ops@example.com" {
+		t.Errorf("Email round-trip broken: got %q", jb.Email)
+	}
+}
+
 func TestSetGetIMAPRoundTrip(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
