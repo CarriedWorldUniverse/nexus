@@ -1,6 +1,6 @@
 # Aspect dynamic provider+model configuration (brainstorm draft)
 
-**Status:** Brainstorm v0.5, 2026-05-28. Filed with [NEX-332](https://carriedworlduniverse.atlassian.net/browse/NEX-332). Iterating in chat between operator and shadow. v0.5 collapses the keyfile schema to a two-section design (identity + cold-start cache) by routing `jira`-style operator-tool credentials through the broker config-push protocol once those tools go native.
+**Status:** Brainstorm v0.6, 2026-05-28. Filed with [NEX-332](https://carriedworlduniverse.atlassian.net/browse/NEX-332). Iterating in chat between operator and shadow. v0.6 grounds the cred-block sprawl claim against two real aspects' keyfiles (plumb vs shadow) — pattern is active, three cred-blocks already in the wild, fourth (github) staged.
 
 ---
 
@@ -117,6 +117,22 @@ This block is NOT in the canonical `aspects.Keyfile` struct. Some other code pat
 **Implication:** the codebase has two partial schemas — the canonical struct that only knows about `envelope`/`encrypted_payload`, and the operator/tooling-side reality where additional sections (`jira`) coexist. Adding `config` the same way works in practice but cements the ad-hoc shape. The schema-doc work (below) makes this intentional and bounded.
 
 **Operator direction (round 4):** `jira` block is read by nexus-jira-mcp today, but Jira is moving to a native nexus tool (sibling to NEX-209 ledger-native). Once that lands, the `jira` block leaves the keyfile entirely — credentials become broker-managed config, pushed via the same `config.refresh` protocol this epic introduces.
+
+**Concrete cred-block sprawl (verified round 5):** the pattern isn't theoretical — it's already happening. Comparing two aspects' keyfiles:
+
+| Section | plumb | shadow |
+|---|---|---|
+| `envelope` + `encrypted_payload` | ✅ | ✅ |
+| `jira` | ✅ | ✅ |
+| `imap` | ❌ | ✅ |
+| `github` | ❌ | ✅ |
+
+Three MCP shims (`nexus-comms-mcp`, `nexus-jira-mcp`, `nexus-imap-mcp`) are registered in each aspect's `.mcp.json`; nexus-comms uses identity-only, the others read tool-specific creds from their named keyfile block. `github` is staged for a future native or third-party tool. Without the native-tools migration the trend continues — every new integration adds another block.
+
+The native-tools transition + broker config push retires this pattern entirely:
+- Shim binaries → funnel-side native tools
+- Cred blocks → broker-managed config, pushed per-aspect via `config.refresh`
+- Keyfile shrinks back to identity + cold-start cache (the two clean sections)
 
 That collapses the keyfile schema to two intentional concerns:
 
