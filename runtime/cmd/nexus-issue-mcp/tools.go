@@ -256,6 +256,82 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 		}
 		return mcpJSON(out), nil
 	})
+
+	srv.AddTool(mcpgo.NewTool("issue.link",
+		mcpgo.WithDescription("Create a typed link from one issue to another. type='blocks' means from_key blocks to_key (the from-side cannot reach Done until to_key is terminal); type='relates-to' is editorial cross-reference only. Idempotent — re-linking the same edge is a no-op."),
+		mcpgo.WithString("from_key", mcpgo.Required()),
+		mcpgo.WithString("to_key", mcpgo.Required()),
+		mcpgo.WithString("type", mcpgo.Required(), mcpgo.Description("blocks | relates-to")),
+		mcpgo.WithString("actor", mcpgo.Required()),
+	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		from := req.GetString("from_key", "")
+		if from == "" {
+			return mcpErr("from_key required"), nil
+		}
+		body := map[string]any{
+			"to_key": req.GetString("to_key", ""),
+			"type":   req.GetString("type", ""),
+			"actor":  req.GetString("actor", ""),
+		}
+		var out map[string]any
+		if err := c.post(ctx, "/api/issues/"+url.PathEscape(from)+"/links", body, &out); err != nil {
+			return mcpErr(err.Error()), nil
+		}
+		return mcpJSON(out), nil
+	})
+
+	srv.AddTool(mcpgo.NewTool("issue.unlink",
+		mcpgo.WithDescription("Remove a typed link. Idempotent — removing a non-existent edge returns success."),
+		mcpgo.WithString("from_key", mcpgo.Required()),
+		mcpgo.WithString("to_key", mcpgo.Required()),
+		mcpgo.WithString("type", mcpgo.Required()),
+		mcpgo.WithString("actor", mcpgo.Required()),
+	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		from := req.GetString("from_key", "")
+		if from == "" {
+			return mcpErr("from_key required"), nil
+		}
+		body := map[string]any{
+			"to_key": req.GetString("to_key", ""),
+			"type":   req.GetString("type", ""),
+			"actor":  req.GetString("actor", ""),
+		}
+		var out map[string]any
+		if err := c.del(ctx, "/api/issues/"+url.PathEscape(from)+"/links", body, &out); err != nil {
+			return mcpErr(err.Error()), nil
+		}
+		return mcpJSON(out), nil
+	})
+
+	srv.AddTool(mcpgo.NewTool("issue.list_links",
+		mcpgo.WithDescription("List every link touching an issue, in both directions. Each entry carries from_key, to_key, type, direction ('outgoing'|'incoming'), created_at, created_by."),
+		mcpgo.WithString("key", mcpgo.Required()),
+	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		key := req.GetString("key", "")
+		if key == "" {
+			return mcpErr("key required"), nil
+		}
+		var out map[string]any
+		if err := c.get(ctx, "/api/issues/"+url.PathEscape(key)+"/links", &out); err != nil {
+			return mcpErr(err.Error()), nil
+		}
+		return mcpJSON(out), nil
+	})
+
+	srv.AddTool(mcpgo.NewTool("issue.list_projects",
+		mcpgo.WithDescription("List projects (the keyspace aspects can create issues against — NEX, WAKE, OSS, ...). Org-scoped by the calling token; archived projects excluded unless include_archived=true."),
+		mcpgo.WithBoolean("include_archived"),
+	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		path := "/api/projects"
+		if req.GetBool("include_archived", false) {
+			path += "?include_archived=true"
+		}
+		var out []any
+		if err := c.get(ctx, path, &out); err != nil {
+			return mcpErr(err.Error()), nil
+		}
+		return mcpJSON(out), nil
+	})
 }
 
 func mcpErr(msg string) *mcpgo.CallToolResult {
