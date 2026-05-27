@@ -1,6 +1,6 @@
 # Aspect dynamic provider+model configuration (brainstorm draft)
 
-**Status:** Brainstorm v0, 2026-05-28. Filed with [NEX-332](https://carriedworlduniverse.atlassian.net/browse/NEX-332). Iterating in chat between operator and shadow. Captures decisions taken so far + the open questions still on the table; will graduate to a spec once those resolve.
+**Status:** Brainstorm v0.2, 2026-05-28. Filed with [NEX-332](https://carriedworlduniverse.atlassian.net/browse/NEX-332). Iterating in chat between operator and shadow. v0.2 closes Q1, Q2, and the resolver-location half of the open list; adds the cold-start persistence requirement.
 
 ---
 
@@ -48,28 +48,45 @@ No per-turn round-trip; only on-change traffic. Mid-conversation reconfigure is 
 
 ---
 
-## Open questions
+## Resolved questions
 
-### 1. Session continuity on provider-type swap mid-conversation
+### Session continuity on provider-type swap — RESOLVED
 
-Claude-code carries session state via `--resume <session-id>` against a local jsonl file. Bridle direct-API providers carry state via `SessionTail` in-memory + funnel's persistence layer. If an aspect is mid-thread on `claudecode` and you swap to `openai`, the thread's history-shape changes hands.
+**Bridle owns the canonical jsonl across providers.** Provider-internal session IDs (claude-code's `--resume`, etc.) are implementation details we don't trust as authoritative. Bridle's session log + rewrite/compaction layer is the source of truth.
 
-Options:
-- **Translation step**: convert the claude-code jsonl into bridle SessionEvents (and vice versa) when the provider type changes. Lossy in general (thinking blocks, tool internals, etc.).
-- **Context reset on type swap**: accept that swapping provider type loses thread context. New thread starts fresh. Operator gets a warning in the dashboard before applying.
-- **Provider-type-pinned threads**: thread metadata records the provider type at creation; refresh only applies to NEW threads created after the change. Existing threads finish on the old provider.
+Implication: swapping providers mid-conversation is safe by construction — bridle re-lowers its own session into whatever format the new provider expects on the next turn. No translation step needed; no thread-pinning required.
 
-Recommend option 3 by default (pinned threads), with option 2 as an explicit "reset and apply" affordance.
+Claude-code's own jsonl rewrite (size-control) keeps the per-provider state manageable but is downstream of bridle's authoritative log.
 
-### 2. Mid-turn refresh semantics
+### Mid-turn refresh semantics — RESOLVED
 
-If `config.refresh` arrives while a turn is in flight:
-- **Finish current turn with old config, apply on next dispatch.** Simpler; preserves the in-flight semantic. Slight delay before change is visible (the duration of one turn). Likely the right default.
-- **Cancel + restart with new config.** Faster to apply but throws away token spend on the cancelled turn + can lose partial outputs.
+**Mid-turn changes don't happen.** A `config.refresh` event that arrives during an in-flight turn is buffered; the in-flight turn completes on the old config; the new config is applied at the next bridle turn boundary.
 
-Recommend "finish current, apply next." Operator can manually cancel + redispatch if they want the change applied to the in-flight turn.
+Single semantic, no operator-facing "should we cancel?" prompt. If the operator wants an in-flight turn killed and redispatched on the new config, that's a separate operator action (existing turn-cancel surface), not entangled with refresh.
 
-### 3. Wire format for config + refresh events
+### Resolver location + cold-start persistence — RESOLVED
+
+**Resolver is funnel-side** (locked in v0). On config change, the new config is **persisted locally** so a cold start with broker unreachable boots on last-known-good config and waits for the broker to come back online before applying any newer state.
+
+Persistence target: **operator says "write to the keyfile"**, but see the design wrinkle below — likely a sidecar `current-config.json` next to the keyfile is cleaner. Decision is one for round 3.
+
+#### Wrinkle: keyfile vs sidecar for persisted config
+
+Keyfile today is an identity envelope (encrypted payload signed by the broker; carries `nexus_id`, aspect identity, session-validate hints). Folding mutable operational config into it has tradeoffs:
+
+| | Co-locate in keyfile | Sidecar `current-config.json` |
+|---|---|---|
+| Single artifact to back up / move | ✅ | ❌ two files |
+| Signing semantics | Need to extend (operational config wasn't part of the signed identity) | Untouched |
+| Rotation safety | Keyfile refresh might unintentionally rewind config | Independent lifecycles |
+| Bootstrap simplicity | One read | One read for keyfile, one for config |
+| Migration of existing aspects | Keyfile schema bump | Just write the new file on first config push |
+
+My read: sidecar wins on every axis except "single file to copy around" — and that one is solvable by keeping them in the same directory. Going with sidecar unless operator pushes back.
+
+## Still-open questions
+
+### 4. Wire format for config + refresh events
 
 Two sub-decisions:
 
@@ -77,14 +94,13 @@ Two sub-decisions:
 
 **Refresh event shape** — frame on the existing aspect WS with a new payload type, carrying the full new config (not a diff — avoids reconcile complexity). Aspect compares to its local cache and applies if different.
 
-### 4. Scope of what flips dynamically
+### 5. Scope of what flips dynamically
 
-- **Definitely dynamic**: provider, model, effort, sampling params.
-- **Dynamic but with caveats** (per Q1): provider-type swap.
+- **Definitely dynamic**: provider, model, effort, sampling params, provider-type swap (made safe by the bridle-owns-jsonl resolution above).
 - **Probably not dynamic**: aspect identity, keyfile, broker URL, system prompt body (personality.refresh covers that separately).
 - **TBD**: tools, MCP config — these are aspect-capability-level, may belong with the system prompt rather than the provider config.
 
-### 5. Dashboard UX
+### 6. Dashboard UX
 
 Per-aspect settings panel already exists (NEX-307 line of work). Extend with:
 - Provider dropdown (claudecode | claude | openai | bedrock | gemini | ollama | …)
@@ -96,14 +112,14 @@ Per-aspect settings panel already exists (NEX-307 line of work). Extend with:
 
 Show currently-applied config vs pending edits so operator can see drift.
 
-### 6. Interaction with NEX-300 configurability arc
+### 7. Interaction with NEX-300 configurability arc
 
 NEX-300 shipped per-aspect knobs (judge/summarizer/main-turn AI choice) across Frame + agentfunnel. This epic builds on that:
 - Reuse the per-aspect config storage layer (don't invent new storage).
 - Generalise the knobs (NEX-300 covered specific axes; this epic makes the surface uniform — any wireable bridle/funnel param can flip).
 - Add the push protocol (NEX-300 changes apply on next aspect connect; this epic adds live push).
 
-### 7. Versioning + audit
+### 8. Versioning + audit
 
 Every config change should be auditable. Broker stores `(aspect, version, config_json, changed_at, changed_by)`. Refresh event carries the new version number; aspect logs it. Useful for "shadow started giving weird answers after 14:32" debugging.
 
@@ -136,7 +152,8 @@ Phase 1+2 are independently useful (un-jam dMon) and don't need the full archite
 ## Open for the next round of brainstorm
 
 When we pick this back up, the prioritised list is:
-1. Lock the answer to Q1 (session continuity on provider-type swap) — drives whether we need a translation layer or not.
-2. Lock the answer to Q4 (scope — tools/MCP in or out).
-3. Sketch the broker storage schema (extension of NEX-300 storage).
-4. Decide whether phases 3-6 stay together as one arc or split further.
+1. Confirm keyfile-vs-sidecar for persisted config (recommended sidecar — see wrinkle).
+2. Lock the answer to Q5 (scope — tools/MCP in or out).
+3. Lock the answer to Q4 (wire format details: full-config push vs diff; refresh ACK semantics).
+4. Sketch the broker storage schema (extension of NEX-300 storage).
+5. Decide whether phases 3-6 stay together as one arc or split further.
