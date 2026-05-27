@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/url"
 
@@ -140,6 +141,27 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 			return mcpErr(err.Error()), nil
 		}
 		return mcpJSON(map[string]any{"ok": true}), nil
+	})
+
+	srv.AddTool(mcpgo.NewTool("issue.find_by_text",
+		mcpgo.WithDescription("Full-text search over issue summary/description/DoD AND comment bodies. Returns issues ranked by FTS5 bm25. Use this when you want to find issues *mentioning* a term — not when you know the exact field to filter on (use issue.search for that). Query syntax: bare words, \"quoted phrases\", AND/OR/NOT operators, prefix-with-* for stems."),
+		mcpgo.WithString("q", mcpgo.Required(), mcpgo.Description("FTS5 query string.")),
+		mcpgo.WithNumber("limit", mcpgo.Description("Max results, default 50, cap 200.")),
+	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		q := req.GetString("q", "")
+		if q == "" {
+			return mcpErr("q required"), nil
+		}
+		v := url.Values{}
+		v.Set("q", q)
+		if limit := req.GetInt("limit", 0); limit > 0 {
+			v.Set("limit", fmt.Sprintf("%d", limit))
+		}
+		var out []any
+		if err := c.get(ctx, "/api/issues/search/text?"+v.Encode(), &out); err != nil {
+			return mcpErr(err.Error()), nil
+		}
+		return mcpJSON(out), nil
 	})
 
 	srv.AddTool(mcpgo.NewTool("issue.search",
