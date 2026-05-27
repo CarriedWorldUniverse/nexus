@@ -73,6 +73,75 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 		return mcpJSON(out), nil
 	})
 
+	srv.AddTool(mcpgo.NewTool("issue.update",
+		mcpgo.WithDescription("Patch issue fields. actor required; pass only the fields to change."),
+		mcpgo.WithString("key", mcpgo.Required()),
+		mcpgo.WithString("actor", mcpgo.Required()),
+		mcpgo.WithString("summary"),
+		mcpgo.WithString("description"),
+		mcpgo.WithString("definition_of_done"),
+		mcpgo.WithString("priority"),
+		mcpgo.WithString("parent_key"),
+	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		key := req.GetString("key", "")
+		actor := req.GetString("actor", "")
+		if key == "" || actor == "" {
+			return mcpErr("key and actor required"), nil
+		}
+		body := map[string]any{"actor": actor}
+		for _, k := range []string{"summary", "description", "definition_of_done", "priority", "parent_key"} {
+			if v, ok := req.GetArguments()[k]; ok {
+				body[k] = v
+			}
+		}
+		if err := c.patch(ctx, "/api/issues/"+url.PathEscape(key), body, nil); err != nil {
+			return mcpErr(err.Error()), nil
+		}
+		return mcpJSON(map[string]any{"ok": true}), nil
+	})
+
+	srv.AddTool(mcpgo.NewTool("issue.transition",
+		mcpgo.WithDescription("Move issue to a new status."),
+		mcpgo.WithString("key", mcpgo.Required()),
+		mcpgo.WithString("status", mcpgo.Required(), mcpgo.Description("Target status, e.g. In Progress, Done.")),
+		mcpgo.WithString("actor", mcpgo.Required()),
+	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		key := req.GetString("key", "")
+		if key == "" {
+			return mcpErr("key required"), nil
+		}
+		body := map[string]any{
+			"status": req.GetString("status", ""),
+			"actor":  req.GetString("actor", ""),
+		}
+		if err := c.post(ctx, "/api/issues/"+url.PathEscape(key)+"/transition", body, nil); err != nil {
+			return mcpErr(err.Error()), nil
+		}
+		return mcpJSON(map[string]any{"ok": true}), nil
+	})
+
+	srv.AddTool(mcpgo.NewTool("issue.assign",
+		mcpgo.WithDescription("Assign issue to an aspect or team. Pass empty strings to unassign."),
+		mcpgo.WithString("key", mcpgo.Required()),
+		mcpgo.WithString("actor", mcpgo.Required()),
+		mcpgo.WithString("aspect"),
+		mcpgo.WithString("team"),
+	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+		key := req.GetString("key", "")
+		if key == "" {
+			return mcpErr("key required"), nil
+		}
+		body := map[string]any{
+			"aspect": req.GetString("aspect", ""),
+			"team":   req.GetString("team", ""),
+			"actor":  req.GetString("actor", ""),
+		}
+		if err := c.post(ctx, "/api/issues/"+url.PathEscape(key)+"/assign", body, nil); err != nil {
+			return mcpErr(err.Error()), nil
+		}
+		return mcpJSON(map[string]any{"ok": true}), nil
+	})
+
 	srv.AddTool(mcpgo.NewTool("issue.search",
 		mcpgo.WithDescription("Structured filter search."),
 		mcpgo.WithObject("filter", mcpgo.Required(), mcpgo.Description("SearchFilter shape; see spec.")),
