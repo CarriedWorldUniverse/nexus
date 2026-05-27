@@ -354,10 +354,19 @@ func (c *jiraClient) MyAccountID(ctx context.Context) (string, error) {
 // ("Epic" | "Story" | "Task" | "Subtask" | "Bug" ...). parentKey
 // empty → no parent (orphan Task or top-level Epic). component
 // empty → no component tag. labels nil/empty → no labels.
-func (c *jiraClient) CreateIssue(ctx context.Context, summary, descriptionMarkdown, issueType, parentKey, component string, labels []string) (string, error) {
+//
+// projectOverride: when non-empty, route to that project key instead
+// of the client's bound default. Lets multi-project aspects (wren on
+// WKS while bound to NEX, etc.) file under the right project without
+// re-binding. Empty → use c.projectKey (the broker-bound default).
+// NEX-315.
+func (c *jiraClient) CreateIssue(ctx context.Context, summary, descriptionMarkdown, issueType, parentKey, component string, labels []string, projectOverride string) (string, error) {
 	project := c.projectKey
+	if projectOverride != "" {
+		project = projectOverride
+	}
 	if project == "" {
-		return "", errors.New("jira: project_key not configured in keyfile and not supplied")
+		return "", errors.New("jira: project key not supplied and no default bound on this client")
 	}
 	fields := map[string]any{
 		"project":   map[string]string{"key": project},

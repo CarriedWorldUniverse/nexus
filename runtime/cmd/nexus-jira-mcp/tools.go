@@ -225,7 +225,7 @@ func registerTools(srv *mcpserver.MCPServer, c *jiraClient, native *nativeClient
 		},
 		{
 			name:        "jira.create",
-			description: "Create a new issue (Epic / Story / Task / Subtask / Bug). When parent is set, the new issue is parented to it.",
+			description: "Create a new issue (Epic / Story / Task / Subtask / Bug). When parent is set, the new issue is parented to it. By default routes to the project bound to this MCP client; pass project to target a different project (NEX-315 — lets one aspect file under WKS, NEX, etc. without re-binding).",
 			schema: mcpgo.ToolInputSchema{
 				Type: "object",
 				Properties: map[string]any{
@@ -235,6 +235,7 @@ func registerTools(srv *mcpserver.MCPServer, c *jiraClient, native *nativeClient
 					"parent":      map[string]any{"type": "string", "description": "Optional parent issue key."},
 					"component":   map[string]any{"type": "string"},
 					"labels":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"project":     map[string]any{"type": "string", "description": "Optional project key (e.g. \"WKS\" for WakeStone). When omitted, defaults to the project this MCP client is bound to (typically the aspect's primary project)."},
 				},
 				Required: []string{"summary", "issue_type"},
 			},
@@ -245,14 +246,20 @@ func registerTools(srv *mcpserver.MCPServer, c *jiraClient, native *nativeClient
 				parent := req.GetString("parent", "")
 				comp := req.GetString("component", "")
 				labels := req.GetStringSlice("labels", nil)
+				project := req.GetString("project", "")
 				if summary == "" || issueType == "" {
 					return mcpErr("summary and issue_type are required"), nil
 				}
-				key, err := c.CreateIssue(ctx, summary, desc, issueType, parent, comp, labels)
+				key, err := c.CreateIssue(ctx, summary, desc, issueType, parent, comp, labels, project)
 				if err != nil {
 					return mcpErr(err.Error()), nil
 				}
-				if native != nil && native.enabled() {
+				// Native mirror only fires for issues filed under the
+				// MCP client's bound default project — the native
+				// tracker is per-aspect and doesn't yet know how to
+				// route a cross-project create. Skip mirror when the
+				// caller targeted a non-default project (NEX-315).
+				if native != nil && native.enabled() && (project == "" || project == c.projectKey) {
 					body := translateJiraCreate(c.projectKey, issueType, summary, desc, native.aspect, "")
 					native.MirrorCreate(ctx, body)
 				}
