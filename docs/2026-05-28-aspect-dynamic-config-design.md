@@ -1,6 +1,6 @@
 # Aspect dynamic provider+model configuration (brainstorm draft)
 
-**Status:** Brainstorm v0.6, 2026-05-28. Filed with [NEX-332](https://carriedworlduniverse.atlassian.net/browse/NEX-332). Iterating in chat between operator and shadow. v0.6 grounds the cred-block sprawl claim against two real aspects' keyfiles (plumb vs shadow) — pattern is active, three cred-blocks already in the wild, fourth (github) staged.
+**Status:** Brainstorm v0.7, 2026-05-28. Filed with [NEX-332](https://carriedworlduniverse.atlassian.net/browse/NEX-332). Iterating in chat between operator and shadow. v0.7 interleaves NEX-332 + [NEX-333](https://carriedworlduniverse.atlassian.net/browse/NEX-333) phasing — both depend on the `config.refresh` protocol and the keyfile schema; lock-step rollout keeps the architecture coherent.
 
 ---
 
@@ -199,18 +199,27 @@ Every config change should be auditable. Broker stores `(aspect, version, config
 
 ---
 
-## Phasing sketch (refine post-brainstorm)
+## Phasing sketch — interleaved with NEX-333
 
-Not a plan yet; just an order-of-operations gut check to keep the epic tractable.
+Operator call (round 6): interleave NEX-332 (dynamic config) with NEX-333 (native tools), since both depend on the `config.refresh` protocol and the keyfile schema. Doing them in lock-step keeps the architectural narrative coherent and avoids two parallel-but-divergent rollouts.
 
-0. **Keyfile schema doc + rotation-preserving harden** — prerequisite. Defines the slot `config` lands in and ensures rotation doesn't rewind operator sections. Filed as separate doc/story per "Keyfile schema prerequisite" above.
-1. **Funnel-side config cache + ProviderResolver** — pure refactor of the existing single-provider construction path. No new wire protocol. Aspects boot from `aspect.json` as today but route through the resolver. Zero-impact intermediate state.
-2. **Bridle openai-as-DeepSeek validation** — confirm `OPENAI_BASE_URL=https://api.deepseek.com/v1` + DeepSeek key actually works end-to-end via the openai provider. This is the immediate-bug-fix slice: dMon agents can switch off the claude-code+shim hack as soon as it lands.
-3. **Broker-side config storage + manual edit API** — extend NEX-300 storage to cover the full config shape. REST + dashboard surface for read/write. No push yet; aspects pick up on reconnect.
-4. **`config.refresh` push protocol** — broker emits frame on change; aspect handles + applies + writes to local keyfile `config` section. End-to-end live reconfigure.
-5. **Dashboard UI completion** — full edit surface with provider/model/effort/sampling controls; "currently applied vs pending" display.
+| # | Epic | Work | Why here |
+|---|---|---|---|
+| 1 | 332 | Keyfile schema doc + rotation-preserving harden | Defines the slot shape both epics live in; rotation must preserve operator sections before any of them depend on persistence. |
+| 2 | 332 | Funnel-side ProviderResolver + local config cache | Establishes the runtime pattern (per-turn resolve from local cache) that native tools will follow. Pure refactor; no wire changes. |
+| 3 | 332 | Bridle openai-as-DeepSeek validation | Independent-value slice — un-jams dMon immediately (sidesteps the thinking-block 400 by leaving the claude-code+shim path). Slottable any time after the bridle PR #40 cascade lands. |
+| 4 | 332 | Broker storage + manual edit API (no push) | First broker-side config storage. Aspects pick up on reconnect. Lets dashboard wire up CRUD before push protocol exists. |
+| 5 | 332 | `config.refresh` push protocol | THE lynchpin. Unlocks every NEX-333 native-tool slice (each needs broker-pushed creds). Both epics blocked on this until landed. |
+| 6 | 333 | `nexus-comms` native | First native-tool slice. Identity-only (no third-party creds) → proves the pattern with minimum risk. Retires the easiest shim. |
+| 7 | 333 | `nexus-jira` native | Highest-impact native-tool slice. Removes the biggest cred-block (every aspect has it). Validates third-party cred handling end-to-end. |
+| 8 | 332 | Dashboard UI completion | Now that storage + push + at least one third-party cred surface (jira) exist, the dashboard can present the full edit-and-apply UX with realistic content. |
+| 9 | 333 | `nexus-imap` + `nexus-github` native | Parallelizable; same shape as jira but smaller footprint. Each independently retire-able. |
+| 10 | 333 | `nexus-issue` native (covers NEX-209) | Last of the nexus-backed first-party tools to go native. Identity-only, so functionally similar to phase 6 but on the ledger surface. |
+| 11 | 333 | Retire shim binaries + clean `.mcp.json` + keyfile schema settles | Cleanup. Each shim binary + build/release pipeline goes away; `.mcp.json` references stripped per aspect; keyfile reaches the clean two-section shape. |
 
-Session continuity policy (the original phase 6) is no longer needed since Q1 resolved in favour of bridle-owns-jsonl — no thread-pinning or translation layer required.
+Phase 3 (bridle openai-as-DeepSeek) is the only one that can run truly out-of-order — it's a self-contained validation that benefits dMon immediately and doesn't depend on phases 1, 2, 4. Worth landing as soon as bridle PR #40 cascade lands so operator can disconnect from the claude-code+shim path on dMon without waiting for the rest.
+
+Session continuity policy (the original phase 6 in v0.1) is no longer needed since Q1 resolved in favour of bridle-owns-jsonl — no thread-pinning or translation layer required.
 
 Phase 1+2 are independently useful (un-jam dMon) and don't need the full architecture. Phases 3-6 are the operator-experience win.
 
