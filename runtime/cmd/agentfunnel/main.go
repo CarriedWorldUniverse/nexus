@@ -53,6 +53,7 @@ import (
 	"github.com/CarriedWorldUniverse/bridle"
 	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
 	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
+	openaiprovider "github.com/CarriedWorldUniverse/bridle/provider/openai"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/rewriter"
 	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
@@ -521,8 +522,21 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 		}
 		p.DisallowedTools = funnel.DisallowedNativeTools
 		return p, nil
+	case "openai":
+		// OPENAI_API_KEY + OPENAI_BASE_URL come from the start script
+		// (or the credential bundle once NEX-332 phase 4 lands). Empty
+		// baseURL falls back to api.openai.com (matching the bridle
+		// constructor's behaviour); set baseURL to point at any
+		// OpenAI-compatible endpoint (DeepSeek's /v1, Together,
+		// local Ollama). Per-aspect API-key handoff is the same shape
+		// as claude-api today — env is the v1 surface; broker-pushed
+		// creds replace it in the dynamic-config arc.
+		return openaiprovider.NewWithBaseURL(
+			os.Getenv("OPENAI_API_KEY"),
+			os.Getenv("OPENAI_BASE_URL"),
+		), nil
 	default:
-		return nil, fmt.Errorf("unsupported provider %q (claude-api and claude-code supported in v1)", provider)
+		return nil, fmt.Errorf("unsupported provider %q (claude-api, claude-code, openai supported)", provider)
 	}
 }
 
