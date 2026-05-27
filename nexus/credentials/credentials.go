@@ -14,7 +14,7 @@
 // a per-kind JSON object encrypted at rest:
 //
 //	kind='provider'  → {"api_shape":"anthropic|openai", "base_url":"...", "key":"...", "default_model":"..."}
-//	kind='jira'      → {"atlassian_email":"...", "atlassian_token":"...", "atlassian_subdomain":"..."}
+//	kind='jira'      → {"atlassian_email":"...", "atlassian_token":"...", "atlassian_subdomain":"...", "project_key":"NEX" (optional)}
 //	kind='imap'      → {"host":"...", "port":993, "user":"...", "password":"...", "ssl":true}
 //
 // Adding a new kind = adding a bundle-validator entry; no schema change.
@@ -168,10 +168,18 @@ type ProviderBundle struct {
 }
 
 // JiraBundle is the parsed shape of a kind='jira' bundle.
+//
+// ProjectKey (NEX-88) is an optional default project for tools that
+// route per-project (e.g. nexus-jira-mcp's jira_create). When set on
+// the credential bundle, aspects fetching the credential pick up the
+// default without needing a project_key in their keyfile or a
+// per-call override. Empty is fine; the consumer falls back to its
+// own resolution chain (keyfile → explicit per-call project param).
 type JiraBundle struct {
-	Email     string `json:"atlassian_email"`
-	Token     string `json:"atlassian_token"`
-	Subdomain string `json:"atlassian_subdomain"`
+	Email      string `json:"atlassian_email"`
+	Token      string `json:"atlassian_token"`
+	Subdomain  string `json:"atlassian_subdomain"`
+	ProjectKey string `json:"project_key,omitempty"`
 }
 
 // IMAPBundle is the parsed shape of a kind='imap' bundle.

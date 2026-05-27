@@ -25,6 +25,11 @@ const FIELDS = {
     { key: 'atlassian_email',     label: 'Email',     type: 'email', required: true },
     { key: 'atlassian_token',     label: 'API token', type: 'text',  secret: true, required: true },
     { key: 'atlassian_subdomain', label: 'Subdomain', type: 'text',  placeholder: 'mycompany (no .atlassian.net)', required: true },
+    // NEX-88: optional default project key carried on the credential
+    // bundle. Lets aspects fetching this credential pick up "where to
+    // file by default" without per-keyfile project_key setup. Empty =
+    // consumer falls back through keyfile / per-call override.
+    { key: 'project_key',         label: 'Default project key', type: 'text', placeholder: 'optional — e.g. NEX, WKS' },
   ],
   imap: [
     { key: 'host',     label: 'Host',     type: 'text',     placeholder: 'imap.gmail.com', required: true },
