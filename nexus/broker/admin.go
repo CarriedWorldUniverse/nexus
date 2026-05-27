@@ -235,6 +235,14 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 			b.requireAdmin(http.HandlerFunc(b.handleAdminModelConfigGet)))
 		mux.Handle("PUT /api/admin/aspects/{name}/model-config",
 			b.requireAdmin(http.HandlerFunc(b.handleAdminModelConfigSet)))
+		// Provider+model runtime binding (NEX-335). Distinct from
+		// model-config above: this updates the broker-authoritative
+		// aspects.provider + aspects.model columns, flipping the
+		// validate-response binding without re-minting the keyfile.
+		mux.Handle("GET /api/admin/aspects/{name}/provider-binding",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminProviderBindingGet)))
+		mux.Handle("PUT /api/admin/aspects/{name}/provider-binding",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminProviderBindingSet)))
 		// Network-wide judge + compact defaults (NEX-294 Slice 2).
 		// Single-row config that layers under per-aspect overrides.
 		// Primary-* intentionally absent — primary is per-aspect by design.

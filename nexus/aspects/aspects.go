@@ -98,6 +98,14 @@ type Store interface {
 	// for caller use.
 	BumpKeyfileVersion(ctx context.Context, name string, newPubkey []byte) (int64, error)
 
+	// SetProviderAndModel atomically updates the provider + model
+	// columns. Used by the admin endpoint that flips an aspect's
+	// runtime binding without re-minting (NEX-335). Does NOT touch
+	// keyfile_version or aspect_pubkey — operator's keyfile keeps
+	// working; only the validate-response's Provider/Model change,
+	// which agentfunnel picks up on the next reconnect.
+	SetProviderAndModel(ctx context.Context, name, provider, model string) error
+
 	// SetStatus atomically updates status. Used by retire.
 	SetStatus(ctx context.Context, name string, status Status) error
 
@@ -246,6 +254,36 @@ func (s *SQLStore) Update(ctx context.Context, a Aspect) error {
 	n, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("aspects.Update(%q) rows affected: %w", a.Name, err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetProviderAndModel atomically updates the provider + model columns
+// on an existing aspect row. Used by the admin endpoint that lets the
+// operator flip an aspect from claude-code → openai etc. without
+// re-minting (the keyfile + aspect_pubkey stay untouched, only the
+// runtime-binding shifts).
+//
+// Targeted method rather than Get+Update because the latter writes
+// every column including status / current_keyfile_version / pubkey —
+// a concurrent BumpKeyfileVersion could be lost in the read-modify-
+// write window.
+func (s *SQLStore) SetProviderAndModel(ctx context.Context, name, provider, model string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE aspects SET
+			provider = ?, model = ?,
+			updated_at = datetime('now')
+		WHERE name = ?
+	`, provider, model, name)
+	if err != nil {
+		return fmt.Errorf("aspects.SetProviderAndModel(%q): %w", name, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("aspects.SetProviderAndModel(%q) rows affected: %w", name, err)
 	}
 	if n == 0 {
 		return ErrNotFound
