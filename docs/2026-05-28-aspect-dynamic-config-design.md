@@ -1,6 +1,6 @@
 # Aspect dynamic provider+model configuration (brainstorm draft)
 
-**Status:** Brainstorm v0.2, 2026-05-28. Filed with [NEX-332](https://carriedworlduniverse.atlassian.net/browse/NEX-332). Iterating in chat between operator and shadow. v0.2 closes Q1, Q2, and the resolver-location half of the open list; adds the cold-start persistence requirement.
+**Status:** Brainstorm v0.3, 2026-05-28. Filed with [NEX-332](https://carriedworlduniverse.atlassian.net/browse/NEX-332). Iterating in chat between operator and shadow. v0.2 closed Q1/Q2/resolver location; v0.3 resolves keyfile-vs-sidecar (keyfile wins, with the existing `jira` section as precedent) and adds the keyfile-schema prerequisite.
 
 ---
 
@@ -70,19 +70,38 @@ Single semantic, no operator-facing "should we cancel?" prompt. If the operator 
 
 Persistence target: **operator says "write to the keyfile"**, but see the design wrinkle below — likely a sidecar `current-config.json` next to the keyfile is cleaner. Decision is one for round 3.
 
-#### Wrinkle: keyfile vs sidecar for persisted config
+#### Keyfile co-location — RESOLVED (with caveat)
 
-Keyfile today is an identity envelope (encrypted payload signed by the broker; carries `nexus_id`, aspect identity, session-validate hints). Folding mutable operational config into it has tradeoffs:
+I initially argued for a sidecar because I had the wrong mental model of the keyfile — assumed it was a pure signed identity envelope. The actual keyfile structure already mixes signed and unsigned operator-managed sections:
 
-| | Co-locate in keyfile | Sidecar `current-config.json` |
-|---|---|---|
-| Single artifact to back up / move | ✅ | ❌ two files |
-| Signing semantics | Need to extend (operational config wasn't part of the signed identity) | Untouched |
-| Rotation safety | Keyfile refresh might unintentionally rewind config | Independent lifecycles |
-| Bootstrap simplicity | One read | One read for keyfile, one for config |
-| Migration of existing aspects | Keyfile schema bump | Just write the new file on first config push |
+```
+{
+  "version": 1,
+  "format": "nexus-keyfile-v1",
+  "envelope": { /* broker-issued identity bits */ },
+  "encrypted_payload": "...",                 // signed aspect identity
+  "jira": { /* operator-managed credentials */ }   // unsigned, freely rewritten
+}
+```
 
-My read: sidecar wins on every axis except "single file to copy around" — and that one is solvable by keeping them in the same directory. Going with sidecar unless operator pushes back.
+Adding a `config` section follows the `jira` precedent: unsigned, freely rewritten, doesn't touch the encrypted identity. Resolved in favour of keyfile co-location.
+
+**Caveat that bumps a prerequisite:** keyfile rotation must preserve operator-managed sections (`jira`, `config`, future additions). If the current rotation tooling rewrites the whole file from a fresh broker response, we'll silently rewind every refresh. Need to verify and harden if needed — see "Keyfile schema prerequisite" below.
+
+### Keyfile schema prerequisite — NEW
+
+Operator call: rather than letting the keyfile accumulate ad-hoc top-level sections (`jira` today; `config` tomorrow; whatever-next next month), define a **versioned keyfile schema** as a prerequisite to landing `config`.
+
+Scope of the schema work:
+- Document every existing top-level key (`version`, `format`, `envelope`, `encrypted_payload`, `jira`) — what it carries, who writes it, who reads it, is it signed
+- Define the policy for new sections: who can add, naming convention, signed-or-unsigned default, mandatory-or-optional
+- Define the unknown-section policy: preserved-on-rotation but not interpreted, OR rejected at parse
+- Define when the `version` / `format` field changes (additions don't; breaking changes do)
+- Document rotation behaviour: which sections are preserved across `encrypted_payload`/`envelope` refresh
+
+This belongs as a child story of NEX-332 — landing it first means the `config` addition slots into a defined slot rather than appearing as the next ad-hoc expansion.
+
+Suggested filename: `docs/2026-05-XX-keyfile-schema.md` (separate doc — keyfile schema is cross-cutting infra, not config-system internal).
 
 ## Still-open questions
 
@@ -129,12 +148,14 @@ Every config change should be auditable. Broker stores `(aspect, version, config
 
 Not a plan yet; just an order-of-operations gut check to keep the epic tractable.
 
+0. **Keyfile schema doc + rotation-preserving harden** — prerequisite. Defines the slot `config` lands in and ensures rotation doesn't rewind operator sections. Filed as separate doc/story per "Keyfile schema prerequisite" above.
 1. **Funnel-side config cache + ProviderResolver** — pure refactor of the existing single-provider construction path. No new wire protocol. Aspects boot from `aspect.json` as today but route through the resolver. Zero-impact intermediate state.
 2. **Bridle openai-as-DeepSeek validation** — confirm `OPENAI_BASE_URL=https://api.deepseek.com/v1` + DeepSeek key actually works end-to-end via the openai provider. This is the immediate-bug-fix slice: dMon agents can switch off the claude-code+shim hack as soon as it lands.
 3. **Broker-side config storage + manual edit API** — extend NEX-300 storage to cover the full config shape. REST + dashboard surface for read/write. No push yet; aspects pick up on reconnect.
-4. **`config.refresh` push protocol** — broker emits frame on change; aspect handles + applies. End-to-end live reconfigure.
+4. **`config.refresh` push protocol** — broker emits frame on change; aspect handles + applies + writes to local keyfile `config` section. End-to-end live reconfigure.
 5. **Dashboard UI completion** — full edit surface with provider/model/effort/sampling controls; "currently applied vs pending" display.
-6. **Session continuity policy** — implement provider-type-pinned threads (Q1 default) + the explicit "reset and apply" affordance.
+
+Session continuity policy (the original phase 6) is no longer needed since Q1 resolved in favour of bridle-owns-jsonl — no thread-pinning or translation layer required.
 
 Phase 1+2 are independently useful (un-jam dMon) and don't need the full architecture. Phases 3-6 are the operator-experience win.
 
@@ -152,8 +173,8 @@ Phase 1+2 are independently useful (un-jam dMon) and don't need the full archite
 ## Open for the next round of brainstorm
 
 When we pick this back up, the prioritised list is:
-1. Confirm keyfile-vs-sidecar for persisted config (recommended sidecar — see wrinkle).
+1. File the keyfile-schema child story (phase 0 — prerequisite).
 2. Lock the answer to Q5 (scope — tools/MCP in or out).
 3. Lock the answer to Q4 (wire format details: full-config push vs diff; refresh ACK semantics).
 4. Sketch the broker storage schema (extension of NEX-300 storage).
-5. Decide whether phases 3-6 stay together as one arc or split further.
+5. Decide whether phases 3-5 stay together as one arc or split further.
