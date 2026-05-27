@@ -1,6 +1,6 @@
 # Aspect dynamic provider+model configuration (brainstorm draft)
 
-**Status:** Brainstorm v0.4, 2026-05-28. Filed with [NEX-332](https://carriedworlduniverse.atlassian.net/browse/NEX-332). Iterating in chat between operator and shadow. v0.4 adds the verified factual content of the keyfile (signed-payload contents + canonical-vs-in-the-wild schema gap) so the schema-doc work has source-of-truth to build from.
+**Status:** Brainstorm v0.5, 2026-05-28. Filed with [NEX-332](https://carriedworlduniverse.atlassian.net/browse/NEX-332). Iterating in chat between operator and shadow. v0.5 collapses the keyfile schema to a two-section design (identity + cold-start cache) by routing `jira`-style operator-tool credentials through the broker config-push protocol once those tools go native.
 
 ---
 
@@ -115,6 +115,15 @@ I initially argued for a sidecar because I had the wrong mental model of the key
 This block is NOT in the canonical `aspects.Keyfile` struct. Some other code path (nexus-jira-mcp probably) reads it via a separate JSON parse. It survives because nothing actively scrubs unknown fields on rotation — but that's incidental, not designed.
 
 **Implication:** the codebase has two partial schemas — the canonical struct that only knows about `envelope`/`encrypted_payload`, and the operator/tooling-side reality where additional sections (`jira`) coexist. Adding `config` the same way works in practice but cements the ad-hoc shape. The schema-doc work (below) makes this intentional and bounded.
+
+**Operator direction (round 4):** `jira` block is read by nexus-jira-mcp today, but Jira is moving to a native nexus tool (sibling to NEX-209 ledger-native). Once that lands, the `jira` block leaves the keyfile entirely — credentials become broker-managed config, pushed via the same `config.refresh` protocol this epic introduces.
+
+That collapses the keyfile schema to two intentional concerns:
+
+1. **Identity** (signed, broker-issued, today's `envelope` + `encrypted_payload`)
+2. **Cold-start config cache** (unsigned, written by aspect on `config.refresh`, used only when broker is unreachable at boot)
+
+Everything else flows broker-side and pushes down. No `jira` block, no `discord` block, no future operator-tool-cred bolt-ons. The "schema rot" risk dissolves into "two well-defined sections, with a clear rule for what does or doesn't belong" — the boundary is *"does this need to survive a broker-unreachable cold start?"*
 
 **Rotation caveat:** keyfile rotation rewrites `envelope` + `encrypted_payload`. Operator-managed sections (`jira`, future `config`) currently survive only if the rotation tool merges rather than replaces — needs verification.
 
