@@ -47,6 +47,7 @@ import (
 	goruntime "runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -141,11 +142,27 @@ func main() {
 		fail(log, "materialise .mcp.json", err)
 	}
 
-	// 3. Build provider.
+	// 3. Build provider + initial binding cache.
+	//
+	// The binding (provider+model+harness triple) lives behind an
+	// atomic.Pointer so the funnel's per-turn BindingFn can pick up
+	// changes without rebuilding the funnel. v1: cache is seeded
+	// here at startup and refreshed by the TokenProvider re-validate
+	// path on JWT near-expiry — so an operator hitting PUT
+	// /api/admin/aspects/{name}/provider-binding sees the new
+	// binding take effect within one JWT cycle (≤ ~1 hour today,
+	// no restart required). Future config.refresh push (NEX-332
+	// phase 5) lands cache updates immediately.
 	provider, err := buildProvider(res.Provider, *claudePath)
 	if err != nil {
 		fail(log, "build provider", err)
 	}
+	bindingCache := &atomic.Pointer[funnel.Binding]{}
+	bindingCache.Store(&funnel.Binding{
+		Provider: bridle.ProviderID(res.Provider),
+		Model:    res.Model,
+		Harness:  bridle.NewHarness(provider),
+	})
 
 	// 4. Compose funnel + wsasp client.
 	sessionID := uuid.NewString()
@@ -189,6 +206,34 @@ func main() {
 		state.Set(sessionSnapshot{JWT: fresh.SessionJWT, Expires: fresh.SessionExpiresAt})
 		log.Info("agentfunnel: TokenProvider re-validated via keyfile",
 			"expires", fresh.SessionExpiresAt.Format(time.RFC3339))
+
+		// NEX-335: refresh the provider+model binding from the new
+		// validate response. If the broker-side aspects.provider or
+		// .model column changed (via the admin provider-binding
+		// endpoint), the next turn picks up the new binding via
+		// funnel.Config.BindingFn — no agentfunnel restart required.
+		// Provider construction reads env (OPENAI_API_KEY/BASE_URL
+		// for openai; same env-based path the initial buildProvider
+		// uses) so a binding-type swap still respects the running
+		// start-script's env. The current pre-fixed-credential path
+		// (NEX-332 phase 4) — broker-resolved creds replace env
+		// reads when wired.
+		prev := bindingCache.Load()
+		if prev.Model != fresh.Model || string(prev.Provider) != fresh.Provider {
+			newProv, perr := buildProvider(fresh.Provider, *claudePath)
+			if perr != nil {
+				log.Warn("agentfunnel: binding refresh skipped — buildProvider failed",
+					"err", perr, "provider", fresh.Provider)
+			} else {
+				bindingCache.Store(&funnel.Binding{
+					Provider: bridle.ProviderID(fresh.Provider),
+					Model:    fresh.Model,
+					Harness:  bridle.NewHarness(newProv),
+				})
+				log.Info("agentfunnel: binding refreshed via re-validate",
+					"provider", fresh.Provider, "model", fresh.Model)
+			}
+		}
 		return fresh.SessionJWT, nil
 	}
 
@@ -296,10 +341,20 @@ func main() {
 
 	systemPrompt := composeSystemPrompt(res)
 	f, err := funnel.New(funnel.Config{
-		AspectID:     res.AspectName,
-		Harness:      bridle.NewHarness(provider),
-		Provider:     bridle.ProviderID(res.Provider),
-		Model:        res.Model,
+		AspectID: res.AspectName,
+		// Static binding fields kept populated for back-compat (some
+		// non-aspect callers still construct without BindingFn) but
+		// the agentfunnel flow always uses BindingFn — see below.
+		Harness:  bridle.NewHarness(provider),
+		Provider: bridle.ProviderID(res.Provider),
+		Model:    res.Model,
+		// NEX-335: per-turn binding resolver reads from the binding
+		// cache. TokenProvider refreshes the cache on JWT re-validate
+		// when the broker-side binding has changed (operator hit the
+		// admin endpoint). The funnel calls this every turn, so the
+		// new binding takes effect on the next turn after the cache
+		// updates — no funnel rebuild, no aspect restart.
+		BindingFn:    func() funnel.Binding { return *bindingCache.Load() },
 		SystemPrompt: systemPrompt,
 		// MCP: non-nil enables MCP tool discovery via cmd.Dir/.mcp.json
 		// for claude-code subprocess. .mcp.json is materialised from the
