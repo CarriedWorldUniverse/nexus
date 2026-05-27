@@ -1,6 +1,6 @@
 # Aspect dynamic provider+model configuration (brainstorm draft)
 
-**Status:** Brainstorm v0.3, 2026-05-28. Filed with [NEX-332](https://carriedworlduniverse.atlassian.net/browse/NEX-332). Iterating in chat between operator and shadow. v0.2 closed Q1/Q2/resolver location; v0.3 resolves keyfile-vs-sidecar (keyfile wins, with the existing `jira` section as precedent) and adds the keyfile-schema prerequisite.
+**Status:** Brainstorm v0.4, 2026-05-28. Filed with [NEX-332](https://carriedworlduniverse.atlassian.net/browse/NEX-332). Iterating in chat between operator and shadow. v0.4 adds the verified factual content of the keyfile (signed-payload contents + canonical-vs-in-the-wild schema gap) so the schema-doc work has source-of-truth to build from.
 
 ---
 
@@ -72,21 +72,51 @@ Persistence target: **operator says "write to the keyfile"**, but see the design
 
 #### Keyfile co-location — RESOLVED (with caveat)
 
-I initially argued for a sidecar because I had the wrong mental model of the keyfile — assumed it was a pure signed identity envelope. The actual keyfile structure already mixes signed and unsigned operator-managed sections:
+I initially argued for a sidecar because I had the wrong mental model of the keyfile — assumed it was a pure signed identity envelope. Actual structure is (verified by reading `nexus/aspects/keyfile.go` + a live `plumb.keyfile.json`):
+
+**Documented canonical keyfile (`aspects.Keyfile` struct):**
 
 ```
 {
-  "version": 1,
-  "format": "nexus-keyfile-v1",
-  "envelope": { /* broker-issued identity bits */ },
-  "encrypted_payload": "...",                 // signed aspect identity
-  "jira": { /* operator-managed credentials */ }   // unsigned, freely rewritten
+  "version": 1,                              // schema version (currently 1)
+  "format": "nexus-keyfile-v1",              // schema identifier
+  "envelope": {                              // plaintext routing — broker-issued
+    "nexus_url": "wss://...",                // dial target
+    "nexus_id":  "...",                      // mutual-auth check
+    "issued_at": "2026-... RFC3339"          // audit
+  },
+  "encrypted_payload": "<base64 sealed blob>"// X25519 sealed; contents below
 }
 ```
 
-Adding a `config` section follows the `jira` precedent: unsigned, freely rewritten, doesn't touch the encrypted identity. Resolved in favour of keyfile co-location.
+**What's actually inside `encrypted_payload`** (`aspects.Payload` struct — the bit that's signed/encrypted via nacl/box against the server pubkey):
 
-**Caveat that bumps a prerequisite:** keyfile rotation must preserve operator-managed sections (`jira`, `config`, future additions). If the current rotation tooling rewrites the whole file from a fresh broker response, we'll silently rewind every refresh. Need to verify and harden if needed — see "Keyfile schema prerequisite" below.
+```
+{
+  "aspect_name":     "plumb",                // identity
+  "aspect_privkey":  "<base64 Ed25519 seed>",// session-auth credential
+  "keyfile_version": 17,                     // anti-replay; broker tracks current
+  "minted_at":       "2026-... RFC3339",     // audit
+  "nexus_id":        "..."                   // mutual-auth: must equal envelope.nexus_id
+}
+```
+
+**Off-spec extra in the wild (the `jira` block):**
+
+```
+"jira": {
+  "site":        "...",
+  "email":       "...",
+  "api_token":   "...",                      // ! credential
+  "project_key": "NEX"
+}
+```
+
+This block is NOT in the canonical `aspects.Keyfile` struct. Some other code path (nexus-jira-mcp probably) reads it via a separate JSON parse. It survives because nothing actively scrubs unknown fields on rotation — but that's incidental, not designed.
+
+**Implication:** the codebase has two partial schemas — the canonical struct that only knows about `envelope`/`encrypted_payload`, and the operator/tooling-side reality where additional sections (`jira`) coexist. Adding `config` the same way works in practice but cements the ad-hoc shape. The schema-doc work (below) makes this intentional and bounded.
+
+**Rotation caveat:** keyfile rotation rewrites `envelope` + `encrypted_payload`. Operator-managed sections (`jira`, future `config`) currently survive only if the rotation tool merges rather than replaces — needs verification.
 
 ### Keyfile schema prerequisite — NEW
 
