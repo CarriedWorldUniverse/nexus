@@ -304,6 +304,29 @@ func registerTools(srv *mcpserver.MCPServer, c *jiraClient, native *nativeClient
 			},
 		},
 		{
+			name:        "jira.delete",
+			description: "Delete a Jira issue by key (NEX-322). When delete_subtasks is true, child subtasks are removed alongside the parent; default false matches Atlassian's API — call fails if subtasks exist and delete_subtasks isn't set. Returns 'deleted: <key>' on success; Jira 403 (no permission) and 404 (key not found) surface as tool errors. Closes the multi-project move workflow: AI can chain jira.get → jira.create (with new project) → jira.delete to relocate a misfiled ticket without operator UI clicks.",
+			schema: mcpgo.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]any{
+					"key":             map[string]any{"type": "string", "description": "Issue key, e.g. NEX-313."},
+					"delete_subtasks": map[string]any{"type": "boolean", "description": "When true, cascade delete to subtasks. Default false (matches Atlassian API)."},
+				},
+				Required: []string{"key"},
+			},
+			handler: func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+				key := req.GetString("key", "")
+				if key == "" {
+					return mcpErr("key is required"), nil
+				}
+				deleteSubtasks := req.GetBool("delete_subtasks", false)
+				if err := c.DeleteIssue(ctx, key, deleteSubtasks); err != nil {
+					return mcpErr(err.Error()), nil
+				}
+				return mcpJSON(map[string]any{"deleted": key}), nil
+			},
+		},
+		{
 			name:        "jira.unlink",
 			description: "Remove an issue link by its ID. Obtain the ID via jira.list_links.",
 			schema: mcpgo.ToolInputSchema{

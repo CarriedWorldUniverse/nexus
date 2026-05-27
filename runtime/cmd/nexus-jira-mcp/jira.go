@@ -394,6 +394,35 @@ func (c *jiraClient) CreateIssue(ctx context.Context, summary, descriptionMarkdo
 	return resp.Key, nil
 }
 
+// DeleteIssue removes an issue (NEX-322). When deleteSubtasks is true,
+// child subtasks are removed alongside the parent; when false (Atlassian's
+// API default), the call fails if subtasks exist.
+//
+// Atlassian responds 204 No Content on success, 403 if the auth'd
+// account lacks delete permission in the project, 404 if the key is
+// unknown. The shared do() helper surfaces non-2xx as a formatted
+// error containing the response body — the MCP handler wraps that
+// verbatim for the model.
+//
+// Closes the cross-project-move workflow gap: AI can now do
+//
+//	jira_get NEX-313  →  jira_create project=WKS …  →  jira_delete NEX-313
+//
+// without operator UI clicks. Original key becomes stale (PR/commit
+// references won't auto-update); future jira_move wrapper could add
+// a "moved to NEW-KEY" comment on source before delete, but V1 keeps
+// the surface minimal.
+func (c *jiraClient) DeleteIssue(ctx context.Context, key string, deleteSubtasks bool) error {
+	if key == "" {
+		return errors.New("jira: delete: key is required")
+	}
+	path := "/rest/api/3/issue/" + key
+	if deleteSubtasks {
+		path += "?deleteSubtasks=true"
+	}
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
 // IssueLink is the projection returned by ListLinks.
 type IssueLink struct {
 	ID           string `json:"id"`
