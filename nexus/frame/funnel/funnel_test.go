@@ -836,7 +836,7 @@ func TestReceive_InboxPressureWarnsOnceWithHysteresis(t *testing.T) {
 // nothing to summarize.
 func TestCompact_EmptyTail_NoOp(t *testing.T) {
 	f, prov := newTestFunnel(t)
-	if err := f.compact(context.Background(), nil); err != nil {
+	if err := f.compact(context.Background(), nil, f.resolveBinding()); err != nil {
 		t.Fatal(err)
 	}
 	if prov.calls.Load() != 0 {
@@ -1454,5 +1454,136 @@ func TestDeliberate_NEX300_ZeroMainTurnSamplingPreservesDefaults(t *testing.T) {
 	}
 	if len(prov.last.StopSequences) != 0 {
 		t.Errorf("StopSequences should be empty; got %v", prov.last.StopSequences)
+	}
+}
+
+// NEX-335 BindingFn pattern: per-turn resolver supersedes static
+// Harness/Provider/Model. Validates the dynamic-config rails the
+// NEX-332 arc builds on.
+
+func TestBindingFn_OverridesStaticHarness(t *testing.T) {
+	// Static provider should NOT receive any call once BindingFn is set.
+	staticProv := &scriptedProvider{}
+	// Dynamic provider that BindingFn routes to.
+	dynProv := &scriptedProvider{}
+
+	f, err := New(Config{
+		AspectID:     "frame",
+		SystemPrompt: "test",
+		Harness:      bridle.NewHarness(staticProv),
+		Provider:     "static",
+		Model:        "static-model",
+		Runner:       noopRunner{},
+		BindingFn: func() Binding {
+			return Binding{
+				Provider: "dynamic",
+				Model:    "dynamic-model",
+				Harness:  bridle.NewHarness(dynProv),
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.Deliberate(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := dynProv.calls.Load(); got != 1 {
+		t.Errorf("dynamic provider calls = %d, want 1", got)
+	}
+	if got := staticProv.calls.Load(); got != 0 {
+		t.Errorf("static provider should not have been called; got %d", got)
+	}
+}
+
+// TestBindingFn_SwapBetweenTurns is the resolver-pattern smoke test:
+// the funnel picks up a swapped binding on the NEXT turn without
+// reconstruction. This is the property NEX-332 phase 5 (config.refresh
+// push) will exploit — the broker push handler just calls
+// cache.Store(newBinding) and the next turn auto-routes.
+func TestBindingFn_SwapBetweenTurns(t *testing.T) {
+	provA := &scriptedProvider{}
+	provB := &scriptedProvider{}
+	bindingA := Binding{Provider: "A", Model: "A-model", Harness: bridle.NewHarness(provA)}
+	bindingB := Binding{Provider: "B", Model: "B-model", Harness: bridle.NewHarness(provB)}
+
+	var current atomic.Pointer[Binding]
+	current.Store(&bindingA)
+
+	f, err := New(Config{
+		AspectID:     "frame",
+		SystemPrompt: "test",
+		Harness:      bridle.NewHarness(&scriptedProvider{}), // unused; satisfies validation
+		Provider:     "static",
+		Model:        "static",
+		Runner:       noopRunner{},
+		BindingFn:    func() Binding { return *current.Load() },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn 1 → bindingA
+	if _, err := f.Deliberate(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	if provA.calls.Load() != 1 || provB.calls.Load() != 0 {
+		t.Fatalf("after turn 1: A=%d B=%d, want A=1 B=0",
+			provA.calls.Load(), provB.calls.Load())
+	}
+
+	// Operator-flip-mid-conversation: swap the cached binding.
+	current.Store(&bindingB)
+
+	// Turn 2 → bindingB
+	if _, err := f.Deliberate(context.Background(), "second"); err != nil {
+		t.Fatal(err)
+	}
+	if provA.calls.Load() != 1 || provB.calls.Load() != 1 {
+		t.Fatalf("after turn 2: A=%d B=%d, want A=1 B=1",
+			provA.calls.Load(), provB.calls.Load())
+	}
+}
+
+// TestBindingFn_TurnRequestCarriesBindingProviderAndModel verifies the
+// resolved binding's Provider+Model land on the TurnRequest sent to
+// bridle — not the static cfg.Provider/Model fields. This is what
+// downstream usage attribution + observability log against.
+func TestBindingFn_TurnRequestCarriesBindingProviderAndModel(t *testing.T) {
+	prov := &scriptedProvider{}
+	f, err := New(Config{
+		AspectID:     "frame",
+		SystemPrompt: "test",
+		Harness:      bridle.NewHarness(&scriptedProvider{}),
+		Provider:     "static-id",
+		Model:        "static-model",
+		Runner:       noopRunner{},
+		BindingFn: func() Binding {
+			return Binding{
+				Provider: "dynamic-id",
+				Model:    "dynamic-model",
+				Harness:  bridle.NewHarness(prov),
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Deliberate(context.Background(), "ping"); err != nil {
+		t.Fatal(err)
+	}
+	if string(prov.last.Session.ID) == "" {
+		// Just verifying the request actually reached the provider.
+	}
+	// scriptedProvider stashes the ProviderRequest in .last; check
+	// that req.Provider/req.Model came from the binding, not from cfg.
+	// ProviderRequest doesn't carry the bridle.ProviderID directly
+	// (it's a ProviderRequest, not TurnRequest), so we check via the
+	// captured last.Model + observation that prov was called at all.
+	if prov.last.Model != "dynamic-model" {
+		t.Errorf("ProviderRequest.Model = %q, want dynamic-model (from binding)",
+			prov.last.Model)
 	}
 }

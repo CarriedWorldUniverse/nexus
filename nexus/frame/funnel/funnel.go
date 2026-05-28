@@ -245,6 +245,20 @@ type MainTurnSampling struct {
 	StopSequences   []string
 }
 
+// Binding is the per-turn provider+model+harness triple. Used by the
+// dynamic-config resolver path (Config.BindingFn) so the funnel can
+// swap any of the three between turns without being rebuilt.
+//
+// Harness wraps the Provider; callers building a Binding should
+// construct fresh via bridle.NewHarness(provider) on each refresh so
+// the harness reflects the current credentials baked into the
+// provider's client.
+type Binding struct {
+	Provider bridle.ProviderID
+	Model    string
+	Harness  *bridle.Harness
+}
+
 type Config struct {
 	// Identity & framing
 	AspectID     string // the Frame's name (operator-chosen)
@@ -273,6 +287,22 @@ type Config struct {
 	// Provider selection
 	Provider bridle.ProviderID
 	Model    string
+
+	// BindingFn, when non-nil, supersedes the static Harness/Provider/
+	// Model fields on every main + compact turn. Mirrors the
+	// SystemPromptFn per-turn-resolution pattern (NEX-332 dynamic
+	// config). Lets the caller swap provider+model+credentials at
+	// runtime — e.g. operator flips an aspect from claude-code to
+	// openai via the broker admin endpoint — without rebuilding the
+	// funnel or restarting the aspect.
+	//
+	// Funnel calls BindingFn() once per turn at the top of buildTurnRequest;
+	// the returned Binding is used consistently across the rest of the
+	// turn's wire format, RunTurn call, and observability/usage hooks.
+	// Caller is responsible for atomicity (returning a coherent triple)
+	// and for ensuring the Harness embedded in Binding is safe to use
+	// for one turn.
+	BindingFn func() Binding
 	MCP      *bridle.MCPClientConfig // optional; nil = no MCP-loaded tools
 	Tools    []bridle.ToolDef        // explicit in-process tool defs (incl. send_comms)
 	Runner   bridle.ToolRunner       // executes Tools
@@ -891,11 +921,21 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (result Del
 			"aspect", f.cfg.AspectID, "trigger_msg_id", st.trigger.MsgID, "err", err)
 	}
 
+	// Resolve the per-turn binding ONCE at the top of the turn so the
+	// wire format (TurnRequest.Provider/Model), the dispatch
+	// (binding.Harness.RunTurn), the compact pre-turn (if it fires),
+	// and the observability + usage hooks downstream all see a
+	// consistent triple. A config.refresh that arrives mid-turn lands
+	// on the next turn, not this one — single-source-of-truth per
+	// Deliberate. Stashed on st so helpers can read it without an
+	// additional parameter.
+	st.binding = f.resolveBinding()
+
 	f.maybeCompact(ctx, st)
 
-	req := f.buildTurnRequest(ctx, st, userMessage)
+	req := f.buildTurnRequest(ctx, st, userMessage, st.binding)
 
-	turnResult, err := f.runMainTurn(ctx, st, req)
+	turnResult, err := f.runMainTurn(ctx, st, req, st.binding)
 
 	if err != nil {
 		return f.handleTurnError(ctx, st, turnResult, err)
@@ -930,6 +970,14 @@ type deliberateState struct {
 	// Per-turn telemetry — populated by runMainTurn.
 	turnID    string
 	turnStart time.Time
+
+	// binding is the per-turn provider+model+harness triple resolved
+	// once at the top of Deliberate via f.resolveBinding(). Read by
+	// runMainTurn for dispatch and by judgeTurn (filter-decision log)
+	// so the whole Deliberate sees one coherent triple even if a
+	// config.refresh lands while a turn is in flight (the new binding
+	// applies on the NEXT turn).
+	binding Binding
 }
 
 // popHeadForTurn pops the next inbox head (FIFO), builds the trigger
@@ -1021,7 +1069,7 @@ func (f *Funnel) maybeCompact(ctx context.Context, st *deliberateState) {
 		return
 	}
 
-	if err := f.compact(ctx, st.tail); err != nil {
+	if err := f.compact(ctx, st.tail, st.binding); err != nil {
 		f.compactionFailures++
 		f.log.Warn("funnel: compaction failed; continuing without it",
 			"err", err, "consecutive_failures", f.compactionFailures)
@@ -1074,7 +1122,14 @@ func (f *Funnel) maybeCompact(ctx context.Context, st *deliberateState) {
 // claudecode), resolves per-call provider env (credential routing),
 // appends the triage contract to the user message when applicable,
 // and packs everything into the request struct.
-func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, userMessage string) bridle.TurnRequest {
+//
+// The binding triple (Provider/Model/Harness) is passed in by the
+// caller via resolveBinding() so the rest of the turn (RunTurn,
+// observability, usage) sees the same values. Per-turn binding
+// resolution at the runMainTurn boundary avoids the mid-turn split
+// where TurnRequest.Provider could come from one binding and the
+// Harness used to dispatch from another.
+func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, userMessage string, binding Binding) bridle.TurnRequest {
 	systemPrompt := f.cfg.SystemPrompt
 	if f.cfg.SystemPromptFn != nil {
 		systemPrompt = f.cfg.SystemPromptFn()
@@ -1089,7 +1144,7 @@ func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, user
 	// the tools are right there. Other providers (claude-api, openai,
 	// ollama) have no Anthropic default to layer onto; the blurb would
 	// be load-bearing-as-instruction not as-augmentation, so skip it.
-	if f.cfg.Provider == bridle.ProviderClaudeCode {
+	if binding.Provider == bridle.ProviderClaudeCode {
 		systemPrompt = appendToolkitBlurb(systemPrompt)
 	}
 	providerEnv, err := f.resolveProviderEnv(ctx, "main")
@@ -1115,8 +1170,8 @@ func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, user
 		Inbox:              st.pending,
 		Tools:              f.cfg.Tools,
 		MCP:                f.cfg.MCP,
-		Provider:           f.cfg.Provider,
-		Model:              f.cfg.Model,
+		Provider:           binding.Provider,
+		Model:              binding.Model,
 		MaxSteps:           f.cfg.MaxStepsPerTurn,
 		Cwd:                f.cfg.AspectHome,
 		ProviderEnv:        providerEnv,
@@ -1139,7 +1194,7 @@ func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, user
 // configured. Always emits TurnEnd (success or error) so dashboards
 // see a paired event for every TurnStart. Records usage attribution
 // and reconciles the inbox-triage contract on every exit path.
-func (f *Funnel) runMainTurn(ctx context.Context, st *deliberateState, req bridle.TurnRequest) (bridle.TurnResult, error) {
+func (f *Funnel) runMainTurn(ctx context.Context, st *deliberateState, req bridle.TurnRequest, binding Binding) (bridle.TurnResult, error) {
 	st.turnID = newTurnID()
 	st.turnStart = time.Now()
 	f.emit(ctx, Event{
@@ -1162,14 +1217,14 @@ func (f *Funnel) runMainTurn(ctx context.Context, st *deliberateState, req bridl
 	// explicitly immediately after RunTurn so the main TurnFrame
 	// settles cleanly.
 	if f.cfg.ObservabilityHook != nil {
-		f.cfg.ObservabilityHook.BeginTurn(st.turnID, "main", f.cfg.Model, string(f.cfg.Provider), st.triggerMsgID)
+		f.cfg.ObservabilityHook.BeginTurn(st.turnID, "main", binding.Model, string(binding.Provider), st.triggerMsgID)
 	}
 	sink := f.buildTurnSink(st.trigger.MsgID)
 	// Tag the context with the turn_id so the triage tool runner
 	// persists rows under the right turn. Required when Triage is
 	// wired; harmless otherwise.
 	turnCtx := WithTurnID(ctx, st.turnID)
-	result, err := f.cfg.Harness.RunTurn(turnCtx, req, f.cfg.Runner, sink)
+	result, err := binding.Harness.RunTurn(turnCtx, req, f.cfg.Runner, sink)
 	if f.cfg.ObservabilityHook != nil {
 		f.cfg.ObservabilityHook.EndTurn()
 	}
@@ -1202,7 +1257,7 @@ func (f *Funnel) runMainTurn(ctx context.Context, st *deliberateState, req bridl
 	// paths) so a turn that errored still has its partial usage
 	// captured — billing apportions to errored turns too. Errors
 	// from the recorder are logged but never fail the deliberation.
-	if recErr := f.cfg.UsageRecorder.Record(ctx, st.triggerMsgID, st.turnID, f.cfg.AspectID, f.cfg.Model, result.Usage); recErr != nil {
+	if recErr := f.cfg.UsageRecorder.Record(ctx, st.triggerMsgID, st.turnID, f.cfg.AspectID, binding.Model, result.Usage); recErr != nil {
 		f.log.Warn("funnel: usage record failed",
 			"err", recErr, "turn_id", st.turnID, "msg_id", st.triggerMsgID)
 	}
@@ -1407,9 +1462,9 @@ func (f *Funnel) judgeTurn(ctx context.Context, st *deliberateState, result brid
 	// only knew how to render turns. The fallback stays until every
 	// consumer (WSForwarder + plumb-side) has migrated.
 	if r, ok := f.cfg.ObservabilityHook.(FilterDecisionRenderer); ok {
-		r.OnFilterDecision(st.turnID, f.cfg.Model, string(f.cfg.Provider), decision.ShouldPost, decision.Reason, decision.Class)
+		r.OnFilterDecision(st.turnID, st.binding.Model, string(st.binding.Provider), decision.ShouldPost, decision.Reason, decision.Class)
 	} else if f.cfg.ObservabilityHook != nil {
-		f.cfg.ObservabilityHook.BeginTurn(st.turnID+"-decision", "filter-decision", f.cfg.Model, string(f.cfg.Provider), 0)
+		f.cfg.ObservabilityHook.BeginTurn(st.turnID+"-decision", "filter-decision", st.binding.Model, string(st.binding.Provider), 0)
 		f.cfg.ObservabilityHook.OnBridleEvent(bridle.ModelChunk{Text: renderFilterVerdict(decision)})
 		f.cfg.ObservabilityHook.OnBridleEvent(bridle.TurnDone{})
 		f.cfg.ObservabilityHook.EndTurn()
@@ -1473,7 +1528,7 @@ type DeliberateResult struct {
 // loop serializes itself. Two concurrent Deliberate calls would race
 // here. v1 has one caller (the Frame's main loop), and that's the
 // invariant. If Deliberate ever fans out, this needs a guard.
-func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error {
+func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent, binding Binding) error {
 	if len(tail) == 0 {
 		// Nothing to compact.
 		return nil
@@ -1504,7 +1559,7 @@ func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error 
 
 	model := f.cfg.Compaction.SummarizationModel
 	if model == "" {
-		model = f.cfg.Model
+		model = binding.Model
 	}
 
 	summarizePrompt := summarizationPrompt
@@ -1520,7 +1575,7 @@ func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error 
 		Session:     bridle.SessionHandle{ID: newSessionID(), New: true},
 		SessionTail: tail,
 		UserMessage: "Summarize this session into a compact briefing the model can use to continue.",
-		Provider:    f.cfg.Provider,
+		Provider:    binding.Provider,
 		Model:       model,
 		MaxSteps:    1, // pure text; one round is enough
 		Cwd:         f.cfg.AspectHome,
@@ -1534,10 +1589,10 @@ func (f *Funnel) compact(ctx context.Context, tail []bridle.SessionEvent) error 
 	// site's reasoning).
 	compactTurnID := newTurnID()
 	if f.cfg.ObservabilityHook != nil {
-		f.cfg.ObservabilityHook.BeginTurn(compactTurnID, "compact", model, string(f.cfg.Provider), 0)
+		f.cfg.ObservabilityHook.BeginTurn(compactTurnID, "compact", model, string(binding.Provider), 0)
 	}
 	sink := turnSink(f.cfg.ObservabilityHook)
-	result, err := f.cfg.Harness.RunTurn(ctx, req, f.cfg.Runner, sink)
+	result, err := binding.Harness.RunTurn(ctx, req, f.cfg.Runner, sink)
 	if f.cfg.ObservabilityHook != nil {
 		f.cfg.ObservabilityHook.EndTurn()
 	}
@@ -1608,6 +1663,28 @@ func (f *Funnel) SessionID() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sessionHandle.ID
+}
+
+// resolveBinding returns the currently-active Binding. If
+// Config.BindingFn is set, the funnel calls it on every turn (NEX-332
+// dynamic-config resolver pattern). Otherwise the static
+// Harness/Provider/Model fields are returned unchanged — backward-
+// compatible no-op for callers that pre-date BindingFn.
+//
+// Called once per turn at the top of buildTurnRequest + the compact
+// turn path. The returned triple is used consistently for the rest
+// of that turn's wire format, RunTurn call, observability hooks, and
+// usage attribution — so a per-turn config change can't leave half
+// the turn on the old binding and half on the new.
+func (f *Funnel) resolveBinding() Binding {
+	if f.cfg.BindingFn != nil {
+		return f.cfg.BindingFn()
+	}
+	return Binding{
+		Provider: f.cfg.Provider,
+		Model:    f.cfg.Model,
+		Harness:  f.cfg.Harness,
+	}
 }
 
 // resolveProviderEnv consults the configured ProviderEnvResolver and
