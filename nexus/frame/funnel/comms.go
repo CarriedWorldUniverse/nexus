@@ -183,8 +183,15 @@ const (
 	ToolNameSendChat        = "send_chat"
 	ToolNameReactTo         = "react_to"
 	ToolNameReactToMessage  = "react_to_message" // legacy alias from Lock 3 — same handler as react_to
-	ToolNameChatRead        = "chat.read"
-	ToolNameReadChatThread  = "read_chat_thread" // alias for chat.read with naming familiar from agent-network
+	// ToolNameChatRead originally used "chat.read" (matching the WS
+	// frame kind) but DeepSeek's OpenAI-shape /v1 rejects tool names
+	// containing `.` — the pattern is ^[a-zA-Z0-9_-]+$. Renamed to the
+	// underscore form 2026-05-28 to unblock plumb's openai+DeepSeek
+	// cutover (NEX-335). Dispatch is on the constant so the rename is
+	// internally coherent; the alias ToolNameReadChatThread remains
+	// for backward compat with anything pinned to that surface.
+	ToolNameChatRead        = "chat_read"
+	ToolNameReadChatThread  = "read_chat_thread" // alias for chat_read with naming familiar from agent-network
 	ToolNameReadChatMessage = "read_chat_message"
 	ToolNameAnnounceFile    = "announce_file"
 	ToolNameShareFile       = "share_file"
