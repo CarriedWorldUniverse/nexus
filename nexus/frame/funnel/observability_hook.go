@@ -100,48 +100,70 @@ func turnSink(hook ObservabilityHook) bridle.EventSink {
 	return multiSink{collectSink{}, hookSink{hook: hook}}
 }
 
-// streamingChatSink intercepts ModelChunk events and posts each text
-// block to chat immediately via ChatGateway, giving the operator live
-// visibility into a turn's progress. Tool-call events pass through
-// without side effects.
+// streamingChatSink intercepts ModelChunk events and posts text
+// blocks to chat via ChatGateway, giving the operator live visibility
+// into a turn's progress.
 //
-// The first block replies to replyTo (the trigger msg); subsequent
-// blocks chain onto the previous block's msg_id so the thread shows
-// a linear progression rather than a fan of siblings.
+// Chunk-coalescing policy: providers emit ModelChunks at wildly
+// different granularities. claudecode/geminicli emit one chunk per
+// semantic text block (sentence-to-paragraph sized). openai-shape
+// providers (OpenAI, DeepSeek, Together, vLLM) emit one chunk per
+// token — emitting each as its own chat row fans a multi-sentence
+// reply into ~40-80 individual messages. The fix: buffer ModelChunk
+// text between natural transition events (ToolCallStart, TurnDone,
+// TurnError) and flush as one post per logical span. claudecode's
+// pattern of "text block → tool call → text block" still produces
+// one row per block (each tool call flushes the preceding buffer).
+// openai's pure-text turn produces one row total (TurnDone flushes).
+//
+// The first emitted post replies to replyTo (the trigger msg);
+// subsequent posts chain onto the previous post's msg_id so the
+// thread shows a linear progression rather than a fan of siblings.
 type streamingChatSink struct {
 	gateway  ChatGateway
 	replyTo  int64
 	aspectID string
 
 	mu        sync.Mutex
+	buf       strings.Builder
 	lastMsgID int64
 }
 
 func (s *streamingChatSink) Emit(ev bridle.Event) {
-	chunk, ok := ev.(bridle.ModelChunk)
-	if !ok {
-		return
+	switch e := ev.(type) {
+	case bridle.ModelChunk:
+		if e.Text == "" {
+			return
+		}
+		s.mu.Lock()
+		s.buf.WriteString(e.Text)
+		s.mu.Unlock()
+	case bridle.ToolCallStart, bridle.TurnDone, bridle.TurnError:
+		_ = e
+		s.mu.Lock()
+		s.flushLocked()
+		s.mu.Unlock()
 	}
-	text := strings.TrimSpace(chunk.Text)
+}
+
+// flushLocked posts the accumulated buffer as one chat row and
+// clears the buffer. Caller holds s.mu. No-op on empty buffer.
+//
+// Uses a detached context: chat posts should complete even if the
+// turn's context is cancelled mid-stream.
+func (s *streamingChatSink) flushLocked() {
+	text := strings.TrimSpace(s.buf.String())
+	s.buf.Reset()
 	if text == "" {
 		return
 	}
-
-	s.mu.Lock()
 	replyTo := s.replyTo
 	if s.lastMsgID != 0 {
 		replyTo = s.lastMsgID
 	}
-	s.mu.Unlock()
-
-	// Use a detached context: chat posts should complete even if the
-	// turn's context is cancelled mid-stream.
 	msgID, err := s.gateway.SendChat(context.Background(), text, replyTo, "")
 	if err != nil {
 		return
 	}
-
-	s.mu.Lock()
 	s.lastMsgID = msgID
-	s.mu.Unlock()
 }
