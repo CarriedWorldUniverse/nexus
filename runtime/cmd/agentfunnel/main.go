@@ -71,6 +71,7 @@ func main() {
 	cursorDir := flag.String("cursor-dir", "", "directory for the Lock 6 message-cursor file (defaults to <cwd>/cursor)")
 	contextMode := flag.String("context-mode", string(schemas.ContextThread), "context mode: global, thread, or stateless (Nexus does not yet ship context_mode in the validation response)")
 	claudePath := flag.String("claude", "", "path to the claude-code CLI (optional; auto-detects /opt/homebrew/bin/claude, /usr/local/bin/claude, ~/.npm-global/bin/claude, then PATH; also honours CLAUDE_PATH env)")
+	policyPath := flag.String("policy", "", "path to a per-aspect tool permission policy JSON file (optional; empty = permissive default_allow). See funnel.ToolPolicy for the JSON shape.")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -158,6 +159,30 @@ func main() {
 	if err != nil {
 		fail(log, "build provider", err)
 	}
+
+	// Load the per-aspect tool permission policy once at startup (Tier A:
+	// local JSON file). Empty -policy preserves the historical permissive
+	// behaviour (DefaultAllow=true); a configured path that's missing or
+	// malformed fails fast rather than silently falling back to permissive.
+	// Threaded into every newBindingHarness call below so the P3b/P3c
+	// permission hook enforces it on native-API providers.
+	//
+	// Tier B (follow-on): store the per-aspect policy centrally in the
+	// Nexus and deliver it via keyfile.ValidationResult — mirroring the
+	// existing res.MCPProfile field (keyfile.go ValidationResult.MCPProfile,
+	// the NEX-169 resolved MCP-server blob). That removes the on-host file
+	// and makes the policy Nexus-authoritative like provider/model.
+	policy, err := loadToolPolicy(*policyPath)
+	if err != nil {
+		fail(log, "load tool policy", err)
+	}
+	log.Info("agentfunnel: tool policy loaded",
+		"source", policySource(*policyPath),
+		"default_allow", policy.DefaultAllow,
+		"denied_tools", deniedToolCount(policy),
+		"escalated_tools", len(policy.Escalate),
+		"bash_deny_patterns", len(policy.BashDeny),
+		"write_path_prefixes", len(policy.WritePathAllow))
 	// escalator (P3c) is built from the wsasp client (below) once it
 	// exists; declared here so the TokenProvider binding-refresh closure
 	// captures the variable. Until assigned it is nil, so an escalate
@@ -171,7 +196,7 @@ func main() {
 		Model:    res.Model,
 		// Native-API providers get the P3b permission hook registered on
 		// the Harness; claude-code is skipped (self-supplies tools).
-		Harness: newBindingHarness(provider, res.Provider, escalator),
+		Harness: newBindingHarness(provider, res.Provider, escalator, policy),
 	})
 
 	// 4. Compose funnel + wsasp client.
@@ -238,7 +263,7 @@ func main() {
 				bindingCache.Store(&funnel.Binding{
 					Provider: bridle.ProviderID(fresh.Provider),
 					Model:    fresh.Model,
-					Harness:  newBindingHarness(newProv, fresh.Provider, escalator),
+					Harness:  newBindingHarness(newProv, fresh.Provider, escalator, policy),
 				})
 				log.Info("agentfunnel: binding refreshed via re-validate",
 					"provider", fresh.Provider, "model", fresh.Model)
@@ -285,7 +310,7 @@ func main() {
 	bindingCache.Store(&funnel.Binding{
 		Provider: bridle.ProviderID(res.Provider),
 		Model:    res.Model,
-		Harness:  newBindingHarness(provider, res.Provider, escalator),
+		Harness:  newBindingHarness(provider, res.Provider, escalator, policy),
 	})
 
 	gateway := wsasp.NewGateway(wsClient)
@@ -388,7 +413,7 @@ func main() {
 		// Hook registered here too so the back-compat path also enforces
 		// the P3b policy for native providers (BindingFn overrides per turn).
 		// escalator is set by now (built right after the wsasp client).
-		Harness:  newBindingHarness(provider, res.Provider, escalator),
+		Harness:  newBindingHarness(provider, res.Provider, escalator, policy),
 		Provider: bridle.ProviderID(res.Provider),
 		Model:    res.Model,
 		// NEX-335: per-turn binding resolver reads from the binding
@@ -648,8 +673,11 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 // direct-API providers (claude-api, openai) the funnel executes every tool
 // via the Harness, so the hook is the enforcement point.
 //
-// v1 policy is permissive (DefaultAllow=true): the enforcement MECHANISM
-// ships here; per-aspect policy config is a thin follow-on (P3b-config).
+// policy is the per-aspect ToolPolicy enforced by the P3b/P3c permission
+// hook. It is loaded once at startup by loadToolPolicy (Tier A: local
+// -policy JSON file) and threaded through unchanged so every binding
+// refresh re-registers the same policy. An empty -policy yields the
+// permissive DefaultAllow=true policy, preserving pre-config behaviour.
 //
 // esc (P3c) handles VerdictEscalate tool calls by asking the operator
 // over the aspect's WS. It is built from the wsasp client (the
@@ -657,19 +685,64 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 // store (before the client is constructed) passes nil, which makes any
 // escalate verdict fail-safe to deny until the escalator-equipped
 // harness is re-stored.
-func newBindingHarness(provider bridle.Provider, providerName string, esc *funnel.Escalator) *bridle.Harness {
+func newBindingHarness(provider bridle.Provider, providerName string, esc *funnel.Escalator, policy funnel.ToolPolicy) *bridle.Harness {
 	h := bridle.NewHarness(provider)
 	switch providerName {
 	case "claude-code", "claudecode":
 		// claude-code owns its tools in-subprocess — hook can't see them.
 	default:
-		// TODO(P3b-config): load the real per-aspect ToolPolicy (broker
-		// model_config / aspect.json) instead of the permissive default.
-		// The Escalate set comes from the same per-aspect policy source.
-		policy := funnel.ToolPolicy{DefaultAllow: true}
 		h.RegisterBeforeToolCall(funnel.PermissionHook(policy, esc))
 	}
 	return h
+}
+
+// loadToolPolicy resolves the per-aspect tool permission policy.
+//
+// Tier A (this function): an empty path returns the permissive default
+// (DefaultAllow=true) so unconfigured aspects behave exactly as they did
+// before the -policy flag existed. A non-empty path is read and
+// JSON-decoded into a funnel.ToolPolicy; a missing or malformed file
+// returns a wrapped error so startup fails fast rather than silently
+// running permissive — a misconfigured policy must be loud.
+//
+// Tier B (follow-on): the Nexus stores the per-aspect policy and delivers
+// it through keyfile.ValidationResult, mirroring the existing MCPProfile
+// field, removing the need for an on-host file.
+func loadToolPolicy(path string) (funnel.ToolPolicy, error) {
+	if path == "" {
+		return funnel.ToolPolicy{DefaultAllow: true}, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return funnel.ToolPolicy{}, fmt.Errorf("read tool policy %q: %w", path, err)
+	}
+	var p funnel.ToolPolicy
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return funnel.ToolPolicy{}, fmt.Errorf("parse tool policy %q: %w", path, err)
+	}
+	return p, nil
+}
+
+// policySource renders a human label for the policy origin in log lines.
+func policySource(path string) string {
+	if path == "" {
+		return "default (permissive)"
+	}
+	return path
+}
+
+// deniedToolCount counts tools the policy denies outright via the Tools
+// map (entries set to false). Bash-denylist and write-path rules are
+// command/path conditional, so they're logged separately as pattern
+// counts rather than folded in here.
+func deniedToolCount(p funnel.ToolPolicy) int {
+	n := 0
+	for _, allowed := range p.Tools {
+		if !allowed {
+			n++
+		}
+	}
+	return n
 }
 
 // buildAgentFunnelFilter constructs the output filter for an agentfunnel
