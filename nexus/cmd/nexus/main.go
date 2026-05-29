@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -27,13 +26,14 @@ import (
 	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
 	"github.com/CarriedWorldUniverse/ledger"
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
-	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
 	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/framecomms"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/judge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/rewriter"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
@@ -235,7 +235,7 @@ func main() {
 		// expectation of "reauth once a day" without re-prompting on
 		// every refresh. Tightening to <24h breaks the workday session;
 		// loosening to 7d+ stretches blast radius if a token leaks.
-		JWTTTL:               24 * time.Hour,
+		JWTTTL: 24 * time.Hour,
 	}
 
 	// Broker-mediated credentials store (task #218). Keys are encrypted
@@ -321,7 +321,7 @@ func main() {
 		// NEX-263: apply per-aspect model + credential overrides from
 		// the credentials store on top of the keyfile-loaded cfg.
 		// Mutates ef.Aspect.Config in place so downstream funnel
-		// builders (buildChatRouter, resolveJudgeProviderAndModel,
+		// builders (buildChatRouter, buildFrameCheapFilter,
 		// buildRewriterRunner) read the override-resolved values.
 		applyAspectModelOverrides(ctx, &embeddedFrame.Aspect.Config, credentialStore, logger)
 	} else {
@@ -518,21 +518,21 @@ func main() {
 		AuthToken:          token,
 		AllowLegacyMaster:  allowLegacy,
 		OperatorAuthBypass: authBypass,
-		Tokens:            tokenStore,
-		StaleAfter:        *staleAfter,
-		Logger:            logger,
-		Projection:        proj,
-		HandQueue:         queue,
-		Admin:             adminCallbacks,
-		ChatRouter:        chatRouter,
-		Replayer:          replayer,
-		ChatStore:         chatStore,
-		RecipientPolicy:   recipientPolicy,
-		AspectHomes:       aspectHomes,
-		TLSCertFile:       *tlsCert,
-		TLSKeyFile:        *tlsKey,
-		DashboardDir:      *dashboardDir,
-		KeyfileValidator:  keyfileValidator,
+		Tokens:             tokenStore,
+		StaleAfter:         *staleAfter,
+		Logger:             logger,
+		Projection:         proj,
+		HandQueue:          queue,
+		Admin:              adminCallbacks,
+		ChatRouter:         chatRouter,
+		Replayer:           replayer,
+		ChatStore:          chatStore,
+		RecipientPolicy:    recipientPolicy,
+		AspectHomes:        aspectHomes,
+		TLSCertFile:        *tlsCert,
+		TLSKeyFile:         *tlsKey,
+		DashboardDir:       *dashboardDir,
+		KeyfileValidator:   keyfileValidator,
 		// NEX-367 follow-up: the session secret the keyfile validator
 		// signs aspect JWTs with, surfaced at broker level so aspect
 		// /connect can verify them even on a headless/aspect-only broker
@@ -1194,47 +1194,39 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 		log.Info("frame funnel: filter=hard (substring/prefix self-suppress only)", "aspect", aspectName)
 		return funnel.HardRulesFilter{}
 	case "cheap":
-		judgeProvider, judgeProviderID, judgeModel := resolveJudgeProviderAndModel(cfg, frameProvider, frameProviderID, frameModel, log)
-		if judgeProvider == nil {
-			log.Warn("frame funnel: filter=cheap requested but no usable judge provider; downgrading to hard",
-				"aspect", aspectName, "filter_provider", cfg.FilterProvider)
-			return funnel.HardRulesFilter{}
-		}
-		judgeEnv := resolveFilterCredentialEnv(cfg, credentialStore, log)
-		log.Info("frame funnel: filter=cheap (hard rules + cheap-model judge)",
-			"aspect", aspectName, "judge_provider", judgeProviderID, "judge_model", judgeModel,
-			"filter_credential", cfg.FilterCredential, "judge_env_keys", envKeys(judgeEnv))
-		return funnel.HardRulesFilter{
-			Inner: &funnel.CheapModelFilter{
-				Harness:           bridle.NewHarness(bareJudgeProvider(nativeJudgeProvider(judgeProvider, judgeProviderID, judgeEnv), judgeProviderID)),
-				Provider:          judgeProviderID,
-				Model:             judgeModel,
-				AspectHome:        aspectHome,
-				Logger:            log,
-				ObservabilityHook: obsHook,
-				ProviderEnv:       judgeEnv,
-			},
-		}
+		return buildFrameCheapFilter(cfg, frameProvider, frameProviderID, frameModel, obsHook, aspectHome, credentialStore, log)
 	default:
 		log.Warn("frame funnel: unrecognised filter setting; falling back to cheap",
 			"aspect", aspectName, "setting", cfg.Filter)
-		judgeProvider, judgeProviderID, judgeModel := resolveJudgeProviderAndModel(cfg, frameProvider, frameProviderID, frameModel, log)
-		if judgeProvider == nil {
-			return funnel.HardRulesFilter{}
-		}
-		judgeEnv := resolveFilterCredentialEnv(cfg, credentialStore, log)
-		return funnel.HardRulesFilter{
-			Inner: &funnel.CheapModelFilter{
-				Harness:           bridle.NewHarness(bareJudgeProvider(nativeJudgeProvider(judgeProvider, judgeProviderID, judgeEnv), judgeProviderID)),
-				Provider:          judgeProviderID,
-				Model:             judgeModel,
-				AspectHome:        aspectHome,
-				Logger:            log,
-				ObservabilityHook: obsHook,
-				ProviderEnv:       judgeEnv,
-			},
+		return buildFrameCheapFilter(cfg, frameProvider, frameProviderID, frameModel, obsHook, aspectHome, credentialStore, log)
+	}
+}
+
+// buildFrameCheapFilter resolves the Frame's judge inputs (judge provider /
+// model from aspect.json, judge credential env from the credentials store)
+// and delegates construction to the shared judge package — the same builder
+// the out-of-process agentfunnel uses (NEX-365 #2). The judge model comes
+// from filter_provider_config.model; the judge provider from filter_provider
+// (empty = inherit the Frame's provider).
+func buildFrameCheapFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, frameProviderID bridle.ProviderID, frameModel string, obsHook funnel.ObservabilityHook, aspectHome string, credentialStore *credentials.Store, log *slog.Logger) funnel.OutputFilter {
+	judgeModel := ""
+	if cfg.FilterProviderConfig != nil {
+		if m, ok := cfg.FilterProviderConfig["model"].(string); ok {
+			judgeModel = strings.TrimSpace(m)
 		}
 	}
+	return judge.BuildFilter(judge.Spec{
+		Label:             "frame funnel",
+		MainProvider:      frameProvider,
+		MainProviderID:    frameProviderID,
+		MainModel:         frameModel,
+		JudgeProviderName: strings.TrimSpace(cfg.FilterProvider),
+		JudgeModel:        judgeModel,
+		JudgeEnv:          resolveFilterCredentialEnv(cfg, credentialStore, log),
+		AspectHome:        aspectHome,
+		ObsHook:           obsHook,
+		Logger:            log,
+	})
 }
 
 // resolveCompactCredentialEnv mirrors resolveFilterCredentialEnv
@@ -1288,26 +1280,11 @@ func resolveFilterCredentialEnv(cfg schemas.AspectConfig, store *credentials.Sto
 	return env
 }
 
-// envKeys returns the env map's keys (sorted) for logging — never the
-// values, which carry the API key. Lets the operator confirm the env
-// got resolved without leaking secrets to stdout.
-func envKeys(env map[string]string) []string {
-	if len(env) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(env))
-	for k := range env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
 // applyAspectModelOverrides reads NEX-263's per-aspect model + credential
 // override rows from the credentials store and mutates cfg in place. Each
 // override field overlays the corresponding keyfile value; null overrides
 // leave keyfile values untouched. Designed to be called once at startup
-// before any consumer (buildChatRouter, resolveJudgeProviderAndModel,
+// before any consumer (buildChatRouter, buildFrameCheapFilter,
 // buildRewriterRunner) reads cfg, so all three see the resolved values.
 //
 // Phase 1 wires three model fields (primary / judge / compact) and the
@@ -1392,8 +1369,8 @@ func applyAspectModelOverrides(ctx context.Context, cfg *schemas.AspectConfig, s
 	// filter_provider is operator-intent and WINS over the stored policy
 	// plane; this only fills the gap when filter_provider is unset. The
 	// paired judge credential (set above) carries the endpoint key + base
-	// URL so resolveJudgeProviderAndModel + nativeJudgeProvider actually
-	// target it.
+	// URL so the judge package (judge.BuildFilter / NativeJudgeProvider)
+	// actually targets it.
 	if judgeProv, src := pickModelOverride(override.JudgeProvider, defaults.JudgeProvider); src != "" {
 		if strings.TrimSpace(cfg.FilterProvider) == "" {
 			cfg.FilterProvider = judgeProv
@@ -1461,70 +1438,11 @@ func pickModelOverride(perAspect *string, networkDefault string) (value, source 
 	return "", ""
 }
 
-// resolveJudgeProviderAndModel picks the cheap-tier provider+model for
-// the CheapModelFilter, separate from the Frame's main provider:
-//
-//   - If aspect.json sets "filter_provider", instantiate that provider
-//     (claude-api / claude-code / future: ollama, openai). Model comes
-//     from filter_provider_config.model, falling back to a sensible
-//     default per provider family.
-//   - Otherwise inherit the Frame's provider, with the Frame's model as
-//     the absolute floor and "claude-haiku-4-5" as the preferred default
-//     when the provider is a Claude flavor.
-//
-// Returns (nil, "", "") when the configured provider can't be built —
-// caller must downgrade to "hard" rather than crash the Frame.
-func resolveJudgeProviderAndModel(cfg schemas.AspectConfig, frameProvider bridle.Provider, frameProviderID bridle.ProviderID, frameModel string, log *slog.Logger) (bridle.Provider, bridle.ProviderID, string) {
-	overrideProvider := strings.TrimSpace(cfg.FilterProvider)
-	overrideModel := ""
-	if cfg.FilterProviderConfig != nil {
-		if m, ok := cfg.FilterProviderConfig["model"].(string); ok {
-			overrideModel = strings.TrimSpace(m)
-		}
-	}
-
-	if overrideProvider == "" {
-		// Inherit Frame's provider. Default model preference: a haiku
-		// tier for Claude flavors, otherwise the Frame's own model.
-		//
-		// Bare "haiku" rather than a versioned id like "claude-haiku-4-5"
-		// because the cheap-judge runs under whichever claude provider
-		// the Frame uses — and for claude-code (subprocess CLI) the
-		// versioned api-style name made the CLI run as a full agent
-		// rather than a classifier (observed 2026-05-12: judge produced
-		// 9-tool-call multi-step deliberations instead of "yes"/"no").
-		// Bare "haiku" picks the CLI's own default haiku tier for
-		// claude-code. NEX-369: under claude-API the bare shorthand is
-		// NOT a valid Anthropic SDK model id (it 404s → the judge
-		// degrades + fails open), so funnel.ExpandBareClaudeTier maps it
-		// to a full id on the native path, leaving claude-code's shorthand
-		// intact. See task #193's filter-suppression trail.
-		model := overrideModel
-		if model == "" {
-			if isClaudeFlavor(frameProviderID) {
-				model = "haiku"
-			} else {
-				model = frameModel
-			}
-		}
-		return frameProvider, frameProviderID, funnel.ExpandBareClaudeTier(model, frameProviderID)
-	}
-
-	// Build a fresh provider from filter_provider.
-	p, id, ok := buildProviderByName(overrideProvider, log)
-	if !ok {
-		return nil, "", ""
-	}
-	model := overrideModel
-	if model == "" {
-		if isClaudeFlavor(id) {
-			model = "haiku"
-		} else {
-			model = frameModel // last-resort fallback; operator should set the model explicitly for non-Claude
-		}
-	}
-	return p, id, funnel.ExpandBareClaudeTier(model, id) // NEX-369
-}
+// NEX-365 #2: the cheap-judge construction (resolveJudgeProviderAndModel,
+// bareJudgeProvider, nativeJudgeProvider, isClaudeFlavor) moved to the
+// shared nexus/frame/funnel/judge package, which now builds the judge for
+// both this Frame and the out-of-process agentfunnel. buildProviderByName
+// stays below — the rewriter (compact) path still uses it.
 
 // buildProviderByName mirrors the Frame's own provider switch in
 // buildChatRouter. Kept narrow — adds providers as the rest of the
@@ -1540,95 +1458,6 @@ func buildProviderByName(name string, log *slog.Logger) (bridle.Provider, bridle
 		log.Warn("frame funnel: filter_provider unrecognised", "filter_provider", name)
 		return nil, "", false
 	}
-}
-
-// bareJudgeProvider returns the provider the cheap-judge harness should
-// use. For claude-code the Frame's provider has full CLI surface (hooks,
-// LSP, plugin sync, CLAUDE.md auto-discovery, keychain, attribution) —
-// fine for the deliberation loop, wasteful and contaminating for a
-// short-lived classifier subprocess. We construct a fresh
-// claudecode.Provider with Bare=true so the judge spawns a minimal
-// CLI: no hooks, no plugin sync, no auto-discovery, no memory writes.
-//
-// Reasons to isolate the judge provider rather than mutate the Frame's:
-//   - The Frame still needs hooks/MCP/auto-discovery for its own turn.
-//   - The two providers can hold per-instance state in future (rate
-//     limiters, session caches) without crossing wires.
-//
-// For non-claudecode judges (claude-api today, ollama/openai later)
-// returns the inbound provider unchanged — Bare is a CLI-only knob.
-//
-// Per task #196 — kills the "judge ran as 9-step agent" failure mode
-// where the cheap-judge subprocess auto-discovered CLAUDE.md, picked
-// up the aspect's full toolkit, and did real work instead of saying
-// "yes" or "no".
-func bareJudgeProvider(p bridle.Provider, id bridle.ProviderID) bridle.Provider {
-	// --bare is API-key-only: disables subscription auth and reads only
-	// ANTHROPIC_API_KEY (or apiKeyHelper via --settings). Pair with
-	// AspectConfig.FilterCredential so the bare subprocess gets an
-	// explicit ANTHROPIC_API_KEY env at spawn — points at a cheap
-	// classifier endpoint (DeepSeek Anthropic-shape) without touching
-	// the main turn's subscription auth.
-	//
-	// Re-enabled 2026-05-15 (NEX-103 Phase 1a). Prior block-comment in
-	// git history at f10d060 explains the 2026-05-13 disable: bare
-	// without a credential silently routes "Not logged in" through the
-	// judge parser as 'n' (suppress everything). Caller MUST set
-	// FilterCredential before enabling FilterProvider=claude-code +
-	// cheap-judge under bare.
-	switch id {
-	case "claude-code", "claudecode":
-		jp := claudecodeprovider.New()
-		jp.Bare = true
-		return jp
-	}
-	return p
-}
-
-// nativeJudgeProvider rebuilds a native Anthropic-shape judge provider
-// from the resolved judge-credential env so cross-provider judging
-// actually targets the judge endpoint. NEX-365 #3.
-//
-// The native claude provider reads its API key + base URL at
-// CONSTRUCTION (option.WithBaseURL/WithAPIKey), NOT per-turn — so the
-// CheapModelFilter's ProviderEnv (which only claude-code *subprocesses*
-// honour) can't redirect it. Without this, a judge_provider=claude-api
-// judge built via claudeprovider.New("") inherits the Frame's ambient
-// ANTHROPIC_* env and judges on the MAIN endpoint, defeating the point
-// of a separate cheap-judge credential (e.g. a DeepSeek Anthropic-shape
-// endpoint). Rebuilding via NewWithBaseURL from the judge credential's
-// env pins the judge to its own key + base URL.
-//
-// Returns the inbound provider unchanged for non-native ids (claude-code
-// keeps its bareJudgeProvider subprocess + ProviderEnv path) or when no
-// judge env was resolved (then the inherited provider's ambient env
-// applies, preserving pre-NEX-365 behaviour).
-func nativeJudgeProvider(p bridle.Provider, id bridle.ProviderID, env map[string]string) bridle.Provider {
-	if id != bridle.ProviderClaude && id != "claude" {
-		return p
-	}
-	if len(env) == 0 {
-		return p
-	}
-	key, base := env["ANTHROPIC_API_KEY"], env["ANTHROPIC_BASE_URL"]
-	if key == "" && base == "" {
-		return p
-	}
-	return claudeprovider.NewWithBaseURL(key, base)
-}
-
-// isClaudeFlavor reports whether providerID is one of the Claude
-// providers. Used for picking the haiku default model.
-//
-// Accepts both the canonical IDs ("claude-api", "claude-code") and the
-// aspect.json aliases ("claude", "claudecode") because callers pass
-// either depending on whether the provider has been instantiated yet.
-func isClaudeFlavor(id bridle.ProviderID) bool {
-	switch id {
-	case "claude-api", "claude-code", "claude", "claudecode":
-		return true
-	}
-	return false
 }
 
 // toolsForProvider returns the bridle.ToolDef set the funnel should
@@ -1672,7 +1501,7 @@ func toolsForProvider(id bridle.ProviderID) []bridle.ToolDef {
 // Caller resolves via resolveCompactCredentialEnv.
 func buildRewriterRunner(cfg schemas.AspectConfig, aspectCwd string, frameProviderID bridle.ProviderID, frameProvider bridle.Provider, frameModel string, sessionIDFn func() string, compactEnv map[string]string, log *slog.Logger) funnel.PostTurnHook {
 	rwCfg := cfg.Rewriter
-	claudeFlavor := isClaudeFlavor(frameProviderID)
+	claudeFlavor := judge.IsClaudeFlavor(frameProviderID)
 	enabledByDefault := claudeFlavor
 	enabled := enabledByDefault
 	if rwCfg != nil && rwCfg.Enabled != nil {
@@ -1719,7 +1548,7 @@ func buildRewriterRunner(cfg schemas.AspectConfig, aspectCwd string, frameProvid
 		distillerModel = rwCfg.DistillerModel
 	}
 	if distillerModel == "" {
-		if isClaudeFlavor(distillerProviderID) {
+		if judge.IsClaudeFlavor(distillerProviderID) {
 			distillerModel = "claude-haiku-4-5"
 		} else {
 			distillerModel = frameModel
@@ -1906,10 +1735,10 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		// The MCP route (task #181) is the proper fix; for now, empty
 		// Tools for claude-code Frames so the model relies on its native
 		// toolkit + the funnel's auto-post path for replies.
-		Tools:  toolsForProvider(bridle.ProviderID(provider)),
-		Runner: funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
-		Filter:         outputFilter,
-		ChatGateway:    gateway,
+		Tools:       toolsForProvider(bridle.ProviderID(provider)),
+		Runner:      funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		Filter:      outputFilter,
+		ChatGateway: gateway,
 		// NEX-239: stream per-text-block to chat for parity with
 		// agentfunnel. Operator stance (2026-05-26): the embedded Frame
 		// is a standard agentfunnel that happens to auto-start with the
@@ -1919,11 +1748,11 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		// NEX-239 reported for anvil before NEX-240 wired streaming for
 		// remote agentfunnel aspects.
 		StreamTextToChat: true,
-		Threads:        threads,
-		Pulser:         pulser,
-		UsageRecorder:  recorder,
-		Triage:         triageStore,
-		PostTurn:       postTurn,
+		Threads:          threads,
+		Pulser:           pulser,
+		UsageRecorder:    recorder,
+		Triage:           triageStore,
+		PostTurn:         postTurn,
 		// NEX-300 main-turn slice: per-aspect sampling + output overrides
 		// from aspect.json's optional main_turn_sampling block. Empty /
 		// absent block produces a zero-valued MainTurnSampling — funnel

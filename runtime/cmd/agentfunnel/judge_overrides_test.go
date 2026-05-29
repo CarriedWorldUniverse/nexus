@@ -291,57 +291,6 @@ func TestBuildAgentFunnelFilter_JudgeProviderOverride_CrossProvider(t *testing.T
 	}
 }
 
-// NEX-365 #3 (parity with the Frame): even WITHOUT an explicit
-// judge_provider, a judge credential must redirect a native claude-api
-// judge to its endpoint — the native SDK ignores per-turn ProviderEnv, so
-// nativeJudgeProvider rebuilds the provider from the judge env. Without
-// this the judge silently runs on the aspect's main endpoint.
-func TestNativeJudgeProvider_AgentFunnel(t *testing.T) {
-	env := map[string]string{
-		"ANTHROPIC_API_KEY":  "sk-deepseek",
-		"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
-	}
-	// claude-api + judge env → rebuilt native provider (Name claude-api),
-	// not the inherited nil.
-	if got := nativeJudgeProvider(nil, "claude-api", env); got == nil || got.Name() != "claude-api" {
-		t.Errorf("claude-api + env: got %v, want a rebuilt claude-api provider", got)
-	}
-	// claude-code passes through (subprocess + ProviderEnv owns it).
-	if got := nativeJudgeProvider(nil, "claude-code", env); got != nil {
-		t.Errorf("claude-code should pass through unchanged (got %v)", got)
-	}
-	// No env → passthrough.
-	if got := nativeJudgeProvider(nil, "claude-api", nil); got != nil {
-		t.Errorf("no env should pass through unchanged (got %v)", got)
-	}
-}
-
-// buildAgentFunnelJudgeProvider pins native Anthropic creds from the
-// judge env at construction (the native SDK can't be redirected per-turn
-// via ProviderEnv). Unrecognised names return ok=false so the caller
-// keeps the aspect's main provider.
-func TestBuildAgentFunnelJudgeProvider(t *testing.T) {
-	env := map[string]string{
-		"ANTHROPIC_API_KEY":  "sk-x",
-		"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
-	}
-	if p, id, ok := buildAgentFunnelJudgeProvider("claude-api", env, newTestLogger()); !ok || p == nil || id != "claude-api" {
-		t.Errorf("claude-api: p=%v id=%q ok=%v, want non-nil/claude-api/true", p, id, ok)
-	}
-	// "claude" alias resolves to the same native family.
-	if _, id, ok := buildAgentFunnelJudgeProvider("claude", env, newTestLogger()); !ok || id != "claude-api" {
-		t.Errorf("claude alias: id=%q ok=%v, want claude-api/true", id, ok)
-	}
-	// claude-code judge → subprocess family.
-	if _, id, ok := buildAgentFunnelJudgeProvider("claude-code", nil, newTestLogger()); !ok || id != "claude-code" {
-		t.Errorf("claude-code: id=%q ok=%v, want claude-code/true", id, ok)
-	}
-	// Unrecognised → ok=false, caller falls back to the main provider.
-	if p, _, ok := buildAgentFunnelJudgeProvider("llama-local", env, newTestLogger()); ok || p != nil {
-		t.Errorf("unrecognised judge_provider should not build; got p=%v ok=%v", p, ok)
-	}
-}
-
 func writeTestFile(dir, name, content string) error {
 	return os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644)
 }
