@@ -185,7 +185,7 @@ func TestReadMainTurnSamplingFromAspectJSON_MalformedJSON(t *testing.T) {
 // cheap-judge for non-Claude providers too, defaulting the judge model
 // to the aspect's own main model (no haiku tier exists off-Claude).
 func TestBuildAgentFunnelFilter_NonClaudeGetsJudge(t *testing.T) {
-	f := buildAgentFunnelFilter(nil, "openai", "", nil, "deepseek-chat", newTestLogger(), nil)
+	f := buildAgentFunnelFilter(nil, "openai", "", "", nil, "deepseek-chat", newTestLogger(), nil)
 	hard, ok := f.(funnel.HardRulesFilter)
 	if !ok {
 		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
@@ -204,7 +204,7 @@ func TestBuildAgentFunnelFilter_NonClaudeGetsJudge(t *testing.T) {
 
 // judgeModelOverride wins over both the haiku and mainModel defaults.
 func TestBuildAgentFunnelFilter_OverrideWins(t *testing.T) {
-	f := buildAgentFunnelFilter(nil, "openai", "x", nil, "deepseek-chat", newTestLogger(), nil)
+	f := buildAgentFunnelFilter(nil, "openai", "", "x", nil, "deepseek-chat", newTestLogger(), nil)
 	hard, ok := f.(funnel.HardRulesFilter)
 	if !ok {
 		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
@@ -224,7 +224,7 @@ func TestBuildAgentFunnelFilter_OverrideWins(t *testing.T) {
 // while claude-code keeps the CLI shorthand.
 func TestBuildAgentFunnelFilter_ClaudeDefaultsHaiku(t *testing.T) {
 	// Native claude-api → full id.
-	f := buildAgentFunnelFilter(nil, "claude-api", "", nil, "whatever", newTestLogger(), nil)
+	f := buildAgentFunnelFilter(nil, "claude-api", "", "", nil, "whatever", newTestLogger(), nil)
 	hard, ok := f.(funnel.HardRulesFilter)
 	if !ok {
 		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
@@ -238,7 +238,7 @@ func TestBuildAgentFunnelFilter_ClaudeDefaultsHaiku(t *testing.T) {
 	}
 
 	// claude-code keeps the bare shorthand its CLI expects.
-	f2 := buildAgentFunnelFilter(nil, "claude-code", "", nil, "whatever", newTestLogger(), nil)
+	f2 := buildAgentFunnelFilter(nil, "claude-code", "", "", nil, "whatever", newTestLogger(), nil)
 	cheap2 := f2.(funnel.HardRulesFilter).Inner.(*funnel.CheapModelFilter)
 	if cheap2.Model != "haiku" {
 		t.Errorf("claude-code Model = %q, want haiku (CLI shorthand preserved)", cheap2.Model)
@@ -249,13 +249,96 @@ func TestBuildAgentFunnelFilter_ClaudeDefaultsHaiku(t *testing.T) {
 // a judge model, so it falls to bare hard-rules (Inner nil) rather than
 // silently always-posting.
 func TestBuildAgentFunnelFilter_MisconfigFallsToHardRules(t *testing.T) {
-	f := buildAgentFunnelFilter(nil, "openai", "", nil, "", newTestLogger(), nil)
+	f := buildAgentFunnelFilter(nil, "openai", "", "", nil, "", newTestLogger(), nil)
 	hard, ok := f.(funnel.HardRulesFilter)
 	if !ok {
 		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
 	}
 	if hard.Inner != nil {
 		t.Errorf("misconfig should produce bare HardRulesFilter; Inner = %#v, want nil", hard.Inner)
+	}
+}
+
+// NEX-365 #3: a judge_provider override routes the cheap-judge to a
+// DIFFERENT provider family than the aspect's primary. Here a claude-code
+// aspect is judged by a native claude-api (DeepSeek Anthropic-shape)
+// endpoint: the CheapModelFilter must run on claude-api with the
+// operator's judge model, NOT the aspect's main claude-code provider.
+func TestBuildAgentFunnelFilter_JudgeProviderOverride_CrossProvider(t *testing.T) {
+	env := map[string]string{
+		"ANTHROPIC_API_KEY":  "sk-deepseek",
+		"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+	}
+	f := buildAgentFunnelFilter(nil, "claude-code", "claude-api", "deepseek-v4-flash", env, "whatever", newTestLogger(), nil)
+	hard, ok := f.(funnel.HardRulesFilter)
+	if !ok {
+		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
+	}
+	cheap, ok := hard.Inner.(*funnel.CheapModelFilter)
+	if !ok || cheap == nil {
+		t.Fatalf("want *funnel.CheapModelFilter inner, got %T", hard.Inner)
+	}
+	if cheap.Provider != "claude-api" {
+		t.Errorf("judge Provider = %q, want claude-api (routed away from claude-code main)", cheap.Provider)
+	}
+	if cheap.Model != "deepseek-v4-flash" {
+		t.Errorf("judge Model = %q, want deepseek-v4-flash", cheap.Model)
+	}
+	// The judge must have a harness built on the standalone provider, not
+	// the (nil) main provider — proves we didn't reuse the aspect's.
+	if cheap.Harness == nil {
+		t.Fatal("judge harness nil — provider not built")
+	}
+}
+
+// NEX-365 #3 (parity with the Frame): even WITHOUT an explicit
+// judge_provider, a judge credential must redirect a native claude-api
+// judge to its endpoint — the native SDK ignores per-turn ProviderEnv, so
+// nativeJudgeProvider rebuilds the provider from the judge env. Without
+// this the judge silently runs on the aspect's main endpoint.
+func TestNativeJudgeProvider_AgentFunnel(t *testing.T) {
+	env := map[string]string{
+		"ANTHROPIC_API_KEY":  "sk-deepseek",
+		"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+	}
+	// claude-api + judge env → rebuilt native provider (Name claude-api),
+	// not the inherited nil.
+	if got := nativeJudgeProvider(nil, "claude-api", env); got == nil || got.Name() != "claude-api" {
+		t.Errorf("claude-api + env: got %v, want a rebuilt claude-api provider", got)
+	}
+	// claude-code passes through (subprocess + ProviderEnv owns it).
+	if got := nativeJudgeProvider(nil, "claude-code", env); got != nil {
+		t.Errorf("claude-code should pass through unchanged (got %v)", got)
+	}
+	// No env → passthrough.
+	if got := nativeJudgeProvider(nil, "claude-api", nil); got != nil {
+		t.Errorf("no env should pass through unchanged (got %v)", got)
+	}
+}
+
+// buildAgentFunnelJudgeProvider pins native Anthropic creds from the
+// judge env at construction (the native SDK can't be redirected per-turn
+// via ProviderEnv). Unrecognised names return ok=false so the caller
+// keeps the aspect's main provider.
+func TestBuildAgentFunnelJudgeProvider(t *testing.T) {
+	env := map[string]string{
+		"ANTHROPIC_API_KEY":  "sk-x",
+		"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+	}
+	if p, id, ok := buildAgentFunnelJudgeProvider("claude-api", env, newTestLogger()); !ok || p == nil || id != "claude-api" {
+		t.Errorf("claude-api: p=%v id=%q ok=%v, want non-nil/claude-api/true", p, id, ok)
+	}
+	// "claude" alias resolves to the same native family.
+	if _, id, ok := buildAgentFunnelJudgeProvider("claude", env, newTestLogger()); !ok || id != "claude-api" {
+		t.Errorf("claude alias: id=%q ok=%v, want claude-api/true", id, ok)
+	}
+	// claude-code judge → subprocess family.
+	if _, id, ok := buildAgentFunnelJudgeProvider("claude-code", nil, newTestLogger()); !ok || id != "claude-code" {
+		t.Errorf("claude-code: id=%q ok=%v, want claude-code/true", id, ok)
+	}
+	// Unrecognised → ok=false, caller falls back to the main provider.
+	if p, _, ok := buildAgentFunnelJudgeProvider("llama-local", env, newTestLogger()); ok || p != nil {
+		t.Errorf("unrecognised judge_provider should not build; got p=%v ok=%v", p, ok)
 	}
 }
 

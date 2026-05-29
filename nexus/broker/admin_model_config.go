@@ -49,6 +49,7 @@ type adminModelConfigReq struct {
 	PrimaryCredential *string `json:"primary_credential,omitempty"`
 	JudgeModel        *string `json:"judge_model,omitempty"`
 	JudgeCredential   *string `json:"judge_credential,omitempty"`
+	JudgeProvider     *string `json:"judge_provider,omitempty"` // NEX-365 #3
 	CompactModel      *string `json:"compact_model,omitempty"`
 	CompactCredential *string `json:"compact_credential,omitempty"`
 }
@@ -102,6 +103,7 @@ func (b *Broker) handleAdminModelConfigSet(w http.ResponseWriter, r *http.Reques
 		"primary_credential": req.PrimaryCredential,
 		"judge_model":        req.JudgeModel,
 		"judge_credential":   req.JudgeCredential,
+		"judge_provider":     req.JudgeProvider,
 		"compact_model":      req.CompactModel,
 		"compact_credential": req.CompactCredential,
 	}

@@ -290,6 +290,17 @@ var columnsToAdd = []columnAddition{
 		column: "judge_credential",
 		ddl:    "ALTER TABLE aspects ADD COLUMN judge_credential TEXT",
 	},
+	// NEX-365 #3 — per-aspect judge PROVIDER override (claude-api /
+	// claude-code). Lets a Claude-primary aspect run its cheap-judge on a
+	// different provider family (e.g. a DeepSeek Anthropic-shape endpoint)
+	// without changing its main turn. Null = inherit network default >
+	// keyfile filter_provider. Network-wide equivalent lives on
+	// network_defaults.judge_provider (added below).
+	{
+		table:  "aspects",
+		column: "judge_provider",
+		ddl:    "ALTER TABLE aspects ADD COLUMN judge_provider TEXT",
+	},
 	{
 		table:  "aspects",
 		column: "compact_model",
@@ -304,6 +315,15 @@ var columnsToAdd = []columnAddition{
 	// parent (NULL for thread roots). thread_root_msg_id is the
 	// canonical thread identity used by aspects for per-thread session
 	// IDs. Both backfilled by backfillChatThreadRoots for existing rows.
+	// NEX-365 #3 — network-wide judge PROVIDER default. Mirrors the
+	// per-aspect aspects.judge_provider column above for existing DBs
+	// whose network_defaults table predates this column (fresh DBs get it
+	// from schema.sql's CREATE TABLE).
+	{
+		table:  "network_defaults",
+		column: "judge_provider",
+		ddl:    "ALTER TABLE network_defaults ADD COLUMN judge_provider TEXT",
+	},
 	{
 		table:  "chat_messages",
 		column: "parent_msg_id",

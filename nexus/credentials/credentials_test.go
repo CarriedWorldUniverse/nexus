@@ -3,6 +3,7 @@ package credentials
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -52,6 +53,7 @@ func newTestStore(t *testing.T) (*Store, *sql.DB) {
 			primary_credential TEXT,
 			judge_model TEXT,
 			judge_credential TEXT,
+			judge_provider TEXT,
 			compact_model TEXT,
 			compact_credential TEXT
 		);
@@ -66,6 +68,7 @@ func newTestStore(t *testing.T) (*Store, *sql.DB) {
 			singleton            INTEGER PRIMARY KEY CHECK (singleton = 1),
 			judge_model          TEXT,
 			judge_credential     TEXT,
+			judge_provider       TEXT,
 			compact_model        TEXT,
 			compact_credential   TEXT,
 			updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
@@ -851,6 +854,80 @@ func TestEffectiveJudge_Resolution(t *testing.T) {
 	_ = s.SetNetworkDefaultField(ctx, "judge_credential", "")
 	if m, err := s.EffectiveJudgeModel(ctx, "harrow"); err != nil || m != "" {
 		t.Errorf("harrow with no defaults: EffectiveJudgeModel = %q err=%v, want empty", m, err)
+	}
+}
+
+// The network-defaults GET response is consumed by the dashboard JS as
+// snake_case keys (fresh.judge_model, fresh.judge_provider, …). Pin the
+// wire shape so a missing/renamed json tag — which Go round-trip tests
+// can't catch (they marshal+unmarshal the same struct) — fails the build
+// instead of silently blanking the settings panel on load.
+func TestNetworkDefaults_JSONWireShape(t *testing.T) {
+	b, err := json.Marshal(NetworkDefaults{
+		JudgeModel: "m", JudgeCredential: "c", JudgeProvider: "claude-api",
+		CompactModel: "cm", CompactCredential: "cc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"judge_model", "judge_credential", "judge_provider", "compact_model", "compact_credential"} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("network-defaults JSON missing snake_case key %q (got %s) — dashboard reads this key", k, b)
+		}
+	}
+}
+
+// NEX-365 #3: judge-PROVIDER resolution mirrors judge-model — per-aspect
+// override wins, network default fills the gap, neither = empty (caller
+// keeps its own filter_provider / inherited provider). This is the lever
+// that lets the operator put EVERY aspect's cheap-judge on one cross-
+// provider endpoint without touching each aspect's primary provider.
+func TestEffectiveJudgeProvider_Resolution(t *testing.T) {
+	ctx := context.Background()
+	s, db := newTestStore(t)
+	if _, err := db.Exec(`INSERT INTO aspects(name) VALUES ('anvil'), ('harrow')`); err != nil {
+		t.Fatalf("seed aspects: %v", err)
+	}
+
+	// No network default, no override → empty (neither layer set).
+	if p, err := s.EffectiveJudgeProvider(ctx, "harrow"); err != nil || p != "" {
+		t.Errorf("no policy: EffectiveJudgeProvider = %q err=%v, want empty", p, err)
+	}
+
+	// Network-wide judge provider → applies to every aspect.
+	if err := s.SetNetworkDefaultField(ctx, "judge_provider", "claude-api"); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := s.EffectiveJudgeProvider(ctx, "harrow"); err != nil || p != "claude-api" {
+		t.Errorf("harrow EffectiveJudgeProvider = %q err=%v, want claude-api (network default)", p, err)
+	}
+
+	// Per-aspect override wins over the network default.
+	if err := s.SetAspectModelField(ctx, "anvil", "judge_provider", "claude-code"); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := s.EffectiveJudgeProvider(ctx, "anvil"); err != nil || p != "claude-code" {
+		t.Errorf("anvil EffectiveJudgeProvider = %q err=%v, want claude-code (override wins)", p, err)
+	}
+	// harrow still sees the network default.
+	if p, err := s.EffectiveJudgeProvider(ctx, "harrow"); err != nil || p != "claude-api" {
+		t.Errorf("harrow EffectiveJudgeProvider = %q err=%v, want claude-api", p, err)
+	}
+
+	// Clearing the network default drops harrow back to empty.
+	if err := s.SetNetworkDefaultField(ctx, "judge_provider", ""); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := s.EffectiveJudgeProvider(ctx, "harrow"); err != nil || p != "" {
+		t.Errorf("cleared: harrow EffectiveJudgeProvider = %q err=%v, want empty", p, err)
+	}
+	// anvil keeps its per-aspect override regardless.
+	if p, err := s.EffectiveJudgeProvider(ctx, "anvil"); err != nil || p != "claude-code" {
+		t.Errorf("anvil EffectiveJudgeProvider = %q err=%v, want claude-code", p, err)
 	}
 }
 

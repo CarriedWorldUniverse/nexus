@@ -285,6 +285,7 @@ func (c *wsConn) handleAspectModelConfigGet(env frames.Envelope) {
 		PrimaryCredential: strOrEmpty(cfg.PrimaryCredential),
 		JudgeModel:        pickEffective(cfg.JudgeModel, defaults.JudgeModel),
 		JudgeCredential:   pickEffective(cfg.JudgeCredential, defaults.JudgeCredential),
+		JudgeProvider:     pickEffective(cfg.JudgeProvider, defaults.JudgeProvider), // NEX-365 #3
 		CompactModel:      pickEffective(cfg.CompactModel, defaults.CompactModel),
 		CompactCredential: pickEffective(cfg.CompactCredential, defaults.CompactCredential),
 	})

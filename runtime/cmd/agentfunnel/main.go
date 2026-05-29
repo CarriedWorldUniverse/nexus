@@ -385,6 +385,7 @@ func main() {
 	// compact values flow into buildAgentFunnelRewriter below.
 	overrides := fetchAspectModelOverrides(wsClient, res.AspectName, log)
 	judgeModelOverride, judgeEnv := overrides.JudgeModel, overrides.JudgeEnv
+	judgeProviderOverride := overrides.JudgeProvider
 
 	// NEX-302: read MainTurnSampling from the aspect's own aspect.json
 	// on disk (autospawn convention: aspect.json lives at the aspect's
@@ -405,7 +406,7 @@ func main() {
 	// judge turn through the same observability stream as the main
 	// turn — otherwise the judge runs invisibly and operators can't see
 	// why a reply was suppressed.
-	outputFilter := buildAgentFunnelFilter(provider, bridle.ProviderID(res.Provider), judgeModelOverride, judgeEnv, res.Model, log, obsHook)
+	outputFilter := buildAgentFunnelFilter(provider, bridle.ProviderID(res.Provider), judgeProviderOverride, judgeModelOverride, judgeEnv, res.Model, log, obsHook)
 
 	// Rewriter wiring: default-on for claude-code-flavored providers,
 	// no-op otherwise. The session jsonl path is resolved lazily
@@ -816,10 +817,39 @@ func deniedToolCount(p funnel.ToolPolicy) int {
 // Without this every reply through the funnel hits chat unfiltered —
 // observed 2026-05-12 as noisy multi-aspect threads bypassing the
 // suppression the keel Frame applies.
-func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.ProviderID, judgeModelOverride string, providerEnv map[string]string, mainModel string, log *slog.Logger, obsHook funnel.ObservabilityHook) funnel.OutputFilter {
+// NEX-365 #3: judgeProviderOverride routes the cheap-judge to a
+// DIFFERENT provider family than the aspect's primary (e.g. a Claude
+// aspect judged by a DeepSeek Anthropic-shape endpoint). Empty = judge
+// runs on the aspect's own provider (pre-NEX-365 behaviour). The judge
+// provider is built standalone via buildAgentFunnelJudgeProvider, which
+// pins native-Anthropic creds from providerEnv at construction (the
+// native SDK reads creds at construction, not per-turn — ProviderEnv
+// alone, honoured only by claude-code subprocesses, can't redirect it).
+func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.ProviderID, judgeProviderOverride, judgeModelOverride string, providerEnv map[string]string, mainModel string, log *slog.Logger, obsHook funnel.ObservabilityHook) funnel.OutputFilter {
+	// Resolve which provider the judge actually runs on. Default: the
+	// aspect's own provider. Override: a standalone provider for the
+	// named family, cred-pinned from the judge env.
+	judgeProvider, judgeID := provider, providerID
+	if jp := strings.TrimSpace(judgeProviderOverride); jp != "" {
+		if p, id, ok := buildAgentFunnelJudgeProvider(jp, providerEnv, log); ok {
+			judgeProvider, judgeID = p, id
+			log.Info("agentfunnel: judge provider override applied",
+				"main_provider", providerID, "judge_provider", id)
+		}
+	} else {
+		// No explicit judge_provider, but a judge credential may still be
+		// set. Pin a native (claude-api) judge to that credential's
+		// endpoint — parity with the Frame's nativeJudgeProvider. The
+		// native SDK reads creds at construction, so without this the
+		// judge env is silently ignored and the judge runs on the main
+		// endpoint. claude-code keeps the bareJudgeProvider + ProviderEnv
+		// subprocess path untouched. NEX-365 #3.
+		judgeProvider = nativeJudgeProvider(judgeProvider, judgeID, providerEnv)
+	}
+
 	model := judgeModelOverride
 	if model == "" {
-		if isClaudeFlavor(providerID) {
+		if isClaudeFlavor(judgeID) {
 			model = "haiku"
 		} else {
 			model = mainModel
@@ -830,26 +860,77 @@ func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.Provider
 	// "haiku" 404s → the judge degrades + fails open (doesn't filter).
 	// Expand bare tiers to full ids on the native path; claude-code keeps
 	// the shorthand its CLI requires.
-	model = funnel.ExpandBareClaudeTier(model, providerID)
+	model = funnel.ExpandBareClaudeTier(model, judgeID)
 	if model == "" {
 		log.Warn("agentfunnel: no judge model resolvable for provider — filter=hard, no cheap-judge",
-			"provider", providerID)
+			"provider", judgeID)
 		return funnel.HardRulesFilter{}
 	}
 	log.Info("agentfunnel: filter=cheap (hard rules + cheap-model judge)",
-		"judge_provider", providerID,
+		"judge_provider", judgeID,
 		"judge_model", model,
 		"judge_env_keys", envKeyNames(providerEnv))
 	return funnel.HardRulesFilter{
 		Inner: &funnel.CheapModelFilter{
-			Harness:           bridle.NewHarness(bareJudgeProvider(provider, providerID)),
-			Provider:          providerID,
+			Harness:           bridle.NewHarness(bareJudgeProvider(judgeProvider, judgeID)),
+			Provider:          judgeID,
 			Model:             model,
 			Logger:            log,
 			ObservabilityHook: obsHook,
 			ProviderEnv:       providerEnv,
 		},
 	}
+}
+
+// buildAgentFunnelJudgeProvider builds a standalone cheap-judge provider
+// for the named family, used when a judge_provider override routes the
+// judge to a different provider than the aspect's primary. NEX-365 #3.
+//
+// For native Anthropic/OpenAI shapes it pins the key + base URL from the
+// resolved judge-credential env (the native SDKs read creds at
+// construction, not per-turn) so e.g. a Claude aspect can be judged by a
+// DeepSeek Anthropic-shape endpoint. claude-code keeps the bare
+// subprocess + ProviderEnv path (bareJudgeProvider rebuilds it). Returns
+// ok=false on an unrecognised name so the caller keeps the main provider.
+func buildAgentFunnelJudgeProvider(name string, env map[string]string, log *slog.Logger) (bridle.Provider, bridle.ProviderID, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claude-api", "claude":
+		key, base := env["ANTHROPIC_API_KEY"], env["ANTHROPIC_BASE_URL"]
+		if key != "" || base != "" {
+			return claudeprovider.NewWithBaseURL(key, base), bridle.ProviderClaude, true
+		}
+		return claudeprovider.New(""), bridle.ProviderClaude, true
+	case "claude-code", "claudecode":
+		return claudecodeprovider.New(), bridle.ProviderClaudeCode, true
+	case "openai":
+		return openaiprovider.NewWithBaseURL(env["OPENAI_API_KEY"], env["OPENAI_BASE_URL"]),
+			bridle.ProviderID("openai"), true
+	default:
+		log.Warn("agentfunnel: judge_provider unrecognised; judge runs on main provider",
+			"judge_provider", name)
+		return nil, "", false
+	}
+}
+
+// nativeJudgeProvider mirrors cmd/nexus/main.go's helper: rebuild a
+// native Anthropic-shape judge provider from the resolved judge-credential
+// env so a judge credential actually redirects the judge, even when no
+// explicit judge_provider was set. The native SDK reads creds at
+// construction (not per-turn), so the CheapModelFilter's ProviderEnv —
+// honoured only by claude-code subprocesses — can't redirect it. Returns
+// the inbound provider unchanged for non-native ids or empty env. NEX-365 #3.
+func nativeJudgeProvider(p bridle.Provider, id bridle.ProviderID, env map[string]string) bridle.Provider {
+	if id != bridle.ProviderClaude && id != "claude" {
+		return p
+	}
+	if len(env) == 0 {
+		return p
+	}
+	key, base := env["ANTHROPIC_API_KEY"], env["ANTHROPIC_BASE_URL"]
+	if key == "" && base == "" {
+		return p
+	}
+	return claudeprovider.NewWithBaseURL(key, base)
 }
 
 // aspectOverrides bundles the resolved admin-override knobs for an
@@ -859,10 +940,16 @@ func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.Provider
 // → claude-haiku). Empty values mean "no override; caller's legacy
 // fallback applies".
 type aspectOverrides struct {
-	JudgeModel   string
-	JudgeEnv     map[string]string
-	CompactModel string
-	CompactEnv   map[string]string
+	JudgeModel string
+	// JudgeProvider names the provider family the cheap-judge should run
+	// on (e.g. "claude-api", "claude-code"), independent of the aspect's
+	// primary provider. Empty = run the judge on the aspect's own
+	// provider (pre-NEX-365 behaviour). NEX-365 #3 — enables a Claude
+	// aspect to be judged by a DeepSeek Anthropic-shape endpoint.
+	JudgeProvider string
+	JudgeEnv      map[string]string
+	CompactModel  string
+	CompactEnv    map[string]string
 }
 
 // fetchAspectModelOverrides retrieves the judge + compact model +
@@ -898,6 +985,11 @@ func fetchAspectModelOverrides(ws brokercreds.Requester, aspectName string, log 
 		log.Info("agentfunnel: admin override applied",
 			"aspect", aspectName, "kind", "judge_model", "to", cfg.JudgeModel)
 		out.JudgeModel = cfg.JudgeModel
+	}
+	if cfg.JudgeProvider != "" {
+		log.Info("agentfunnel: admin override applied",
+			"aspect", aspectName, "kind", "judge_provider", "to", cfg.JudgeProvider)
+		out.JudgeProvider = cfg.JudgeProvider
 	}
 	out.JudgeEnv = resolveCredentialEnv(ws, aspectName, "judge", cfg.JudgeCredential, log)
 
