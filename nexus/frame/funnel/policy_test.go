@@ -38,6 +38,54 @@ func TestPolicyEvaluate(t *testing.T) {
 	}
 }
 
+func TestPolicyJSONRoundTrip(t *testing.T) {
+	// The snake_case wire shape agentfunnel's -policy file uses.
+	const src = `{"default_allow":true,"tools":{"bash":false},"escalate":{"write":true},"bash_deny":["rm -rf"],"write_path_allow":["work/"]}`
+	var p ToolPolicy
+	if err := json.Unmarshal([]byte(src), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !p.DefaultAllow {
+		t.Error("default_allow should decode to true")
+	}
+	if p.Tools["bash"] {
+		t.Error("tools.bash should decode to false")
+	}
+	if !p.Escalate["write"] {
+		t.Error("escalate.write should decode to true")
+	}
+
+	cases := []struct {
+		name string
+		call bridle.ToolCall
+		want Verdict
+	}{
+		{"bash denied outright", bridle.ToolCall{Name: "bash", Args: []byte(`{"command":"ls"}`)}, VerdictDeny},
+		{"write escalated (path inside allow)", bridle.ToolCall{Name: "write", Args: []byte(`{"path":"work/a.txt","content":"x"}`)}, VerdictEscalate},
+		{"read allowed by default", bridle.ToolCall{Name: "read", Args: []byte(`{"path":"x"}`)}, VerdictAllow},
+	}
+	for _, c := range cases {
+		got, reason := p.Decide(c.call)
+		if got != c.want {
+			t.Errorf("%s: verdict=%v want %v (reason=%q)", c.name, got, c.want, reason)
+		}
+	}
+
+	// Round-trip the other direction: marshal then re-decode and confirm
+	// the verdicts survive (json tags + omitempty are consistent).
+	out, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var p2 ToolPolicy
+	if err := json.Unmarshal(out, &p2); err != nil {
+		t.Fatalf("re-unmarshal: %v", err)
+	}
+	if v, _ := p2.Decide(bridle.ToolCall{Name: "write", Args: []byte(`{"path":"work/a.txt"}`)}); v != VerdictEscalate {
+		t.Errorf("re-decoded policy: write verdict=%v want Escalate", v)
+	}
+}
+
 func TestPolicyBashDenylist(t *testing.T) {
 	p := ToolPolicy{DefaultAllow: true, BashDeny: []string{"rm -rf", "mkfs"}}
 	if allow, _ := p.Evaluate(bridle.ToolCall{Name: "bash", Args: json.RawMessage(`{"command":"rm -rf /tmp/x"}`)}); allow {
