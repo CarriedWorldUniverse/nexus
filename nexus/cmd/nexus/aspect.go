@@ -205,6 +205,18 @@ func runAspectMint(args []string) int {
 		version = v
 	}
 
+	// NEX-367: pin the broker's TLS cert into the keyfile (if one is
+	// present in the data-dir) so the aspect trusts a self-signed /
+	// self-contained broker without a system-wide trust step. Absent
+	// (CA-signed deployments that don't keep a local cert) → empty →
+	// clients fall back to the system trust store.
+	var brokerTLSCert string
+	certPath := filepath.Join(*dataDir, "tls", "server.crt")
+	if pem, rerr := os.ReadFile(certPath); rerr == nil {
+		brokerTLSCert = string(pem)
+		fmt.Fprintf(os.Stderr, "pinning broker TLS cert from %s\n", certPath)
+	}
+
 	// Mint the keyfile (encrypts privkey against server pubkey).
 	now := time.Now().UTC()
 	kf, fingerprint, err := aspects.Mint(aspects.MintInput{
@@ -215,6 +227,7 @@ func runAspectMint(args []string) int {
 		NexusID:        id.NexusID,
 		NexusURL:       *nexusURL,
 		MintedAt:       now,
+		BrokerTLSCert:  brokerTLSCert,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "aspect mint: mint keyfile: %v\n", err)
