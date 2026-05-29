@@ -41,31 +41,62 @@ func TestHarness_DeliversAcrossAspects(t *testing.T) {
 }
 
 // TestHarness_EchoLoopReproduced reproduces the shadow<->plumb echo: two
-// aspects that each reply addressing the other, with no judge (AlwaysPost)
-// and no pre-turn inbox gate. A single seed triggers a runaway — both
-// aspects keep taking turns off each other's posts. This documents the bug
-// the Day-2 inbox gate must damp; once the gate lands, a sibling test will
-// assert the loop is bounded WHILE operator/addressed messages still always
-// get a turn. GREEN today because the loop genuinely exists.
-func TestHarness_EchoLoopReproduced(t *testing.T) {
+// aspects that each reply addressing the other. With the NEX-365 Tier-1
+// loop damper in the funnel, a single seed makes each aspect take a few
+// turns and then DAMP — the runaway is capped well below the maxCalls
+// ceiling. (Before the gate this climbed to ~50; the cap proves the gate,
+// not the maxCalls safety net, stopped it.)
+func TestHarness_EchoLoopDamped(t *testing.T) {
 	srv, b := newInteractionBroker(t)
 	wsURL := wsConnectURL(srv.URL)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	// maxCalls caps the storm so an ungated loop can't run forever.
 	a := newHarnessAspect(t, ctx, b, wsURL, "echoa", "@echob ping", 50)
 	bb := newHarnessAspect(t, ctx, b, wsURL, "echob", "@echoa pong", 50)
 	waitConnected(t, b, "echoa", "echob")
 
 	seed(t, b, "@echoa start")
 
-	// One seed -> many turns each = the echo. Without a gate it keeps going.
+	// The loop starts (a few turns each) ...
 	waitFor(t, 5*time.Second, func() bool {
-		return a.turns() >= 4 && bb.turns() >= 4
-	}, "echo loop runaway from a single seed")
+		return a.turns() >= 2 && bb.turns() >= 2
+	}, "echo loop to start")
 
-	t.Logf("echo reproduced from a single seed: echoa turns=%d, echob turns=%d",
-		a.turns(), bb.turns())
+	// ... then the damper caps it. Give it ample time to (not) run away.
+	time.Sleep(2 * time.Second)
+	const cap = 10 // damp threshold is 3 (+ a couple repeats to detect) — well under 50
+	if a.turns() > cap || bb.turns() > cap {
+		t.Fatalf("loop not damped: echoa=%d echob=%d (want <=%d each; ungated would approach maxCalls=50)",
+			a.turns(), bb.turns(), cap)
+	}
+	t.Logf("echo damped: echoa turns=%d, echob turns=%d (capped, not runaway)", a.turns(), bb.turns())
+}
+
+// TestHarness_OperatorNeverDamped is the safety invariant: even after an
+// aspect is damped by a degenerate peer echo, an OPERATOR message still gets
+// a turn — the damper must never silence the human channel.
+func TestHarness_OperatorNeverDamped(t *testing.T) {
+	srv, b := newInteractionBroker(t)
+	wsURL := wsConnectURL(srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	a := newHarnessAspect(t, ctx, b, wsURL, "dampa", "@dampb ping", 200)
+	bb := newHarnessAspect(t, ctx, b, wsURL, "dampb", "@dampa pong", 200)
+	_ = bb // bb only exists to drive the echo that damps dampa
+	waitConnected(t, b, "dampa", "dampb")
+
+	// Drive dampa into a damped state via the peer echo, then let it settle.
+	seed(t, b, "@dampa start")
+	waitFor(t, 5*time.Second, func() bool { return a.turns() >= 4 }, "dampa to start looping")
+	time.Sleep(1500 * time.Millisecond) // let damping engage + the peer storm quiesce
+	damped := a.turns()
+
+	// Now the operator addresses dampa directly. Even damped, this MUST run.
+	seed(t, b, "@dampa operator here — please ack")
+	waitFor(t, 4*time.Second, func() bool { return a.turns() > damped }, "operator message to get a turn despite damping")
+	t.Logf("operator broke through: dampa turns %d -> %d", damped, a.turns())
 }

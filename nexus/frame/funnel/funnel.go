@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -519,6 +520,18 @@ type Funnel struct {
 	// mid-turn comms shape (Lock 3).
 	deliberating atomic.Bool
 
+	// Loop damping (NEX-365): Tier-1 structural back-off. When an aspect
+	// produces K consecutive UNPRODUCTIVE turns (empty / judge-suppressed /
+	// output repeating a recent turn), Deliberate skips further NON-operator
+	// turns until the loop cools (time-decay) or a productive turn resets
+	// the counter — breaking degenerate aspect<->aspect echoes. The operator
+	// channel (Source="tty" / From="operator") is never damped, and a real
+	// varied exchange stays productive so it never trips. Guarded by dampMu.
+	dampMu          sync.Mutex
+	dampConsecutive int
+	dampRecent      []string
+	dampLastTurnAt  time.Time
+
 	mu sync.Mutex // guards inbox, sessionTail, cumulativeTokens, sessionHandle, seenMsgIDs
 
 	// inbox holds comms that arrived since the last deliberation. Folded
@@ -911,6 +924,18 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (result Del
 		return DeliberateResult{}, err
 	}
 
+	// NEX-365 Tier-1 loop damping: if this aspect is in a degenerate echo
+	// (K consecutive unproductive turns) and the trigger is NOT the
+	// operator, skip the expensive turn. The message is dropped (the
+	// back-off); the loop breaks because the peer stops getting replies.
+	// Operator turns and any productive/varied turn break the damp.
+	if f.shouldDampen(st.trigger) {
+		f.log.Info("funnel: loop-damped — skipping turn (degenerate echo; operator input is never damped)",
+			"aspect", f.cfg.AspectID, "trigger_from", st.trigger.From,
+			"source", st.trigger.Source, "consecutive_unproductive", f.dampSnapshot())
+		return DeliberateResult{Filter: FilterDecision{ShouldPost: false, Reason: "loop-damped"}}, nil
+	}
+
 	// NEX-82: Return.OnTurnStart fires the "picking it up" pulse.
 	// Default impl (NexusChatReturnHandler) writes 👀 on the trigger
 	// msg via ChatGateway. Noop for headless callers. Errors are
@@ -945,7 +970,79 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (result Del
 
 	decision := f.judgeTurn(ctx, st, turnResult)
 
+	// NEX-365: record this turn's outcome for loop damping. Unproductive =
+	// empty reply, judge-suppressed, or output repeating a recent turn.
+	f.recordTurnOutcome(turnResult.FinalText, decision.ShouldPost)
+
 	return f.dispatchReturn(ctx, st, turnResult, decision), nil
+}
+
+// --- NEX-365 Tier-1 loop damping -------------------------------------------
+
+const (
+	loopDampThreshold  = 3                // consecutive unproductive turns before damping
+	loopDampRecentN    = 4                // recent outputs kept for repeat detection
+	loopDampResetAfter = 60 * time.Second // inactivity gap that resets stale loop state
+)
+
+// shouldDampen reports whether this turn should be skipped as part of a
+// degenerate echo. The operator channel is an ABSOLUTE carve-out (a human
+// must always be able to reach an aspect). Everything else — including peer
+// @mentions — is dampable, but ONLY once K consecutive turns have been
+// unproductive; a real, varied exchange stays productive and never trips.
+func (f *Funnel) shouldDampen(trigger TurnTrigger) bool {
+	if trigger.Source == "tty" || trigger.From == "operator" {
+		return false
+	}
+	f.dampMu.Lock()
+	defer f.dampMu.Unlock()
+	return f.dampConsecutive >= loopDampThreshold
+}
+
+// recordTurnOutcome updates the damping counter after a turn ran. A quiet
+// gap (loopDampResetAfter) decays stale state so a later legitimate message
+// isn't damped by a long-dead loop.
+func (f *Funnel) recordTurnOutcome(finalText string, shouldPost bool) {
+	now := time.Now()
+	text := strings.TrimSpace(finalText)
+	f.dampMu.Lock()
+	defer f.dampMu.Unlock()
+	if !f.dampLastTurnAt.IsZero() && now.Sub(f.dampLastTurnAt) > loopDampResetAfter {
+		f.dampConsecutive = 0
+		f.dampRecent = nil
+	}
+	f.dampLastTurnAt = now
+
+	unproductive := text == "" || !shouldPost || f.isRecentRepeatLocked(text)
+	if unproductive {
+		f.dampConsecutive++
+	} else {
+		f.dampConsecutive = 0
+	}
+	if text != "" {
+		f.dampRecent = append(f.dampRecent, text)
+		if len(f.dampRecent) > loopDampRecentN {
+			f.dampRecent = f.dampRecent[len(f.dampRecent)-loopDampRecentN:]
+		}
+	}
+}
+
+// isRecentRepeatLocked reports whether text exactly matches a recent output.
+// Caller must hold dampMu.
+func (f *Funnel) isRecentRepeatLocked(text string) bool {
+	for _, prev := range f.dampRecent {
+		if prev == text {
+			return true
+		}
+	}
+	return false
+}
+
+// dampSnapshot reads the consecutive-unproductive counter for logging.
+func (f *Funnel) dampSnapshot() int {
+	f.dampMu.Lock()
+	defer f.dampMu.Unlock()
+	return f.dampConsecutive
 }
 
 // deliberateState carries per-turn working state across Deliberate's
