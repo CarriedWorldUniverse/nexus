@@ -3,9 +3,12 @@ package funnel
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
+
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 )
 
 func TestPolicyEvaluate(t *testing.T) {
@@ -47,7 +50,7 @@ func TestPolicyBashDenylist(t *testing.T) {
 
 func TestPermissionHookDeniesViaBridleDeny(t *testing.T) {
 	p := ToolPolicy{DefaultAllow: true, Tools: map[string]bool{"bash": false}}
-	hook := PermissionHook(p)
+	hook := PermissionHook(p, nil)
 	in := bridle.BeforeToolCallCtx{Call: bridle.ToolCall{Name: "bash", Args: []byte(`{"command":"id"}`)}}
 	out, action, err := hook(context.Background(), in)
 	if err != nil {
@@ -64,5 +67,138 @@ func TestPermissionHookDeniesViaBridleDeny(t *testing.T) {
 	out2, _, _ := hook(context.Background(), in2)
 	if out2.Deny {
 		t.Fatal("allowed tool must not be denied")
+	}
+}
+
+func TestPolicyDecidePrecedence(t *testing.T) {
+	// Deny outranks Escalate: bash is both escalated AND denylisted.
+	p := ToolPolicy{
+		DefaultAllow: true,
+		Tools:        map[string]bool{"forbidden": false},
+		BashDeny:     []string{"rm -rf"},
+		Escalate:     map[string]bool{"bash": true, "forbidden": true},
+	}
+	cases := []struct {
+		name string
+		call bridle.ToolCall
+		want Verdict
+	}{
+		{"outright deny outranks escalate", bridle.ToolCall{Name: "forbidden"}, VerdictDeny},
+		{"bash escalated when benign", bridle.ToolCall{Name: "bash", Args: []byte(`{"command":"ls"}`)}, VerdictEscalate},
+		{"bash denylist outranks escalate", bridle.ToolCall{Name: "bash", Args: []byte(`{"command":"rm -rf /"}`)}, VerdictDeny},
+		{"non-escalated tool allowed", bridle.ToolCall{Name: "read", Args: []byte(`{"path":"x"}`)}, VerdictAllow},
+	}
+	for _, c := range cases {
+		got, reason := p.Decide(c.call)
+		if got != c.want {
+			t.Errorf("%s: verdict=%v want %v (reason=%q)", c.name, got, c.want, reason)
+		}
+		if (got == VerdictDeny || got == VerdictEscalate) && reason == "" {
+			t.Errorf("%s: deny/escalate must carry a reason", c.name)
+		}
+	}
+}
+
+// fakeRequester is an in-process operator: it captures the request and
+// returns a canned decision frame correlated to the request ID.
+type fakeRequester struct {
+	decision string
+	note     string
+	gotReq   frames.EscalationRequestPayload
+	err      error
+}
+
+func (f *fakeRequester) Request(_ context.Context, env frames.Envelope) (frames.Envelope, error) {
+	if f.err != nil {
+		return frames.Envelope{}, f.err
+	}
+	_ = frames.PayloadAs(env, &f.gotReq)
+	return frames.NewResponse(frames.KindEscalationDecision, env.ID, frames.EscalationDecisionPayload{
+		Aspect:    f.gotReq.Aspect,
+		Decision:  f.decision,
+		Operator:  "test-operator",
+		Note:      f.note,
+		RequestID: env.ID,
+	})
+}
+
+func TestPermissionHookEscalateApprove(t *testing.T) {
+	p := ToolPolicy{DefaultAllow: true, Escalate: map[string]bool{"bash": true}}
+	fake := &fakeRequester{decision: frames.EscalationApprove}
+	hook := PermissionHook(p, &Escalator{Requester: fake, AspectID: "plumb"})
+
+	in := bridle.BeforeToolCallCtx{Call: bridle.ToolCall{Name: "bash", Args: []byte(`{"command":"id"}`)}}
+	out, action, err := hook(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action != bridle.HookContinue {
+		t.Fatalf("approve must HookContinue, got %v", action)
+	}
+	if out.Deny {
+		t.Fatalf("approve must NOT deny; got Deny=true Err=%q", out.Err)
+	}
+	// Aspect identity must have been injected (model can't forge it).
+	if fake.gotReq.Aspect != "plumb" {
+		t.Errorf("escalation.request Aspect=%q, want plumb (funnel-injected)", fake.gotReq.Aspect)
+	}
+	if fake.gotReq.Tool != "bash" {
+		t.Errorf("escalation.request Tool=%q, want bash", fake.gotReq.Tool)
+	}
+}
+
+func TestPermissionHookEscalateDeny(t *testing.T) {
+	p := ToolPolicy{DefaultAllow: true, Escalate: map[string]bool{"bash": true}}
+	fake := &fakeRequester{decision: frames.EscalationDeny, note: "not on prod"}
+	hook := PermissionHook(p, &Escalator{Requester: fake, AspectID: "plumb"})
+
+	in := bridle.BeforeToolCallCtx{Call: bridle.ToolCall{Name: "bash", Args: []byte(`{"command":"id"}`)}}
+	out, action, err := hook(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action != bridle.HookContinue {
+		t.Fatalf("deny must HookContinue, got %v", action)
+	}
+	if !out.Deny {
+		t.Fatal("operator deny must set Deny=true")
+	}
+	if !strings.Contains(out.Err, "operator denied") {
+		t.Errorf("Err=%q, want it to contain 'operator denied'", out.Err)
+	}
+	if !strings.Contains(out.Err, "not on prod") {
+		t.Errorf("Err=%q, want it to surface the operator note", out.Err)
+	}
+}
+
+func TestPermissionHookEscalateNilEscalatorFailsSafe(t *testing.T) {
+	p := ToolPolicy{DefaultAllow: true, Escalate: map[string]bool{"bash": true}}
+	hook := PermissionHook(p, nil) // no operator wire
+
+	in := bridle.BeforeToolCallCtx{Call: bridle.ToolCall{Name: "bash", Args: []byte(`{"command":"id"}`)}}
+	out, _, err := hook(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Deny {
+		t.Fatal("escalate with no operator must fail-safe to deny")
+	}
+}
+
+func TestPermissionHookEscalateTransportErrorFailsSafe(t *testing.T) {
+	p := ToolPolicy{DefaultAllow: true, Escalate: map[string]bool{"bash": true}}
+	fake := &fakeRequester{err: context.Canceled}
+	hook := PermissionHook(p, &Escalator{Requester: fake, AspectID: "plumb"})
+
+	in := bridle.BeforeToolCallCtx{Call: bridle.ToolCall{Name: "bash", Args: []byte(`{"command":"id"}`)}}
+	out, _, err := hook(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Deny {
+		t.Fatal("escalation transport error must fail-safe to deny")
+	}
+	if !strings.Contains(out.Err, "escalation failed") {
+		t.Errorf("Err=%q, want it to contain 'escalation failed'", out.Err)
 	}
 }

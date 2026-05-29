@@ -384,3 +384,58 @@ func TestPayloadJSONTags(t *testing.T) {
 		})
 	}
 }
+
+func TestEscalationFramesRoundTrip(t *testing.T) {
+	if !IsKnown(KindEscalationRequest) {
+		t.Error("KindEscalationRequest should be known")
+	}
+	if !IsKnown(KindEscalationDecision) {
+		t.Error("KindEscalationDecision should be known")
+	}
+
+	req, err := NewRequest(KindEscalationRequest, EscalationRequestPayload{
+		Aspect: "plumb",
+		Tool:   "bash",
+		Args:   json.RawMessage(`{"command":"rm -rf /"}`),
+		Reason: "policy requires approval for bash",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.ID == "" {
+		t.Fatal("escalation.request should carry a correlation ID")
+	}
+
+	var gotReq EscalationRequestPayload
+	if err := PayloadAs(req, &gotReq); err != nil {
+		t.Fatal(err)
+	}
+	if gotReq.Aspect != "plumb" || gotReq.Tool != "bash" {
+		t.Errorf("request payload round-trip = %+v", gotReq)
+	}
+	if string(gotReq.Args) != `{"command":"rm -rf /"}` {
+		t.Errorf("args round-trip = %s", gotReq.Args)
+	}
+
+	// The decision echoes the request ID into InReplyTo (the broker sets
+	// this when routing the operator's answer back to the aspect).
+	dec, err := NewResponse(KindEscalationDecision, req.ID, EscalationDecisionPayload{
+		Aspect:    "plumb",
+		Decision:  EscalationApprove,
+		Operator:  "shadow",
+		RequestID: req.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dec.InReplyTo != req.ID {
+		t.Errorf("decision InReplyTo = %q, want %q", dec.InReplyTo, req.ID)
+	}
+	var gotDec EscalationDecisionPayload
+	if err := PayloadAs(dec, &gotDec); err != nil {
+		t.Fatal(err)
+	}
+	if gotDec.Decision != EscalationApprove || gotDec.Aspect != "plumb" {
+		t.Errorf("decision payload round-trip = %+v", gotDec)
+	}
+}

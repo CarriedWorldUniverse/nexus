@@ -1015,3 +1015,48 @@ type AgentSayPayload struct {
 	AspectID string `json:"aspect_id"`
 	Content  string `json:"content"`
 }
+
+// -------------------------------------------------------------------
+// Operator escalation (ToolRunner P3c)
+// -------------------------------------------------------------------
+
+// EscalationRequestPayload is emitted by a native-API aspect's funnel
+// when its permission policy marks a tool call "ask a human". The
+// aspect's funnel blocks on the correlated Request; the broker fans
+// this payload out to subscribed operators.
+//
+// Aspect is funnel-injected from the aspect's own identity, NOT a
+// model-supplied field — the operator always knows who is asking and
+// the model cannot forge it (same accountability boundary as comms).
+// The broker re-verifies Aspect == the connection's authenticated
+// identity before fan-out.
+type EscalationRequestPayload struct {
+	Aspect string          `json:"aspect"`
+	Tool   string          `json:"tool"`
+	Args   json.RawMessage `json:"args,omitempty"`
+	Reason string          `json:"reason,omitempty"`
+}
+
+// EscalationDecisionPayload is the operator's answer. It travels back
+// to the originating aspect as a frame whose InReplyTo is the original
+// escalation.request ID, so the aspect's blocked Request resolves.
+//
+// Decision is "approve" or "deny". Operator is the deciding identity
+// (audit). Note is optional free text surfaced to the model on deny.
+// Aspect names the target aspect so the (stateless) broker can route
+// the decision to the right connection. RequestID echoes the
+// correlation id for audit/observability — the broker sets the actual
+// envelope InReplyTo from the request, this field is informational.
+type EscalationDecisionPayload struct {
+	Aspect    string `json:"aspect"`
+	Decision  string `json:"decision"` // "approve" | "deny"
+	Operator  string `json:"operator,omitempty"`
+	Note      string `json:"note,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// Escalation decision constants.
+const (
+	EscalationApprove = "approve"
+	EscalationDeny    = "deny"
+)

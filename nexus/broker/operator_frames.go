@@ -63,6 +63,10 @@ func (c *wsConn) dispatchOperatorFrame(env frames.Envelope) bool {
 		c.handleOperatorKnowledgeStore(env)
 	case frames.KindAspectSay:
 		c.handleOperatorAspectSay(env)
+	case frames.KindEscalationDecision:
+		// P3c: operator answered a paused tool call. Route the decision
+		// back to the originating aspect's connection.
+		c.handleEscalationDecisionFrame(env)
 	default:
 		return false
 	}

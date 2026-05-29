@@ -158,13 +158,20 @@ func main() {
 	if err != nil {
 		fail(log, "build provider", err)
 	}
+	// escalator (P3c) is built from the wsasp client (below) once it
+	// exists; declared here so the TokenProvider binding-refresh closure
+	// captures the variable. Until assigned it is nil, so an escalate
+	// verdict fail-safe-denies. The binding cache is re-stored with the
+	// escalator-equipped harness right after the client is constructed,
+	// before funnel.New consumes it.
+	var escalator *funnel.Escalator
 	bindingCache := &atomic.Pointer[funnel.Binding]{}
 	bindingCache.Store(&funnel.Binding{
 		Provider: bridle.ProviderID(res.Provider),
 		Model:    res.Model,
 		// Native-API providers get the P3b permission hook registered on
 		// the Harness; claude-code is skipped (self-supplies tools).
-		Harness: newBindingHarness(provider, res.Provider),
+		Harness: newBindingHarness(provider, res.Provider, escalator),
 	})
 
 	// 4. Compose funnel + wsasp client.
@@ -231,7 +238,7 @@ func main() {
 				bindingCache.Store(&funnel.Binding{
 					Provider: bridle.ProviderID(fresh.Provider),
 					Model:    fresh.Model,
-					Harness:  newBindingHarness(newProv, fresh.Provider),
+					Harness:  newBindingHarness(newProv, fresh.Provider, escalator),
 				})
 				log.Info("agentfunnel: binding refreshed via re-validate",
 					"provider", fresh.Provider, "model", fresh.Model)
@@ -267,6 +274,19 @@ func main() {
 	if err != nil {
 		fail(log, "wsasp.NewClient", err)
 	}
+
+	// P3c: now that the wsasp client exists, build the operator-escalation
+	// requester for native providers and re-store the binding cache with
+	// an escalator-equipped harness. wsClient.Request blocks on the
+	// correlated escalation.decision (no timeout) — the broker relays the
+	// request to operators and routes the decision back. claude-code is
+	// skipped inside newBindingHarness (it self-supplies tools).
+	escalator = &funnel.Escalator{Requester: wsClient, AspectID: res.AspectName}
+	bindingCache.Store(&funnel.Binding{
+		Provider: bridle.ProviderID(res.Provider),
+		Model:    res.Model,
+		Harness:  newBindingHarness(provider, res.Provider, escalator),
+	})
 
 	gateway := wsasp.NewGateway(wsClient)
 	// NEX-knowledge-fix (operator 2026-05-27): wire knowledge gateway
@@ -367,7 +387,8 @@ func main() {
 		// the agentfunnel flow always uses BindingFn — see below.
 		// Hook registered here too so the back-compat path also enforces
 		// the P3b policy for native providers (BindingFn overrides per turn).
-		Harness:  newBindingHarness(provider, res.Provider),
+		// escalator is set by now (built right after the wsasp client).
+		Harness:  newBindingHarness(provider, res.Provider, escalator),
 		Provider: bridle.ProviderID(res.Provider),
 		Model:    res.Model,
 		// NEX-335: per-turn binding resolver reads from the binding
@@ -629,7 +650,14 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 //
 // v1 policy is permissive (DefaultAllow=true): the enforcement MECHANISM
 // ships here; per-aspect policy config is a thin follow-on (P3b-config).
-func newBindingHarness(provider bridle.Provider, providerName string) *bridle.Harness {
+//
+// esc (P3c) handles VerdictEscalate tool calls by asking the operator
+// over the aspect's WS. It is built from the wsasp client (the
+// Requester) + aspect id once that client exists; the earliest harness
+// store (before the client is constructed) passes nil, which makes any
+// escalate verdict fail-safe to deny until the escalator-equipped
+// harness is re-stored.
+func newBindingHarness(provider bridle.Provider, providerName string, esc *funnel.Escalator) *bridle.Harness {
 	h := bridle.NewHarness(provider)
 	switch providerName {
 	case "claude-code", "claudecode":
@@ -637,8 +665,9 @@ func newBindingHarness(provider bridle.Provider, providerName string) *bridle.Ha
 	default:
 		// TODO(P3b-config): load the real per-aspect ToolPolicy (broker
 		// model_config / aspect.json) instead of the permissive default.
+		// The Escalate set comes from the same per-aspect policy source.
 		policy := funnel.ToolPolicy{DefaultAllow: true}
-		h.RegisterBeforeToolCall(funnel.PermissionHook(policy))
+		h.RegisterBeforeToolCall(funnel.PermissionHook(policy, esc))
 	}
 	return h
 }

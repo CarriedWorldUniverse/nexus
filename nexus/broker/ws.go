@@ -460,6 +460,11 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleAspectModelConfigGet(env)
 	case frames.KindSwitchSurface:
 		c.handleSwitchSurfaceFrame(env)
+	case frames.KindEscalationRequest:
+		// P3c: a native-API aspect's funnel paused a tool call and is
+		// asking a human. Relay to operators (identity-checked); the
+		// aspect's own Request holds the pending channel.
+		c.handleEscalationRequestFrame(env)
 	default:
 		c.log.Info("frame kind not yet handled", "kind", env.Kind)
 	}

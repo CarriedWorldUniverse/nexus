@@ -55,7 +55,7 @@ func TestE2EPermissionDeniesBash(t *testing.T) {
 	// Policy: bash DENIED, everything else allowed (mirrors agentfunnel's
 	// native-provider hook registration, but with a non-permissive policy
 	// so we can prove the deny path end to end).
-	h.RegisterBeforeToolCall(PermissionHook(ToolPolicy{DefaultAllow: true, Tools: map[string]bool{"bash": false}}))
+	h.RegisterBeforeToolCall(PermissionHook(ToolPolicy{DefaultAllow: true, Tools: map[string]bool{"bash": false}}, nil))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
