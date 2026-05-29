@@ -55,6 +55,7 @@ import (
 	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
 	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
 	openaiprovider "github.com/CarriedWorldUniverse/bridle/provider/openai"
+	toolrunner "github.com/CarriedWorldUniverse/bridle/toolrunner"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/rewriter"
 	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
@@ -339,6 +340,23 @@ func main() {
 		return funnelPtr.SessionID()
 	}, overrides.CompactModel, overrides.CompactEnv, log)
 
+	// Provider-aware ToolRunner. Native-API providers get the local
+	// coding-tool lane (toolrunner.LocalToolRunner) composed behind comms;
+	// claude-code keeps the NullRunner no-op (it self-supplies tools). The
+	// aspect's cwd (autospawn home dir, where aspect.json lives) is the
+	// WorkDir for local file/bash tools. Lynxai web access is opt-in via
+	// env; empty base URL gracefully disables web_fetch/web_extract.
+	toolRunner, err := runnerForProviderAgent(
+		bridle.ProviderID(res.Provider),
+		commsRunner,
+		cwd,
+		os.Getenv("LYNXAI_BASE_URL"),
+		os.Getenv("LYNXAI_KEY"),
+	)
+	if err != nil {
+		fail(log, "build tool runner", err)
+	}
+
 	systemPrompt := composeSystemPrompt(res)
 	f, err := funnel.New(funnel.Config{
 		AspectID: res.AspectName,
@@ -374,7 +392,7 @@ func main() {
 		// owns its own tool surface natively. Mirrors cmd/nexus/main.go's
 		// toolsForProvider — see #181 for the MCP fix.
 		Tools:  toolsForProviderAgent(bridle.ProviderID(res.Provider)),
-		Runner: funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		Runner: toolRunner,
 		// ChatGateway routes the model's auto-post FinalText through the
 		// same SendChat path CommsRunner uses for explicit send_chat tool
 		// calls. Required for claude-code (subprocess mode): without it,
@@ -1098,7 +1116,32 @@ func toolsForProviderAgent(id bridle.ProviderID) []bridle.ToolDef {
 	case "claude-code", "claudecode":
 		return nil
 	}
-	return funnel.CommsToolDefs()
+	// Native-API providers: the funnel supplies the full tool surface —
+	// host comms (lane 2: send_chat etc.) + local coding tools (lane 1:
+	// bash/read/write/edit/glob/grep/web_fetch/web_extract). The two name
+	// sets are disjoint so ComposeRunner can route purely by tool name.
+	return append(funnel.CommsToolDefs(), toolrunner.Defs()...)
+}
+
+// runnerForProviderAgent builds the funnel's ToolRunner. claude-code owns
+// its own tools natively, so the non-comms lane is a no-op (NullRunner);
+// native-API providers get the real LocalToolRunner as the non-comms lane,
+// composed behind the comms runner (ComposeRunner routes comms names to
+// comms, everything else to the local runner).
+func runnerForProviderAgent(id bridle.ProviderID, comms funnel.CommsRunner, workDir, lynxaiBase, lynxaiKey string) (bridle.ToolRunner, error) {
+	switch id {
+	case "claude-code", "claudecode":
+		return funnel.ComposeRunner(comms, &funnel.NullRunner{}), nil
+	}
+	local, err := toolrunner.New(toolrunner.Config{
+		WorkDir:       workDir,
+		LynxaiBaseURL: lynxaiBase, // empty → web_fetch/web_extract return a disabled-error result (graceful)
+		LynxaiKey:     lynxaiKey,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build local tool runner: %w", err)
+	}
+	return funnel.ComposeRunner(comms, local), nil
 }
 
 func fail(log *slog.Logger, msg string, err error) {
