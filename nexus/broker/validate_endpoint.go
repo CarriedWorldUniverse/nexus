@@ -24,6 +24,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -113,6 +114,18 @@ type validateResponse struct {
 	// is unusable, so the handler returns 500 rather than emit a
 	// half-resolved profile.
 	MCPProfile string `json:"mcp_profile,omitempty"`
+
+	// ProviderEnv is the aspect's resolved provider-credential env overlay
+	// (NEX-332 phase 4): {OPENAI_API_KEY, OPENAI_BASE_URL} or
+	// {ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL}, drawn from the aspect's
+	// default provider credential in the store. Lets an out-of-process
+	// aspect (agentfunnel) construct its native-API provider with the
+	// broker-held key — no key in start scripts or env. Empty when: no
+	// credentials store, no default for the provider's shape, the provider
+	// self-authenticates (claude-code), or the credential's mode forbids
+	// fetch (mode=proxy keeps the key inside nexus). The aspect falls back
+	// to its own process env when this is absent.
+	ProviderEnv map[string]string `json:"provider_env,omitempty"`
 }
 
 // personalityWire is the on-the-wire shape of the personality bundle.
@@ -261,6 +274,13 @@ func (b *Broker) handleAspectValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// NEX-332 phase 4: resolve the aspect's default provider credential
+	// from the store and deliver it as an env overlay, so an out-of-process
+	// aspect constructs its native-API provider with the broker-held key
+	// (no key in start scripts/env). Best-effort: any miss falls back to
+	// the aspect's own process env.
+	providerEnv := resolveProviderEnv(r.Context(), v.Credentials, sess.AspectName, sess.Provider, b.log)
+
 	resp := validateResponse{
 		OK:               true,
 		SessionJWT:       sess.SessionJWT,
@@ -271,11 +291,60 @@ func (b *Broker) handleAspectValidate(w http.ResponseWriter, r *http.Request) {
 		CentralNexusMD:   sess.CentralNexusMD,
 		CentralVersion:   sess.CentralVersion,
 		MCPProfile:       mcpProfile,
+		ProviderEnv:      providerEnv,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		b.log.Warn("validate: response encode failed", "err", err)
 	}
+}
+
+// resolveProviderEnv resolves the aspect's default provider credential for
+// the shape its provider needs and returns the {API_KEY, BASE_URL} env
+// overlay (NEX-332 phase 4). Returns nil — caller falls back to process env
+// — when: no store, the provider self-authenticates (claude-code), no
+// default is configured for that shape, or the credential's mode forbids
+// fetch (mode=proxy keeps the key inside nexus). Never fatal: a resolve
+// error degrades to nil + a warning, so a misconfigured default can't block
+// an otherwise-valid keyfile from connecting.
+func resolveProviderEnv(ctx context.Context, store *credentials.Store, aspect, provider string, log *slog.Logger) map[string]string {
+	if store == nil {
+		return nil
+	}
+	var shape credentials.APIShape
+	switch provider {
+	case "claude-api", "claude":
+		shape = credentials.ShapeAnthropic
+	case "openai", "openai-api":
+		shape = credentials.ShapeOpenAI
+	default:
+		// claude-code self-authenticates (subscription/keychain); other
+		// providers have no env mapping. No delivery.
+		return nil
+	}
+	cred, env, err := store.ResolveDefaultForAspect(ctx, aspect, shape)
+	if err != nil {
+		if !errors.Is(err, credentials.ErrNoDefault) && log != nil {
+			log.Warn("validate: provider env resolve failed; aspect falls back to process env",
+				"aspect", aspect, "shape", string(shape), "err", err)
+		}
+		return nil
+	}
+	// Mode gate: only hand the raw key off-box when the operator opted in
+	// (fetch/both). mode=proxy means the key must never leave nexus, which
+	// an out-of-process aspect can't honour — skip delivery, warn.
+	if cred.Mode != credentials.ModeFetch && cred.Mode != credentials.ModeBoth {
+		if log != nil {
+			log.Warn("validate: aspect's default provider cred is mode=proxy — not delivered to an out-of-process aspect (set mode=fetch/both for native aspects)",
+				"aspect", aspect, "credential", cred.Name, "mode", string(cred.Mode))
+		}
+		return nil
+	}
+	if log != nil {
+		log.Info("validate: delivering provider-cred env from store (keyless aspect)",
+			"aspect", aspect, "credential", cred.Name, "shape", string(shape))
+	}
+	return env
 }
 
 // personalityWireFrom adapts an aspects.Personality (or nil) to the

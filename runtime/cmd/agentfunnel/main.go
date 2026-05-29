@@ -155,6 +155,25 @@ func main() {
 		fail(log, "materialise .mcp.json", err)
 	}
 
+	// NEX-332 phase 4: apply the provider-credential env the broker
+	// resolved from its store (keyless aspects). agentfunnel is a
+	// single-aspect process, so setting it on the process env is safe and
+	// makes the native-API providers (which read construction-time env)
+	// pick up the broker-held key with no further plumbing. Falls back to
+	// the existing process env when the broker delivered nothing (no
+	// default cred / mode=proxy / claude-code self-auth).
+	if len(res.ProviderEnv) > 0 {
+		applied := make([]string, 0, len(res.ProviderEnv))
+		for k, v := range res.ProviderEnv {
+			if err := os.Setenv(k, v); err != nil {
+				fail(log, "apply broker provider env", err)
+			}
+			applied = append(applied, k)
+		}
+		log.Info("agentfunnel: applied provider creds from broker store (keyless)",
+			"aspect", res.AspectName, "vars", applied)
+	}
+
 	// 3. Build provider + initial binding cache.
 	//
 	// The binding (provider+model+harness triple) lives behind an

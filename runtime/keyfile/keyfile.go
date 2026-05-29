@@ -275,6 +275,15 @@ type ValidationResult struct {
 	// NexusID is the verified Nexus instance ID (envelope == server).
 	// Useful for log correlation.
 	NexusID string
+
+	// ProviderEnv is the aspect's resolved provider-credential env overlay
+	// from the broker (NEX-332 phase 4): {OPENAI_API_KEY, OPENAI_BASE_URL}
+	// or {ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL}. The aspect applies it
+	// before constructing its native-API provider so the broker-held key
+	// is used — no key in start scripts/env. Empty when the broker has no
+	// default provider cred for this aspect (caller falls back to its own
+	// process env).
+	ProviderEnv map[string]string
 }
 
 // Load reads and parses an on-disk keyfile. Validates format + version
@@ -426,6 +435,7 @@ func (c *Client) Validate(ctx context.Context, kf *Keyfile) (*ValidationResult, 
 		Provider:         resp.Provider,
 		Model:            resp.Model,
 		MCPProfile:       resp.MCPProfile,
+		ProviderEnv:      resp.ProviderEnv,
 		NexusURL:         kf.Envelope.NexusURL,
 		NexusID:          kf.Envelope.NexusID,
 	}, nil
@@ -485,7 +495,8 @@ type validateResponse struct {
 
 	// NEX-169: resolved MCP profile. Empty when the Nexus doesn't have
 	// a credentials store wired or no profile is configured.
-	MCPProfile string `json:"mcp_profile"`
+	MCPProfile  string            `json:"mcp_profile"`
+	ProviderEnv map[string]string `json:"provider_env"`
 }
 
 // postValidate POSTs the encrypted_payload and decodes the response.
