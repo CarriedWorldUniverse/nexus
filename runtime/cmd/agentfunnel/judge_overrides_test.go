@@ -218,9 +218,12 @@ func TestBuildAgentFunnelFilter_OverrideWins(t *testing.T) {
 	}
 }
 
-// Claude flavor with no override defaults the judge model to "haiku",
-// ignoring mainModel.
+// Claude flavor with no override defaults the judge to the haiku tier,
+// ignoring mainModel. NEX-369: on native claude-api the bare "haiku" is
+// expanded to a full Anthropic model id (a bare "haiku" 404s the SDK),
+// while claude-code keeps the CLI shorthand.
 func TestBuildAgentFunnelFilter_ClaudeDefaultsHaiku(t *testing.T) {
+	// Native claude-api → full id.
 	f := buildAgentFunnelFilter(nil, "claude-api", "", nil, "whatever", newTestLogger(), nil)
 	hard, ok := f.(funnel.HardRulesFilter)
 	if !ok {
@@ -230,8 +233,15 @@ func TestBuildAgentFunnelFilter_ClaudeDefaultsHaiku(t *testing.T) {
 	if !ok || cheap == nil {
 		t.Fatalf("want non-nil *funnel.CheapModelFilter inner, got %T", hard.Inner)
 	}
-	if cheap.Model != "haiku" {
-		t.Errorf("Model = %q, want haiku (claude default)", cheap.Model)
+	if cheap.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("claude-api Model = %q, want claude-haiku-4-5-20251001 (NEX-369 expanded)", cheap.Model)
+	}
+
+	// claude-code keeps the bare shorthand its CLI expects.
+	f2 := buildAgentFunnelFilter(nil, "claude-code", "", nil, "whatever", newTestLogger(), nil)
+	cheap2 := f2.(funnel.HardRulesFilter).Inner.(*funnel.CheapModelFilter)
+	if cheap2.Model != "haiku" {
+		t.Errorf("claude-code Model = %q, want haiku (CLI shorthand preserved)", cheap2.Model)
 	}
 }
 

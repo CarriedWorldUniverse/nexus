@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+
+	"github.com/CarriedWorldUniverse/bridle"
 )
 
 // NexusChatReturnHandler is the default ReturnHandler for the nexus
@@ -129,9 +131,14 @@ func (h *NexusChatReturnHandler) Handle(ctx context.Context, result DeliberateRe
 	}
 
 	// Auto-post the model's natural reply when filter approves.
-	// Skip when text was already streamed to chat during the turn —
-	// posting FinalText again would duplicate the last block.
-	if result.Filter.ShouldPost && !h.SuppressAutoPost {
+	// Skip when text was already streamed to chat during the turn
+	// (SuppressAutoPost), OR when the model posted a chat message via a
+	// comms tool this turn (NEX-370): send_chat IS the reply, so
+	// auto-posting FinalText too would duplicate it (the multi-post bug).
+	// FinalText auto-post stays the fallback for turns where the model
+	// did NOT explicitly post.
+	postedViaTool := postedChatViaTool(result.TurnResult.ToolCalls)
+	if result.Filter.ShouldPost && !h.SuppressAutoPost && !postedViaTool {
 		text := strings.TrimSpace(result.TurnResult.FinalText)
 		if text != "" {
 			if msgID, err := h.Gateway.SendChat(ctx, text, trigger.MsgID, ""); err != nil {
@@ -146,8 +153,26 @@ func (h *NexusChatReturnHandler) Handle(ctx context.Context, result DeliberateRe
 					"chars", len(text))
 			}
 		}
+	} else if result.Filter.ShouldPost && postedViaTool && strings.TrimSpace(result.TurnResult.FinalText) != "" {
+		h.debug("funnel: auto-post skipped — model already posted via a comms tool this turn (NEX-370)",
+			"trigger_msg_id", trigger.MsgID)
 	}
 	return nil
+}
+
+// postedChatViaTool reports whether the model posted a chat MESSAGE via a
+// comms tool during the turn. When it did, the reply is already on the bus,
+// so auto-posting FinalText would duplicate it (NEX-370). react_to /
+// chat_read / knowledge tools don't count — they don't post a message that
+// FinalText would duplicate.
+func postedChatViaTool(invs []bridle.ToolInvocation) bool {
+	for _, name := range toolNamesFromInvocations(invs) {
+		switch name {
+		case ToolNameSendChat, ToolNameAnnounceFile, ToolNameShareFile:
+			return true
+		}
+	}
+	return false
 }
 
 // debug / info / warn shorthand for handlers — guards against nil
