@@ -155,49 +155,10 @@ func TestBuildOutputFilter_UnknownFallsBackToCheap(t *testing.T) {
 	}
 }
 
-// NEX-365 #3: nativeJudgeProvider rebuilds a native Anthropic-shape
-// judge provider from the resolved judge-credential env so cross-provider
-// judging (a Claude aspect judged by a DeepSeek Anthropic-shape endpoint)
-// actually targets the judge endpoint — the native SDK reads creds at
-// CONSTRUCTION, not per-turn, so ProviderEnv alone can't redirect it.
-func TestNativeJudgeProvider(t *testing.T) {
-	env := map[string]string{
-		"ANTHROPIC_API_KEY":  "sk-deepseek",
-		"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
-	}
-
-	// claude-api + judge env → a freshly-built native claude provider,
-	// NOT the inherited (stub) one.
-	got := nativeJudgeProvider(stubProvider{}, "claude-api", env)
-	if got.Name() != "claude-api" {
-		t.Errorf("claude-api + env: provider Name = %q, want claude-api (rebuilt)", got.Name())
-	}
-	if _, isStub := got.(stubProvider); isStub {
-		t.Error("claude-api + env: judge still on the inherited stub provider; should be rebuilt with the judge creds")
-	}
-
-	// "claude" alias behaves the same.
-	if got := nativeJudgeProvider(stubProvider{}, "claude", env); got.Name() != "claude-api" {
-		t.Errorf("claude alias: Name = %q, want claude-api", got.Name())
-	}
-
-	// claude-code is the subprocess family — left to bareJudgeProvider +
-	// ProviderEnv, so nativeJudgeProvider must pass it through untouched.
-	if got := nativeJudgeProvider(stubProvider{}, "claude-code", env); got.Name() != "stub" {
-		t.Errorf("claude-code: provider should pass through (Name=%q), bareJudgeProvider owns it", got.Name())
-	}
-
-	// No judge env → nothing to pin; inherit (passthrough), preserving
-	// pre-NEX-365 behaviour.
-	if got := nativeJudgeProvider(stubProvider{}, "claude-api", nil); got.Name() != "stub" {
-		t.Errorf("claude-api + no env: should pass through (Name=%q)", got.Name())
-	}
-
-	// Non-Claude id → passthrough.
-	if got := nativeJudgeProvider(stubProvider{}, "openai", env); got.Name() != "stub" {
-		t.Errorf("openai: should pass through (Name=%q)", got.Name())
-	}
-}
+// NEX-365 #2: nativeJudgeProvider / bareJudgeProvider / IsClaudeFlavor /
+// BuildProvider unit tests moved to nexus/frame/funnel/judge (judge_test.go)
+// along with the logic. The buildOutputFilter tests below remain — they
+// exercise the Frame's delegation to that shared builder end to end.
 
 func TestBuildOutputFilter_CaseInsensitive(t *testing.T) {
 	got := buildOutputFilter(cfgWith("HARD", "", ""), stubProvider{}, "stub", "stub-model", nil, "", nil, quietLogger())
