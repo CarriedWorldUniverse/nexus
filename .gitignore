@@ -49,15 +49,10 @@ nexus-jira-mcp
 .worktree/
 /site/
 
-# Bare-named Go build outputs at repo root (no .exe extension on Unix)
-/agentfunnel
-/aspect
-# A bare-named `nexus` binary collides with the nexus/ source directory.
-# Ignore a root *file* named nexus, but re-include the directory: the
-# trailing-slash negation matches directories only, so source under nexus/
-# is never shadowed.
-/nexus
-!/nexus/
+# Binaries build to bin/ (Makefile: go build -o bin/$@), which is ignored
+# above. Do NOT add bare-named root ignores per binary — they shadow
+# same-named source dirs (e.g. /nexus vs the nexus/ package tree). Build
+# with `make` or `-o bin/`, not a bare `go build ./cmd/x` from the root.
 
 # Skill artifacts (writing-plans, brainstorming, etc.) live in shadow's
 # working tree, not in this repo. Defensive ignore in case they leak.
