@@ -264,15 +264,26 @@ func (b *Broker) tryVerifyOperatorJWT(token string) (TokenInfo, bool) {
 // Failures are silent; the WS handler treats this as a TokenStore
 // miss and returns 401, same as any other unrecognized bearer.
 func (b *Broker) tryVerifyAspectJWT(token string) (TokenInfo, bool) {
+	// NEX-367 follow-up: aspect session JWTs are signed by the keyfile
+	// validator with the broker's session secret — independent of the
+	// operator dashboard. Verify against the broker-level secret (always
+	// set on a real boot) so aspect /connect works on a headless /
+	// aspect-only broker that has no OperatorLogin (the latter is gated
+	// behind NEXUS_OPERATOR_RPID). Fall back to OperatorLogin's secret for
+	// back-compat with callers/tests that only wire it there.
 	ol := b.cfg.OperatorLogin
-	if ol == nil || len(ol.SessionSigningSecret) == 0 {
+	secret := b.cfg.SessionSigningSecret
+	if len(secret) == 0 && ol != nil {
+		secret = ol.SessionSigningSecret
+	}
+	if len(secret) == 0 {
 		return TokenInfo{}, false
 	}
 	now := time.Now()
-	if ol.Now != nil {
+	if ol != nil && ol.Now != nil {
 		now = ol.Now()
 	}
-	claims, err := jwt.Verify(ol.SessionSigningSecret, token, now)
+	claims, err := jwt.Verify(secret, token, now)
 	if err != nil {
 		return TokenInfo{}, false
 	}

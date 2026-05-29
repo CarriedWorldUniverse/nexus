@@ -533,6 +533,11 @@ func main() {
 		TLSKeyFile:        *tlsKey,
 		DashboardDir:      *dashboardDir,
 		KeyfileValidator:  keyfileValidator,
+		// NEX-367 follow-up: the session secret the keyfile validator
+		// signs aspect JWTs with, surfaced at broker level so aspect
+		// /connect can verify them even on a headless/aspect-only broker
+		// (OperatorLogin nil because NEXUS_OPERATOR_RPID is unset).
+		SessionSigningSecret: nexusIdentity.SessionSigningSecret,
 		// Knowledge store powers operator-facing knowledge frames
 		// (knowledge.list / knowledge.search / knowledge.store) on the
 		// dashboard's WS surface. Same store the bridle tool runner
