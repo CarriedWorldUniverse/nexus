@@ -825,6 +825,12 @@ func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.Provider
 			model = mainModel
 		}
 	}
+	// NEX-369: claude-code's CLI accepts a bare tier ("haiku"), but the
+	// native Anthropic SDK (claude-api) needs a full model id — a bare
+	// "haiku" 404s → the judge degrades + fails open (doesn't filter).
+	// Expand bare tiers to full ids on the native path; claude-code keeps
+	// the shorthand its CLI requires.
+	model = funnel.ExpandBareClaudeTier(model, providerID)
 	if model == "" {
 		log.Warn("agentfunnel: no judge model resolvable for provider — filter=hard, no cheap-judge",
 			"provider", providerID)

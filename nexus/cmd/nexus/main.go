@@ -1474,9 +1474,12 @@ func resolveJudgeProviderAndModel(cfg schemas.AspectConfig, frameProvider bridle
 		// versioned api-style name made the CLI run as a full agent
 		// rather than a classifier (observed 2026-05-12: judge produced
 		// 9-tool-call multi-step deliberations instead of "yes"/"no").
-		// Bare "haiku" picks the CLI's own default haiku tier; under
-		// claude-api the same shorthand still resolves to the current
-		// haiku model. See task #193's filter-suppression trail.
+		// Bare "haiku" picks the CLI's own default haiku tier for
+		// claude-code. NEX-369: under claude-API the bare shorthand is
+		// NOT a valid Anthropic SDK model id (it 404s → the judge
+		// degrades + fails open), so funnel.ExpandBareClaudeTier maps it
+		// to a full id on the native path, leaving claude-code's shorthand
+		// intact. See task #193's filter-suppression trail.
 		model := overrideModel
 		if model == "" {
 			if isClaudeFlavor(frameProviderID) {
@@ -1485,7 +1488,7 @@ func resolveJudgeProviderAndModel(cfg schemas.AspectConfig, frameProvider bridle
 				model = frameModel
 			}
 		}
-		return frameProvider, frameProviderID, model
+		return frameProvider, frameProviderID, funnel.ExpandBareClaudeTier(model, frameProviderID)
 	}
 
 	// Build a fresh provider from filter_provider.
@@ -1501,7 +1504,7 @@ func resolveJudgeProviderAndModel(cfg schemas.AspectConfig, frameProvider bridle
 			model = frameModel // last-resort fallback; operator should set the model explicitly for non-Claude
 		}
 	}
-	return p, id, model
+	return p, id, funnel.ExpandBareClaudeTier(model, id) // NEX-369
 }
 
 // buildProviderByName mirrors the Frame's own provider switch in

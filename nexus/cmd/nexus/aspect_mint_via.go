@@ -116,6 +116,7 @@ func runAspectMintViaBroker(name, outPath, nexusURL, brokerURL, adminToken, prov
 		NexusID:        mintResp.NexusID,
 		NexusURL:       nexusURL,
 		MintedAt:       time.Now().UTC(),
+		BrokerTLSCert:  mintResp.BrokerTLSCert, // NEX-371: pin broker cert (self-signed support)
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "aspect mint: build keyfile: %v\n", err)

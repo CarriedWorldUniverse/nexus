@@ -32,6 +32,37 @@ import (
 	"github.com/CarriedWorldUniverse/bridle"
 )
 
+// ExpandBareClaudeTier maps a bare Claude tier ("haiku"/"sonnet"/"opus")
+// to a full Anthropic model id for the NATIVE claude-api path. claude-code
+// is left untouched — its CLI accepts (and expects) the bare shorthand.
+// Non-tier strings and non-Claude providers pass through unchanged.
+//
+// NEX-369: a bare "haiku" is not a valid Anthropic SDK model id, so a
+// native cheap-judge configured with it 404s → degrades + fails open
+// (stops filtering). Both the Frame and agentfunnel default the Claude
+// judge to "haiku", so both route through here. (Shared so the two
+// runtimes can't drift — a step toward the NEX-365 unification.)
+func ExpandBareClaudeTier(model string, providerID bridle.ProviderID) string {
+	// Only the native Anthropic SDK path needs expansion. claude-code's CLI
+	// resolves the shorthand itself; non-Claude providers (openai/…) have no
+	// such tiers, so leave them untouched.
+	switch providerID {
+	case "claude-api", "claude":
+	default:
+		return model
+	}
+	switch model {
+	case "haiku":
+		return "claude-haiku-4-5-20251001"
+	case "sonnet":
+		return "claude-sonnet-4-6"
+	case "opus":
+		return "claude-opus-4-8"
+	default:
+		return model
+	}
+}
+
 // judgeVerdictSchema is the strict-JSON-schema enforced on cheap-
 // judge responses when EnforceJSONSchema is opted in (NEX-300 +
 // NEX-297 L2 finding). On providers that support OpenAI's structured

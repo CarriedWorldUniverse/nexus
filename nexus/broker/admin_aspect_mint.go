@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 )
@@ -49,6 +50,11 @@ type AdminMintResponse struct {
 	NexusID           string `json:"nexus_id"`
 	ServerPubkeyB64   string `json:"server_pubkey_b64"`
 	PreviouslyExisted bool   `json:"previously_existed"`
+
+	// BrokerTLSCert is the broker's TLS cert (PEM), so a --via-minted
+	// keyfile pins it the same way the direct-DB mint does (NEX-371 /
+	// NEX-367). Empty for CA-signed deployments (clients use system trust).
+	BrokerTLSCert string `json:"broker_tls_cert,omitempty"`
 }
 
 // MintAspect runs the broker-side half of an admin-mediated aspect
@@ -138,6 +144,18 @@ func (b *Broker) handleAdminAspectMint(w http.ResponseWriter, r *http.Request) {
 		// first", "pubkey wrong size", etc).
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// NEX-371: pin the broker's own TLS cert into the response so the
+	// --via-minted keyfile trusts a self-signed broker, same as the
+	// direct-DB mint path (NEX-367). Best-effort — a read failure just
+	// omits the pin (aspect falls back to the system trust store).
+	if b.cfg.TLSCertFile != "" {
+		if pem, rerr := os.ReadFile(b.cfg.TLSCertFile); rerr == nil {
+			resp.BrokerTLSCert = string(pem)
+		} else {
+			b.log.Warn("admin mint: read TLS cert for keyfile pinning failed",
+				"path", b.cfg.TLSCertFile, "err", rerr)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
