@@ -199,6 +199,17 @@ const (
 	KindObserveBegin Kind = "observe.begin"
 	KindObserveEvent Kind = "observe.event"
 	KindObserveEnd   Kind = "observe.end"
+
+	// Operator escalation (ToolRunner P3c). A native-API aspect's
+	// permission policy can mark a tool call "ask a human"; the funnel's
+	// BeforeToolCall hook then pauses mid-turn and emits an
+	// escalation.request (correlated via the envelope ID). The broker
+	// fans the request out to subscribed operators; agora surfaces it.
+	// The operator answers with an escalation.decision carrying
+	// InReplyTo=request.ID, which the broker routes back to the
+	// originating aspect's connection so the blocked Request resolves.
+	KindEscalationRequest  Kind = "escalation.request"
+	KindEscalationDecision Kind = "escalation.decision"
 )
 
 // Envelope is the shared shape of every frame.
@@ -330,7 +341,9 @@ func IsKnown(k Kind) bool {
 		KindUnsubscribeObserve,
 		KindSubscribeAck,
 		KindRosterUpdate, KindAspectStatusPulse, KindObserveFrame,
-		KindObserveBegin, KindObserveEvent, KindObserveEnd:
+		KindObserveBegin, KindObserveEvent, KindObserveEnd,
+		// Operator escalation (P3c)
+		KindEscalationRequest, KindEscalationDecision:
 		return true
 	}
 	return false
