@@ -103,8 +103,19 @@ func main() {
 	// timeout is a backstop so a hung process between calls (e.g.
 	// stuck in TLS handshake setup) eventually surfaces as a startup
 	// error rather than dangling forever.
+	// NEX-367: if the keyfile pins a self-signed broker cert, build a
+	// TLS config that trusts it (system roots + pinned cert) and use it
+	// for BOTH the validate handshake here AND the WS dial below. Nil =
+	// default system trust store (CA-signed certs just work).
+	brokerTLS, err := kf.BrokerTLSConfig()
+	if err != nil {
+		fail(log, "build broker TLS config from keyfile", err)
+	}
+	if brokerTLS != nil {
+		log.Info("agentfunnel: trusting pinned broker cert from keyfile (self-signed-capable)")
+	}
 	bootCtx, bootCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	client := keyfile.NewClient()
+	client := &keyfile.Client{HTTP: keyfile.HTTPClientWithTLS(brokerTLS)}
 	res, err := client.Validate(bootCtx, kf)
 	bootCancel()
 	if err != nil {
@@ -231,7 +242,8 @@ func main() {
 		if snap.JWT != "" && time.Until(snap.Expires) > 1*time.Minute {
 			return snap.JWT, nil
 		}
-		client := keyfile.NewClient()
+		// NEX-367: reuse the same pinned-cert trust on JWT refresh.
+		client := &keyfile.Client{HTTP: keyfile.HTTPClientWithTLS(brokerTLS)}
 		fresh, ferr := client.Validate(ctx, kf)
 		if ferr != nil {
 			log.Warn("agentfunnel: TokenProvider re-validate failed, using cached token",
@@ -277,6 +289,7 @@ func main() {
 		URL:           wsURL,
 		AuthToken:     res.SessionJWT, // initial JWT; TokenProvider refreshes it
 		TokenProvider: tokenProvider,
+		TLSConfig:     brokerTLS, // NEX-367: trust the pinned broker cert on the WS dial too
 		AspectName:    res.AspectName,
 		CursorFile:    cursorFile,
 		OnDeliver: func(msg wsasp.DeliveredMessage) {

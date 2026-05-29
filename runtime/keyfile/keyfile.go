@@ -27,6 +27,8 @@ package keyfile
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,6 +78,18 @@ type Envelope struct {
 	NexusURL string `json:"nexus_url"`
 	NexusID  string `json:"nexus_id"`
 	IssuedAt string `json:"issued_at"`
+
+	// BrokerTLSCert, when non-empty, is the broker's TLS certificate
+	// (PEM) pinned at mint time. Clients add it to their trusted-root
+	// set for both the validate handshake and the WS dial, so a
+	// self-signed / self-contained broker is trusted WITHOUT a
+	// system-wide trust step and WITHOUT insecure-skip-verify. Empty =
+	// rely on the system trust store (CA-signed certs, e.g. tailnet or
+	// fraedom-dev.com, just work). The cert is public; it lives in the
+	// plaintext envelope because clients need it before the handshake.
+	// On-disk integrity is the keyfile's existing model (distributed
+	// like an SSH private key); pinning defends the network-MITM threat.
+	BrokerTLSCert string `json:"broker_tls_cert,omitempty"`
 }
 
 // Keyfile is the on-disk JSON document.
@@ -319,6 +333,41 @@ func (c *Client) ensureHTTP() {
 			c.HTTP = &http.Client{Timeout: 10 * time.Second}
 		}
 	})
+}
+
+// BrokerTLSConfig returns a *tls.Config that trusts the system roots PLUS
+// the broker cert pinned in the keyfile envelope (NEX-367). Returns
+// (nil, nil) when no cert is pinned — callers then use default transports
+// (system trust store), which is correct for CA-signed certs. The pinned
+// cert is ADDED to the system pool rather than replacing it, so a keyfile
+// that pins a self-signed cert still works if the broker later moves
+// behind a CA-signed cert during the keyfile's lifetime.
+func (kf *Keyfile) BrokerTLSConfig() (*tls.Config, error) {
+	if kf == nil || kf.Envelope.BrokerTLSCert == "" {
+		return nil, nil
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM([]byte(kf.Envelope.BrokerTLSCert)) {
+		return nil, fmt.Errorf("%w: broker_tls_cert is not valid PEM", ErrBadKeyfile)
+	}
+	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, nil
+}
+
+// HTTPClientWithTLS builds a 10s-timeout HTTP client using tlsCfg for the
+// transport. When tlsCfg is nil it returns a default client (system trust
+// store). Use the result as keyfile.Client.HTTP so the validate handshake
+// trusts a pinned self-signed broker cert.
+func HTTPClientWithTLS(tlsCfg *tls.Config) *http.Client {
+	if tlsCfg == nil {
+		return &http.Client{Timeout: 10 * time.Second}
+	}
+	return &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+	}
 }
 
 // Validate runs the spec §5 startup handshake:

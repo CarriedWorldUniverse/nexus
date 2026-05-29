@@ -12,6 +12,7 @@ package wsclient
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -57,6 +58,12 @@ type Config struct {
 	// TokenProvider that re-validates against the keyfile endpoint.
 	// When nil, AuthToken is used directly (backward compatible).
 	TokenProvider func(ctx context.Context) (string, error)
+
+	// TLSConfig, when non-nil, is used for the wss:// dial's TLS
+	// handshake. Lets callers trust a pinned self-signed broker cert
+	// (NEX-367) without a system-wide trust step or insecure-skip-verify.
+	// Nil = default system trust store (CA-signed certs just work).
+	TLSConfig *tls.Config
 
 	// Handler receives uncorrelated incoming frames. Required.
 	Handler Handler
@@ -247,9 +254,19 @@ func (c *Client) dialAndServe(ctx context.Context) (bool, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	conn, _, err := websocket.Dial(dialCtx, c.cfg.URL, &websocket.DialOptions{
+	dialOpts := &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + token}},
-	})
+	}
+	// NEX-367: when a pinned broker cert is supplied, dial through an
+	// HTTP client whose transport trusts it. Nil TLSConfig keeps the
+	// default system trust store.
+	if c.cfg.TLSConfig != nil {
+		dialOpts.HTTPClient = &http.Client{
+			Transport: &http.Transport{TLSClientConfig: c.cfg.TLSConfig},
+		}
+	}
+
+	conn, _, err := websocket.Dial(dialCtx, c.cfg.URL, dialOpts)
 	if err != nil {
 		return false, fmt.Errorf("dial: %w", err)
 	}

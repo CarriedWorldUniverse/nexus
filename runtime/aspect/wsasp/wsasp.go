@@ -15,6 +15,7 @@ package wsasp
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -45,6 +46,11 @@ type Config struct {
 	// against the keyfile endpoint so that an expired token doesn't
 	// cause permanent reconnect failures.
 	TokenProvider func(ctx context.Context) (string, error)
+
+	// TLSConfig, when non-nil, is passed to the underlying wsclient for
+	// the wss:// dial — trusts a pinned self-signed broker cert (NEX-367)
+	// without system-wide trust. Nil = default system trust store.
+	TLSConfig *tls.Config
 
 	// AspectName is the registered aspect id.
 	AspectName string
@@ -151,6 +157,7 @@ func NewClient(cfg Config) (*Client, error) {
 		URL:           cfg.URL,
 		AuthToken:     cfg.AuthToken,
 		TokenProvider: cfg.TokenProvider,
+		TLSConfig:     cfg.TLSConfig,
 		Handler:       wsclient.HandlerFunc(c.handleFrame),
 	})
 	if err != nil {
