@@ -230,6 +230,7 @@ type AspectModelConfig struct {
 	PrimaryCredential string `json:"primary_credential,omitempty"`
 	JudgeModel        string `json:"judge_model,omitempty"`
 	JudgeCredential   string `json:"judge_credential,omitempty"`
+	JudgeProvider     string `json:"judge_provider,omitempty"` // NEX-365 #3
 	CompactModel      string `json:"compact_model,omitempty"`
 	CompactCredential string `json:"compact_credential,omitempty"`
 }
@@ -285,6 +286,7 @@ func FetchAspectModelConfig(ctx context.Context, ws Requester) (AspectModelConfi
 		PrimaryCredential: result.PrimaryCredential,
 		JudgeModel:        result.JudgeModel,
 		JudgeCredential:   result.JudgeCredential,
+		JudgeProvider:     result.JudgeProvider,
 		CompactModel:      result.CompactModel,
 		CompactCredential: result.CompactCredential,
 	}, nil

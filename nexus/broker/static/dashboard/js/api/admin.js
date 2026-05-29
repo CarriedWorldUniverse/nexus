@@ -135,9 +135,13 @@ export function setCredentialDefaults(aspect, payload) {
 
 // GET /api/admin/network-defaults (NEX-294 Slice 2)
 // Returns NetworkDefaults: { judge_model, judge_credential,
-// compact_model, compact_credential } — each an empty string when
-// unset. Applies as fallback when per-aspect override is blank.
-// Primary fields intentionally absent (primary is per-aspect).
+// judge_provider, compact_model, compact_credential } — each an empty
+// string when unset. Applies as fallback when per-aspect override is
+// blank. Primary fields intentionally absent (primary is per-aspect).
+// judge_provider (NEX-365 #3) selects the provider family the cheap-
+// judge runs on (claude-api / claude-code / openai), independent of the
+// aspect's primary provider — enables one cheap cross-provider judge
+// endpoint network-wide.
 export function getNetworkDefaults() {
   return adminFetch('/api/admin/network-defaults');
 }

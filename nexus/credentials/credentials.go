@@ -714,6 +714,12 @@ type AspectModelConfig struct {
 	PrimaryCredential *string `json:"primary_credential,omitempty"`
 	JudgeModel        *string `json:"judge_model,omitempty"`
 	JudgeCredential   *string `json:"judge_credential,omitempty"`
+	// JudgeProvider names the provider family the cheap-judge runs on
+	// (e.g. "claude-api", "claude-code"), independent of the aspect's
+	// primary provider. NEX-365 #3 — enables cross-provider judging
+	// (a Claude aspect judged by a DeepSeek Anthropic-shape endpoint).
+	// nil = inherit network default > keyfile filter_provider.
+	JudgeProvider     *string `json:"judge_provider,omitempty"`
 	CompactModel      *string `json:"compact_model,omitempty"`
 	CompactCredential *string `json:"compact_credential,omitempty"`
 }
@@ -726,6 +732,7 @@ var modelConfigColumns = map[string]bool{
 	"primary_credential": true,
 	"judge_model":        true,
 	"judge_credential":   true,
+	"judge_provider":     true, // NEX-365 #3
 	"compact_model":      true,
 	"compact_credential": true,
 }
@@ -736,13 +743,13 @@ var modelConfigColumns = map[string]bool{
 func (s *Store) GetAspectModelConfig(ctx context.Context, aspect string) (AspectModelConfig, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT primary_model, primary_credential,
-		       judge_model,   judge_credential,
+		       judge_model,   judge_credential, judge_provider,
 		       compact_model, compact_credential
 		  FROM aspects WHERE name = ?
 	`, aspect)
 	cfg := AspectModelConfig{Aspect: aspect}
-	var pm, pc, jm, jc, cm, cc sql.NullString
-	if err := row.Scan(&pm, &pc, &jm, &jc, &cm, &cc); err != nil {
+	var pm, pc, jm, jc, jp, cm, cc sql.NullString
+	if err := row.Scan(&pm, &pc, &jm, &jc, &jp, &cm, &cc); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return cfg, nil
 		}
@@ -763,6 +770,10 @@ func (s *Store) GetAspectModelConfig(ctx context.Context, aspect string) (Aspect
 	if jc.Valid {
 		v := jc.String
 		cfg.JudgeCredential = &v
+	}
+	if jp.Valid {
+		v := jp.String
+		cfg.JudgeProvider = &v
 	}
 	if cm.Valid {
 		v := cm.String
@@ -820,11 +831,24 @@ func (s *Store) SetAspectModelField(ctx context.Context, aspect, column, value s
 // network level by design — primary is per-aspect differentiation.
 // Only judge + compact have the "should be uniform" property that
 // motivates a network default.
+//
+// JSON tags are snake_case so the dashboard's network-defaults panel
+// (and any REST consumer) reads the same field names the PUT body uses.
+// Without them Go's encoder emits PascalCase (JudgeModel…) and the JS
+// `fresh.judge_model` reads come back undefined — the panel then shows
+// every value blank on load. (Go round-trip tests don't catch this:
+// they marshal AND unmarshal the same struct.)
 type NetworkDefaults struct {
-	JudgeModel        string
-	JudgeCredential   string
-	CompactModel      string
-	CompactCredential string
+	JudgeModel      string `json:"judge_model"`
+	JudgeCredential string `json:"judge_credential"`
+	// JudgeProvider is the network-wide cheap-judge provider family
+	// (e.g. "claude-api", "claude-code"). NEX-365 #3 — set this to run
+	// EVERY aspect's judge on one cheap cross-provider endpoint without
+	// touching each aspect's primary provider. "" = no default; falls
+	// through to per-aspect filter_provider / keyfile.
+	JudgeProvider     string `json:"judge_provider"`
+	CompactModel      string `json:"compact_model"`
+	CompactCredential string `json:"compact_credential"`
 }
 
 // networkDefaultColumns is the allowed set of column names for
@@ -833,6 +857,7 @@ type NetworkDefaults struct {
 var networkDefaultColumns = map[string]bool{
 	"judge_model":        true,
 	"judge_credential":   true,
+	"judge_provider":     true, // NEX-365 #3
 	"compact_model":      true,
 	"compact_credential": true,
 }
@@ -848,12 +873,12 @@ var networkDefaultColumns = map[string]bool{
 // don't need defensive plumbing.
 func (s *Store) GetNetworkDefaults(ctx context.Context) (NetworkDefaults, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT judge_model, judge_credential,
+		SELECT judge_model, judge_credential, judge_provider,
 		       compact_model, compact_credential
 		  FROM network_defaults WHERE singleton = 1
 	`)
-	var jm, jc, cm, cc sql.NullString
-	if err := row.Scan(&jm, &jc, &cm, &cc); err != nil {
+	var jm, jc, jp, cm, cc sql.NullString
+	if err := row.Scan(&jm, &jc, &jp, &cm, &cc); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return NetworkDefaults{}, nil
 		}
@@ -865,6 +890,9 @@ func (s *Store) GetNetworkDefaults(ctx context.Context) (NetworkDefaults, error)
 	}
 	if jc.Valid {
 		nd.JudgeCredential = jc.String
+	}
+	if jp.Valid {
+		nd.JudgeProvider = jp.String
 	}
 	if cm.Valid {
 		nd.CompactModel = cm.String
@@ -925,6 +953,28 @@ func (s *Store) EffectiveJudgeModel(ctx context.Context, aspect string) (string,
 		return "", err
 	}
 	return nd.JudgeModel, nil
+}
+
+// EffectiveJudgeProvider returns the provider family the cheap-judge
+// should run on for `aspect`: per-aspect override > network default >
+// "" (caller's own filter_provider / keyfile fallback). NEX-365 #3.
+//
+// Empty result means "no judge-provider policy set" — the caller keeps
+// whatever provider it would have used (the Frame's filter_provider or
+// the aspect's inherited main provider).
+func (s *Store) EffectiveJudgeProvider(ctx context.Context, aspect string) (string, error) {
+	overrides, err := s.GetAspectModelConfig(ctx, aspect)
+	if err != nil {
+		return "", err
+	}
+	if overrides.JudgeProvider != nil && *overrides.JudgeProvider != "" {
+		return *overrides.JudgeProvider, nil
+	}
+	nd, err := s.GetNetworkDefaults(ctx)
+	if err != nil {
+		return "", err
+	}
+	return nd.JudgeProvider, nil
 }
 
 // EffectiveJudgeCredential mirrors EffectiveJudgeModel for the

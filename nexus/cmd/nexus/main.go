@@ -1206,7 +1206,7 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 			"filter_credential", cfg.FilterCredential, "judge_env_keys", envKeys(judgeEnv))
 		return funnel.HardRulesFilter{
 			Inner: &funnel.CheapModelFilter{
-				Harness:           bridle.NewHarness(bareJudgeProvider(judgeProvider, judgeProviderID)),
+				Harness:           bridle.NewHarness(bareJudgeProvider(nativeJudgeProvider(judgeProvider, judgeProviderID, judgeEnv), judgeProviderID)),
 				Provider:          judgeProviderID,
 				Model:             judgeModel,
 				AspectHome:        aspectHome,
@@ -1222,15 +1222,16 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 		if judgeProvider == nil {
 			return funnel.HardRulesFilter{}
 		}
+		judgeEnv := resolveFilterCredentialEnv(cfg, credentialStore, log)
 		return funnel.HardRulesFilter{
 			Inner: &funnel.CheapModelFilter{
-				Harness:           bridle.NewHarness(bareJudgeProvider(judgeProvider, judgeProviderID)),
+				Harness:           bridle.NewHarness(bareJudgeProvider(nativeJudgeProvider(judgeProvider, judgeProviderID, judgeEnv), judgeProviderID)),
 				Provider:          judgeProviderID,
 				Model:             judgeModel,
 				AspectHome:        aspectHome,
 				Logger:            log,
 				ObservabilityHook: obsHook,
-				ProviderEnv:       resolveFilterCredentialEnv(cfg, credentialStore, log),
+				ProviderEnv:       judgeEnv,
 			},
 		}
 	}
@@ -1384,6 +1385,24 @@ func applyAspectModelOverrides(ctx context.Context, cfg *schemas.AspectConfig, s
 		log.Info("aspect credential override applied",
 			"aspect", cfg.Name, "kind", "judge",
 			"from", prev, "to", judgeCred, "model_source", src)
+	}
+	// Judge provider — per-aspect override > network default (NEX-365 #3).
+	// Selects which provider family the cheap-judge runs on, independent
+	// of the aspect's primary provider. aspect.json's explicit
+	// filter_provider is operator-intent and WINS over the stored policy
+	// plane; this only fills the gap when filter_provider is unset. The
+	// paired judge credential (set above) carries the endpoint key + base
+	// URL so resolveJudgeProviderAndModel + nativeJudgeProvider actually
+	// target it.
+	if judgeProv, src := pickModelOverride(override.JudgeProvider, defaults.JudgeProvider); src != "" {
+		if strings.TrimSpace(cfg.FilterProvider) == "" {
+			cfg.FilterProvider = judgeProv
+			log.Info("aspect judge provider applied",
+				"aspect", cfg.Name, "kind", "judge", "to", judgeProv, "model_source", src)
+		} else {
+			log.Info("aspect judge provider present but filter_provider set in aspect.json; keeping aspect.json",
+				"aspect", cfg.Name, "stored", judgeProv, "aspect_json", cfg.FilterProvider, "model_source", src)
+		}
 	}
 	if override.PrimaryCredential != nil {
 		log.Warn("aspect primary credential override stored but not yet wired into runtime",
@@ -1564,6 +1583,38 @@ func bareJudgeProvider(p bridle.Provider, id bridle.ProviderID) bridle.Provider 
 		return jp
 	}
 	return p
+}
+
+// nativeJudgeProvider rebuilds a native Anthropic-shape judge provider
+// from the resolved judge-credential env so cross-provider judging
+// actually targets the judge endpoint. NEX-365 #3.
+//
+// The native claude provider reads its API key + base URL at
+// CONSTRUCTION (option.WithBaseURL/WithAPIKey), NOT per-turn — so the
+// CheapModelFilter's ProviderEnv (which only claude-code *subprocesses*
+// honour) can't redirect it. Without this, a judge_provider=claude-api
+// judge built via claudeprovider.New("") inherits the Frame's ambient
+// ANTHROPIC_* env and judges on the MAIN endpoint, defeating the point
+// of a separate cheap-judge credential (e.g. a DeepSeek Anthropic-shape
+// endpoint). Rebuilding via NewWithBaseURL from the judge credential's
+// env pins the judge to its own key + base URL.
+//
+// Returns the inbound provider unchanged for non-native ids (claude-code
+// keeps its bareJudgeProvider subprocess + ProviderEnv path) or when no
+// judge env was resolved (then the inherited provider's ambient env
+// applies, preserving pre-NEX-365 behaviour).
+func nativeJudgeProvider(p bridle.Provider, id bridle.ProviderID, env map[string]string) bridle.Provider {
+	if id != bridle.ProviderClaude && id != "claude" {
+		return p
+	}
+	if len(env) == 0 {
+		return p
+	}
+	key, base := env["ANTHROPIC_API_KEY"], env["ANTHROPIC_BASE_URL"]
+	if key == "" && base == "" {
+		return p
+	}
+	return claudeprovider.NewWithBaseURL(key, base)
 }
 
 // isClaudeFlavor reports whether providerID is one of the Claude
