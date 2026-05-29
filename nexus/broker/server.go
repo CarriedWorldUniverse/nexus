@@ -246,6 +246,15 @@ type Config struct {
 	// nil → endpoints not registered (legacy boot, no dashboard SPA).
 	OperatorLogin *OperatorLogin
 
+	// SessionSigningSecret is the HMAC secret the keyfile validator signs
+	// aspect session JWTs with, and the WS /connect handler verifies them
+	// against (NEX-367 follow-up). It MUST be the same secret the
+	// KeyfileValidator uses. Kept here — not only inside OperatorLogin —
+	// so aspect /connect works on a headless / aspect-only broker that has
+	// no operator dashboard (OperatorLogin nil). Empty → aspect-JWT verify
+	// falls back to OperatorLogin.SessionSigningSecret for back-compat.
+	SessionSigningSecret []byte
+
 	// KnowledgeStore powers operator-facing knowledge frames
 	// (knowledge.list / knowledge.search / knowledge.store) on the WS
 	// surface. nil → those frames return an "<kind>.error"
