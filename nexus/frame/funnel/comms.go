@@ -785,7 +785,8 @@ func (r composedRunner) Run(ctx context.Context, call bridle.ToolCall) (json.Raw
 		ToolNameChatRead, ToolNameReadChatThread, ToolNameReadChatMessage,
 		ToolNameAnnounceFile, ToolNameShareFile,
 		ToolNameListShared, ToolNameGetShared,
-		ToolNameStoreKnowledge, ToolNameSearchKnowledge:
+		ToolNameStoreKnowledge, ToolNameSearchKnowledge,
+		ToolNameTriage:
 		return r.comms.Run(ctx, call)
 	}
 	if r.next == nil {

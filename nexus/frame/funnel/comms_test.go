@@ -400,6 +400,35 @@ func TestComposeRunner_DispatchesCommsToolsToCommsRunner(t *testing.T) {
 	}
 }
 
+// Regression: `triage` was present in CommsToolDefs (model surface) AND
+// CommsRunner.Run, but MISSING from composedRunner's routing switch — so
+// native-API aspects' triage calls fell through to the next runner (the
+// LocalToolRunner) and returned `unknown tool "triage"`, stalling the
+// inbox-triage loop. The route must go to comms.
+func TestComposeRunner_RoutesTriageToComms(t *testing.T) {
+	g := &fakeGateway{}
+	otherCalled := false
+	other := stubToolRunner(func(_ context.Context, _ bridle.ToolCall) (json.RawMessage, error) {
+		otherCalled = true
+		return json.RawMessage(`{}`), nil
+	})
+	r := ComposeRunner(CommsRunner{Gateway: g}, other)
+
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameTriage,
+		Args: mustJSON(map[string]any{"msg_id": 1, "decision": "skip", "reason": "ack"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherCalled {
+		t.Fatal("triage routed to the next runner instead of comms (the unknown-tool bug)")
+	}
+	if !strings.Contains(string(res), "ok") {
+		t.Errorf("expected comms triage stub result, got %s", res)
+	}
+}
+
 func TestComposeRunner_DelegatesUnknownToOther(t *testing.T) {
 	g := &fakeGateway{}
 	otherCalled := false
