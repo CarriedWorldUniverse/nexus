@@ -27,21 +27,35 @@ const (
 // ToolPolicy is a per-aspect autonomous permission policy. Zero value
 // (DefaultAllow=false, empty maps) denies everything — set DefaultAllow
 // true for a permissive base and carve out denials.
+//
+// The JSON shape (loaded by agentfunnel's -policy flag, snake_case) is:
+//
+//	{
+//	  "default_allow": true,
+//	  "tools": {"bash": false},
+//	  "bash_deny": ["rm -rf", "mkfs"],
+//	  "write_path_allow": ["work/"],
+//	  "escalate": {"write": true}
+//	}
+//
+// This example denies bash outright, escalates every write to the
+// operator, restricts allowed writes to the work/ prefix, and allows
+// everything else by default.
 type ToolPolicy struct {
 	// DefaultAllow is the decision when no tool-specific rule matches.
-	DefaultAllow bool
+	DefaultAllow bool `json:"default_allow"`
 	// Tools overrides per tool name: true=allow, false=deny. Absent → DefaultAllow.
-	Tools map[string]bool
+	Tools map[string]bool `json:"tools,omitempty"`
 	// BashDeny: a bash call whose command contains any of these substrings
 	// is denied (checked only for the "bash" tool, when bash is otherwise allowed).
-	BashDeny []string
+	BashDeny []string `json:"bash_deny,omitempty"`
 	// WritePathAllow: if non-empty, write/edit are allowed only when their
 	// path has one of these prefixes. Empty → no path restriction.
-	WritePathAllow []string
+	WritePathAllow []string `json:"write_path_allow,omitempty"`
 	// Escalate names tools that, when otherwise allowed, require operator
 	// approval on every call (P3c). A tool that is outright denied (Tools=false,
 	// BashDeny match, WritePathAllow miss) stays denied — Deny outranks Escalate.
-	Escalate map[string]bool
+	Escalate map[string]bool `json:"escalate,omitempty"`
 }
 
 // Decide classifies a tool call. Precedence: outright Deny > Escalate >
