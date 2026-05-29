@@ -1,6 +1,7 @@
 package funnel
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -41,5 +42,27 @@ func TestPolicyBashDenylist(t *testing.T) {
 	}
 	if allow, _ := p.Evaluate(bridle.ToolCall{Name: "bash", Args: json.RawMessage(`{"command":"ls"}`)}); !allow {
 		t.Error("benign bash should be allowed when tool not outright denied")
+	}
+}
+
+func TestPermissionHookDeniesViaBridleDeny(t *testing.T) {
+	p := ToolPolicy{DefaultAllow: true, Tools: map[string]bool{"bash": false}}
+	hook := PermissionHook(p)
+	in := bridle.BeforeToolCallCtx{Call: bridle.ToolCall{Name: "bash", Args: []byte(`{"command":"id"}`)}}
+	out, action, err := hook(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action != bridle.HookContinue {
+		t.Fatalf("deny must use HookContinue+Deny, not %v", action)
+	}
+	if !out.Deny || out.Err == "" {
+		t.Fatalf("expected Deny set with reason, got %+v", out)
+	}
+
+	in2 := bridle.BeforeToolCallCtx{Call: bridle.ToolCall{Name: "read", Args: []byte(`{"path":"x"}`)}}
+	out2, _, _ := hook(context.Background(), in2)
+	if out2.Deny {
+		t.Fatal("allowed tool must not be denied")
 	}
 }

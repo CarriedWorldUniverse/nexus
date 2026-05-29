@@ -1,6 +1,7 @@
 package funnel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -64,4 +65,17 @@ func (p ToolPolicy) Evaluate(call bridle.ToolCall) (allow bool, reason string) {
 		}
 	}
 	return true, ""
+}
+
+// PermissionHook returns a bridle BeforeToolCall hook that enforces p.
+// On deny it sets Deny+Err and returns HookContinue (bridle then hands the
+// model the refusal as a tool_result and continues — see bridle P3a).
+func PermissionHook(p ToolPolicy) bridle.Hook[bridle.BeforeToolCallCtx] {
+	return func(_ context.Context, in bridle.BeforeToolCallCtx) (bridle.BeforeToolCallCtx, bridle.HookAction, error) {
+		if allow, reason := p.Evaluate(in.Call); !allow {
+			in.Deny = true
+			in.Err = "permission denied: " + reason
+		}
+		return in, bridle.HookContinue, nil
+	}
 }
