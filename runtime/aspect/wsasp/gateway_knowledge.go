@@ -90,6 +90,7 @@ func (g *KnowledgeGateway) SearchKnowledge(ctx context.Context, q funnel.Knowled
 		Shared:   q.Shared,
 		Peers:    q.Peers,
 		TopK:     q.TopK,
+		Keyword:  q.Keyword,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("wsasp: knowledge.search encode: %w", err)

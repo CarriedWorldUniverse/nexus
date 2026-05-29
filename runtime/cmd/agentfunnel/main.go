@@ -73,6 +73,9 @@ func main() {
 	contextMode := flag.String("context-mode", string(schemas.ContextThread), "context mode: global, thread, or stateless (Nexus does not yet ship context_mode in the validation response)")
 	claudePath := flag.String("claude", "", "path to the claude-code CLI (optional; auto-detects /opt/homebrew/bin/claude, /usr/local/bin/claude, ~/.npm-global/bin/claude, then PATH; also honours CLAUDE_PATH env)")
 	policyPath := flag.String("policy", "", "path to a per-aspect tool permission policy JSON file (optional; empty = permissive default_allow). See funnel.ToolPolicy for the JSON shape.")
+	autoRecall := flag.Bool("auto-recall", false, "enable turn-time recall from the Commonplace (search the cross-session knowledge store with each incoming message and inject the strongest matches into the system prompt). Off by default.")
+	autoRecallTopK := flag.Int("auto-recall-topk", 0, "auto-recall: max strongest matches to inject (0 = funnel default)")
+	autoRecallMaxRank := flag.Float64("auto-recall-max-rank", 0, "auto-recall: BM25 relevance gate; only hits with score < this inject (ranks are negative, lower = stronger; 0 = no gate)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -352,9 +355,10 @@ func main() {
 	// search_knowledge / store_knowledge tools. Pre-fix the Knowledge
 	// field was nil → CommsRunner returned "knowledge gateway not
 	// configured" on every call.
+	knowledgeGateway := wsasp.NewKnowledgeGateway(wsClient)
 	commsRunner := funnel.CommsRunner{
 		Gateway:   gateway,
-		Knowledge: wsasp.NewKnowledgeGateway(wsClient),
+		Knowledge: knowledgeGateway,
 		AspectID:  res.AspectName,
 	}
 
@@ -477,6 +481,15 @@ func main() {
 		// toolsForProvider — see #181 for the MCP fix.
 		Tools:  toolsForProviderAgent(bridle.ProviderID(res.Provider)),
 		Runner: toolRunner,
+		// AutoRecall (Commonplace): turn-time recall into the system prompt,
+		// gated by the -auto-recall flag (no aspect.json on the host). Uses
+		// the same knowledge gateway as the comms runner. Day-3 lever.
+		AutoRecall: funnel.AutoRecallConfig{
+			Gateway: knowledgeGateway,
+			Enabled: *autoRecall,
+			TopK:    *autoRecallTopK,
+			MaxRank: *autoRecallMaxRank,
+		},
 		// ChatGateway routes the model's auto-post FinalText through the
 		// same SendChat path CommsRunner uses for explicit send_chat tool
 		// calls. Required for claude-code (subprocess mode): without it,

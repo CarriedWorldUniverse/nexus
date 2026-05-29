@@ -61,7 +61,7 @@ export function Knowledge() {
   return html`
     <div class="knowledge-view">
       <div class="knowledge-header">
-        <span class="knowledge-header-title">Knowledge Base</span>
+        <span class="knowledge-header-title">Commonplace</span>
         <span class="knowledge-header-count">${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}</span>
       </div>
 
