@@ -373,7 +373,7 @@ func main() {
 	// judge turn through the same observability stream as the main
 	// turn — otherwise the judge runs invisibly and operators can't see
 	// why a reply was suppressed.
-	outputFilter := buildAgentFunnelFilter(provider, bridle.ProviderID(res.Provider), judgeModelOverride, judgeEnv, log, obsHook)
+	outputFilter := buildAgentFunnelFilter(provider, bridle.ProviderID(res.Provider), judgeModelOverride, judgeEnv, res.Model, log, obsHook)
 
 	// Rewriter wiring: default-on for claude-code-flavored providers,
 	// no-op otherwise. The session jsonl path is resolved lazily
@@ -746,37 +746,57 @@ func deniedToolCount(p funnel.ToolPolicy) int {
 }
 
 // buildAgentFunnelFilter constructs the output filter for an agentfunnel
-// aspect. Mirrors the Frame's buildOutputFilter but simpler — no
+// aspect. Mirrors the Frame's buildOutputFilter /
+// resolveJudgeProviderAndModel (cmd/nexus/main.go) but simpler — no
 // aspect.json on the host means there's no operator-level filter
-// override yet, so we hard-code the cheap-judge default:
+// override yet, so we hard-code the cheap-judge default and run it for
+// EVERY provider:
 //
-//   - claude-flavoured provider → HardRulesFilter wrapping
-//     CheapModelFilter using the same provider + bare "haiku" model.
-//     Bare "haiku" matches the Frame's choice (cmd/nexus/main.go):
-//     under claude-code (subprocess CLI), the versioned api-style id
-//     "claude-haiku-4-5" makes the CLI run as a full agent instead of
+//   - claude-flavoured provider → CheapModelFilter using the same
+//     provider + bare "haiku" model. Bare "haiku" matches the Frame's
+//     choice: under claude-code (subprocess CLI), the versioned api-style
+//     id "claude-haiku-4-5" makes the CLI run as a full agent instead of
 //     a classifier, so we use the CLI's own default haiku tier.
-//   - non-claude provider → HardRulesFilter only (no usable cheap-tier
-//     judge yet; ollama/openai support comes when the operator gains a
-//     filter override path).
+//   - non-claude provider → CheapModelFilter using the same provider +
+//     the aspect's own main model (mainModel) as the judge model, since
+//     there's no haiku tier off-Claude. Mirrors the Frame's frameModel
+//     fallback in resolveJudgeProviderAndModel. bareJudgeProvider returns
+//     the provider unchanged for non-Claude, so the openai/DeepSeek
+//     provider judges itself using its construction-time process-env
+//     creds (direct-API providers ignore per-turn ProviderEnv, but the
+//     provider already carries process-env creds — fine for a single-
+//     credential deploy). CheapModelFilter defaults ResponseFormat to
+//     json_object, which DeepSeek /v1 accepts (no schema concern).
 //
 // judgeModelOverride / providerEnv come from NEX-293 — the per-aspect
-// admin model_config row + the resolved FilterCredential's env
-// overlay. Empty model = use "haiku" default; nil env = inherit
+// admin model_config row + the resolved FilterCredential's env overlay.
+// Empty model = use the per-flavor default above; nil env = inherit
 // ambient process env (legacy / no override configured). Both are
-// resolved upstream from the broker over WS.
+// resolved upstream from the broker over WS. mainModel is the aspect's
+// own main model (res.Model at the call site), the non-Claude judge
+// fallback.
+//
+// If no judge model can be resolved (non-Claude, no override, and an
+// empty mainModel — a misconfig) we fall to bare HardRulesFilter and log
+// loudly: we can't judge without a model, but we must NOT silently
+// always-post.
 //
 // Without this every reply through the funnel hits chat unfiltered —
 // observed 2026-05-12 as noisy multi-aspect threads bypassing the
 // suppression the keel Frame applies.
-func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.ProviderID, judgeModelOverride string, providerEnv map[string]string, log *slog.Logger, obsHook funnel.ObservabilityHook) funnel.OutputFilter {
-	if !isClaudeFlavor(providerID) {
-		log.Info("agentfunnel: filter=hard (no cheap-judge for non-claude provider)", "provider", providerID)
-		return funnel.HardRulesFilter{}
-	}
+func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.ProviderID, judgeModelOverride string, providerEnv map[string]string, mainModel string, log *slog.Logger, obsHook funnel.ObservabilityHook) funnel.OutputFilter {
 	model := judgeModelOverride
 	if model == "" {
-		model = "haiku"
+		if isClaudeFlavor(providerID) {
+			model = "haiku"
+		} else {
+			model = mainModel
+		}
+	}
+	if model == "" {
+		log.Warn("agentfunnel: no judge model resolvable for provider — filter=hard, no cheap-judge",
+			"provider", providerID)
+		return funnel.HardRulesFilter{}
 	}
 	log.Info("agentfunnel: filter=cheap (hard rules + cheap-model judge)",
 		"judge_provider", providerID,

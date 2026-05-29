@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 	"github.com/CarriedWorldUniverse/nexus/runtime/brokercreds"
 )
 
@@ -177,6 +178,74 @@ func TestReadMainTurnSamplingFromAspectJSON_MalformedJSON(t *testing.T) {
 	got := readMainTurnSamplingFromAspectJSON(dir, newTestLogger())
 	if got.Temperature != nil || got.MaxOutputTokens != 0 || len(got.StopSequences) != 0 {
 		t.Errorf("malformed JSON should produce zero MainTurnSampling; got %+v", got)
+	}
+}
+
+// NEX (judge-for-all-providers): buildAgentFunnelFilter must build a
+// cheap-judge for non-Claude providers too, defaulting the judge model
+// to the aspect's own main model (no haiku tier exists off-Claude).
+func TestBuildAgentFunnelFilter_NonClaudeGetsJudge(t *testing.T) {
+	f := buildAgentFunnelFilter(nil, "openai", "", nil, "deepseek-chat", newTestLogger(), nil)
+	hard, ok := f.(funnel.HardRulesFilter)
+	if !ok {
+		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
+	}
+	cheap, ok := hard.Inner.(*funnel.CheapModelFilter)
+	if !ok || cheap == nil {
+		t.Fatalf("want non-nil *funnel.CheapModelFilter inner, got %T", hard.Inner)
+	}
+	if cheap.Provider != "openai" {
+		t.Errorf("Provider = %q, want openai", cheap.Provider)
+	}
+	if cheap.Model != "deepseek-chat" {
+		t.Errorf("Model = %q, want deepseek-chat (mainModel fallback)", cheap.Model)
+	}
+}
+
+// judgeModelOverride wins over both the haiku and mainModel defaults.
+func TestBuildAgentFunnelFilter_OverrideWins(t *testing.T) {
+	f := buildAgentFunnelFilter(nil, "openai", "x", nil, "deepseek-chat", newTestLogger(), nil)
+	hard, ok := f.(funnel.HardRulesFilter)
+	if !ok {
+		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
+	}
+	cheap, ok := hard.Inner.(*funnel.CheapModelFilter)
+	if !ok || cheap == nil {
+		t.Fatalf("want non-nil *funnel.CheapModelFilter inner, got %T", hard.Inner)
+	}
+	if cheap.Model != "x" {
+		t.Errorf("Model = %q, want x (override wins)", cheap.Model)
+	}
+}
+
+// Claude flavor with no override defaults the judge model to "haiku",
+// ignoring mainModel.
+func TestBuildAgentFunnelFilter_ClaudeDefaultsHaiku(t *testing.T) {
+	f := buildAgentFunnelFilter(nil, "claude-api", "", nil, "whatever", newTestLogger(), nil)
+	hard, ok := f.(funnel.HardRulesFilter)
+	if !ok {
+		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
+	}
+	cheap, ok := hard.Inner.(*funnel.CheapModelFilter)
+	if !ok || cheap == nil {
+		t.Fatalf("want non-nil *funnel.CheapModelFilter inner, got %T", hard.Inner)
+	}
+	if cheap.Model != "haiku" {
+		t.Errorf("Model = %q, want haiku (claude default)", cheap.Model)
+	}
+}
+
+// Misconfig: non-Claude with no override AND no mainModel can't resolve
+// a judge model, so it falls to bare hard-rules (Inner nil) rather than
+// silently always-posting.
+func TestBuildAgentFunnelFilter_MisconfigFallsToHardRules(t *testing.T) {
+	f := buildAgentFunnelFilter(nil, "openai", "", nil, "", newTestLogger(), nil)
+	hard, ok := f.(funnel.HardRulesFilter)
+	if !ok {
+		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
+	}
+	if hard.Inner != nil {
+		t.Errorf("misconfig should produce bare HardRulesFilter; Inner = %#v, want nil", hard.Inner)
 	}
 }
 
