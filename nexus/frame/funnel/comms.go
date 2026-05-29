@@ -779,14 +779,39 @@ type composedRunner struct {
 	next  bridle.ToolRunner
 }
 
+// commsToolAliases are tool names the CommsRunner HANDLES but does not
+// advertise via CommsToolDefs (legacy aliases). They must still route to
+// comms, so they're added to the routed set explicitly.
+var commsToolAliases = []string{ToolNameReactToMessage}
+
+// commsRoutedNames is the SINGLE SOURCE OF TRUTH for which tool names route
+// to the CommsRunner: every tool advertised by CommsToolDefs(), plus the
+// legacy aliases above. composedRunner routes by this set instead of a
+// hand-maintained switch, so the router can no longer drift from the
+// advertised/handled comms tools — that drift was the NEX-365 / #202
+// "unknown tool \"triage\"" bug (triage was in the defs + handler but missing
+// from the router's case list). Adding a comms tool to CommsToolDefs now
+// auto-routes it. Computed once at init.
+var commsRoutedNames = func() map[string]bool {
+	defs := CommsToolDefs()
+	m := make(map[string]bool, len(defs)+len(commsToolAliases))
+	for _, d := range defs {
+		m[d.Name] = true
+	}
+	for _, a := range commsToolAliases {
+		m[a] = true
+	}
+	return m
+}()
+
+// Handles reports whether a tool name is owned by the CommsRunner and should
+// be routed to it rather than the local/next runner.
+func (r CommsRunner) Handles(name string) bool {
+	return commsRoutedNames[name]
+}
+
 func (r composedRunner) Run(ctx context.Context, call bridle.ToolCall) (json.RawMessage, error) {
-	switch call.Name {
-	case ToolNameSendChat, ToolNameReactTo, ToolNameReactToMessage,
-		ToolNameChatRead, ToolNameReadChatThread, ToolNameReadChatMessage,
-		ToolNameAnnounceFile, ToolNameShareFile,
-		ToolNameListShared, ToolNameGetShared,
-		ToolNameStoreKnowledge, ToolNameSearchKnowledge,
-		ToolNameTriage:
+	if r.comms.Handles(call.Name) {
 		return r.comms.Run(ctx, call)
 	}
 	if r.next == nil {
