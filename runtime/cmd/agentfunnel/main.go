@@ -162,7 +162,9 @@ func main() {
 	bindingCache.Store(&funnel.Binding{
 		Provider: bridle.ProviderID(res.Provider),
 		Model:    res.Model,
-		Harness:  bridle.NewHarness(provider),
+		// Native-API providers get the P3b permission hook registered on
+		// the Harness; claude-code is skipped (self-supplies tools).
+		Harness: newBindingHarness(provider, res.Provider),
 	})
 
 	// 4. Compose funnel + wsasp client.
@@ -229,7 +231,7 @@ func main() {
 				bindingCache.Store(&funnel.Binding{
 					Provider: bridle.ProviderID(fresh.Provider),
 					Model:    fresh.Model,
-					Harness:  bridle.NewHarness(newProv),
+					Harness:  newBindingHarness(newProv, fresh.Provider),
 				})
 				log.Info("agentfunnel: binding refreshed via re-validate",
 					"provider", fresh.Provider, "model", fresh.Model)
@@ -363,7 +365,9 @@ func main() {
 		// Static binding fields kept populated for back-compat (some
 		// non-aspect callers still construct without BindingFn) but
 		// the agentfunnel flow always uses BindingFn — see below.
-		Harness:  bridle.NewHarness(provider),
+		// Hook registered here too so the back-compat path also enforces
+		// the P3b policy for native providers (BindingFn overrides per turn).
+		Harness:  newBindingHarness(provider, res.Provider),
 		Provider: bridle.ProviderID(res.Provider),
 		Model:    res.Model,
 		// NEX-335: per-turn binding resolver reads from the binding
@@ -611,6 +615,32 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 	default:
 		return nil, fmt.Errorf("unsupported provider %q (claude-api, claude-code, openai supported)", provider)
 	}
+}
+
+// newBindingHarness builds the *bridle.Harness the funnel runs turns
+// against for a given binding, and — for NATIVE-API providers only —
+// registers the autonomous permission hook (P3b).
+//
+// claude-code is skipped: it self-supplies its tool surface inside the
+// spawned subprocess, so a BeforeToolCall hook on this Harness never sees
+// those calls (claude-code's own --disallowedTools is its guardrail). For
+// direct-API providers (claude-api, openai) the funnel executes every tool
+// via the Harness, so the hook is the enforcement point.
+//
+// v1 policy is permissive (DefaultAllow=true): the enforcement MECHANISM
+// ships here; per-aspect policy config is a thin follow-on (P3b-config).
+func newBindingHarness(provider bridle.Provider, providerName string) *bridle.Harness {
+	h := bridle.NewHarness(provider)
+	switch providerName {
+	case "claude-code", "claudecode":
+		// claude-code owns its tools in-subprocess — hook can't see them.
+	default:
+		// TODO(P3b-config): load the real per-aspect ToolPolicy (broker
+		// model_config / aspect.json) instead of the permissive default.
+		policy := funnel.ToolPolicy{DefaultAllow: true}
+		h.RegisterBeforeToolCall(funnel.PermissionHook(policy))
+	}
+	return h
 }
 
 // buildAgentFunnelFilter constructs the output filter for an agentfunnel
