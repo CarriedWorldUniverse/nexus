@@ -382,3 +382,81 @@ func TestNewClient_ForwardsTokenProviderToWSClient(t *testing.T) {
 		t.Errorf("TokenProvider returned %q, want %q", got, "fresh-token")
 	}
 }
+
+// TestHandleFrame_RoutesEscalationRequest pins the broker-pushed
+// escalation.request path: a request frame fed through the same
+// inbound dispatch entry point (handleFrame) that routes chat.deliver
+// must decode and surface to the OnEscalationRequest callback, with
+// the request envelope's correlation id (env.ID, set by NewRequest)
+// passed through so the operator's decision can be correlated back.
+func TestHandleFrame_RoutesEscalationRequest(t *testing.T) {
+	var (
+		gotPayload   frames.EscalationRequestPayload
+		gotRequestID string
+		calls        int
+	)
+	c, err := NewClient(Config{
+		URL:        "wss://example/connect",
+		AspectName: "operator",
+		OnDeliver:  noopDeliver,
+		OnEscalationRequest: func(p frames.EscalationRequestPayload, requestID string) {
+			calls++
+			gotPayload = p
+			gotRequestID = requestID
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env, err := frames.NewRequest(frames.KindEscalationRequest, frames.EscalationRequestPayload{
+		Aspect: "anvil",
+		Tool:   "bash",
+		Reason: "destructive command",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.handleFrame(env)
+
+	if calls != 1 {
+		t.Fatalf("OnEscalationRequest called %d times, want 1", calls)
+	}
+	if gotPayload.Aspect != "anvil" {
+		t.Errorf("payload.Aspect = %q, want %q", gotPayload.Aspect, "anvil")
+	}
+	if gotPayload.Tool != "bash" {
+		t.Errorf("payload.Tool = %q, want %q", gotPayload.Tool, "bash")
+	}
+	if gotRequestID != env.ID {
+		t.Errorf("requestID = %q, want env.ID %q", gotRequestID, env.ID)
+	}
+}
+
+// TestHandleFrame_EscalationRequestNilCallbackIsNoop confirms the
+// callback is OPTIONAL: an aspect that doesn't wire one (the default
+// non-operator case) must not crash when the broker pushes an
+// escalation.request.
+func TestHandleFrame_EscalationRequestNilCallbackIsNoop(t *testing.T) {
+	c, err := NewClient(Config{
+		URL:        "wss://example/connect",
+		AspectName: "anvil",
+		OnDeliver:  noopDeliver,
+		// OnEscalationRequest deliberately nil.
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env, err := frames.NewRequest(frames.KindEscalationRequest, frames.EscalationRequestPayload{
+		Aspect: "anvil",
+		Tool:   "bash",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Must not panic.
+	c.handleFrame(env)
+}
