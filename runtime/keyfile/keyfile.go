@@ -284,6 +284,19 @@ type ValidationResult struct {
 	// default provider cred for this aspect (caller falls back to its own
 	// process env).
 	ProviderEnv map[string]string
+
+	// JudgeProvider/JudgeModel/JudgeEnv carry the broker's EFFECTIVE
+	// cheap-judge config (NEX-373) so the aspect builds its judge from the
+	// validate response — not a startup WS round-trip that raced the WS
+	// connect. All empty → the aspect's judge inherits its main provider.
+	JudgeProvider string
+	JudgeModel    string
+	JudgeEnv      map[string]string
+
+	// CompactModel/CompactEnv mirror the judge fields for the compact /
+	// summarizer (rewriter) tier.
+	CompactModel string
+	CompactEnv   map[string]string
 }
 
 // Load reads and parses an on-disk keyfile. Validates format + version
@@ -320,7 +333,7 @@ func Load(path string) (*Keyfile, error) {
 // initialisation is sync.Once-guarded so concurrent Validate calls
 // can't race on the field write.
 type Client struct {
-	HTTP    *http.Client
+	HTTP     *http.Client
 	httpInit sync.Once
 }
 
@@ -436,6 +449,11 @@ func (c *Client) Validate(ctx context.Context, kf *Keyfile) (*ValidationResult, 
 		Model:            resp.Model,
 		MCPProfile:       resp.MCPProfile,
 		ProviderEnv:      resp.ProviderEnv,
+		JudgeProvider:    resp.JudgeProvider,
+		JudgeModel:       resp.JudgeModel,
+		JudgeEnv:         resp.JudgeEnv,
+		CompactModel:     resp.CompactModel,
+		CompactEnv:       resp.CompactEnv,
 		NexusURL:         kf.Envelope.NexusURL,
 		NexusID:          kf.Envelope.NexusID,
 	}, nil
@@ -497,6 +515,15 @@ type validateResponse struct {
 	// a credentials store wired or no profile is configured.
 	MCPProfile  string            `json:"mcp_profile"`
 	ProviderEnv map[string]string `json:"provider_env"`
+
+	// NEX-373: effective judge + compact config delivered here instead of a
+	// startup WS fetch. Older Nexus instances leave these zero (the aspect
+	// then falls back to its WS-fetch path / its own defaults).
+	JudgeProvider string            `json:"judge_provider"`
+	JudgeModel    string            `json:"judge_model"`
+	JudgeEnv      map[string]string `json:"judge_env"`
+	CompactModel  string            `json:"compact_model"`
+	CompactEnv    map[string]string `json:"compact_env"`
 }
 
 // postValidate POSTs the encrypted_payload and decodes the response.

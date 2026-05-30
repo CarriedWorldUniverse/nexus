@@ -385,12 +385,24 @@ func main() {
 	// Filter still works via shell-env passthrough (PR #146) or
 	// subscription auth; we don't want a transient broker hiccup to
 	// take the aspect down entirely.
-	// NEX-293 + NEX-301: fetch judge AND compact admin overrides in one
-	// WS round-trip. judge values flow into buildAgentFunnelFilter;
-	// compact values flow into buildAgentFunnelRewriter below.
-	overrides := fetchAspectModelOverrides(wsClient, res.AspectName, log)
-	judgeModelOverride, judgeEnv := overrides.JudgeModel, overrides.JudgeEnv
-	judgeProviderOverride := overrides.JudgeProvider
+	// NEX-373: judge + compact config arrive in the VALIDATE response
+	// (res.Judge*/Compact*), resolved broker-side. Previously the aspect
+	// fetched them over WS here at startup — but that request raced
+	// wsClient.Run (which connects ~170 lines below) and silently timed out,
+	// dropping every judge/compact override (judges fell back to bare
+	// claude-code and failed open). Delivering them via validate, like
+	// provider_env, removes the race entirely.
+	judgeProviderOverride := res.JudgeProvider
+	judgeModelOverride := res.JudgeModel
+	judgeEnv := res.JudgeEnv
+	compactModelOverride := res.CompactModel
+	compactEnv := res.CompactEnv
+	if judgeProviderOverride != "" || judgeModelOverride != "" || compactModelOverride != "" {
+		log.Info("agentfunnel: model overrides from validate",
+			"aspect", res.AspectName, "judge_provider", judgeProviderOverride,
+			"judge_model", judgeModelOverride, "compact_model", compactModelOverride,
+			"judge_env_keys", envKeyNames(judgeEnv))
+	}
 
 	// NEX-302: read MainTurnSampling from the aspect's own aspect.json
 	// on disk (autospawn convention: aspect.json lives at the aspect's
@@ -423,7 +435,7 @@ func main() {
 			return ""
 		}
 		return funnelPtr.SessionID()
-	}, overrides.CompactModel, overrides.CompactEnv, log)
+	}, compactModelOverride, compactEnv, log)
 
 	// Provider-aware ToolRunner. Native-API providers get the local
 	// coding-tool lane (toolrunner.LocalToolRunner) composed behind comms;
@@ -813,112 +825,6 @@ func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.Provider
 		ObsHook:           obsHook,
 		Logger:            log,
 	})
-}
-
-// aspectOverrides bundles the resolved admin-override knobs for an
-// agentfunnel-spawned aspect. Each pair (model, env) is independent
-// — judge and compact have separate credential lookups so they can
-// route to different providers (e.g. judge → DeepSeek bare, compact
-// → claude-haiku). Empty values mean "no override; caller's legacy
-// fallback applies".
-type aspectOverrides struct {
-	JudgeModel string
-	// JudgeProvider names the provider family the cheap-judge should run
-	// on (e.g. "claude-api", "claude-code"), independent of the aspect's
-	// primary provider. Empty = run the judge on the aspect's own
-	// provider (pre-NEX-365 behaviour). NEX-365 #3 — enables a Claude
-	// aspect to be judged by a DeepSeek Anthropic-shape endpoint.
-	JudgeProvider string
-	JudgeEnv      map[string]string
-	CompactModel  string
-	CompactEnv    map[string]string
-}
-
-// fetchAspectModelOverrides retrieves the judge + compact model +
-// credential overrides (NEX-263 + NEX-294 effective values) for this
-// aspect from the broker over WS, and resolves each credential into
-// an env overlay. NEX-301 extends NEX-293's judge-only path to also
-// cover compact, so out-of-process aspects pick up the same admin
-// + network-default plane the in-process Frame uses via
-// applyAspectModelOverrides.
-//
-// Best-effort: every failure path logs and returns the partial
-// result. A failed credential fetch leaves that side's env nil
-// (subprocess inherits ambient process env); a failed model_config
-// fetch returns zero values across the board so the funnel falls
-// through to legacy hardcoded defaults rather than refusing to start.
-func fetchAspectModelOverrides(ws brokercreds.Requester, aspectName string, log *slog.Logger) aspectOverrides {
-	out := aspectOverrides{}
-	if ws == nil {
-		return out
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cfg, err := brokercreds.FetchAspectModelConfig(ctx, ws)
-	if err != nil {
-		log.Warn("agentfunnel: fetch aspect model config failed; falling back to defaults",
-			"aspect", aspectName, "err", err)
-		return out
-	}
-
-	// Judge side (NEX-293).
-	if cfg.JudgeModel != "" {
-		log.Info("agentfunnel: admin override applied",
-			"aspect", aspectName, "kind", "judge_model", "to", cfg.JudgeModel)
-		out.JudgeModel = cfg.JudgeModel
-	}
-	if cfg.JudgeProvider != "" {
-		log.Info("agentfunnel: admin override applied",
-			"aspect", aspectName, "kind", "judge_provider", "to", cfg.JudgeProvider)
-		out.JudgeProvider = cfg.JudgeProvider
-	}
-	out.JudgeEnv = resolveCredentialEnv(ws, aspectName, "judge", cfg.JudgeCredential, log)
-
-	// Compact side (NEX-301). Symmetric with judge.
-	if cfg.CompactModel != "" {
-		log.Info("agentfunnel: admin override applied",
-			"aspect", aspectName, "kind", "compact_model", "to", cfg.CompactModel)
-		out.CompactModel = cfg.CompactModel
-	}
-	out.CompactEnv = resolveCredentialEnv(ws, aspectName, "compact", cfg.CompactCredential, log)
-
-	return out
-}
-
-// resolveCredentialEnv fetches a named credential's provider bundle
-// over WS and translates it to an env overlay (ANTHROPIC_API_KEY +
-// optional ANTHROPIC_BASE_URL for Anthropic-shape; OPENAI_* for
-// OpenAI-shape). Returns nil on any failure path or when the
-// credential name is empty — caller falls back to ambient env.
-//
-// kindTag is just for log lines ("judge" / "compact") so operators
-// can grep for the specific side when debugging.
-func resolveCredentialEnv(ws brokercreds.Requester, aspectName, kindTag, credentialName string, log *slog.Logger) map[string]string {
-	if credentialName == "" {
-		return nil
-	}
-	credCtx, credCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer credCancel()
-	resolvedName, bundle, err := brokercreds.FetchProvider(credCtx, ws, credentialName)
-	if err != nil {
-		log.Warn("agentfunnel: fetch credential failed; inherits ambient env",
-			"aspect", aspectName, "kind", kindTag,
-			"credential", credentialName, "err", err)
-		return nil
-	}
-	env := providerBundleToEnv(bundle)
-	if env == nil {
-		log.Warn("agentfunnel: credential has no env mapping for api_shape; inherits ambient env",
-			"aspect", aspectName, "kind", kindTag,
-			"credential", resolvedName, "api_shape", bundle.APIShape)
-		return nil
-	}
-	log.Info("agentfunnel: credential resolved",
-		"aspect", aspectName, "kind", kindTag,
-		"credential", resolvedName, "api_shape", bundle.APIShape,
-		"env_keys", envKeyNames(env))
-	return env
 }
 
 // readMainTurnSamplingFromAspectJSON loads the aspect's aspect.json
