@@ -20,11 +20,73 @@
 
 ## Conventions used below
 
-- `DMON_TS` = dMon's Tailscale MagicDNS name, e.g. `dmon.tailXXXX.ts.net` (set in Task 0.5).
+- `DMON_TS` = dMon's Tailscale MagicDNS name — **`dmonextreme.tail41686e.ts.net`** (confirmed 2026-05-30).
 - `NEXUS_DATA=/var/lib/nexus` = the hub data dir (owned by `nexus`).
 - `ASPECTS_DIR=/var/lib/nexus/aspects` = broker-side aspect homes (owned by `nexus`).
 - Broker listens on `:7888`; the broker URL everyone uses is `wss://$DMON_TS:7888`.
 - `SRC=/usr/local/src/nexus` = a shared build checkout (built once, binaries installed to `/usr/local/bin`).
+- `BACKUP=/run/media/jacinta/Backup/backup-DMONEXTREME` = the USB backup of the old Windows DMONEXTREME (the migration source).
+- `NEXUS_ID=7a5f2d56-de16-40e8-8505-3360cd982d1d` = the broker identity carried in the restored `nexus.db` — the post-restore boot MUST log this exact id.
+
+---
+
+## This is a RESTORE, not greenfield (read before Phase 2)
+
+dMon already had a running nexus on Windows; its state is on the USB backup. We **migrate** it forward rather than starting empty, so aspect identities, comms history, the Commonplace knowledge, the ledger, credentials, roster, and network-defaults all carry over. Concretely, the **"Migration variant"** section below **overrides**:
+
+- **Task 2.2** (`nexus init` / `identity init`) → replaced by *restoring the DBs* (identity comes with `nexus.db`).
+- **Task 3.1** (write Keel's home by hand) → replaced by *restoring the aspect homes* from the backup.
+- **Tasks 5.2 / 6.1 keyfile mint** → replaced by **re-mint** (the backup/Drive keyfiles are stale-format — pre-NEX-367/368/332 — and pinned to the old URL; re-mint produces current-format keyfiles for the new host).
+
+Everything else (Phase 0/1 host prep, the `nexus.slice` + units in 3.2, credentials rotation in 4.1, the aspect@ template in 5.3, wren/Unity in 7, backup in 8) applies unchanged.
+
+### Migration variant — RESTORE from the DMONEXTREME backup (Path B)
+
+> Run after Phase 0 + Phase 1 (host prep, users, dirs, SELinux, wakestone group) but **instead of** Phase 2.2 / 3.1 and the mints in 5.2/6.1.
+
+- [ ] **M1: Restore the DBs** (use `src/nexus/nexus/data/` — it has the freshest `nexus.db` + its WAL; copy db+wal+shm together so SQLite replays the WAL on first open).
+  ```bash
+  D="$BACKUP/src/nexus/nexus/data"
+  sudo install -d -o nexus -g nexus -m 0750 /var/lib/nexus
+  sudo cp "$D"/nexus.db "$D"/nexus.db-wal "$D"/nexus.db-shm /var/lib/nexus/ 2>/dev/null || sudo cp "$D"/nexus.db /var/lib/nexus/
+  sudo cp "$D"/ledger.db /var/lib/nexus/
+  sudo chown nexus:nexus /var/lib/nexus/*.db*
+  sudo restorecon -Rv /var/lib/nexus
+  # Insurance before first boot (older DB → schema migration runs on open):
+  sudo -u nexus cp /var/lib/nexus/nexus.db /var/lib/nexus/nexus.db.pre-migrate
+  ```
+
+- [ ] **M2: Restore the aspect homes** (carry personalities + per-aspect `.mcp.json`, incl. wren→unity-mcp).
+  ```bash
+  sudo install -d -o nexus -g nexus -m 0750 /var/lib/nexus/aspects
+  sudo cp -a "$BACKUP"/src/nexus/nexus/agents/. /var/lib/nexus/aspects/
+  sudo chown -R nexus:nexus /var/lib/nexus/aspects
+  sudo restorecon -Rv /var/lib/nexus/aspects
+  ```
+  (Keel's home comes along too → the broker embeds it as the Frame. **No `keel` keyfile needed** — the Frame runs in-process.)
+
+- [ ] **M3: TLS + units + boot** — do Task 2.3 (Tailscale cert) + Task 3.2 (slice + `nexus.service`), then start.
+
+- [ ] **M4: Verify identity continuity** — the boot MUST be the *same* Nexus.
+  ```bash
+  journalctl -u nexus.service -n 40 --no-pager | grep -iE "nexus identity loaded|ledger service initialised|frame"
+  curl -sk "https://$DMON_TS:7888/api/nexus_id"; echo
+  ```
+  Expected: logs show `nexus identity loaded nexus_id=7a5f2d56-…`; `/api/nexus_id` returns `$NEXUS_ID`. If it shows a *different* id, STOP — the wrong DB was restored.
+
+- [ ] **M5: Re-mint the 6 connecting aspects** (not keel — embedded). Restored `nexus.db` already has the aspect rows; `mint --force` bumps version + replaces the pubkey in-place and stamps the **new** URL.
+  ```bash
+  for a in anvil wren forge maren verity harrow; do
+    sudo -u nexus env NEXUS_DATA_DIR=/var/lib/nexus \
+      nexus aspect mint "$a" --force --data-dir /var/lib/nexus \
+        --nexus-url "wss://$DMON_TS:7888/connect" -o /tmp/$a.keyfile.json
+    sudo install -o "$a" -g "$a" -m 0600 /tmp/$a.keyfile.json /home/$a/keyfile.json
+    sudo rm -f /tmp/$a.keyfile.json
+  done
+  ```
+  > If the broker is already running, the offline direct-DB mint above can race the live writer — either stop `nexus.service` for the mint loop, or use the `--via https://$DMON_TS:7888 --admin-token <token>` broker-single-writer path instead. Decide live based on whether you want zero downtime.
+
+- [ ] **M6:** Continue at Phase 4.1 (**rotate the leaked DeepSeek key** in the restored cred store), then enable the `aspect@` services (Phase 5.3 / 6) — keyfiles are already in place from M5.
 
 ---
 
@@ -169,6 +231,24 @@
 - [ ] **Step 3: Verify setgid + membership.**
   Run: `ls -ld /srv/wakestone && id wren`
   Expected: dir mode `drwxrwsr-x` (the `s`), `wakestone` in wren's groups. (Group membership applies on the user's next service start / login.)
+
+### Task 1.4: Repo-clone policy (per-user, on-demand)
+
+**Decision:** code repos are **cloned per aspect, into that aspect's own `~/Source`, only the repos it actually uses** — NOT a central shared folder.
+
+- **Why per-user, not central:** aspects do real dev (branch, edit, leave uncommitted state, build, PR). A shared working tree can hold only one branch + one set of changes at a time, so two aspects in it stomp each other. Separate clones give each aspect its own branch / dirty state / build — the point of the per-OS-user isolation. A central folder writable by all six would also need a setgid group *per repo* (like `wakestone`) — lots of plumbing for negative benefit. Disk is a non-issue (1.9 TB, ~12 G used).
+- **The one shared-tree exception is the Unity/WakeStone project** (Task 1.3's `wakestone` group) — shared *because* Unity forces a single editor/working-copy, not as the general pattern.
+- **"Only what it uses":** e.g. anvil → `nexus`, `bridle`; forge/wren → the game repos; harrow → `research`. Each aspect (or an operator setup step) clones into its own `~/Source/` as needed; nothing is pre-provisioned centrally.
+
+- [ ] **Step 1:** No central action — clones happen per aspect under `/home/<aspect>/Source/`. (Aspects with build/dev duties clone on first use; or seed a starter clone per aspect during its Phase 5/6 setup.)
+
+- [ ] **Step 2 (optional efficiency — skip unless disk/bandwidth matters):** a shared read-only Go module cache so aspects don't each re-download deps.
+  ```bash
+  sudo install -d -o root -g nexus -m 2775 /var/cache/gomod
+  # then add `Environment=GOMODCACHE=/var/cache/gomod` to aspect@.service (and the build step),
+  # with the aspect users in a group that can read it. (Or leave per-user GOMODCACHE — simplest.)
+  ```
+  Later option (not now): a local bare **git reference mirror** + `git clone --reference` so per-user clones share objects without sharing working trees.
 
 ---
 
