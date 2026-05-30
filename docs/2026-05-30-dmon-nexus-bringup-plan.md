@@ -92,15 +92,17 @@ Everything else (Phase 0/1 host prep, the `nexus.slice` + units in 3.2, credenti
 
 ## Phase 0 — Host prep (Fedora Workstation 44)
 
-### Task 0.1: Confirm baseline + disable suspend (always-on)
+### Task 0.1: Remote-manageable host hardening (never suspend / never lock you out)
 
-**Files:** Create `/etc/systemd/logind.conf.d/nexus-noSuspend.conf`
+> dMon is managed remotely over SSH and the GUI is flaky on this hardware — GNOME/**Wayland** froze once already with Unity open on the very-new RTX 5090 driver (boot log shows ASUS SBIOS power-handler NVRM warnings — the ROG ACPI quirk family). SSH (`sshd` + Tailscale SSH) is **independent of the GUI** (confirmed: SSH stayed up through the freeze), so the desktop locking/freezing never costs SSH. The two things that *would* cost remote access are **suspend** (a suspended laptop drops off the tailnet) and **node-key expiry** (Task 0.2). Make the host never suspend / never lock / never blank, and always recoverable over SSH.
+
+**Files:** Create `/etc/systemd/logind.conf.d/nexus-noSuspend.conf` + `/etc/dconf/db/local.d/00-nexus-server`
 
 - [ ] **Step 1: Confirm the host.**
   Run: `cat /etc/fedora-release && uname -r && getenforce`
   Expected: `Fedora ... 44 ...`, a 6.x kernel, `Enforcing`.
 
-- [ ] **Step 2: Stop lid-close / idle suspend** (laptop-as-server).
+- [ ] **Step 2: Stop lid-close / idle suspend (logind — always-applies, session-independent).**
   Create `/etc/systemd/logind.conf.d/nexus-noSuspend.conf`:
   ```ini
   [Login]
@@ -112,19 +114,43 @@ Everything else (Phase 0/1 host prep, the `nexus.slice` + units in 3.2, credenti
   Then: `sudo systemctl restart systemd-logind`
   Also mask sleep targets: `sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target`
 
-- [ ] **Step 3: Verify.**
+- [ ] **Step 3: GNOME defaults system-wide via dconf (no auto-suspend / no lock / no blank).**
+  Fedora **Workstation** auto-suspends on AC idle and locks the screen by default (`sleep-inactive-ac-type='suspend'`), *on top of* logind. Set these system-wide (not per-session) so they survive GUI restarts and need no working desktop to apply.
+  Create `/etc/dconf/db/local.d/00-nexus-server`:
+  ```ini
+  [org/gnome/settings-daemon/plugins/power]
+  sleep-inactive-ac-type='nothing'
+  sleep-inactive-battery-type='nothing'
+
+  [org/gnome/desktop/session]
+  idle-delay=uint32 0
+
+  [org/gnome/desktop/screensaver]
+  lock-enabled=false
+  idle-activation-enabled=false
+  ```
+  Then: `sudo dconf update`
+
+- [ ] **Step 4: Verify + know the GUI-recovery lever.**
   Run: `systemctl status sleep.target | head -3`
   Expected: `Loaded: masked`.
+  Remember the recovery path: if the desktop ever wedges, **`sudo systemctl restart gdm` over SSH** respawns it without a reboot (or `loginctl terminate-session <n>` for just the hung seat) — no physical console needed.
 
-### Task 0.2: Tailscale up
+- [ ] **Step 5 (optional): Wayland → Xorg fallback if the desktop keeps freezing under Unity.**
+  Nvidia + heavy-GPU apps (Unity) are steadier on Xorg than Wayland right now. If freezes recur, set `WaylandEnable=false` under `[daemon]` in `/etc/gdm/custom.conf`, then `sudo systemctl restart gdm` and log back into "GNOME on Xorg". This directly reduces how often you'd need the Step-4 recovery lever.
 
-- [ ] **Step 1: Install + bring up Tailscale.**
-  Run: `sudo dnf install -y tailscale && sudo systemctl enable --now tailscaled && sudo tailscale up`
-  (Authenticate in the browser to the `agentnetwork` tailnet.)
+### Task 0.2: Tailscale up + remote-access durability
+
+- [ ] **Step 1: Install + bring up Tailscale, with Tailscale SSH.**
+  Run: `sudo dnf install -y tailscale && sudo systemctl enable --now tailscaled && sudo tailscale up --ssh`
+  (Authenticate in the browser to the `tail41686e` tailnet.) `--ssh` makes the node accept tailnet-identity SSH (works through NAT/IP changes) as a robust path alongside `sshd`. Verify it's on: `tailscale debug prefs | grep RunSSH` → `"RunSSH": true`.
 
 - [ ] **Step 2: Verify + capture the MagicDNS name.**
   Run: `tailscale status --self --json | grep -i dnsname`
-  Expected: dMon's `*.ts.net` name. Record it — this is `$DMON_TS` (Task 0.5).
+  Expected: `dmonextreme.tail41686e.ts.net` — this is `$DMON_TS` (Task 0.5).
+
+- [ ] **Step 3: Disable node-key expiry (in the admin console) — REQUIRED for an always-on remote box.**
+  In https://login.tailscale.com/admin/machines → `dmonextreme` → ⋯ → **Disable key expiry**. Otherwise the node key expires (~180 days), the box silently drops off the tailnet, and re-auth needs interactive access *at the machine* — exactly what you can't do remotely. Verify the machine shows "Expiry disabled".
 
 ### Task 0.3: GPU + asusctl (keep dGPU on for Unity)
 
@@ -210,20 +236,20 @@ Everything else (Phase 0/1 host prep, the `nexus.slice` + units in 3.2, credenti
 
 ### Task 1.3: Create the shared `wakestone` group (wren ↔ operator)
 
-> Replace `OPERATOR` below with your interactive login name.
+> Operator login = `jacinta`.
 
 - [ ] **Step 1: Create the group; add the operator + wren.**
   Run:
   ```bash
   sudo groupadd wakestone
-  sudo usermod -aG wakestone OPERATOR
+  sudo usermod -aG wakestone jacinta
   sudo usermod -aG wakestone wren
   ```
 
 - [ ] **Step 2: Create the shared project root, setgid so new files inherit the group.**
   Run:
   ```bash
-  sudo install -d -o OPERATOR -g wakestone -m 2775 /srv/wakestone
+  sudo install -d -o jacinta -g wakestone -m 2775 /srv/wakestone
   sudo semanage fcontext -a -t user_home_t "/srv/wakestone(/.*)?"
   sudo restorecon -Rv /srv/wakestone
   ```
@@ -530,10 +556,21 @@ Everything else (Phase 0/1 host prep, the `nexus.slice` + units in 3.2, credenti
 
 - [ ] **Step 1:** Create `/var/lib/nexus/aspects/wren/` home (Task 5.1), set its `aspect-default` credential, mint `/home/wren/keyfile.json` (Task 5.2). Do **not** start `aspect@wren` yet.
 
-### Task 7.2: Put the WakeStone project in the shared group dir
+### Task 7.2: Move the WakeStone project into the shared group dir
 
-- [ ] **Step 1:** Move/clone the WakeStone Unity project into `/srv/wakestone/<project>` (created setgid in Task 1.3). Ensure group-write:
-  Run: `sudo chgrp -R wakestone /srv/wakestone && sudo chmod -R g+rwX /srv/wakestone && sudo find /srv/wakestone -type d -exec chmod g+s {} +`
+> The project currently lives at **`/home/jacinta/Project/WakeStone`** (the operator's home), so `wren` can't write to it. wren is a coding aspect — it wants to write C# directly with its file tools (not route every edit through the MCP bridge) — so the project moves to the shared, group-writable `wakestone` tree (created setgid in Task 1.3), out of the operator's home (no home-traversal grant needed for wren).
+
+- [ ] **Step 1: Move it (with Unity CLOSED — don't move a project with the editor holding locks / churning `Library/`).**
+  Run:
+  ```bash
+  sudo mv /home/jacinta/Project/WakeStone /srv/wakestone/WakeStone
+  sudo chgrp -R wakestone /srv/wakestone/WakeStone
+  sudo chmod -R g+rwX /srv/wakestone/WakeStone
+  sudo find /srv/wakestone/WakeStone -type d -exec chmod g+s {} +
+  sudo restorecon -Rv /srv/wakestone/WakeStone
+  ```
+  Git is path-relative — `.git` moves with the tree, remotes/branches unaffected. Afterward, re-add the project in **Unity Hub** from `/srv/wakestone/WakeStone`.
+  > Alternative (keep it in your home): leave it at `~/Project/WakeStone`, make it setgid `wakestone`, and `sudo setfacl -m u:wren:x /home/jacinta /home/jacinta/Project` so wren can traverse in. Works, but opens a path into your home — the move is cleaner.
 
 - [ ] **Step 2: Set `umask 002` for both identities** so new files stay group-writable.
   Append `umask 002` to `/home/wren/.bashrc` (wren) and to the operator's shell rc; for the wren *service*, add `UMask=0002` under `[Service]` in a drop-in: `sudo systemctl edit aspect@wren.service` → add `[Service]\nUMask=0002`.
