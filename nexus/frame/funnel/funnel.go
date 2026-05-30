@@ -304,9 +304,16 @@ type Config struct {
 	// and for ensuring the Harness embedded in Binding is safe to use
 	// for one turn.
 	BindingFn func() Binding
-	MCP      *bridle.MCPClientConfig // optional; nil = no MCP-loaded tools
-	Tools    []bridle.ToolDef        // explicit in-process tool defs (incl. send_comms)
-	Runner   bridle.ToolRunner       // executes Tools
+	MCP       *bridle.MCPClientConfig // optional; nil = no MCP-loaded tools
+	Tools     []bridle.ToolDef        // explicit in-process tool defs (incl. send_comms)
+	Runner    bridle.ToolRunner       // executes Tools
+
+	// AutoRecall, when Enabled with a non-nil Gateway, searches the
+	// Commonplace (cross-session knowledge store) with each turn's incoming
+	// message and injects the strongest matches into the system prompt — so
+	// aspects reuse prior knowledge instead of re-deriving it (the Day-3
+	// cost/output lever). Fail-open + bounded; see commonplace.go.
+	AutoRecall AutoRecallConfig
 
 	// ChatGateway is the chat-posting seam used by the default
 	// NexusChatReturnHandler to auto-post the model's natural reply at
@@ -365,7 +372,6 @@ type Config struct {
 	// per-aspect intent is fixed for the lifetime of the aspect
 	// process; per-call would invite mid-session drift.
 	MainTurnSampling MainTurnSampling
-
 
 	// Routing — used by the Frame to decide what reaches the funnel.
 	// Not consumed inside Deliberate, but stored here so callers have
@@ -1243,6 +1249,14 @@ func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, user
 	// be load-bearing-as-instruction not as-augmentation, so skip it.
 	if binding.Provider == bridle.ProviderClaudeCode {
 		systemPrompt = appendToolkitBlurb(systemPrompt)
+	}
+	// Auto-recall (Commonplace): pull prior knowledge relevant to this
+	// turn's incoming message into the system prompt so the aspect reuses it
+	// instead of re-deriving. Recall on the clean userMessage BEFORE the
+	// triage contract is appended below. Safe-framed (RenderRecalledKnowledge)
+	// + fail-open; no-op unless AutoRecall is configured + enabled.
+	if block := f.recallForTurn(ctx, userMessage); block != "" {
+		systemPrompt = systemPrompt + "\n\n" + block
 	}
 	providerEnv, err := f.resolveProviderEnv(ctx, "main")
 	if err != nil {

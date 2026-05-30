@@ -492,3 +492,47 @@ func TestList(t *testing.T) {
 		}
 	}
 }
+
+// TestSearch_KeywordMode is the auto-recall fix: a whole-message query
+// (a full sentence) finds nothing as a phrase, but Keyword=true ORs the
+// salient terms and matches entries that share vocabulary — and stopwords
+// don't drag in unrelated rows.
+func TestSearch_KeywordMode(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	s.Put(ctx, "anvil", "deploy-runbook", "to deploy the broker run install.ps1 then start the service", PutOptions{})
+	s.Put(ctx, "anvil", "unrelated", "notes about the coffee machine", PutOptions{})
+
+	whole := "how do I deploy the broker on the windows laptop"
+	scope := Scope{Agent: "anvil", OwnAgent: true}
+
+	// Phrase mode (the bug): a sentence-as-phrase matches nothing.
+	phraseHits, err := s.Search(ctx, Query{Text: whole, Scope: scope})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(phraseHits) != 0 {
+		t.Errorf("phrase mode should not match a whole-sentence query; got %d hits", len(phraseHits))
+	}
+
+	// Keyword mode (the fix): ORs deploy/broker/windows/laptop → finds the runbook.
+	kwHits, err := s.Search(ctx, Query{Text: whole, Scope: scope, Keyword: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kwHits) == 0 {
+		t.Fatal("keyword mode should match on shared terms; got 0 hits")
+	}
+	if kwHits[0].Topic != "deploy-runbook" {
+		t.Errorf("top keyword hit = %q, want deploy-runbook", kwHits[0].Topic)
+	}
+
+	// All-stopwords query → no usable terms → empty (not an error, not all rows).
+	stop, err := s.Search(ctx, Query{Text: "how do I", Scope: scope, Keyword: true})
+	if err != nil {
+		t.Fatalf("all-stopwords keyword query should not error: %v", err)
+	}
+	if len(stop) != 0 {
+		t.Errorf("all-stopwords query should match nothing; got %d hits", len(stop))
+	}
+}

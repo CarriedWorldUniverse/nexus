@@ -1202,6 +1202,23 @@ func buildOutputFilter(cfg schemas.AspectConfig, frameProvider bridle.Provider, 
 	}
 }
 
+// autoRecallConfig maps the aspect.json auto_recall block to the funnel's
+// AutoRecallConfig, supplying the runtime's knowledge gateway. nil block →
+// zero config (disabled). The funnel applies its own defaults for unset
+// TopK/MaxChars.
+func autoRecallConfig(c *schemas.AutoRecall, gw funnel.KnowledgeGateway) funnel.AutoRecallConfig {
+	if c == nil {
+		return funnel.AutoRecallConfig{}
+	}
+	return funnel.AutoRecallConfig{
+		Gateway:  gw,
+		Enabled:  c.Enabled,
+		TopK:     c.TopK,
+		MaxRank:  c.MaxRank,
+		MaxChars: c.MaxChars,
+	}
+}
+
 // buildFrameCheapFilter resolves the Frame's judge inputs (judge provider /
 // model from aspect.json, judge credential env from the credentials store)
 // and delegates construction to the shared judge package — the same builder
@@ -1735,8 +1752,12 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		// The MCP route (task #181) is the proper fix; for now, empty
 		// Tools for claude-code Frames so the model relies on its native
 		// toolkit + the funnel's auto-post path for replies.
-		Tools:       toolsForProvider(bridle.ProviderID(provider)),
-		Runner:      funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		Tools:  toolsForProvider(bridle.ProviderID(provider)),
+		Runner: funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		// AutoRecall (Commonplace): turn-time recall into the system prompt.
+		// Off unless aspect.json opts in; the gateway is the same one the
+		// comms runner uses. Day-3 cost/output lever.
+		AutoRecall:  autoRecallConfig(ef.Aspect.Config.AutoRecall, knowledgeGateway),
 		Filter:      outputFilter,
 		ChatGateway: gateway,
 		// NEX-239: stream per-text-block to chat for parity with

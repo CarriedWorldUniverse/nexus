@@ -320,6 +320,7 @@ type KnowledgeSearchPayload struct {
 	Peers    []string `json:"peers,omitempty"`
 	TopK     int      `json:"top_k,omitempty"`
 	MaxRank  float64  `json:"max_rank,omitempty"`
+	Keyword  bool     `json:"keyword,omitempty"` // OR-of-terms match (auto-recall)
 }
 
 // KnowledgeSearchResultPayload is the response.
