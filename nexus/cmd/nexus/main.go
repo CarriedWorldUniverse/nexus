@@ -1760,6 +1760,11 @@ func buildChatRouter(ctx context.Context, ef *frame.EmbeddedFrame, ros *roster.R
 		AutoRecall:  autoRecallConfig(ef.Aspect.Config.AutoRecall, knowledgeGateway),
 		Filter:      outputFilter,
 		ChatGateway: gateway,
+		// ThreadReader gives the post-hoc judge the recent thread tail so it
+		// can suppress @all / broadcast acknowledgement loops by INTENT (the
+		// AI judge's job) rather than the verbatim-only Tier-1 damping. Same
+		// gateway; ReadThreadTail = ReadThread(sinceID=0), funnel-bounded.
+		ThreadReader: gateway,
 		// NEX-239: stream per-text-block to chat for parity with
 		// agentfunnel. Operator stance (2026-05-26): the embedded Frame
 		// is a standard agentfunnel that happens to auto-start with the

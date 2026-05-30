@@ -196,6 +196,16 @@ func (g *Gateway) ReadThread(ctx context.Context, threadID, sinceID int64) ([]fu
 	return out, nil
 }
 
+// ReadThreadTail satisfies funnel.ThreadReader: it returns the thread's
+// recent messages (oldest-first) so the post-hoc judge can match churn
+// intent across the thread (the @all / broadcast-storm fix). sinceID=0
+// pulls the whole thread; the funnel bounds the count + line length before
+// the tail reaches the judge prompt, so the ReadThread default cap is the
+// only ceiling here.
+func (g *Gateway) ReadThreadTail(ctx context.Context, threadID int64) ([]funnel.ChatMessage, error) {
+	return g.ReadThread(ctx, threadID, 0)
+}
+
 // AnnounceFile inserts a chat post announcing the file plus a
 // shared_files row linking back to it. Returns the chat msg_id (the
 // model's reference for follow-up activity) — the share_id stays

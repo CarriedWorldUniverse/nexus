@@ -330,6 +330,22 @@ type Config struct {
 	// owns its own posting surface.
 	ChatGateway ChatGateway
 
+	// ThreadReader, when set, lets the post-hoc judge see the recent
+	// thread tail so it can match churn INTENT across the thread (the
+	// @all / broadcast-storm fix) rather than judging each candidate in
+	// isolation. judgeTurn calls ReadThreadTail with the trigger's
+	// ThreadRoot, formats the result "from: content", and passes it as
+	// FilterInput.ThreadTail. nil disables the feature (filter sees an
+	// empty tail — opt-in, never blocks a turn). Fail-open: a reader
+	// error is logged and treated as no tail.
+	//
+	// In-process Frame wires this to the broker's thread store
+	// (gateway.ReadThread). The out-of-process agentfunnel path is a
+	// follow-up (it needs a WS chat.read round-trip on the hot path),
+	// so dMon aspects rely on the trigger+candidate signal the judge
+	// already gets until that lands.
+	ThreadReader ThreadReader
+
 	// StreamTextToChat, when true, posts each assistant text block to
 	// chat as it streams from the provider rather than buffering and
 	// posting once at turn-end. Gives the operator live visibility into
@@ -1051,6 +1067,38 @@ func (f *Funnel) dampSnapshot() int {
 	return f.dampConsecutive
 }
 
+// threadTailForJudge loads the recent thread tail for the post-hoc judge so
+// it can match churn intent across the thread (the @all / broadcast-storm
+// fix). Returns nil — and the judge prompt omits the section — when no
+// ThreadReader is configured, the turn isn't thread-rooted, or the read
+// fails. Fail-open by design: thread context sharpens the judge but must
+// never block or error a turn. Each surviving message is formatted
+// "from: content"; buildJudgeUserMessage bounds the count + line length.
+func (f *Funnel) threadTailForJudge(ctx context.Context, st *deliberateState) []string {
+	if f.cfg.ThreadReader == nil || st.triggerThreadRoot == 0 {
+		return nil
+	}
+	msgs, err := f.cfg.ThreadReader.ReadThreadTail(ctx, st.triggerThreadRoot)
+	if err != nil {
+		f.log.Debug("funnel: thread-tail read for judge failed (fail-open, no tail)",
+			"aspect", f.cfg.AspectID, "thread_root", st.triggerThreadRoot, "err", err)
+		return nil
+	}
+	out := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		content := strings.TrimSpace(m.Content)
+		if content == "" {
+			continue
+		}
+		from := m.From
+		if from == "" {
+			from = "?"
+		}
+		out = append(out, from+": "+content)
+	}
+	return out
+}
+
 // deliberateState carries per-turn working state across Deliberate's
 // extracted helper methods. Per-call (not per-Funnel); safe to mutate
 // freely because the deliberating atomic guard ensures only one
@@ -1429,6 +1477,7 @@ func (f *Funnel) handleTurnError(ctx context.Context, st *deliberateState, resul
 			TriggerMsgID: st.triggerMsgID,
 			DoD:          f.takeDoD(),
 			ToolNames:    toolNamesFromInvocations(result.ToolCalls),
+			ThreadTail:   f.threadTailForJudge(ctx, st),
 			Partial:      true,
 		})
 		partial := DeliberateResult{
@@ -1542,6 +1591,7 @@ func (f *Funnel) judgeTurn(ctx context.Context, st *deliberateState, result brid
 		DoD:                dod,
 		PriorTurnFinalText: priorTurn,
 		ToolNames:          toolNamesFromInvocations(result.ToolCalls),
+		ThreadTail:         f.threadTailForJudge(ctx, st),
 	})
 
 	// Surface the verdict as a structured Event so non-obs-hook sinks

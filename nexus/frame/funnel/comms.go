@@ -66,6 +66,22 @@ func TurnIDFromContext(ctx context.Context) string {
 // concurrent calls. Methods return an error if the call cannot be
 // performed; the caller (ToolRunner) translates errors into
 // tool-result JSON the model can read.
+// ThreadReader is the narrow seam the post-hoc judge uses to see the
+// recent thread tail (the @all / broadcast-storm fix). Deliberately
+// separate from ChatGateway: ChatGateway is nil in production when an
+// explicit Return handler is wired (NEX-82), but the judge needs thread
+// context on every chat turn regardless of the return path — so this is
+// its own always-set seam. The in-process Frame implements it against the
+// broker thread store; the agentfunnel path implements it against a WS
+// chat.read (follow-up).
+type ThreadReader interface {
+	// ReadThreadTail returns recent messages in the thread, oldest-first.
+	// The funnel bounds the result before handing it to the judge, so an
+	// implementation may return the full thread (or its own sane cap).
+	// Errors are treated as "no tail" by the caller (fail-open).
+	ReadThreadTail(ctx context.Context, threadID int64) ([]ChatMessage, error)
+}
+
 type ChatGateway interface {
 	// SendChat posts a message to chat as the aspect. Returns the
 	// new message id and any error. ReplyTo and Topic are optional;
