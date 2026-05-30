@@ -66,7 +66,8 @@ func (g *KnowledgeGateway) SearchKnowledge(ctx context.Context, q funnel.Knowled
 			Shared:   q.Shared,
 			Peers:    q.Peers,
 		},
-		TopK: q.TopK,
+		TopK:    q.TopK,
+		Keyword: q.Keyword,
 	})
 	if err != nil {
 		return nil, err

@@ -15,7 +15,7 @@ export function FilesView() {
         <button
           class=${'files-view-tab' + (tab === 'knowledge' ? ' active' : '')}
           onClick=${() => setTab('knowledge')}
-        >Knowledge Base</button>
+        >Commonplace</button>
       </div>
       <div class="files-view-content">
         ${tab === 'files' ? html`<${Files} />` : html`<${Knowledge} />`}
