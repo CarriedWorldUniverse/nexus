@@ -126,6 +126,22 @@ type validateResponse struct {
 	// fetch (mode=proxy keeps the key inside nexus). The aspect falls back
 	// to its own process env when this is absent.
 	ProviderEnv map[string]string `json:"provider_env,omitempty"`
+
+	// JudgeProvider/JudgeModel/JudgeEnv carry the EFFECTIVE cheap-judge
+	// config (per-aspect override > network default) so an out-of-process
+	// aspect builds its judge from the validate response — NOT a separate
+	// startup WS round-trip, which raced wsClient.Run and silently timed out
+	// (NEX-373). JudgeEnv is the judge credential's {API_KEY, BASE_URL}
+	// overlay (same shape + mode-gate as ProviderEnv). All empty when no
+	// judge policy is set → the aspect's judge inherits its main provider.
+	JudgeProvider string            `json:"judge_provider,omitempty"`
+	JudgeModel    string            `json:"judge_model,omitempty"`
+	JudgeEnv      map[string]string `json:"judge_env,omitempty"`
+
+	// CompactModel/CompactEnv mirror the judge fields for the compact /
+	// summarizer (rewriter) tier. Empty → the aspect's compact inherits.
+	CompactModel string            `json:"compact_model,omitempty"`
+	CompactEnv   map[string]string `json:"compact_env,omitempty"`
 }
 
 // personalityWire is the on-the-wire shape of the personality bundle.
@@ -281,6 +297,12 @@ func (b *Broker) handleAspectValidate(w http.ResponseWriter, r *http.Request) {
 	// the aspect's own process env.
 	providerEnv := resolveProviderEnv(r.Context(), v.Credentials, sess.AspectName, sess.Provider, b.log)
 
+	// NEX-373: resolve the effective judge + compact config here and deliver
+	// it in the validate response, instead of the out-of-process aspect doing
+	// a startup WS round-trip (which raced wsClient.Run and timed out).
+	judgeProvider, judgeModel, judgeEnv := resolveJudgeConfig(r.Context(), v.Credentials, sess.AspectName, b.log)
+	compactModel, compactEnv := resolveCompactConfig(r.Context(), v.Credentials, sess.AspectName, b.log)
+
 	resp := validateResponse{
 		OK:               true,
 		SessionJWT:       sess.SessionJWT,
@@ -292,6 +314,11 @@ func (b *Broker) handleAspectValidate(w http.ResponseWriter, r *http.Request) {
 		CentralVersion:   sess.CentralVersion,
 		MCPProfile:       mcpProfile,
 		ProviderEnv:      providerEnv,
+		JudgeProvider:    judgeProvider,
+		JudgeModel:       judgeModel,
+		JudgeEnv:         judgeEnv,
+		CompactModel:     compactModel,
+		CompactEnv:       compactEnv,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -343,6 +370,77 @@ func resolveProviderEnv(ctx context.Context, store *credentials.Store, aspect, p
 	if log != nil {
 		log.Info("validate: delivering provider-cred env from store (keyless aspect)",
 			"aspect", aspect, "credential", cred.Name, "shape", string(shape))
+	}
+	return env
+}
+
+// resolveJudgeConfig resolves the EFFECTIVE cheap-judge provider + model
+// (per-aspect override > network default) and the judge credential's env
+// overlay, for delivery in the validate response (NEX-373). Best-effort:
+// any miss returns zero values so the aspect's own judge defaults apply.
+// The env honours the same fetch/both mode-gate as resolveProviderEnv.
+func resolveJudgeConfig(ctx context.Context, store *credentials.Store, aspect string, log *slog.Logger) (provider, model string, env map[string]string) {
+	if store == nil {
+		return "", "", nil
+	}
+	provider, _ = store.EffectiveJudgeProvider(ctx, aspect)
+	model, _ = store.EffectiveJudgeModel(ctx, aspect)
+	if cred, _ := store.EffectiveJudgeCredential(ctx, aspect); cred != "" {
+		env = resolveNamedCredEnv(ctx, store, aspect, cred, "judge", log)
+	}
+	return provider, model, env
+}
+
+// resolveCompactConfig mirrors resolveJudgeConfig for the compact/summarizer
+// (rewriter) tier — model + the compact credential's env overlay.
+func resolveCompactConfig(ctx context.Context, store *credentials.Store, aspect string, log *slog.Logger) (model string, env map[string]string) {
+	if store == nil {
+		return "", nil
+	}
+	model, _ = store.EffectiveCompactModel(ctx, aspect)
+	if cred, _ := store.EffectiveCompactCredential(ctx, aspect); cred != "" {
+		env = resolveNamedCredEnv(ctx, store, aspect, cred, "compact", log)
+	}
+	return model, env
+}
+
+// resolveNamedCredEnv materialises a NAMED provider credential's env overlay
+// for an aspect, with the same allow-check + fetch/both mode-gate
+// resolveProviderEnv applies. Returns nil (caller inherits) on any miss.
+// tag is just for log lines ("judge"/"compact").
+func resolveNamedCredEnv(ctx context.Context, store *credentials.Store, aspect, credName, tag string, log *slog.Logger) map[string]string {
+	if store == nil || credName == "" {
+		return nil
+	}
+	cred, err := store.Get(ctx, credName)
+	if err != nil {
+		if log != nil {
+			log.Warn("validate: "+tag+" credential lookup failed; aspect inherits",
+				"aspect", aspect, "credential", credName, "err", err)
+		}
+		return nil
+	}
+	if !cred.AllowedFor(aspect) {
+		if log != nil {
+			log.Warn("validate: "+tag+" credential not allowed for aspect; inheriting",
+				"aspect", aspect, "credential", credName)
+		}
+		return nil
+	}
+	if cred.Mode != credentials.ModeFetch && cred.Mode != credentials.ModeBoth {
+		if log != nil {
+			log.Warn("validate: "+tag+" credential is mode=proxy — not delivered to an out-of-process aspect",
+				"aspect", aspect, "credential", credName, "mode", string(cred.Mode))
+		}
+		return nil
+	}
+	env, err := store.EnvForCredential(cred)
+	if err != nil {
+		if log != nil {
+			log.Warn("validate: "+tag+" credential env materialisation failed; inheriting",
+				"aspect", aspect, "credential", credName, "err", err)
+		}
+		return nil
 	}
 	return env
 }

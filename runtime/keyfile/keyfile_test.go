@@ -126,6 +126,11 @@ func fakeNexusServer(t *testing.T, opts fakeServerOpts) *httptest.Server {
 			"central_nexus_md": opts.centralNexusMD,
 			"central_version":  opts.centralVersion,
 			"mcp_profile":      opts.mcpProfile,
+			"judge_provider":   opts.judgeProvider,
+			"judge_model":      opts.judgeModel,
+			"judge_env":        opts.judgeEnv,
+			"compact_model":    opts.compactModel,
+			"compact_env":      opts.compactEnv,
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -143,6 +148,12 @@ type fakeServerOpts struct {
 	centralNexusMD string // Part 9 central content (zero-valued = legacy shape)
 	centralVersion int64  // Part 9 central version
 	mcpProfile     string // NEX-169 resolved MCP profile
+	// NEX-373 judge + compact config delivered in the validate response.
+	judgeProvider string
+	judgeModel    string
+	judgeEnv      map[string]string
+	compactModel  string
+	compactEnv    map[string]string
 }
 
 // TestValidate_HappyPath — end-to-end against a fake Nexus that mirrors
@@ -209,6 +220,41 @@ func TestValidate_DecodesCentralFields(t *testing.T) {
 	}
 	if res.CentralVersion != 7 {
 		t.Errorf("CentralVersion = %d; want 7", res.CentralVersion)
+	}
+}
+
+// TestValidate_DecodesJudgeConfig — NEX-373: the broker delivers the
+// effective judge + compact config in the validate response (so the aspect
+// builds its judge from validate, not a startup WS fetch that raced the WS
+// connect). ValidationResult must surface them; absence → zero values.
+func TestValidate_DecodesJudgeConfig(t *testing.T) {
+	srv := fakeNexusServer(t, fakeServerOpts{
+		nexusID:       "matching-id",
+		jwt:           fakeJWT(t, "plumb"),
+		expiresAt:     "2026-05-08T11:00:00Z",
+		judgeProvider: "openai",
+		judgeModel:    "deepseek-v4-flash",
+		judgeEnv:      map[string]string{"OPENAI_API_KEY": "sk-x", "OPENAI_BASE_URL": "https://api.deepseek.com/v1"},
+		compactModel:  "deepseek-v4-flash",
+		compactEnv:    map[string]string{"OPENAI_API_KEY": "sk-x"},
+	})
+	kf := &Keyfile{
+		Version: 1, Format: expectedFormat,
+		Envelope:         Envelope{NexusURL: srv.URL + "/connect", NexusID: "matching-id"},
+		EncryptedPayload: "AAAA",
+	}
+	res, err := (&Client{HTTP: srv.Client()}).Validate(context.Background(), kf)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.JudgeProvider != "openai" || res.JudgeModel != "deepseek-v4-flash" {
+		t.Errorf("judge: provider=%q model=%q (want openai/deepseek-v4-flash)", res.JudgeProvider, res.JudgeModel)
+	}
+	if res.JudgeEnv["OPENAI_BASE_URL"] != "https://api.deepseek.com/v1" {
+		t.Errorf("JudgeEnv not delivered: %v", res.JudgeEnv)
+	}
+	if res.CompactModel != "deepseek-v4-flash" || res.CompactEnv["OPENAI_API_KEY"] != "sk-x" {
+		t.Errorf("compact: model=%q env=%v", res.CompactModel, res.CompactEnv)
 	}
 }
 
