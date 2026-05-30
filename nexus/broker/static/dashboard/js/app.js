@@ -113,6 +113,12 @@ export function App() {
         const data = await res.json();
         if (!cancelled && data && data.bypass) {
           await commsOpen('');
+          // Under bypass the broker grants the operator Admin server-side
+          // (auth() resolves token-less requests as {operator, Admin:true}).
+          // The role probe below never runs on this branch, so set admin
+          // explicitly here — otherwise isAdmin stays false and the
+          // Settings nav is hidden even though every data path is admin.
+          if (!cancelled) setIsAdminFromRole('operator');
           if (!cancelled) setAuthed(true);
           return;
         }
