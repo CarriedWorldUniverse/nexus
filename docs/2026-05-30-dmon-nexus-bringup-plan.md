@@ -290,6 +290,13 @@ Everything else (Phase 0/1 host prep, the `nexus.slice` + units in 3.2, credenti
 
 ### Task 2.3: TLS via a real Tailscale cert (no self-signed)
 
+> The old `agentnetwork` certs in the backup (`src/nexus/certs/`) are dead (wrong name) — this is a **fresh** cert for `dmonextreme.tail41686e.ts.net`. The broker requires its own TLS (`-tls-cert` is mandatory), so the broker **holds** the cert (we do not front it with `tailscale serve`).
+
+- [ ] **Step 0 (PREREQUISITE — `tailscale cert` fails without it): enable HTTPS certs in the tailnet.**
+  In the Tailscale admin console (https://login.tailscale.com/admin/dns): confirm **MagicDNS** is on and toggle **HTTPS Certificates** ON for the tailnet. Verify on dMon:
+  Run: `tailscale cert "$DMON_TS" --cert-file /tmp/_probe.crt --key-file /tmp/_probe.key && echo "certs enabled" && rm -f /tmp/_probe.*`
+  Expected: succeeds (`certs enabled`). If it errors with "HTTPS not enabled", fix it in the admin console first.
+
 - [ ] **Step 1: Mint a Tailscale cert for dMon's name.**
   Run:
   ```bash
@@ -300,8 +307,8 @@ Everything else (Phase 0/1 host prep, the `nexus.slice` + units in 3.2, credenti
   ```
 
 - [ ] **Step 2: Verify the cert CN matches `$DMON_TS`.**
-  Run: `openssl x509 -in /var/lib/nexus/tls/broker.crt -noout -subject`
-  Expected: subject contains `$DMON_TS`.
+  Run: `openssl x509 -in /var/lib/nexus/tls/broker.crt -noout -subject -enddate`
+  Expected: subject contains `$DMON_TS`; note the `notAfter` — Tailscale/LE certs are **~90-day**, so renewal (Task 8.4) is mandatory.
 
 > Because this is a real cert for the MagicDNS name, **every** aspect (localhost and remote) connects via `wss://$DMON_TS:7888` and validates normally — no keyfile cert-pinning (NEX-367) needed here. Keyfile-pinning stays the fallback for hosts without a tailnet cert (e.g. the work laptop / pure self-signed).
 
@@ -595,6 +602,32 @@ Everything else (Phase 0/1 host prep, the `nexus.slice` + units in 3.2, credenti
 - [ ] **Step 1:** With the aspects running, open Unity + run a build while watching `systemd-cgtop`.
   Run: `systemd-cgtop` and watch `nexus.slice` CPU stay capped vs your session.
   Expected: under contention, `nexus.slice` is throttled (the low `CPUWeight`) and the editor stays responsive. Tune `CPUWeight`/`MemoryHigh` in `/etc/systemd/system/nexus.slice` if needed → `sudo systemctl daemon-reload`.
+
+### Task 8.4: Tailscale cert auto-renewal (the broker's TLS expires ~90 days)
+
+> Without this the broker's cert expires and every aspect drops. `tailscale cert` re-issues the LE cert; the broker reads the files at startup, so renewal = re-cert + restart (cheap — aspects reconnect). Run monthly so renewal lands well inside the 90-day window.
+
+**Files:** Create `/usr/local/bin/nexus-cert-renew.sh` + `/etc/systemd/system/nexus-cert-renew.service` + `.timer`
+
+- [ ] **Step 1: Renewal script** (re-cert into the same paths, then restart the broker).
+  Create `/usr/local/bin/nexus-cert-renew.sh`:
+  ```bash
+  #!/usr/bin/env bash
+  set -euo pipefail
+  DMON_TS="dmonextreme.tail41686e.ts.net"
+  tailscale cert --cert-file /var/lib/nexus/tls/broker.crt --key-file /var/lib/nexus/tls/broker.key "$DMON_TS"
+  chown nexus:nexus /var/lib/nexus/tls/broker.crt /var/lib/nexus/tls/broker.key
+  chmod 0640 /var/lib/nexus/tls/broker.key
+  restorecon /var/lib/nexus/tls/broker.crt /var/lib/nexus/tls/broker.key
+  systemctl restart nexus.service
+  ```
+  `sudo install -m 0755 /usr/local/bin/nexus-cert-renew.sh /usr/local/bin/nexus-cert-renew.sh`
+
+- [ ] **Step 2: Service + timer** (`nexus-cert-renew.service` `Type=oneshot`, runs as **root** — `tailscale cert` + `systemctl restart` need it; `ExecStart=/usr/local/bin/nexus-cert-renew.sh`. `nexus-cert-renew.timer` `OnCalendar=*-*-01 04:00:00`, `Persistent=true`). Enable: `sudo systemctl enable --now nexus-cert-renew.timer`.
+
+- [ ] **Step 3: Verify** the timer is scheduled + a manual run renews + the broker comes back.
+  Run: `sudo systemctl start nexus-cert-renew.service && systemctl is-active nexus.service && openssl x509 -in /var/lib/nexus/tls/broker.crt -noout -enddate`
+  Expected: broker `active`, a fresh `notAfter` ~90 days out. `systemctl list-timers nexus-cert-renew.timer` shows the next monthly run.
 
 ### Task 8.3: Reboot survival
 
