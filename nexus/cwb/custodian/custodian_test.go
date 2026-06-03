@@ -113,7 +113,11 @@ func TestCustodianRefreshExhausted(t *testing.T) {
 
 	c := New(srv.URL)
 	ctx := context.Background()
-	if _, err := c.Redeem(ctx, "assertion"); err != nil {
+	assertion, err := identity.AgentAssertion([]byte("test-owner-seed"), "shadow", "agent-1", srv.URL+"/herald/token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Redeem(ctx, assertion); err != nil {
 		t.Fatalf("Redeem: %v", err)
 	}
 	s := &source{cust: c, subject: "agent-1"}

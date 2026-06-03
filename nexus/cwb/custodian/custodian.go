@@ -112,6 +112,12 @@ func (s *source) Refresh(ctx context.Context) (string, error) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// If a concurrent caller already refreshed (herald rotates refresh tokens
+	// single-use), the entry is fresh — return it rather than presenting the
+	// now-rotated token, which would needlessly fail a healthy session.
+	if time.Until(e.exp) > skew {
+		return e.access, nil
+	}
 	return s.refreshLocked(ctx, e)
 }
 
