@@ -58,13 +58,20 @@ func Open(ctx context.Context, dir string, log *slog.Logger) (*sql.DB, error) {
 	// Windows paths need forward slashes and URI-style prefix so the
 	// driver doesn't parse backslashes as escape characters.
 	uriPath := filepath.ToSlash(path)
+	// busy_timeout MUST be the first pragma. The driver applies _pragma
+	// directives in order on each NEW connection; journal_mode(WAL) can hit
+	// a transient lock when connections open concurrently. With busy_timeout
+	// already in effect, that switch waits (up to 5s) instead of failing
+	// immediately with "database is locked" — the cross-platform fix for the
+	// concurrent-first-connection pragma race (which Windows' stricter file
+	// locking surfaces readily).
 	// _txlock=immediate makes BeginTx issue BEGIN IMMEDIATE instead of
 	// BEGIN (DEFERRED). Required by chat.Insert's linked-list threading:
 	// the SELECT-MAX(id)-then-INSERT pair must be atomic against other
 	// writers, otherwise two concurrent replies to the same parent both
 	// read the same MAX and fork the thread (#226 invariant violation).
 	// Under WAL, writers serialize at BEGIN; reads stay non-blocking.
-	dsn := "file:" + uriPath + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)&_txlock=immediate"
+	dsn := "file:" + uriPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_txlock=immediate"
 
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
