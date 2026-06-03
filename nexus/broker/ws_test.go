@@ -753,6 +753,10 @@ func TestUnknownKindDropped(t *testing.T) {
 // test reads it.
 type fakeCustodian struct {
 	redeem func(ctx context.Context, assertion string) (string, error)
+	// clientFn, when set, overrides the default Client() binding so a test
+	// can point the bound heraldClient at a stub CWB edge. Additive: nil
+	// preserves the original static-token-to-http://x behaviour.
+	clientFn func(subject string) (*client.Client, error)
 
 	mu     sync.Mutex
 	forgot []string
@@ -763,6 +767,9 @@ func (f *fakeCustodian) Redeem(ctx context.Context, a string) (string, error) {
 }
 
 func (f *fakeCustodian) Client(subject string) (*client.Client, error) {
+	if f.clientFn != nil {
+		return f.clientFn(subject)
+	}
 	return client.WithStaticToken("http://x", "tok"), nil
 }
 
