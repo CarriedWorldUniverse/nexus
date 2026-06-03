@@ -43,6 +43,8 @@ Design corpus. Every meaningful design decision lives as a dated spec in `docs/2
 - [Storage abstraction spec](../2026-05-05-storage-abstraction-spec.md)
 - [Storage abstraction review (plumb)](../2026-05-05-storage-abstraction-spec-review-plumb.md)
 - [Files subsystem spec](../2026-05-04-files-subsystem-spec.md)
+- [Credential custodian design](../2026-06-04-credential-custodian-design.md) — AI-usable password, 2FA, and third-party credential custody
+- [Nexus token custodian design](../2026-06-03-nexus-token-custodian-design.md) — per-aspect Herald/CWB token custody
 - [AWS bootstrap spec](../2026-05-01-aws-bootstrap-spec.md) — production deployment
 
 ## Skills + identity
