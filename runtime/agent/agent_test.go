@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +14,10 @@ import (
 
 	"github.com/coder/websocket"
 
+	casket "github.com/CarriedWorldUniverse/casket-go"
+	"github.com/CarriedWorldUniverse/cwb-client/identity"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/CarriedWorldUniverse/nexus/runtime/heraldkeyfile"
 	"github.com/CarriedWorldUniverse/nexus/runtime/providers"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
@@ -63,6 +67,8 @@ type fakeNexus struct {
 	inboundCh   chan frames.Envelope // non-register/deregister frames land here
 	registers   atomic.Int32
 	deregisters atomic.Int32
+
+	lastAssertion atomic.Value // string
 }
 
 func newFakeNexus(t *testing.T, token string) *fakeNexus {
@@ -72,6 +78,12 @@ func newFakeNexus(t *testing.T, token string) *fakeNexus {
 		inboundCh: make(chan frames.Envelope, 32),
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/herald/.well-known/openid-configuration" {
+			base := "http://" + r.Host
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token_endpoint":"` + base + `/herald/token","jwks_uri":"` + base + `/jwks"}`))
+			return
+		}
 		if r.URL.Path != "/connect" {
 			http.NotFound(w, r)
 			return
@@ -103,6 +115,9 @@ func newFakeNexus(t *testing.T, token string) *fakeNexus {
 
 func (f *fakeNexus) URL() string { return "ws" + strings.TrimPrefix(f.srv.URL, "http") + "/connect" }
 
+func (f *fakeNexus) BaseWS() string   { return "ws" + strings.TrimPrefix(f.srv.URL, "http") }
+func (f *fakeNexus) HTTPBase() string { return f.srv.URL }
+
 // serveLoop is the SOLE reader on its connection. Handles
 // register/deregister inline; everything else is forwarded to
 // inboundCh for test assertions.
@@ -120,6 +135,9 @@ func (f *fakeNexus) serveLoop(wsc *websocket.Conn) {
 		switch env.Kind {
 		case frames.KindRegister:
 			f.registers.Add(1)
+			var rp frames.RegisterPayload
+			_ = frames.PayloadAs(env, &rp)
+			f.lastAssertion.Store(rp.Assertion)
 			ack, _ := frames.NewResponse(frames.KindRegisterAck, env.ID, frames.RegisterAckPayload{
 				HeartbeatIntervalS: 15,
 				StaleAfterS:        30,
@@ -201,6 +219,62 @@ func newAgent(t *testing.T, nexusURL, token string, provider providers.Provider)
 		t.Fatalf("New: %v", err)
 	}
 	return a
+}
+
+func newAgentWithHerald(t *testing.T, nexusURL, token string, provider providers.Provider, kf *heraldkeyfile.Keyfile) *Agent {
+	t.Helper()
+	a, err := New(Config{
+		Home:          t.TempDir(),
+		Aspect:        schemas.AspectConfig{Name: "testaspect", ContextMode: schemas.ContextGlobal, Provider: "claude-api", Port: 0},
+		Provider:      provider,
+		UpstreamURL:   nexusURL,
+		AuthToken:     token,
+		HeraldKeyfile: kf,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return a
+}
+
+func TestSendRegisterAttachesAssertion(t *testing.T) {
+	nx := newFakeNexus(t, "tok")
+	priv, pub, _ := casket.DeriveAgentKey([]byte("0123456789abcdef0123456789abcdef"), "plumb")
+	kf := &heraldkeyfile.Keyfile{
+		Key:         base64.StdEncoding.EncodeToString(priv),
+		KeyID:       "agent-uuid-9",
+		URL:         nx.BaseWS(),
+		Slug:        "plumb",
+		Fingerprint: identity.Fingerprint(pub),
+	}
+	a := newAgentWithHerald(t, nx.URL(), "tok", &mockProvider{reply: "ok"}, kf)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Start(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && nx.registers.Load() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if nx.registers.Load() == 0 {
+		t.Fatal("agent never registered")
+	}
+	got, _ := nx.lastAssertion.Load().(string)
+	if got == "" {
+		t.Fatal("no assertion in register frame")
+	}
+	claims, err := identity.DecodeAccessClaims(got)
+	if err != nil {
+		t.Fatalf("decode assertion: %v", err)
+	}
+	if claims["sub"] != "agent-uuid-9" {
+		t.Errorf("sub = %v, want agent-uuid-9", claims["sub"])
+	}
+	if aud, _ := claims["aud"].(string); aud != nx.HTTPBase()+"/herald/token" {
+		t.Errorf("aud = %v, want %s/herald/token", claims["aud"], nx.HTTPBase())
+	}
 }
 
 func TestNewRequiresFields(t *testing.T) {
@@ -326,5 +400,22 @@ func TestFailLoudOnExplicitOutpostUnreachable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "initial connect failed") && !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("err = %v, want initial-connect failure", err)
+	}
+}
+
+func TestHTTPEdge(t *testing.T) {
+	cases := map[string]string{
+		"ws://host:8080":            "http://host:8080",
+		"wss://host":                "https://host",
+		"http://host":               "http://host",
+		"https://host:9":            "https://host:9",
+		"WSS://Host":                "https://Host",
+		"ws://host:8080/connect":    "http://host:8080",
+		"https://host/herald/x?y=1": "https://host",
+	}
+	for in, want := range cases {
+		if got := httpEdge(in); got != want {
+			t.Errorf("httpEdge(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
