@@ -170,7 +170,7 @@ function NetworkDefaultsPanel({ providerCreds }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [nd, setNd] = useState({
-    judge_model: '', judge_credential: '',
+    judge_model: '', judge_credential: '', judge_provider: '',
     compact_model: '', compact_credential: '',
   });
   // Per-field save status — 'idle' | 'saving' | 'saved' | 'error'.
@@ -186,6 +186,7 @@ function NetworkDefaultsPanel({ providerCreds }) {
       setNd({
         judge_model: (fresh && fresh.judge_model) || '',
         judge_credential: (fresh && fresh.judge_credential) || '',
+        judge_provider: (fresh && fresh.judge_provider) || '',
         compact_model: (fresh && fresh.compact_model) || '',
         compact_credential: (fresh && fresh.compact_credential) || '',
       });
@@ -205,6 +206,7 @@ function NetworkDefaultsPanel({ providerCreds }) {
       setNd({
         judge_model: (fresh && fresh.judge_model) || '',
         judge_credential: (fresh && fresh.judge_credential) || '',
+        judge_provider: (fresh && fresh.judge_provider) || '',
         compact_model: (fresh && fresh.compact_model) || '',
         compact_credential: (fresh && fresh.compact_credential) || '',
       });
@@ -236,10 +238,28 @@ function NetworkDefaultsPanel({ providerCreds }) {
       ${error && html`<div class="settings-error">${error}</div>`}
 
       <div class="settings-kind-row">
+        <div class="settings-defaults-label">Judge provider:</div>
+        <select
+          class="settings-select"
+          value=${nd.judge_provider}
+          onChange=${(e) => save('judge_provider', e.target.value)}
+        >
+          <option value="">(none — per-aspect / keyfile filter_provider)</option>
+          <option value="claude-api">claude-api (native Anthropic SDK / DeepSeek anthropic-shape)</option>
+          <option value="claude-code">claude-code (CLI subprocess)</option>
+          <option value="openai">openai (OpenAI-shape / DeepSeek /v1)</option>
+        </select>
+        <span class="settings-defaults-status">
+          ${status.judge_provider === 'saving' ? '…' :
+            status.judge_provider === 'saved' ? '✓' :
+            status.judge_provider === 'error' ? '✗' : ''}
+        </span>
+      </div>
+      <div class="settings-kind-row">
         <div class="settings-defaults-label">Judge model:</div>
         <${CommittedField}
           initial=${nd.judge_model}
-          placeholder="e.g. deepseek-chat or haiku"
+          placeholder="e.g. deepseek-v4-flash or haiku"
           status=${status.judge_model}
           onCommit=${(v) => save('judge_model', v)}
         />

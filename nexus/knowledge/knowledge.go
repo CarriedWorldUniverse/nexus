@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode"
 )
 
 // Store is the knowledge store handle. Safe for concurrent use — all
@@ -96,6 +97,14 @@ func (s *Store) Put(ctx context.Context, fromAgent, topic, content string, opts 
 	if err != nil {
 		return 0, fmt.Errorf("knowledge.Put: %w", err)
 	}
+	// Telemetry (Commonplace): one event per write so we can finally answer
+	// "is the store being used, by whom, and how much" — grep/aggregate the
+	// `knowledge.put` events. Was a long-standing §2.8 TODO.
+	if s.log != nil {
+		s.log.Info("knowledge.put",
+			"from_agent", fromAgent, "topic", topic,
+			"shared", shared == 1, "bytes", len(content))
+	}
 	return id, nil
 }
 
@@ -154,6 +163,16 @@ type Query struct {
 	Text  string
 	Scope Scope
 	TopK  int // default 5 if zero
+
+	// Keyword selects keyword (OR-of-terms) matching instead of the
+	// default whole-text phrase match. Phrase match is right for a focused
+	// query (the search_knowledge tool: "deploy runbook"); keyword match is
+	// right when the query is a whole message (auto-recall passes the
+	// incoming turn text) — a phrase of an entire sentence matches almost
+	// nothing. With Keyword set, the text is tokenized into an OR of quoted
+	// terms (stopwords + sub-3-char tokens dropped); no usable terms → no
+	// hits. Each term is still quote-escaped, so this stays injection-safe.
+	Keyword bool
 
 	// MaxRank is the FTS5 BM25 rank cutoff. Hits with rank >= MaxRank
 	// are rejected. BM25 ranks are negative for matches; closer to
@@ -233,7 +252,17 @@ func (s *Store) Search(ctx context.Context, q Query) ([]Hit, error) {
 	// syntax-error footgun (stray `"` or `-` returns SQLITE_ERROR
 	// rather than zero hits). Quoting the whole input as a phrase
 	// neutralizes operators and makes syntax errors impossible.
-	args := []any{sanitizeFTSQuery(q.Text)}
+	ftsExpr := sanitizeFTSQuery(q.Text)
+	if q.Keyword {
+		or := sanitizeFTSQueryOR(q.Text)
+		if or == "" {
+			// All stopwords / too-short tokens — nothing usable to match.
+			// Empty result is the right answer (and fail-open for auto-recall).
+			return nil, nil
+		}
+		ftsExpr = or
+	}
+	args := []any{ftsExpr}
 	args = append(args, scopeArgs...)
 
 	if q.MaxRank != 0 {
@@ -270,6 +299,19 @@ func (s *Store) Search(ctx context.Context, q Query) ([]Hit, error) {
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("knowledge.Search: rows: %w", err)
 	}
+	// Telemetry (Commonplace): one event per search — answers "is recall
+	// happening, and is it finding anything." topScore is the best (lowest)
+	// BM25 rank; 0 when there were no hits. Was a long-standing §2.8 TODO.
+	if s.log != nil {
+		var topScore float64
+		if len(hits) > 0 {
+			topScore = hits[0].Score // ORDER BY rank → first is strongest
+		}
+		s.log.Info("knowledge.search",
+			"agent", q.Scope.Agent, "query_len", len(q.Text),
+			"own", q.Scope.OwnAgent, "shared", q.Scope.Shared, "peers", len(q.Scope.Peers),
+			"hits", len(hits), "top_score", topScore)
+	}
 	return hits, nil
 }
 
@@ -292,6 +334,52 @@ func sanitizeFTSQuery(text string) string {
 	// Doubling " is FTS5's escape for a literal double-quote inside a
 	// phrase. Wrap the whole thing in quotes to force phrase parsing.
 	return `"` + strings.ReplaceAll(text, `"`, `""`) + `"`
+}
+
+// ftsStopwords are dropped from keyword (OR) queries — common words that
+// add query cost + noise without narrowing. Small + English; BM25 already
+// downweights frequent terms, so this just trims the worst offenders so a
+// whole-message recall query doesn't OR together "how/the/do/I/...".
+var ftsStopwords = map[string]bool{
+	"the": true, "a": true, "an": true, "and": true, "or": true, "of": true,
+	"to": true, "in": true, "on": true, "for": true, "is": true, "are": true,
+	"was": true, "be": true, "do": true, "does": true, "did": true, "how": true,
+	"what": true, "why": true, "when": true, "where": true, "who": true,
+	"can": true, "could": true, "should": true, "would": true, "with": true,
+	"my": true, "me": true, "i": true, "you": true, "it": true, "this": true,
+	"that": true, "we": true, "at": true, "by": true, "as": true, "from": true,
+	"about": true, "into": true, "out": true, "up": true, "if": true, "so": true,
+}
+
+// maxKeywordTerms bounds the OR query size so a huge pasted message can't
+// build an enormous FTS expression.
+const maxKeywordTerms = 12
+
+// sanitizeFTSQueryOR tokenizes free text into an OR of quoted single-term
+// phrases for keyword retrieval. Used by auto-recall, which passes a whole
+// turn message rather than a focused phrase — ORing the salient terms lets
+// BM25 surface entries that share vocabulary with the message. Tokens are
+// lowercased, split on non-alphanumeric runes, de-duplicated, with
+// stopwords + sub-3-char tokens dropped and the count capped. Each term is
+// quote-escaped, so the result is always a valid, injection-safe FTS5
+// query. Returns "" when nothing usable remains.
+func sanitizeFTSQueryOR(text string) string {
+	fields := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	})
+	seen := make(map[string]bool, len(fields))
+	terms := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if len(f) < 3 || ftsStopwords[f] || seen[f] {
+			continue
+		}
+		seen[f] = true
+		terms = append(terms, `"`+strings.ReplaceAll(f, `"`, `""`)+`"`)
+		if len(terms) >= maxKeywordTerms {
+			break
+		}
+	}
+	return strings.Join(terms, " OR ")
 }
 
 // List returns entries from a single agent (convenience for dashboard

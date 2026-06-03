@@ -15,6 +15,7 @@ package wsasp
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -46,6 +47,11 @@ type Config struct {
 	// cause permanent reconnect failures.
 	TokenProvider func(ctx context.Context) (string, error)
 
+	// TLSConfig, when non-nil, is passed to the underlying wsclient for
+	// the wss:// dial — trusts a pinned self-signed broker cert (NEX-367)
+	// without system-wide trust. Nil = default system trust store.
+	TLSConfig *tls.Config
+
 	// AspectName is the registered aspect id.
 	AspectName string
 
@@ -59,6 +65,16 @@ type Config struct {
 	// Replay flag is propagated for callers that want to surface
 	// staleness; live frames have replay=false.
 	OnDeliver func(msg DeliveredMessage)
+
+	// OnEscalationRequest is called when the broker pushes an
+	// escalation.request frame (a native-API aspect's funnel asking a
+	// human to approve/deny a tool call). OPTIONAL: nil means the frame
+	// is ignored (the common case — only operator-facing clients such
+	// as agora wire this to render an approval modal). requestID is the
+	// request envelope's correlation id (env.ID, set by NewRequest); the
+	// caller echoes it back when sending the escalation.decision so the
+	// blocked aspect's Request resolves against the right pending call.
+	OnEscalationRequest func(payload frames.EscalationRequestPayload, requestID string)
 
 	// Register is the full schemas.RegisterRequest the wrapper sends
 	// at handshake. The aspect binary populates this before calling
@@ -141,6 +157,7 @@ func NewClient(cfg Config) (*Client, error) {
 		URL:           cfg.URL,
 		AuthToken:     cfg.AuthToken,
 		TokenProvider: cfg.TokenProvider,
+		TLSConfig:     cfg.TLSConfig,
 		Handler:       wsclient.HandlerFunc(c.handleFrame),
 	})
 	if err != nil {
@@ -315,10 +332,12 @@ func (c *Client) handleFrame(env frames.Envelope) {
 	switch env.Kind {
 	case frames.KindChatDeliver:
 		c.onChatDeliver(env)
+	case frames.KindEscalationRequest:
+		c.onEscalationRequest(env)
 	}
 	// Unhandled kinds (turn requests, dispatch, etc.) flow through
-	// the wsclient to its Request/correlation path; chat.deliver is
-	// the only push-to-aspect frame we own here.
+	// the wsclient to its Request/correlation path; chat.deliver and
+	// escalation.request are the push-to-aspect frames we own here.
 }
 
 // onChatDeliver decodes the chat.deliver frame and forwards it to
@@ -350,6 +369,29 @@ func (c *Client) onChatDeliver(env frames.Envelope) {
 
 	c.advanceCursor(msg.ID)
 	c.cfg.OnDeliver(msg)
+}
+
+// onEscalationRequest decodes a broker-pushed escalation.request frame
+// and forwards it to the configured OnEscalationRequest callback.
+// Mirrors onChatDeliver's structure, with two differences: the
+// callback is OPTIONAL (nil → ignore the frame; most aspects aren't
+// operators), and there's no cursor advance — escalation.request is a
+// correlated Request, not a chat row, so it isn't part of the Lock 6
+// since_msg_id replay stream. The request id (env.ID) is passed through
+// so the operator's decision can be correlated back to the blocked
+// aspect's pending Request. Decode errors are logged and dropped rather
+// than crashing the read goroutine.
+func (c *Client) onEscalationRequest(env frames.Envelope) {
+	if c.cfg.OnEscalationRequest == nil {
+		return
+	}
+	var p frames.EscalationRequestPayload
+	if err := frames.PayloadAs(env, &p); err != nil {
+		c.log.Warn("wsasp: escalation.request decode failed; dropping frame",
+			"aspect", c.cfg.AspectName, "request_id", env.ID, "err", err)
+		return
+	}
+	c.cfg.OnEscalationRequest(p, env.ID)
 }
 
 // advanceCursor updates the highest-processed cursor and persists

@@ -96,6 +96,7 @@ func (c *wsConn) handleAspectKnowledgeSearch(env frames.Envelope) {
 		},
 		TopK:    topK,
 		MaxRank: p.MaxRank,
+		Keyword: p.Keyword,
 	}
 	ctx, cancel := c.opCtx()
 	defer cancel()

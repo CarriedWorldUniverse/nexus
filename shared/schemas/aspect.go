@@ -116,6 +116,14 @@ type AspectConfig struct {
 	// process-env keys), matching legacy behaviour.
 	CompactCredential string `json:"compact_credential,omitempty"`
 
+	// AutoRecall configures turn-time recall from the Commonplace (the
+	// cross-session knowledge store). When enabled, each turn searches the
+	// store with the incoming message and injects the strongest matches into
+	// the system prompt so the aspect reuses prior knowledge instead of
+	// re-deriving it (the Day-3 cost/output lever). nil / disabled = off, no
+	// behaviour change. Fail-open + bounded; see funnel.AutoRecallConfig.
+	AutoRecall *AutoRecall `json:"auto_recall,omitempty"`
+
 	// PrimarySurface selects which runtime binary the aspect runs as.
 	// "funnel" (default/empty) → agentfunnel.exe; "agora" → agora.exe.
 	// Autospawn uses this to pick the correct binary. Self-switch
@@ -146,6 +154,23 @@ type AspectConfig struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
+// AutoRecall is the aspect.json shape for turn-time Commonplace recall.
+// Maps to funnel.AutoRecallConfig (the Gateway is supplied by the runtime,
+// not the operator). Zero value with Enabled=false is off.
+type AutoRecall struct {
+	// Enabled turns turn-time recall on for this aspect. Off by default.
+	Enabled bool `json:"enabled"`
+	// TopK bounds how many of the strongest matches are considered
+	// (0 = runtime default).
+	TopK int `json:"top_k,omitempty"`
+	// MaxRank is a BM25 relevance gate: only hits with score < max_rank are
+	// injected (ranks are negative; lower = stronger). 0 = no gate.
+	MaxRank float64 `json:"max_rank,omitempty"`
+	// MaxChars is a soft per-entry content budget for the injected block
+	// (0 = runtime default).
+	MaxChars int `json:"max_chars,omitempty"`
+}
+
 // MainTurnSampling carries per-aspect overrides for the standard
 // provider sampling + output knobs on the main deliberation turn
 // (NEX-300 main-turn slice). All fields are optional; nil pointers
@@ -164,12 +189,12 @@ type AspectConfig struct {
 // specific fields (TopK = claude-only, Seed = openai-only) are
 // silently ignored by providers that don't honour them.
 type MainTurnSampling struct {
-	Temperature      *float64 `json:"temperature,omitempty"`
-	TopP             *float64 `json:"top_p,omitempty"`
-	TopK             *int     `json:"top_k,omitempty"`
-	Seed             *int     `json:"seed,omitempty"`
-	MaxOutputTokens  int      `json:"max_output_tokens,omitempty"`
-	StopSequences    []string `json:"stop_sequences,omitempty"`
+	Temperature     *float64 `json:"temperature,omitempty"`
+	TopP            *float64 `json:"top_p,omitempty"`
+	TopK            *int     `json:"top_k,omitempty"`
+	Seed            *int     `json:"seed,omitempty"`
+	MaxOutputTokens int      `json:"max_output_tokens,omitempty"`
+	StopSequences   []string `json:"stop_sequences,omitempty"`
 }
 
 // RewriterConfig controls the per-turn jsonl rewriter. All fields are

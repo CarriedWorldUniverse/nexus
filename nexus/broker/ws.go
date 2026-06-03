@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/CarriedWorldUniverse/cwb-client/client"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
@@ -70,6 +71,12 @@ type wsConn struct {
 	// When it reaches Config.MaxConsecutiveBadFrames the connection
 	// is closed (#34). Single-reader (the serve loop) so no lock.
 	badFrameCount int
+
+	// heraldSubject/heraldClient are set when the register frame carried a
+	// casket assertion the custodian redeemed (bootstrap step 3a). Empty/nil
+	// otherwise. heraldClient calls CWB pillars AS this aspect.
+	heraldSubject string
+	heraldClient  *client.Client
 }
 
 // Maximum size of a single frame's JSON payload. Generous but
@@ -264,15 +271,26 @@ func (b *Broker) tryVerifyOperatorJWT(token string) (TokenInfo, bool) {
 // Failures are silent; the WS handler treats this as a TokenStore
 // miss and returns 401, same as any other unrecognized bearer.
 func (b *Broker) tryVerifyAspectJWT(token string) (TokenInfo, bool) {
+	// NEX-367 follow-up: aspect session JWTs are signed by the keyfile
+	// validator with the broker's session secret — independent of the
+	// operator dashboard. Verify against the broker-level secret (always
+	// set on a real boot) so aspect /connect works on a headless /
+	// aspect-only broker that has no OperatorLogin (the latter is gated
+	// behind NEXUS_OPERATOR_RPID). Fall back to OperatorLogin's secret for
+	// back-compat with callers/tests that only wire it there.
 	ol := b.cfg.OperatorLogin
-	if ol == nil || len(ol.SessionSigningSecret) == 0 {
+	secret := b.cfg.SessionSigningSecret
+	if len(secret) == 0 && ol != nil {
+		secret = ol.SessionSigningSecret
+	}
+	if len(secret) == 0 {
 		return TokenInfo{}, false
 	}
 	now := time.Now()
-	if ol.Now != nil {
+	if ol != nil && ol.Now != nil {
 		now = ol.Now()
 	}
-	claims, err := jwt.Verify(ol.SessionSigningSecret, token, now)
+	claims, err := jwt.Verify(secret, token, now)
 	if err != nil {
 		return TokenInfo{}, false
 	}
@@ -460,6 +478,15 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleAspectModelConfigGet(env)
 	case frames.KindSwitchSurface:
 		c.handleSwitchSurfaceFrame(env)
+	case frames.KindEscalationRequest:
+		// P3c: a native-API aspect's funnel paused a tool call and is
+		// asking a human. Relay to operators (identity-checked); the
+		// aspect's own Request holds the pending channel.
+		c.handleEscalationRequestFrame(env)
+	case frames.KindCWBRequest:
+		// Relays an outbound CWB call; run in a goroutine to avoid stalling the
+		// per-connection read loop on a slow pillar (same pattern as dispatch/turn).
+		go c.handleCWBRequest(env)
 	default:
 		c.log.Info("frame kind not yet handled", "kind", env.Kind)
 	}
@@ -954,6 +981,28 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 		}
 	}
 
+	// Bootstrap step 3a: if the aspect presented a casket assertion and herald-
+	// auth is enabled, redeem it and bind the herald identity + per-aspect CWB
+	// client to this connection. Done BEFORE the roster bind so a failed
+	// assertion leaves no roster/dispatcher state (registeredAs stays empty, so
+	// cleanup() does not deregister). Additive: absent assertion / no custodian
+	// = unchanged. A present-but-failing assertion fails the register (surfaced).
+	if payload.Assertion != "" && c.broker.custodian != nil {
+		subject, err := c.broker.custodian.Redeem(c.broker.ctx, payload.Assertion)
+		if err != nil {
+			c.respondError(env, "herald assertion redemption failed: "+err.Error())
+			return
+		}
+		cl, err := c.broker.custodian.Client(subject)
+		if err != nil {
+			c.broker.custodian.Forget(subject) // don't leak the just-redeemed token
+			c.respondError(env, "custodian client: "+err.Error())
+			return
+		}
+		c.heraldSubject = subject
+		c.heraldClient = cl
+	}
+
 	state, displacedSession, err := c.broker.roster.Register(&payload.RegisterRequest)
 	if err != nil {
 		switch {
@@ -1004,6 +1053,7 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 	ack, _ := frames.NewResponse(frames.KindRegisterAck, env.ID, frames.RegisterAckPayload{
 		HeartbeatIntervalS: c.broker.cfg.HeartbeatIntervalS,
 		StaleAfterS:        int(c.broker.cfg.StaleAfter.Seconds()),
+		HeraldSubject:      c.heraldSubject,
 	})
 	c.send(ack)
 
@@ -1185,6 +1235,13 @@ func (c *wsConn) cleanup() {
 			Status: "down",
 			Reason: "disconnect",
 		})
+	}
+	// Bootstrap step 3a: drop any custodied herald token for this
+	// connection so the custodian doesn't leak per-aspect tokens
+	// across disconnect churn.
+	if c.heraldSubject != "" && c.broker.custodian != nil {
+		c.broker.custodian.Forget(c.heraldSubject)
+		c.heraldSubject = ""
 	}
 	_ = c.conn.Close(websocket.StatusNormalClosure, "connection ended")
 	// Release the connection-cap slots reserved at handleConnect.

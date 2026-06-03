@@ -209,6 +209,96 @@ func TestFunnel_FilterDecisionSurfacedInResult(t *testing.T) {
 	}
 }
 
+// stubThreadReader is a function-typed ThreadReader for tests.
+type stubThreadReader func(ctx context.Context, threadID int64) ([]ChatMessage, error)
+
+func (s stubThreadReader) ReadThreadTail(ctx context.Context, threadID int64) ([]ChatMessage, error) {
+	return s(ctx, threadID)
+}
+
+// The @all loop fix, funnel side: when a ThreadReader is configured and the
+// triggering message has a ThreadRoot, judgeTurn loads the thread tail and
+// hands it to the filter as FilterInput.ThreadTail (rendered "from: content"),
+// so the judge can match churn intent. Verifies the wiring end-to-end through
+// Deliberate without mocking the judge model.
+func TestFunnel_ThreadTailDeliveredToFilter(t *testing.T) {
+	var gotTail []string
+	capture := stubFilter(func(in FilterInput) FilterDecision {
+		gotTail = in.ThreadTail
+		return FilterDecision{ShouldPost: true}
+	})
+	reader := stubThreadReader(func(_ context.Context, threadID int64) ([]ChatMessage, error) {
+		if threadID != 42 {
+			t.Errorf("ThreadReader got threadID=%d, want 42 (the trigger's ThreadRoot)", threadID)
+		}
+		return []ChatMessage{
+			{ID: 40, From: "anvil", Content: "we're live on Fedora! 🎉"},
+			{ID: 41, From: "forge", Content: "incredible, great job team!"},
+		}, nil
+	})
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{FinalText: "amazing, congrats all! 🎉", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
+	}}
+	f, err := New(Config{
+		AspectID:     "maren",
+		Harness:      bridle.NewHarness(prov),
+		Provider:     "scripted",
+		Model:        "m",
+		Runner:       noopRunner{},
+		Filter:       capture,
+		ThreadReader: reader,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{MsgID: 41, From: "forge", Content: "incredible, great job team!", ThreadRoot: 42})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotTail) != 2 {
+		t.Fatalf("filter got %d thread-tail lines, want 2: %v", len(gotTail), gotTail)
+	}
+	if gotTail[0] != "anvil: we're live on Fedora! 🎉" {
+		t.Errorf("thread-tail line 0 = %q, want \"anvil: we're live on Fedora! 🎉\"", gotTail[0])
+	}
+	if gotTail[1] != "forge: incredible, great job team!" {
+		t.Errorf("thread-tail line 1 = %q", gotTail[1])
+	}
+}
+
+// No ThreadReader configured (or a top-level msg with ThreadRoot==0) → the
+// filter sees an empty ThreadTail and the judge prompt omits the section.
+// Confirms the feature is opt-in and never blocks a turn.
+func TestFunnel_NoThreadReader_EmptyTail(t *testing.T) {
+	var gotTail []string
+	capture := stubFilter(func(in FilterInput) FilterDecision {
+		gotTail = in.ThreadTail
+		return FilterDecision{ShouldPost: true}
+	})
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{FinalText: "reply", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
+	}}
+	f, err := New(Config{
+		AspectID: "maren",
+		Harness:  bridle.NewHarness(prov),
+		Provider: "scripted",
+		Model:    "m",
+		Runner:   noopRunner{},
+		Filter:   capture,
+		// ThreadReader intentionally unset
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{MsgID: 41, From: "forge", Content: "hi", ThreadRoot: 42})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotTail) != 0 {
+		t.Errorf("no ThreadReader configured → tail should be empty; got %v", gotTail)
+	}
+}
+
 func TestFunnel_DefaultFilterIsAlwaysPost(t *testing.T) {
 	prov := &scriptedProvider{results: []bridle.ProviderResult{
 		{FinalText: "reply", Usage: bridle.Usage{InputTokens: 1, OutputTokens: 1}},
@@ -485,6 +575,76 @@ func TestBuildJudgeUserMessage_IncludesPartialMarker(t *testing.T) {
 	})
 	if !strings.Contains(msg, "PARTIAL:") {
 		t.Errorf("expected PARTIAL marker when Partial=true; got:\n%s", msg)
+	}
+}
+
+// Loop-suppression (the @all broadcast-storm fix): the judge sees the
+// recent thread tail so it can match INTENT — "this thread is a low-signal
+// acknowledgement loop" — rather than judging each reply in isolation where
+// a varied-but-empty "amazing, congrats! 🎉" reads as substantive. Post-hoc
+// suppression of the echo starves the fan-out (no post → no re-trigger).
+func TestBuildJudgeUserMessage_IncludesThreadTail(t *testing.T) {
+	msg := buildJudgeUserMessage(FilterInput{
+		AspectID:  "maren",
+		FinalText: "Amazing work everyone! 🎉",
+		ThreadTail: []string{
+			"anvil: we're live on Fedora! 🎉",
+			"forge: incredible, great job team!",
+			"verity: congrats all, huge milestone!",
+		},
+	})
+	if !strings.Contains(msg, "RECENT THREAD") {
+		t.Errorf("judge prompt missing RECENT THREAD header; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "forge: incredible") {
+		t.Errorf("judge prompt missing thread-tail body; got:\n%s", msg)
+	}
+}
+
+// The thread tail is bounded — keep only the last loopTailMaxLines entries
+// and cap each line — so a 200-message thread can't blow the judge prompt.
+func TestBuildJudgeUserMessage_BoundsThreadTail(t *testing.T) {
+	tail := make([]string, 40)
+	for i := range tail {
+		tail[i] = "aspect: a celebratory line that says nothing new"
+	}
+	tail = append(tail, "anvil: "+strings.Repeat("z", 5000))
+	msg := buildJudgeUserMessage(FilterInput{
+		AspectID:   "maren",
+		FinalText:  "x",
+		ThreadTail: tail,
+	})
+	// Only the last loopTailMaxLines kept.
+	if got := strings.Count(msg, "celebratory line"); got > loopTailMaxLines {
+		t.Errorf("thread tail not bounded to %d lines; counted %d:\n%s", loopTailMaxLines, got, msg)
+	}
+	// Over-long line truncated.
+	if !strings.Contains(msg, "…") {
+		t.Errorf("expected per-line truncation ellipsis on a 5k line; got:\n%s", msg)
+	}
+}
+
+// RECENT THREAD section omits entirely when ThreadTail is empty so the
+// common single-reply turn isn't burdened with the marker.
+func TestBuildJudgeUserMessage_OmitsThreadTailWhenAbsent(t *testing.T) {
+	msg := buildJudgeUserMessage(FilterInput{
+		AspectID:  "shadow",
+		FinalText: "hello",
+	})
+	if strings.Contains(msg, "RECENT THREAD") {
+		t.Errorf("RECENT THREAD leaked when ThreadTail empty; got:\n%s", msg)
+	}
+}
+
+// The judge prompt itself must carry the loop-suppression criterion, so a
+// judge configured with filterJudgePrompt knows to classify acknowledgement
+// churn as scratch even when the individual reply reads as substantive.
+func TestFilterJudgePrompt_CarriesLoopSuppressionClause(t *testing.T) {
+	low := strings.ToLower(filterJudgePrompt)
+	for _, want := range []string{"loop", "acknowledg", "scratch"} {
+		if !strings.Contains(low, want) {
+			t.Errorf("filterJudgePrompt missing loop-suppression vocabulary %q; the judge can't match the churn intent without it", want)
+		}
 	}
 }
 

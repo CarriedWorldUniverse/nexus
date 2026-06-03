@@ -26,6 +26,7 @@ import (
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
+	"github.com/CarriedWorldUniverse/nexus/nexus/cwb/custodian"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
@@ -81,6 +82,10 @@ type Config struct {
 	HeartbeatIntervalS int           // value returned to aspects on register
 	StaleAfter         time.Duration // aspect becomes "stale" after this gap
 	Logger             *slog.Logger
+
+	// HeraldEdge, when set (NEXUS_CWB_EDGE), enables herald-auth on register:
+	// an aspect's assertion is redeemed via the custodian. Empty = disabled.
+	HeraldEdge string
 
 	// Projection receives session.entry.appended frames from aspects.
 	// Optional — if nil, the broker logs and drops session-projection
@@ -246,6 +251,15 @@ type Config struct {
 	// nil → endpoints not registered (legacy boot, no dashboard SPA).
 	OperatorLogin *OperatorLogin
 
+	// SessionSigningSecret is the HMAC secret the keyfile validator signs
+	// aspect session JWTs with, and the WS /connect handler verifies them
+	// against (NEX-367 follow-up). It MUST be the same secret the
+	// KeyfileValidator uses. Kept here — not only inside OperatorLogin —
+	// so aspect /connect works on a headless / aspect-only broker that has
+	// no operator dashboard (OperatorLogin nil). Empty → aspect-JWT verify
+	// falls back to OperatorLogin.SessionSigningSecret for back-compat.
+	SessionSigningSecret []byte
+
 	// KnowledgeStore powers operator-facing knowledge frames
 	// (knowledge.list / knowledge.search / knowledge.store) on the WS
 	// surface. nil → those frames return an "<kind>.error"
@@ -376,6 +390,10 @@ type Broker struct {
 	// (1 per aspect per 60s) and reject the spammy case.
 	sessionRefreshMu     sync.Mutex
 	lastSessionRefreshAt map[string]time.Time
+
+	// custodian redeems casket assertions presented on register
+	// (bootstrap step 3a). nil unless HeraldEdge is configured.
+	custodian Custodian
 }
 
 func New(cfg Config, r *roster.Roster) *Broker {
@@ -427,6 +445,9 @@ func New(cfg Config, r *roster.Roster) *Broker {
 		b.observability.SetOnFrame(b.BroadcastObserveFrame)
 	} else {
 		b.observability = observability.NewHub(500, b.BroadcastObserveFrame)
+	}
+	if cfg.HeraldEdge != "" {
+		b.custodian = custodian.New(cfg.HeraldEdge)
 	}
 	return b
 }

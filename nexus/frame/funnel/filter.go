@@ -32,6 +32,37 @@ import (
 	"github.com/CarriedWorldUniverse/bridle"
 )
 
+// ExpandBareClaudeTier maps a bare Claude tier ("haiku"/"sonnet"/"opus")
+// to a full Anthropic model id for the NATIVE claude-api path. claude-code
+// is left untouched — its CLI accepts (and expects) the bare shorthand.
+// Non-tier strings and non-Claude providers pass through unchanged.
+//
+// NEX-369: a bare "haiku" is not a valid Anthropic SDK model id, so a
+// native cheap-judge configured with it 404s → degrades + fails open
+// (stops filtering). Both the Frame and agentfunnel default the Claude
+// judge to "haiku", so both route through here. (Shared so the two
+// runtimes can't drift — a step toward the NEX-365 unification.)
+func ExpandBareClaudeTier(model string, providerID bridle.ProviderID) string {
+	// Only the native Anthropic SDK path needs expansion. claude-code's CLI
+	// resolves the shorthand itself; non-Claude providers (openai/…) have no
+	// such tiers, so leave them untouched.
+	switch providerID {
+	case "claude-api", "claude":
+	default:
+		return model
+	}
+	switch model {
+	case "haiku":
+		return "claude-haiku-4-5-20251001"
+	case "sonnet":
+		return "claude-sonnet-4-6"
+	case "opus":
+		return "claude-opus-4-8"
+	default:
+		return model
+	}
+}
+
 // judgeVerdictSchema is the strict-JSON-schema enforced on cheap-
 // judge responses when EnforceJSONSchema is opted in (NEX-300 +
 // NEX-297 L2 finding). On providers that support OpenAI's structured
@@ -201,6 +232,24 @@ type FilterInput struct {
 	// through). CheapModelFilter mentions this in the user message so
 	// the cheap judge can apply the same lean.
 	Partial bool
+
+	// ThreadTail is the recent posts in the thread this reply lands in,
+	// oldest-first, each pre-formatted as "from: content". It exists so
+	// the judge can match INTENT across the thread rather than judging
+	// the candidate in isolation: a varied-but-content-free reply
+	// ("amazing, congrats! 🎉") reads as substantive on its own, but as
+	// the Nth entry in an acknowledgement loop it's churn the judge
+	// should suppress. Because the filter is post-hoc, a scratch verdict
+	// means no post → the other aspects never re-trigger → the @all /
+	// broadcast fan-out self-extinguishes. This is why the AI judge
+	// exists (intent, not text-match); Tier-1 damping only catches
+	// VERBATIM repeats and is blind to varied churn.
+	//
+	// Bounded by buildJudgeUserMessage (last loopTailMaxLines, each line
+	// capped) so a long thread can't blow the judge prompt. Empty for
+	// turns with no thread context (autonomous, or runtimes that don't
+	// plumb it yet — the agentfunnel path is a follow-up).
+	ThreadTail []string
 }
 
 // FilterDecision is the result of Judge.
@@ -464,6 +513,19 @@ CLASS DEFINITIONS:
 - Raw JSON / internal reasoning / classification format that leaked
 - Empty, whitespace-only, or near-empty
 - Tool-call trace or internal protocol output that escaped
+- LOOP CONTINUATION: when a RECENT THREAD section is provided and shows the
+  thread is a low-signal acknowledgement/agreement/celebration loop — the
+  recent posts are congratulations, "great work", "amazing", emoji reactions,
+  "confirmed, we're live" restated, or other content that adds no NEW
+  information, question, decision, or action — and the candidate is just
+  another such reply, classify it "scratch" EVEN IF the candidate reads as
+  substantive on its own. Judge the thread's intent, not the single line:
+  a varied wording of "nice job team!" is still loop churn. What BREAKS the
+  loop (and earns "complete"): genuinely new information, a real question, a
+  decision, a concrete next action, or a correction. When unsure whether a
+  reply adds something new versus echoes the loop, prefer "scratch" — the
+  echo re-triggers every other participant and a broadcast storm is far worse
+  than one suppressed pleasantry.
 Do NOT post to chat.
 
 "goal_not_met" — The candidate output IS substantive chat content, AND a Definition of Done was provided, AND the DoD is NOT yet satisfied. The agent made progress but is not finished. Post to chat (the reply is real) but flag for continuation.
@@ -486,6 +548,17 @@ Respond with ONLY the JSON object.`
 const (
 	maxJudgeTriggerLen   = 1200
 	maxJudgeCandidateLen = 4000
+)
+
+// loopTailMaxLines / loopTailMaxLineLen bound the RECENT THREAD section.
+// The judge only needs enough of the tail to recognise a churn pattern —
+// the last few posts are sufficient ("are these all content-free
+// acknowledgements?"). Cap line length so one pathological post can't
+// dominate the prompt; the loop signal lives in the SHAPE of the recent
+// exchange, not the full text of any single line.
+const (
+	loopTailMaxLines   = 8
+	loopTailMaxLineLen = 280
 )
 
 // buildJudgeUserMessage assembles the per-call user message for the cheap
@@ -535,6 +608,14 @@ func buildJudgeUserMessage(in FilterInput) string {
 		}
 		msg += "\n\nPRIOR TURN OUTPUT (the candidate below must show forward progress vs this; near-identical output is the blocked signal):\n" + prior
 	}
+	// Recent thread tail — lets the judge match churn INTENT across the
+	// thread rather than judging the candidate in isolation. Bounded to
+	// the last loopTailMaxLines, each line capped, so a long or
+	// pathological thread can't blow the prompt. See FilterInput.ThreadTail
+	// + the LOOP SUPPRESSION clause in filterJudgePrompt.
+	if tail := boundedThreadTail(in.ThreadTail); len(tail) > 0 {
+		msg += "\n\nRECENT THREAD (oldest first — judge whether this thread is a low-signal acknowledgement/agreement loop the candidate is merely continuing):\n" + strings.Join(tail, "\n")
+	}
 	// Surface tool usage so the judge can weight "thin text + real
 	// work via tools" as complete rather than scratch. Bounded list
 	// — 20 names is enough to convey the shape without bloating the
@@ -568,6 +649,32 @@ func buildJudgeUserMessage(in FilterInput) string {
 	// non-operator-triggered turn was failing open.
 	msg += "\n\nCANDIDATE OUTPUT (from @" + in.AspectID + "):\n" + candidate
 	return msg
+}
+
+// boundedThreadTail trims the thread tail to the last loopTailMaxLines
+// entries and caps each line at loopTailMaxLineLen. Blank/whitespace-only
+// lines are dropped. Returns nil when nothing survives so the caller can
+// omit the section entirely. Keeps the LAST lines (most recent) because
+// the churn signal is in how the thread is trending right now.
+func boundedThreadTail(tail []string) []string {
+	out := make([]string, 0, len(tail))
+	for _, line := range tail {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if len(line) > loopTailMaxLineLen {
+			line = line[:loopTailMaxLineLen] + "…"
+		}
+		out = append(out, line)
+	}
+	if len(out) > loopTailMaxLines {
+		out = out[len(out)-loopTailMaxLines:]
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // Judge runs the cheap-model judgment. The deadline is enforced by a

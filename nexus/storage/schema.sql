@@ -589,6 +589,7 @@ CREATE TABLE IF NOT EXISTS network_defaults (
   singleton            INTEGER PRIMARY KEY CHECK (singleton = 1),
   judge_model          TEXT,
   judge_credential     TEXT,
+  judge_provider       TEXT,
   compact_model        TEXT,
   compact_credential   TEXT,
   updated_at           TEXT NOT NULL DEFAULT (datetime('now'))

@@ -55,7 +55,9 @@ import (
 	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
 	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
 	openaiprovider "github.com/CarriedWorldUniverse/bridle/provider/openai"
+	toolrunner "github.com/CarriedWorldUniverse/bridle/toolrunner"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/judge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/rewriter"
 	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
 	"github.com/CarriedWorldUniverse/nexus/runtime/brokercreds"
@@ -70,6 +72,10 @@ func main() {
 	cursorDir := flag.String("cursor-dir", "", "directory for the Lock 6 message-cursor file (defaults to <cwd>/cursor)")
 	contextMode := flag.String("context-mode", string(schemas.ContextThread), "context mode: global, thread, or stateless (Nexus does not yet ship context_mode in the validation response)")
 	claudePath := flag.String("claude", "", "path to the claude-code CLI (optional; auto-detects /opt/homebrew/bin/claude, /usr/local/bin/claude, ~/.npm-global/bin/claude, then PATH; also honours CLAUDE_PATH env)")
+	policyPath := flag.String("policy", "", "path to a per-aspect tool permission policy JSON file (optional; empty = permissive default_allow). See funnel.ToolPolicy for the JSON shape.")
+	autoRecall := flag.Bool("auto-recall", false, "enable turn-time recall from the Commonplace (search the cross-session knowledge store with each incoming message and inject the strongest matches into the system prompt). Off by default.")
+	autoRecallTopK := flag.Int("auto-recall-topk", 0, "auto-recall: max strongest matches to inject (0 = funnel default)")
+	autoRecallMaxRank := flag.Float64("auto-recall-max-rank", 0, "auto-recall: BM25 relevance gate; only hits with score < this inject (ranks are negative, lower = stronger; 0 = no gate)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -101,8 +107,19 @@ func main() {
 	// timeout is a backstop so a hung process between calls (e.g.
 	// stuck in TLS handshake setup) eventually surfaces as a startup
 	// error rather than dangling forever.
+	// NEX-367: if the keyfile pins a self-signed broker cert, build a
+	// TLS config that trusts it (system roots + pinned cert) and use it
+	// for BOTH the validate handshake here AND the WS dial below. Nil =
+	// default system trust store (CA-signed certs just work).
+	brokerTLS, err := kf.BrokerTLSConfig()
+	if err != nil {
+		fail(log, "build broker TLS config from keyfile", err)
+	}
+	if brokerTLS != nil {
+		log.Info("agentfunnel: trusting pinned broker cert from keyfile (self-signed-capable)")
+	}
 	bootCtx, bootCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	client := keyfile.NewClient()
+	client := &keyfile.Client{HTTP: keyfile.HTTPClientWithTLS(brokerTLS)}
 	res, err := client.Validate(bootCtx, kf)
 	bootCancel()
 	if err != nil {
@@ -142,6 +159,25 @@ func main() {
 		fail(log, "materialise .mcp.json", err)
 	}
 
+	// NEX-332 phase 4: apply the provider-credential env the broker
+	// resolved from its store (keyless aspects). agentfunnel is a
+	// single-aspect process, so setting it on the process env is safe and
+	// makes the native-API providers (which read construction-time env)
+	// pick up the broker-held key with no further plumbing. Falls back to
+	// the existing process env when the broker delivered nothing (no
+	// default cred / mode=proxy / claude-code self-auth).
+	if len(res.ProviderEnv) > 0 {
+		applied := make([]string, 0, len(res.ProviderEnv))
+		for k, v := range res.ProviderEnv {
+			if err := os.Setenv(k, v); err != nil {
+				fail(log, "apply broker provider env", err)
+			}
+			applied = append(applied, k)
+		}
+		log.Info("agentfunnel: applied provider creds from broker store (keyless)",
+			"aspect", res.AspectName, "vars", applied)
+	}
+
 	// 3. Build provider + initial binding cache.
 	//
 	// The binding (provider+model+harness triple) lives behind an
@@ -157,11 +193,44 @@ func main() {
 	if err != nil {
 		fail(log, "build provider", err)
 	}
+
+	// Load the per-aspect tool permission policy once at startup (Tier A:
+	// local JSON file). Empty -policy preserves the historical permissive
+	// behaviour (DefaultAllow=true); a configured path that's missing or
+	// malformed fails fast rather than silently falling back to permissive.
+	// Threaded into every newBindingHarness call below so the P3b/P3c
+	// permission hook enforces it on native-API providers.
+	//
+	// Tier B (follow-on): store the per-aspect policy centrally in the
+	// Nexus and deliver it via keyfile.ValidationResult — mirroring the
+	// existing res.MCPProfile field (keyfile.go ValidationResult.MCPProfile,
+	// the NEX-169 resolved MCP-server blob). That removes the on-host file
+	// and makes the policy Nexus-authoritative like provider/model.
+	policy, err := loadToolPolicy(*policyPath)
+	if err != nil {
+		fail(log, "load tool policy", err)
+	}
+	log.Info("agentfunnel: tool policy loaded",
+		"source", policySource(*policyPath),
+		"default_allow", policy.DefaultAllow,
+		"denied_tools", deniedToolCount(policy),
+		"escalated_tools", len(policy.Escalate),
+		"bash_deny_patterns", len(policy.BashDeny),
+		"write_path_prefixes", len(policy.WritePathAllow))
+	// escalator (P3c) is built from the wsasp client (below) once it
+	// exists; declared here so the TokenProvider binding-refresh closure
+	// captures the variable. Until assigned it is nil, so an escalate
+	// verdict fail-safe-denies. The binding cache is re-stored with the
+	// escalator-equipped harness right after the client is constructed,
+	// before funnel.New consumes it.
+	var escalator *funnel.Escalator
 	bindingCache := &atomic.Pointer[funnel.Binding]{}
 	bindingCache.Store(&funnel.Binding{
 		Provider: bridle.ProviderID(res.Provider),
 		Model:    res.Model,
-		Harness:  bridle.NewHarness(provider),
+		// Native-API providers get the P3b permission hook registered on
+		// the Harness; claude-code is skipped (self-supplies tools).
+		Harness: newBindingHarness(provider, res.Provider, escalator, policy),
 	})
 
 	// 4. Compose funnel + wsasp client.
@@ -196,7 +265,8 @@ func main() {
 		if snap.JWT != "" && time.Until(snap.Expires) > 1*time.Minute {
 			return snap.JWT, nil
 		}
-		client := keyfile.NewClient()
+		// NEX-367: reuse the same pinned-cert trust on JWT refresh.
+		client := &keyfile.Client{HTTP: keyfile.HTTPClientWithTLS(brokerTLS)}
 		fresh, ferr := client.Validate(ctx, kf)
 		if ferr != nil {
 			log.Warn("agentfunnel: TokenProvider re-validate failed, using cached token",
@@ -228,7 +298,7 @@ func main() {
 				bindingCache.Store(&funnel.Binding{
 					Provider: bridle.ProviderID(fresh.Provider),
 					Model:    fresh.Model,
-					Harness:  bridle.NewHarness(newProv),
+					Harness:  newBindingHarness(newProv, fresh.Provider, escalator, policy),
 				})
 				log.Info("agentfunnel: binding refreshed via re-validate",
 					"provider", fresh.Provider, "model", fresh.Model)
@@ -242,6 +312,7 @@ func main() {
 		URL:           wsURL,
 		AuthToken:     res.SessionJWT, // initial JWT; TokenProvider refreshes it
 		TokenProvider: tokenProvider,
+		TLSConfig:     brokerTLS, // NEX-367: trust the pinned broker cert on the WS dial too
 		AspectName:    res.AspectName,
 		CursorFile:    cursorFile,
 		OnDeliver: func(msg wsasp.DeliveredMessage) {
@@ -265,15 +336,29 @@ func main() {
 		fail(log, "wsasp.NewClient", err)
 	}
 
+	// P3c: now that the wsasp client exists, build the operator-escalation
+	// requester for native providers and re-store the binding cache with
+	// an escalator-equipped harness. wsClient.Request blocks on the
+	// correlated escalation.decision (no timeout) — the broker relays the
+	// request to operators and routes the decision back. claude-code is
+	// skipped inside newBindingHarness (it self-supplies tools).
+	escalator = &funnel.Escalator{Requester: wsClient, AspectID: res.AspectName}
+	bindingCache.Store(&funnel.Binding{
+		Provider: bridle.ProviderID(res.Provider),
+		Model:    res.Model,
+		Harness:  newBindingHarness(provider, res.Provider, escalator, policy),
+	})
+
 	gateway := wsasp.NewGateway(wsClient)
 	// NEX-knowledge-fix (operator 2026-05-27): wire knowledge gateway
 	// over WS so remote aspects (harrow, anvil, plumb) can use the
 	// search_knowledge / store_knowledge tools. Pre-fix the Knowledge
 	// field was nil → CommsRunner returned "knowledge gateway not
 	// configured" on every call.
+	knowledgeGateway := wsasp.NewKnowledgeGateway(wsClient)
 	commsRunner := funnel.CommsRunner{
 		Gateway:   gateway,
-		Knowledge: wsasp.NewKnowledgeGateway(wsClient),
+		Knowledge: knowledgeGateway,
 		AspectID:  res.AspectName,
 	}
 
@@ -300,11 +385,24 @@ func main() {
 	// Filter still works via shell-env passthrough (PR #146) or
 	// subscription auth; we don't want a transient broker hiccup to
 	// take the aspect down entirely.
-	// NEX-293 + NEX-301: fetch judge AND compact admin overrides in one
-	// WS round-trip. judge values flow into buildAgentFunnelFilter;
-	// compact values flow into buildAgentFunnelRewriter below.
-	overrides := fetchAspectModelOverrides(wsClient, res.AspectName, log)
-	judgeModelOverride, judgeEnv := overrides.JudgeModel, overrides.JudgeEnv
+	// NEX-373: judge + compact config arrive in the VALIDATE response
+	// (res.Judge*/Compact*), resolved broker-side. Previously the aspect
+	// fetched them over WS here at startup — but that request raced
+	// wsClient.Run (which connects ~170 lines below) and silently timed out,
+	// dropping every judge/compact override (judges fell back to bare
+	// claude-code and failed open). Delivering them via validate, like
+	// provider_env, removes the race entirely.
+	judgeProviderOverride := res.JudgeProvider
+	judgeModelOverride := res.JudgeModel
+	judgeEnv := res.JudgeEnv
+	compactModelOverride := res.CompactModel
+	compactEnv := res.CompactEnv
+	if judgeProviderOverride != "" || judgeModelOverride != "" || compactModelOverride != "" {
+		log.Info("agentfunnel: model overrides from validate",
+			"aspect", res.AspectName, "judge_provider", judgeProviderOverride,
+			"judge_model", judgeModelOverride, "compact_model", compactModelOverride,
+			"judge_env_keys", envKeyNames(judgeEnv))
+	}
 
 	// NEX-302: read MainTurnSampling from the aspect's own aspect.json
 	// on disk (autospawn convention: aspect.json lives at the aspect's
@@ -325,7 +423,7 @@ func main() {
 	// judge turn through the same observability stream as the main
 	// turn — otherwise the judge runs invisibly and operators can't see
 	// why a reply was suppressed.
-	outputFilter := buildAgentFunnelFilter(provider, bridle.ProviderID(res.Provider), judgeModelOverride, judgeEnv, log, obsHook)
+	outputFilter := buildAgentFunnelFilter(provider, bridle.ProviderID(res.Provider), judgeProviderOverride, judgeModelOverride, judgeEnv, res.Model, log, obsHook)
 
 	// Rewriter wiring: default-on for claude-code-flavored providers,
 	// no-op otherwise. The session jsonl path is resolved lazily
@@ -337,7 +435,24 @@ func main() {
 			return ""
 		}
 		return funnelPtr.SessionID()
-	}, overrides.CompactModel, overrides.CompactEnv, log)
+	}, compactModelOverride, compactEnv, log)
+
+	// Provider-aware ToolRunner. Native-API providers get the local
+	// coding-tool lane (toolrunner.LocalToolRunner) composed behind comms;
+	// claude-code keeps the NullRunner no-op (it self-supplies tools). The
+	// aspect's cwd (autospawn home dir, where aspect.json lives) is the
+	// WorkDir for local file/bash tools. Lynxai web access is opt-in via
+	// env; empty base URL gracefully disables web_fetch/web_extract.
+	toolRunner, err := runnerForProviderAgent(
+		bridle.ProviderID(res.Provider),
+		commsRunner,
+		cwd,
+		os.Getenv("LYNXAI_BASE_URL"),
+		os.Getenv("LYNXAI_KEY"),
+	)
+	if err != nil {
+		fail(log, "build tool runner", err)
+	}
 
 	systemPrompt := composeSystemPrompt(res)
 	f, err := funnel.New(funnel.Config{
@@ -345,7 +460,10 @@ func main() {
 		// Static binding fields kept populated for back-compat (some
 		// non-aspect callers still construct without BindingFn) but
 		// the agentfunnel flow always uses BindingFn — see below.
-		Harness:  bridle.NewHarness(provider),
+		// Hook registered here too so the back-compat path also enforces
+		// the P3b policy for native providers (BindingFn overrides per turn).
+		// escalator is set by now (built right after the wsasp client).
+		Harness:  newBindingHarness(provider, res.Provider, escalator, policy),
 		Provider: bridle.ProviderID(res.Provider),
 		Model:    res.Model,
 		// NEX-335: per-turn binding resolver reads from the binding
@@ -374,21 +492,30 @@ func main() {
 		// owns its own tool surface natively. Mirrors cmd/nexus/main.go's
 		// toolsForProvider — see #181 for the MCP fix.
 		Tools:  toolsForProviderAgent(bridle.ProviderID(res.Provider)),
-		Runner: funnel.ComposeRunner(commsRunner, &funnel.NullRunner{}),
+		Runner: toolRunner,
+		// AutoRecall (Commonplace): turn-time recall into the system prompt,
+		// gated by the -auto-recall flag (no aspect.json on the host). Uses
+		// the same knowledge gateway as the comms runner. Day-3 lever.
+		AutoRecall: funnel.AutoRecallConfig{
+			Gateway: knowledgeGateway,
+			Enabled: *autoRecall,
+			TopK:    *autoRecallTopK,
+			MaxRank: *autoRecallMaxRank,
+		},
 		// ChatGateway routes the model's auto-post FinalText through the
 		// same SendChat path CommsRunner uses for explicit send_chat tool
 		// calls. Required for claude-code (subprocess mode): without it,
 		// model output evaporates because the CLI has no MCP-loaded tools
 		// to call. Mirrors cmd/nexus/main.go's Frame funnel wiring.
-		ChatGateway:       gateway,
-		StreamTextToChat:  true, // NEX-240: stream text blocks to chat as they arrive
-		AspectHome:        cwd,  // NEX-241: stderr log + session isolation anchor
+		ChatGateway:      gateway,
+		StreamTextToChat: true, // NEX-240: stream text blocks to chat as they arrive
+		AspectHome:       cwd,  // NEX-241: stderr log + session isolation anchor
 		// NEX-302: per-aspect main-turn sampling overrides from
 		// aspect.json on the aspect's home dir. Empty / unset block
 		// leaves funnel's pass-through with zero-valued
 		// MainTurnSampling -> bridle TurnRequest fields stay unset
 		// -> provider defaults preserved (back-compat).
-		MainTurnSampling: mainTurnSampling,
+		MainTurnSampling:  mainTurnSampling,
 		Filter:            outputFilter,
 		PostTurn:          postTurn,
 		ObservabilityHook: obsHook,
@@ -595,150 +722,110 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 	}
 }
 
-// buildAgentFunnelFilter constructs the output filter for an agentfunnel
-// aspect. Mirrors the Frame's buildOutputFilter but simpler — no
-// aspect.json on the host means there's no operator-level filter
-// override yet, so we hard-code the cheap-judge default:
+// newBindingHarness builds the *bridle.Harness the funnel runs turns
+// against for a given binding, and — for NATIVE-API providers only —
+// registers the autonomous permission hook (P3b).
 //
-//   - claude-flavoured provider → HardRulesFilter wrapping
-//     CheapModelFilter using the same provider + bare "haiku" model.
-//     Bare "haiku" matches the Frame's choice (cmd/nexus/main.go):
-//     under claude-code (subprocess CLI), the versioned api-style id
-//     "claude-haiku-4-5" makes the CLI run as a full agent instead of
-//     a classifier, so we use the CLI's own default haiku tier.
-//   - non-claude provider → HardRulesFilter only (no usable cheap-tier
-//     judge yet; ollama/openai support comes when the operator gains a
-//     filter override path).
+// claude-code is skipped: it self-supplies its tool surface inside the
+// spawned subprocess, so a BeforeToolCall hook on this Harness never sees
+// those calls (claude-code's own --disallowedTools is its guardrail). For
+// direct-API providers (claude-api, openai) the funnel executes every tool
+// via the Harness, so the hook is the enforcement point.
 //
-// judgeModelOverride / providerEnv come from NEX-293 — the per-aspect
-// admin model_config row + the resolved FilterCredential's env
-// overlay. Empty model = use "haiku" default; nil env = inherit
-// ambient process env (legacy / no override configured). Both are
-// resolved upstream from the broker over WS.
+// policy is the per-aspect ToolPolicy enforced by the P3b/P3c permission
+// hook. It is loaded once at startup by loadToolPolicy (Tier A: local
+// -policy JSON file) and threaded through unchanged so every binding
+// refresh re-registers the same policy. An empty -policy yields the
+// permissive DefaultAllow=true policy, preserving pre-config behaviour.
 //
-// Without this every reply through the funnel hits chat unfiltered —
-// observed 2026-05-12 as noisy multi-aspect threads bypassing the
-// suppression the keel Frame applies.
-func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.ProviderID, judgeModelOverride string, providerEnv map[string]string, log *slog.Logger, obsHook funnel.ObservabilityHook) funnel.OutputFilter {
-	if !isClaudeFlavor(providerID) {
-		log.Info("agentfunnel: filter=hard (no cheap-judge for non-claude provider)", "provider", providerID)
-		return funnel.HardRulesFilter{}
+// esc (P3c) handles VerdictEscalate tool calls by asking the operator
+// over the aspect's WS. It is built from the wsasp client (the
+// Requester) + aspect id once that client exists; the earliest harness
+// store (before the client is constructed) passes nil, which makes any
+// escalate verdict fail-safe to deny until the escalator-equipped
+// harness is re-stored.
+func newBindingHarness(provider bridle.Provider, providerName string, esc *funnel.Escalator, policy funnel.ToolPolicy) *bridle.Harness {
+	h := bridle.NewHarness(provider)
+	switch providerName {
+	case "claude-code", "claudecode":
+		// claude-code owns its tools in-subprocess — hook can't see them.
+	default:
+		h.RegisterBeforeToolCall(funnel.PermissionHook(policy, esc))
 	}
-	model := judgeModelOverride
-	if model == "" {
-		model = "haiku"
-	}
-	log.Info("agentfunnel: filter=cheap (hard rules + cheap-model judge)",
-		"judge_provider", providerID,
-		"judge_model", model,
-		"judge_env_keys", envKeyNames(providerEnv))
-	return funnel.HardRulesFilter{
-		Inner: &funnel.CheapModelFilter{
-			Harness:           bridle.NewHarness(bareJudgeProvider(provider, providerID)),
-			Provider:          providerID,
-			Model:             model,
-			Logger:            log,
-			ObservabilityHook: obsHook,
-			ProviderEnv:       providerEnv,
-		},
-	}
+	return h
 }
 
-// aspectOverrides bundles the resolved admin-override knobs for an
-// agentfunnel-spawned aspect. Each pair (model, env) is independent
-// — judge and compact have separate credential lookups so they can
-// route to different providers (e.g. judge → DeepSeek bare, compact
-// → claude-haiku). Empty values mean "no override; caller's legacy
-// fallback applies".
-type aspectOverrides struct {
-	JudgeModel   string
-	JudgeEnv     map[string]string
-	CompactModel string
-	CompactEnv   map[string]string
-}
-
-// fetchAspectModelOverrides retrieves the judge + compact model +
-// credential overrides (NEX-263 + NEX-294 effective values) for this
-// aspect from the broker over WS, and resolves each credential into
-// an env overlay. NEX-301 extends NEX-293's judge-only path to also
-// cover compact, so out-of-process aspects pick up the same admin
-// + network-default plane the in-process Frame uses via
-// applyAspectModelOverrides.
+// loadToolPolicy resolves the per-aspect tool permission policy.
 //
-// Best-effort: every failure path logs and returns the partial
-// result. A failed credential fetch leaves that side's env nil
-// (subprocess inherits ambient process env); a failed model_config
-// fetch returns zero values across the board so the funnel falls
-// through to legacy hardcoded defaults rather than refusing to start.
-func fetchAspectModelOverrides(ws brokercreds.Requester, aspectName string, log *slog.Logger) aspectOverrides {
-	out := aspectOverrides{}
-	if ws == nil {
-		return out
+// Tier A (this function): an empty path returns the permissive default
+// (DefaultAllow=true) so unconfigured aspects behave exactly as they did
+// before the -policy flag existed. A non-empty path is read and
+// JSON-decoded into a funnel.ToolPolicy; a missing or malformed file
+// returns a wrapped error so startup fails fast rather than silently
+// running permissive — a misconfigured policy must be loud.
+//
+// Tier B (follow-on): the Nexus stores the per-aspect policy and delivers
+// it through keyfile.ValidationResult, mirroring the existing MCPProfile
+// field, removing the need for an on-host file.
+func loadToolPolicy(path string) (funnel.ToolPolicy, error) {
+	if path == "" {
+		return funnel.ToolPolicy{DefaultAllow: true}, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cfg, err := brokercreds.FetchAspectModelConfig(ctx, ws)
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		log.Warn("agentfunnel: fetch aspect model config failed; falling back to defaults",
-			"aspect", aspectName, "err", err)
-		return out
+		return funnel.ToolPolicy{}, fmt.Errorf("read tool policy %q: %w", path, err)
 	}
-
-	// Judge side (NEX-293).
-	if cfg.JudgeModel != "" {
-		log.Info("agentfunnel: admin override applied",
-			"aspect", aspectName, "kind", "judge_model", "to", cfg.JudgeModel)
-		out.JudgeModel = cfg.JudgeModel
+	var p funnel.ToolPolicy
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return funnel.ToolPolicy{}, fmt.Errorf("parse tool policy %q: %w", path, err)
 	}
-	out.JudgeEnv = resolveCredentialEnv(ws, aspectName, "judge", cfg.JudgeCredential, log)
-
-	// Compact side (NEX-301). Symmetric with judge.
-	if cfg.CompactModel != "" {
-		log.Info("agentfunnel: admin override applied",
-			"aspect", aspectName, "kind", "compact_model", "to", cfg.CompactModel)
-		out.CompactModel = cfg.CompactModel
-	}
-	out.CompactEnv = resolveCredentialEnv(ws, aspectName, "compact", cfg.CompactCredential, log)
-
-	return out
+	return p, nil
 }
 
-// resolveCredentialEnv fetches a named credential's provider bundle
-// over WS and translates it to an env overlay (ANTHROPIC_API_KEY +
-// optional ANTHROPIC_BASE_URL for Anthropic-shape; OPENAI_* for
-// OpenAI-shape). Returns nil on any failure path or when the
-// credential name is empty — caller falls back to ambient env.
-//
-// kindTag is just for log lines ("judge" / "compact") so operators
-// can grep for the specific side when debugging.
-func resolveCredentialEnv(ws brokercreds.Requester, aspectName, kindTag, credentialName string, log *slog.Logger) map[string]string {
-	if credentialName == "" {
-		return nil
+// policySource renders a human label for the policy origin in log lines.
+func policySource(path string) string {
+	if path == "" {
+		return "default (permissive)"
 	}
-	credCtx, credCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer credCancel()
-	resolvedName, bundle, err := brokercreds.FetchProvider(credCtx, ws, credentialName)
-	if err != nil {
-		log.Warn("agentfunnel: fetch credential failed; inherits ambient env",
-			"aspect", aspectName, "kind", kindTag,
-			"credential", credentialName, "err", err)
-		return nil
-	}
-	env := providerBundleToEnv(bundle)
-	if env == nil {
-		log.Warn("agentfunnel: credential has no env mapping for api_shape; inherits ambient env",
-			"aspect", aspectName, "kind", kindTag,
-			"credential", resolvedName, "api_shape", bundle.APIShape)
-		return nil
-	}
-	log.Info("agentfunnel: credential resolved",
-		"aspect", aspectName, "kind", kindTag,
-		"credential", resolvedName, "api_shape", bundle.APIShape,
-		"env_keys", envKeyNames(env))
-	return env
+	return path
 }
 
+// deniedToolCount counts tools the policy denies outright via the Tools
+// map (entries set to false). Bash-denylist and write-path rules are
+// command/path conditional, so they're logged separately as pattern
+// counts rather than folded in here.
+func deniedToolCount(p funnel.ToolPolicy) int {
+	n := 0
+	for _, allowed := range p.Tools {
+		if !allowed {
+			n++
+		}
+	}
+	return n
+}
+
+// buildAgentFunnelFilter constructs the cheap-judge output filter for an
+// agentfunnel aspect by delegating to the shared judge package — the same
+// builder the in-process Frame uses (NEX-365 #2). The agentfunnel resolves
+// its judge inputs from the broker (NEX-293/#3): judgeProviderOverride +
+// judgeModelOverride from the admin model_config row, providerEnv from the
+// resolved judge credential. Empty override = the judge runs on the
+// aspect's own provider. There's no aspect.json on the host, so the filter
+// is always cheap-or-(downgrade-to-)hard; mainModel (res.Model) is the
+// non-Claude judge-model fallback.
+func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.ProviderID, judgeProviderOverride, judgeModelOverride string, providerEnv map[string]string, mainModel string, log *slog.Logger, obsHook funnel.ObservabilityHook) funnel.OutputFilter {
+	return judge.BuildFilter(judge.Spec{
+		Label:             "agentfunnel",
+		MainProvider:      provider,
+		MainProviderID:    providerID,
+		MainModel:         mainModel,
+		JudgeProviderName: judgeProviderOverride,
+		JudgeModel:        judgeModelOverride,
+		JudgeEnv:          providerEnv,
+		ObsHook:           obsHook,
+		Logger:            log,
+	})
+}
 
 // readMainTurnSamplingFromAspectJSON loads the aspect's aspect.json
 // from `aspectHome/aspect.json`, extracts the main_turn_sampling
@@ -837,48 +924,6 @@ func envKeyNames(env map[string]string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// bareJudgeProvider mirrors cmd/nexus/main.go: when the judge runs
-// under claude-code, the original intent (#196) was a fresh Provider
-// with Bare=true for a lean CLI surface. Disabled 2026-05-13 same as
-// the in-process Frame: --bare is API-key-only mode (disables
-// subscription auth entirely), and aspects running this binary run on
-// subscription, so the bare subprocess had no auth path and returned
-// "Not logged in" as every verdict. See main.go bareJudgeProvider for
-// the full incident write-up. Re-enable post-#222 once the credentials
-// store can hand an API key to the bare subprocess.
-//
-// Until then: judge inherits the deliberation provider's surface.
-// Contamination risk #196 was meant to fix is mitigated by #195's
-// prompt hardening + #212's verdict format.
-func bareJudgeProvider(p bridle.Provider, id bridle.ProviderID) bridle.Provider {
-	// NEX-103 Phase 1a parity with cmd/nexus/main.go: bare branch
-	// re-enabled. Caller (Frame buildOutputFilter) supplies the
-	// ANTHROPIC_API_KEY via filter credential lookup; this side
-	// (agentfunnel) doesn't yet have brokercreds wired in — still
-	// returns p unchanged for non-claude-code providers and skips
-	// bare unless the credential plumbing lands first.
-	switch id {
-	case "claude-code", "claudecode":
-		jp := claudecodeprovider.New()
-		jp.Bare = true
-		return jp
-	}
-	return p
-}
-
-// isClaudeFlavor reports whether providerID is one of the Claude
-// providers. Mirrors the Frame's helper in cmd/nexus/main.go — accepts
-// the canonical IDs ("claude-api", "claude-code") and the validation-
-// response aliases ("claude", "claudecode") so callers don't have to
-// normalise.
-func isClaudeFlavor(id bridle.ProviderID) bool {
-	switch id {
-	case "claude-api", "claude-code", "claude", "claudecode":
-		return true
-	}
-	return false
 }
 
 // resolveClaudePath picks the path to the claude-code CLI. Order:
@@ -1098,7 +1143,32 @@ func toolsForProviderAgent(id bridle.ProviderID) []bridle.ToolDef {
 	case "claude-code", "claudecode":
 		return nil
 	}
-	return funnel.CommsToolDefs()
+	// Native-API providers: the funnel supplies the full tool surface —
+	// host comms (lane 2: send_chat etc.) + local coding tools (lane 1:
+	// bash/read/write/edit/glob/grep/web_fetch/web_extract). The two name
+	// sets are disjoint so ComposeRunner can route purely by tool name.
+	return append(funnel.CommsToolDefs(), toolrunner.Defs()...)
+}
+
+// runnerForProviderAgent builds the funnel's ToolRunner. claude-code owns
+// its own tools natively, so the non-comms lane is a no-op (NullRunner);
+// native-API providers get the real LocalToolRunner as the non-comms lane,
+// composed behind the comms runner (ComposeRunner routes comms names to
+// comms, everything else to the local runner).
+func runnerForProviderAgent(id bridle.ProviderID, comms funnel.CommsRunner, workDir, lynxaiBase, lynxaiKey string) (bridle.ToolRunner, error) {
+	switch id {
+	case "claude-code", "claudecode":
+		return funnel.ComposeRunner(comms, &funnel.NullRunner{}), nil
+	}
+	local, err := toolrunner.New(toolrunner.Config{
+		WorkDir:       workDir,
+		LynxaiBaseURL: lynxaiBase, // empty → web_fetch/web_extract return a disabled-error result (graceful)
+		LynxaiKey:     lynxaiKey,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build local tool runner: %w", err)
+	}
+	return funnel.ComposeRunner(comms, local), nil
 }
 
 func fail(log *slog.Logger, msg string, err error) {

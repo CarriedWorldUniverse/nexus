@@ -64,15 +64,22 @@ func TestBuildOutputFilter_Cheap_InheritsFrameProvider(t *testing.T) {
 }
 
 func TestBuildOutputFilter_Cheap_ClaudeFrameDefaultsToHaiku(t *testing.T) {
-	for _, id := range []bridle.ProviderID{"claude-code", "claudecode", "claude-api", "claude"} {
+	// NEX-369: claude-code keeps the bare "haiku" CLI shorthand (a versioned
+	// id makes the CLI run as a full agent, not a classifier — see #194);
+	// native claude-api/claude expand to a full Anthropic model id because
+	// a bare "haiku" 404s the SDK → the judge degrades + fails open.
+	want := map[bridle.ProviderID]string{
+		"claude-code": "haiku",
+		"claudecode":  "haiku",
+		"claude-api":  "claude-haiku-4-5-20251001",
+		"claude":      "claude-haiku-4-5-20251001",
+	}
+	for id, exp := range want {
 		got := buildOutputFilter(cfgWith("cheap", "", ""), stubProvider{}, id, "claude-opus-4-7", nil, "", nil, quietLogger())
 		hr := got.(funnel.HardRulesFilter)
 		cmf := hr.Inner.(*funnel.CheapModelFilter)
-		// Bare "haiku" rather than a versioned api-style id — under
-		// claude-code the versioned name made the CLI run as a full
-		// agent rather than a single-shot classifier. See #194.
-		if cmf.Model != "haiku" {
-			t.Errorf("Claude flavor %q default: expected haiku, got %q", id, cmf.Model)
+		if cmf.Model != exp {
+			t.Errorf("Claude flavor %q default: expected %q, got %q", id, exp, cmf.Model)
 		}
 	}
 }
@@ -99,8 +106,9 @@ func TestBuildOutputFilter_Cheap_OverrideProviderWithoutModelFallsToHaiku(t *tes
 	if cmf.Provider != "claude-api" {
 		t.Errorf("expected provider claude-api, got %q", cmf.Provider)
 	}
-	if cmf.Model != "haiku" {
-		t.Errorf("Claude override no model: expected haiku, got %q", cmf.Model)
+	// NEX-369: native claude-api judge expands the bare default to a full id.
+	if cmf.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("Claude override no model: expected claude-haiku-4-5-20251001, got %q", cmf.Model)
 	}
 }
 
@@ -146,6 +154,11 @@ func TestBuildOutputFilter_UnknownFallsBackToCheap(t *testing.T) {
 		t.Fatalf("unknown: expected fallback to HardRulesFilter, got %T", got)
 	}
 }
+
+// NEX-365 #2: nativeJudgeProvider / bareJudgeProvider / IsClaudeFlavor /
+// BuildProvider unit tests moved to nexus/frame/funnel/judge (judge_test.go)
+// along with the logic. The buildOutputFilter tests below remain — they
+// exercise the Frame's delegation to that shared builder end to end.
 
 func TestBuildOutputFilter_CaseInsensitive(t *testing.T) {
 	got := buildOutputFilter(cfgWith("HARD", "", ""), stubProvider{}, "stub", "stub-model", nil, "", nil, quietLogger())

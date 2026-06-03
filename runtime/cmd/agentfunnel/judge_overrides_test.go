@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 	"github.com/CarriedWorldUniverse/nexus/runtime/brokercreds"
 )
 
@@ -177,6 +178,116 @@ func TestReadMainTurnSamplingFromAspectJSON_MalformedJSON(t *testing.T) {
 	got := readMainTurnSamplingFromAspectJSON(dir, newTestLogger())
 	if got.Temperature != nil || got.MaxOutputTokens != 0 || len(got.StopSequences) != 0 {
 		t.Errorf("malformed JSON should produce zero MainTurnSampling; got %+v", got)
+	}
+}
+
+// NEX (judge-for-all-providers): buildAgentFunnelFilter must build a
+// cheap-judge for non-Claude providers too, defaulting the judge model
+// to the aspect's own main model (no haiku tier exists off-Claude).
+func TestBuildAgentFunnelFilter_NonClaudeGetsJudge(t *testing.T) {
+	f := buildAgentFunnelFilter(nil, "openai", "", "", nil, "deepseek-chat", newTestLogger(), nil)
+	hard, ok := f.(funnel.HardRulesFilter)
+	if !ok {
+		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
+	}
+	cheap, ok := hard.Inner.(*funnel.CheapModelFilter)
+	if !ok || cheap == nil {
+		t.Fatalf("want non-nil *funnel.CheapModelFilter inner, got %T", hard.Inner)
+	}
+	if cheap.Provider != "openai" {
+		t.Errorf("Provider = %q, want openai", cheap.Provider)
+	}
+	if cheap.Model != "deepseek-chat" {
+		t.Errorf("Model = %q, want deepseek-chat (mainModel fallback)", cheap.Model)
+	}
+}
+
+// judgeModelOverride wins over both the haiku and mainModel defaults.
+func TestBuildAgentFunnelFilter_OverrideWins(t *testing.T) {
+	f := buildAgentFunnelFilter(nil, "openai", "", "x", nil, "deepseek-chat", newTestLogger(), nil)
+	hard, ok := f.(funnel.HardRulesFilter)
+	if !ok {
+		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
+	}
+	cheap, ok := hard.Inner.(*funnel.CheapModelFilter)
+	if !ok || cheap == nil {
+		t.Fatalf("want non-nil *funnel.CheapModelFilter inner, got %T", hard.Inner)
+	}
+	if cheap.Model != "x" {
+		t.Errorf("Model = %q, want x (override wins)", cheap.Model)
+	}
+}
+
+// Claude flavor with no override defaults the judge to the haiku tier,
+// ignoring mainModel. NEX-369: on native claude-api the bare "haiku" is
+// expanded to a full Anthropic model id (a bare "haiku" 404s the SDK),
+// while claude-code keeps the CLI shorthand.
+func TestBuildAgentFunnelFilter_ClaudeDefaultsHaiku(t *testing.T) {
+	// Native claude-api → full id.
+	f := buildAgentFunnelFilter(nil, "claude-api", "", "", nil, "whatever", newTestLogger(), nil)
+	hard, ok := f.(funnel.HardRulesFilter)
+	if !ok {
+		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
+	}
+	cheap, ok := hard.Inner.(*funnel.CheapModelFilter)
+	if !ok || cheap == nil {
+		t.Fatalf("want non-nil *funnel.CheapModelFilter inner, got %T", hard.Inner)
+	}
+	if cheap.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("claude-api Model = %q, want claude-haiku-4-5-20251001 (NEX-369 expanded)", cheap.Model)
+	}
+
+	// claude-code keeps the bare shorthand its CLI expects.
+	f2 := buildAgentFunnelFilter(nil, "claude-code", "", "", nil, "whatever", newTestLogger(), nil)
+	cheap2 := f2.(funnel.HardRulesFilter).Inner.(*funnel.CheapModelFilter)
+	if cheap2.Model != "haiku" {
+		t.Errorf("claude-code Model = %q, want haiku (CLI shorthand preserved)", cheap2.Model)
+	}
+}
+
+// Misconfig: non-Claude with no override AND no mainModel can't resolve
+// a judge model, so it falls to bare hard-rules (Inner nil) rather than
+// silently always-posting.
+func TestBuildAgentFunnelFilter_MisconfigFallsToHardRules(t *testing.T) {
+	f := buildAgentFunnelFilter(nil, "openai", "", "", nil, "", newTestLogger(), nil)
+	hard, ok := f.(funnel.HardRulesFilter)
+	if !ok {
+		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
+	}
+	if hard.Inner != nil {
+		t.Errorf("misconfig should produce bare HardRulesFilter; Inner = %#v, want nil", hard.Inner)
+	}
+}
+
+// NEX-365 #3: a judge_provider override routes the cheap-judge to a
+// DIFFERENT provider family than the aspect's primary. Here a claude-code
+// aspect is judged by a native claude-api (DeepSeek Anthropic-shape)
+// endpoint: the CheapModelFilter must run on claude-api with the
+// operator's judge model, NOT the aspect's main claude-code provider.
+func TestBuildAgentFunnelFilter_JudgeProviderOverride_CrossProvider(t *testing.T) {
+	env := map[string]string{
+		"ANTHROPIC_API_KEY":  "sk-deepseek",
+		"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+	}
+	f := buildAgentFunnelFilter(nil, "claude-code", "claude-api", "deepseek-v4-flash", env, "whatever", newTestLogger(), nil)
+	hard, ok := f.(funnel.HardRulesFilter)
+	if !ok {
+		t.Fatalf("want funnel.HardRulesFilter, got %T", f)
+	}
+	cheap, ok := hard.Inner.(*funnel.CheapModelFilter)
+	if !ok || cheap == nil {
+		t.Fatalf("want *funnel.CheapModelFilter inner, got %T", hard.Inner)
+	}
+	if cheap.Provider != "claude-api" {
+		t.Errorf("judge Provider = %q, want claude-api (routed away from claude-code main)", cheap.Provider)
+	}
+	if cheap.Model != "deepseek-v4-flash" {
+		t.Errorf("judge Model = %q, want deepseek-v4-flash", cheap.Model)
+	}
+	// The judge must have a harness built on the standalone provider, not
+	// the (nil) main provider — proves we didn't reuse the aspect's.
+	if cheap.Harness == nil {
+		t.Fatal("judge harness nil — provider not built")
 	}
 }
 

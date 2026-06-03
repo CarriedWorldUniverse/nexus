@@ -27,6 +27,8 @@ package keyfile
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,6 +78,18 @@ type Envelope struct {
 	NexusURL string `json:"nexus_url"`
 	NexusID  string `json:"nexus_id"`
 	IssuedAt string `json:"issued_at"`
+
+	// BrokerTLSCert, when non-empty, is the broker's TLS certificate
+	// (PEM) pinned at mint time. Clients add it to their trusted-root
+	// set for both the validate handshake and the WS dial, so a
+	// self-signed / self-contained broker is trusted WITHOUT a
+	// system-wide trust step and WITHOUT insecure-skip-verify. Empty =
+	// rely on the system trust store (CA-signed certs, e.g. tailnet or
+	// fraedom-dev.com, just work). The cert is public; it lives in the
+	// plaintext envelope because clients need it before the handshake.
+	// On-disk integrity is the keyfile's existing model (distributed
+	// like an SSH private key); pinning defends the network-MITM threat.
+	BrokerTLSCert string `json:"broker_tls_cert,omitempty"`
 }
 
 // Keyfile is the on-disk JSON document.
@@ -261,6 +275,28 @@ type ValidationResult struct {
 	// NexusID is the verified Nexus instance ID (envelope == server).
 	// Useful for log correlation.
 	NexusID string
+
+	// ProviderEnv is the aspect's resolved provider-credential env overlay
+	// from the broker (NEX-332 phase 4): {OPENAI_API_KEY, OPENAI_BASE_URL}
+	// or {ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL}. The aspect applies it
+	// before constructing its native-API provider so the broker-held key
+	// is used — no key in start scripts/env. Empty when the broker has no
+	// default provider cred for this aspect (caller falls back to its own
+	// process env).
+	ProviderEnv map[string]string
+
+	// JudgeProvider/JudgeModel/JudgeEnv carry the broker's EFFECTIVE
+	// cheap-judge config (NEX-373) so the aspect builds its judge from the
+	// validate response — not a startup WS round-trip that raced the WS
+	// connect. All empty → the aspect's judge inherits its main provider.
+	JudgeProvider string
+	JudgeModel    string
+	JudgeEnv      map[string]string
+
+	// CompactModel/CompactEnv mirror the judge fields for the compact /
+	// summarizer (rewriter) tier.
+	CompactModel string
+	CompactEnv   map[string]string
 }
 
 // Load reads and parses an on-disk keyfile. Validates format + version
@@ -297,7 +333,7 @@ func Load(path string) (*Keyfile, error) {
 // initialisation is sync.Once-guarded so concurrent Validate calls
 // can't race on the field write.
 type Client struct {
-	HTTP    *http.Client
+	HTTP     *http.Client
 	httpInit sync.Once
 }
 
@@ -319,6 +355,41 @@ func (c *Client) ensureHTTP() {
 			c.HTTP = &http.Client{Timeout: 10 * time.Second}
 		}
 	})
+}
+
+// BrokerTLSConfig returns a *tls.Config that trusts the system roots PLUS
+// the broker cert pinned in the keyfile envelope (NEX-367). Returns
+// (nil, nil) when no cert is pinned — callers then use default transports
+// (system trust store), which is correct for CA-signed certs. The pinned
+// cert is ADDED to the system pool rather than replacing it, so a keyfile
+// that pins a self-signed cert still works if the broker later moves
+// behind a CA-signed cert during the keyfile's lifetime.
+func (kf *Keyfile) BrokerTLSConfig() (*tls.Config, error) {
+	if kf == nil || kf.Envelope.BrokerTLSCert == "" {
+		return nil, nil
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM([]byte(kf.Envelope.BrokerTLSCert)) {
+		return nil, fmt.Errorf("%w: broker_tls_cert is not valid PEM", ErrBadKeyfile)
+	}
+	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, nil
+}
+
+// HTTPClientWithTLS builds a 10s-timeout HTTP client using tlsCfg for the
+// transport. When tlsCfg is nil it returns a default client (system trust
+// store). Use the result as keyfile.Client.HTTP so the validate handshake
+// trusts a pinned self-signed broker cert.
+func HTTPClientWithTLS(tlsCfg *tls.Config) *http.Client {
+	if tlsCfg == nil {
+		return &http.Client{Timeout: 10 * time.Second}
+	}
+	return &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+	}
 }
 
 // Validate runs the spec §5 startup handshake:
@@ -377,6 +448,12 @@ func (c *Client) Validate(ctx context.Context, kf *Keyfile) (*ValidationResult, 
 		Provider:         resp.Provider,
 		Model:            resp.Model,
 		MCPProfile:       resp.MCPProfile,
+		ProviderEnv:      resp.ProviderEnv,
+		JudgeProvider:    resp.JudgeProvider,
+		JudgeModel:       resp.JudgeModel,
+		JudgeEnv:         resp.JudgeEnv,
+		CompactModel:     resp.CompactModel,
+		CompactEnv:       resp.CompactEnv,
 		NexusURL:         kf.Envelope.NexusURL,
 		NexusID:          kf.Envelope.NexusID,
 	}, nil
@@ -436,7 +513,17 @@ type validateResponse struct {
 
 	// NEX-169: resolved MCP profile. Empty when the Nexus doesn't have
 	// a credentials store wired or no profile is configured.
-	MCPProfile string `json:"mcp_profile"`
+	MCPProfile  string            `json:"mcp_profile"`
+	ProviderEnv map[string]string `json:"provider_env"`
+
+	// NEX-373: effective judge + compact config delivered here instead of a
+	// startup WS fetch. Older Nexus instances leave these zero (the aspect
+	// then falls back to its WS-fetch path / its own defaults).
+	JudgeProvider string            `json:"judge_provider"`
+	JudgeModel    string            `json:"judge_model"`
+	JudgeEnv      map[string]string `json:"judge_env"`
+	CompactModel  string            `json:"compact_model"`
+	CompactEnv    map[string]string `json:"compact_env"`
 }
 
 // postValidate POSTs the encrypted_payload and decodes the response.

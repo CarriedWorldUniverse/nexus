@@ -51,6 +51,12 @@ type Envelope struct {
 	NexusURL string `json:"nexus_url"`
 	NexusID  string `json:"nexus_id"`
 	IssuedAt string `json:"issued_at"` // RFC 3339 UTC
+
+	// BrokerTLSCert, when non-empty, pins the broker's TLS cert (PEM) so
+	// aspect clients trust a self-signed / self-contained broker without
+	// a system-wide trust step (NEX-367). Mirrors
+	// runtime/keyfile.Envelope.BrokerTLSCert — keep the json tag in sync.
+	BrokerTLSCert string `json:"broker_tls_cert,omitempty"`
 }
 
 // Keyfile is the full on-disk JSON document.
@@ -100,6 +106,12 @@ type MintInput struct {
 	// MintedAt is the UTC timestamp written into both envelope.issued_at
 	// and payload.minted_at. Caller controls (so tests can pin).
 	MintedAt time.Time
+
+	// BrokerTLSCert, when non-empty, is the broker's TLS cert (PEM)
+	// pinned into the envelope so aspect clients trust a self-signed /
+	// self-contained broker without system-wide trust (NEX-367). Empty
+	// for CA-signed deployments (clients use the system trust store).
+	BrokerTLSCert string
 }
 
 // Mint constructs and seals a keyfile. Reads randomness from rand.Reader
@@ -176,9 +188,10 @@ func mintWithRand(in MintInput, r io.Reader) (*Keyfile, string, error) {
 		Version: KeyfileVersion,
 		Format:  KeyfileFormat,
 		Envelope: Envelope{
-			NexusURL: in.NexusURL,
-			NexusID:  in.NexusID,
-			IssuedAt: mintedAt,
+			NexusURL:      in.NexusURL,
+			NexusID:       in.NexusID,
+			IssuedAt:      mintedAt,
+			BrokerTLSCert: in.BrokerTLSCert,
 		},
 		EncryptedPayload: encoded,
 	}

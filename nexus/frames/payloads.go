@@ -31,6 +31,12 @@ type RegisterPayload struct {
 	// (debugging, late-spawn aspects that want full backlog). Live
 	// frames after Register always flow regardless of this flag.
 	RequestReplay bool `json:"request_replay,omitempty"`
+
+	// Assertion is an optional casket assertion for herald-auth
+	// (bootstrap step 3a). When present and the broker has a custodian
+	// configured (HeraldEdge), it is redeemed to bind a herald identity
+	// + per-aspect CWB client to the connection.
+	Assertion string `json:"assertion,omitempty"`
 }
 
 // RegisterAckPayload tells the client what cadence to heartbeat at
@@ -39,6 +45,11 @@ type RegisterPayload struct {
 type RegisterAckPayload struct {
 	HeartbeatIntervalS int `json:"heartbeat_interval_s"`
 	StaleAfterS        int `json:"stale_after_s"`
+
+	// HeraldSubject is set when the register's assertion was redeemed
+	// (bootstrap step 3a). Empty when no assertion was presented or
+	// herald-auth is disabled.
+	HeraldSubject string `json:"herald_subject,omitempty"`
 }
 
 // DeregisterPayload is sent on graceful shutdown.
@@ -90,6 +101,10 @@ type ForwardedRegisterPayload struct {
 	// RequestReplay mirrors RegisterPayload.RequestReplay. Outposts
 	// MUST propagate. Default false per NEX-131 — replay is opt-in.
 	RequestReplay bool `json:"request_replay,omitempty"`
+
+	// Assertion mirrors RegisterPayload.Assertion so a casket assertion
+	// survives the outpost relay (bootstrap step 3a).
+	Assertion string `json:"assertion,omitempty"`
 }
 
 // -------------------------------------------------------------------
@@ -175,6 +190,28 @@ type DispatchErrorPayload struct {
 	Active     int    `json:"active,omitempty"`
 	SoftCap    int    `json:"soft_cap,omitempty"`
 	Limit      int    `json:"limit,omitempty"`
+}
+
+// -------------------------------------------------------------------
+// CWB data-plane relay
+// -------------------------------------------------------------------
+
+// CWBRequestPayload is an aspect's CWB API call relayed over the WS. The broker
+// executes it through the connection's custodied herald client (token injected)
+// and replies with CWBResponsePayload. Pillar+path (not a URL) so the broker
+// pins the destination host to the CWB edge.
+type CWBRequestPayload struct {
+	Pillar string `json:"pillar"`
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	Body   []byte `json:"body,omitempty"` // raw JSON request body
+}
+
+// CWBResponsePayload is the relayed CWB response (status + raw body); the
+// aspect's cwb-client wrapper maps non-2xx to an error as usual.
+type CWBResponsePayload struct {
+	Status int    `json:"status"`
+	Body   []byte `json:"body,omitempty"`
 }
 
 // -------------------------------------------------------------------
@@ -320,6 +357,7 @@ type KnowledgeSearchPayload struct {
 	Peers    []string `json:"peers,omitempty"`
 	TopK     int      `json:"top_k,omitempty"`
 	MaxRank  float64  `json:"max_rank,omitempty"`
+	Keyword  bool     `json:"keyword,omitempty"` // OR-of-terms match (auto-recall)
 }
 
 // KnowledgeSearchResultPayload is the response.
@@ -407,6 +445,7 @@ type AspectModelConfigGetResultPayload struct {
 	PrimaryCredential string `json:"primary_credential,omitempty"`
 	JudgeModel        string `json:"judge_model,omitempty"`
 	JudgeCredential   string `json:"judge_credential,omitempty"`
+	JudgeProvider     string `json:"judge_provider,omitempty"` // NEX-365 #3
 	CompactModel      string `json:"compact_model,omitempty"`
 	CompactCredential string `json:"compact_credential,omitempty"`
 }
@@ -1015,3 +1054,48 @@ type AgentSayPayload struct {
 	AspectID string `json:"aspect_id"`
 	Content  string `json:"content"`
 }
+
+// -------------------------------------------------------------------
+// Operator escalation (ToolRunner P3c)
+// -------------------------------------------------------------------
+
+// EscalationRequestPayload is emitted by a native-API aspect's funnel
+// when its permission policy marks a tool call "ask a human". The
+// aspect's funnel blocks on the correlated Request; the broker fans
+// this payload out to subscribed operators.
+//
+// Aspect is funnel-injected from the aspect's own identity, NOT a
+// model-supplied field — the operator always knows who is asking and
+// the model cannot forge it (same accountability boundary as comms).
+// The broker re-verifies Aspect == the connection's authenticated
+// identity before fan-out.
+type EscalationRequestPayload struct {
+	Aspect string          `json:"aspect"`
+	Tool   string          `json:"tool"`
+	Args   json.RawMessage `json:"args,omitempty"`
+	Reason string          `json:"reason,omitempty"`
+}
+
+// EscalationDecisionPayload is the operator's answer. It travels back
+// to the originating aspect as a frame whose InReplyTo is the original
+// escalation.request ID, so the aspect's blocked Request resolves.
+//
+// Decision is "approve" or "deny". Operator is the deciding identity
+// (audit). Note is optional free text surfaced to the model on deny.
+// Aspect names the target aspect so the (stateless) broker can route
+// the decision to the right connection. RequestID echoes the
+// correlation id for audit/observability — the broker sets the actual
+// envelope InReplyTo from the request, this field is informational.
+type EscalationDecisionPayload struct {
+	Aspect    string `json:"aspect"`
+	Decision  string `json:"decision"` // "approve" | "deny"
+	Operator  string `json:"operator,omitempty"`
+	Note      string `json:"note,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// Escalation decision constants.
+const (
+	EscalationApprove = "approve"
+	EscalationDeny    = "deny"
+)
