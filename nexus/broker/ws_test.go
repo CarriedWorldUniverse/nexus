@@ -840,7 +840,7 @@ func TestRegisterNoAssertion(t *testing.T) {
 }
 
 func TestRegisterBadAssertion(t *testing.T) {
-	srv, _, b := newTestServer(t)
+	srv, r, b := newTestServer(t)
 	b.custodian = &fakeCustodian{redeem: func(context.Context, string) (string, error) {
 		return "", fmt.Errorf("herald rejected")
 	}}
@@ -850,6 +850,11 @@ func TestRegisterBadAssertion(t *testing.T) {
 	// "register.error" (there is no generic frames.KindError).
 	if want := frames.Kind("register.error"); ack.Kind != want {
 		t.Fatalf("bad assertion should error with %s, got %s", want, ack.Kind)
+	}
+	// A failed assertion must leave NO roster state — the redeem runs before
+	// roster.Register, so no phantom "live" aspect can be created.
+	if _, ok := r.Get("bad"); ok {
+		t.Fatal("failed-assertion register must not leave the aspect in the roster")
 	}
 }
 
