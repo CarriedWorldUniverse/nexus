@@ -677,28 +677,12 @@ func TestSQLStore_ConcurrentRepliesChain(t *testing.T) {
 
 	const N = 20
 
-	// Pre-warm the pool by materialising N sql.Conns sequentially
-	// before the goroutine burst. The ncruces/go-sqlite3 driver
-	// applies DSN pragmas lazily on each new connection; under
-	// concurrent first-use the per-conn PRAGMA setup races with the
-	// busy-timeout machinery — fine on POSIX, but on Windows the
-	// stricter file-locking surfaces this as
-	// `sqlite3: invalid _pragma: sqlite3: database is locked` and
-	// the test flakes. Warming sequentially completes pragma setup
-	// for each conn before any concurrent BEGIN IMMEDIATE hits the
-	// pool, removing the race.
-	conns := make([]*sql.Conn, 0, N)
-	for i := 0; i < N; i++ {
-		c, err := s.DB.Conn(ctx)
-		if err != nil {
-			t.Fatalf("pre-warm conn %d: %v", i, err)
-		}
-		conns = append(conns, c)
-	}
-	for _, c := range conns {
-		_ = c.Close() // return to pool, ready for reuse
-	}
-
+	// N goroutines each insert a reply to the same root concurrently.
+	// Correctness relies on _txlock=immediate serialising the
+	// SELECT-MAX/INSERT pair so the thread doesn't fork (#226). No pool
+	// pre-warm is needed: the DSN sets busy_timeout before journal_mode,
+	// so concurrent first-connection pragma setup waits rather than
+	// failing with "database is locked" (storage.Open).
 	var wg sync.WaitGroup
 	errs := make(chan error, N)
 	start := make(chan struct{})
