@@ -28,6 +28,10 @@ func newTestServer(t *testing.T) (*httptest.Server, *roster.Roster, *Broker) {
 		HeartbeatIntervalS: 15,
 		StaleAfter:         30 * time.Second,
 	}, r)
+	// Real startup sets b.ctx in ListenAndServe; the test harness bypasses it,
+	// so init it here — handlers (e.g. the register herald-auth redeem) use it.
+	b.ctx, b.ctxCancel = context.WithCancel(context.Background())
+	t.Cleanup(b.ctxCancel)
 	srv := httptest.NewServer(newMux(b))
 	t.Cleanup(srv.Close)
 	return srv, r, b
