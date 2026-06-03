@@ -65,26 +65,26 @@ A small package: a `Keyfile` struct for the five fields, `Load(path) (*Keyfile, 
 - **Sign + attach:** `runtime/agent/agent.go` `sendRegister` — if `HeraldKeyfile != nil`, `priv, _ := kf.PrivateKey()`, `assertion, err := identity.AgentAssertionFromKey(priv, kf.KeyID, tokenURL)`, set `RegisterPayload.Assertion = assertion`. On any signing/discovery error: log + register **without** the assertion (the connection still comes up on the existing transport bearer; herald-binding is best-effort this cycle, not a hard gate — 3a only hard-fails when an assertion *is presented* and redemption fails, which never happens if we omit it). A fresh assertion is signed on every (re)connect — the 2-minute expiry needs no refresh loop.
 - **Transport auth untouched:** the existing bearer for the WS upgrade is unchanged; herald/transport convergence stays a later step (per 3a).
 
-### Piece 4 — `cw agent enroll`
+### Piece 4 — `cw agent enroll` (attach-only)
 
-A new subcommand under `cw agent` (sibling of `create`/`pubkey`/`keygen`). Inputs: `--slug` (required), `--url` (required, the nexus relay for the keyfile), `--org` + `--responsible-human` (for the create path), `--out` (keyfile path, default `./<slug>.keyfile.json`), `CW_OWNER_SEED` (env, the derivation root). Edge via the existing `--edge`/`CW_EDGE` global (the gateway url in production; herald directly for the test).
+A new subcommand under `cw agent` (sibling of `create`/`pubkey`/`keygen`). **Attach-only this cycle:** it writes the bootstrap keyfile for an agent that *already exists* at herald; it does not mint. Inputs: `--slug` (required), `--url` (required, the nexus relay for the keyfile), `--out` (keyfile path, default `./<slug>.keyfile.json`), `CW_OWNER_SEED` (env, the derivation root). Edge via the existing `--edge`/`CW_EDGE` global (the gateway url in production; herald directly for the test).
 
 Flow:
 1. **Derive:** `priv, pub, _ := casket.DeriveAgentKey([]byte(seed), slug)`; `fp := identity.Fingerprint(pub)`.
-2. **Create-or-attach (typo guard):** look up an existing agent by fingerprint at the edge.
-   - **Found** (fingerprint matches a registered agent) → *attach*: reuse its `key_id`, no create call.
-   - **Not found** → this slug has no agent yet. Because the key is deterministic, a *misspelled* slug also yields a valid-but-unregistered fingerprint — so a "not found" is exactly the typo signal. **Prompt** the human: `no existing agent for slug "<slug>" (fingerprint <fp>) — create a new agent? [y/N]`. On `y` → `herald.CreateAgent(org, {DisplayName: slug, ResponsibleHuman, CasketPubkey: pub})`; on `N`/non-interactive without `--create` → abort with a message naming the slug + fingerprint. A `--create` flag pre-confirms (for scripted/first-time enrollment).
+2. **Attach (resolve the UUID):** look up the agent by fingerprint at the edge — `herald.GetAgentByFingerprint(ctx, c, fp)`.
+   - **Found** → take its `id` as `key_id`.
+   - **Not found (404)** → abort with a message naming the slug + fingerprint and pointing the human to provision the agent first. Because the key is deterministic, a *misspelled* slug yields a valid-but-unregistered fingerprint, so a not-found is also the typo signal — surfacing it (rather than minting) is the guard this cycle.
 3. **Write keyfile:** marshal `{ key: base64(priv), key_id, url, slug, fingerprint }` to `--out` with `0600` perms. Print the path + a one-line "start the aspect with `NEXUS_HERALD_KEYFILE=<path>`" hint to stderr.
 
-**Herald-side dependency (the one new CWB surface this cycle):** the create-or-attach lookup needs *get-agent-by-fingerprint*. herald currently exposes `CreateAgent` but no agent lookup (`cwb-client/herald` has `Me`, org/human/product calls, `CreateAgent` — no `GetAgent`/`ListAgents`). The plan adds a minimal herald endpoint (`GET /api/agents?fingerprint=` or `GET /api/agents/by-fingerprint/{fp}`, identity-derived authz: the caller must be the responsible human / owner) + a `herald.GetAgentByFingerprint` wrapper in cwb-client. **Confirm herald's actual API first**; if an equivalent lookup already exists, use it. This is the only herald-repo change in the cycle and is additive.
+**Herald-side dependency — already satisfied.** herald already serves `GET /api/agents/by-fingerprint/{fp}` (NEX-412; returns `{id, kind, display_name, org, responsible_human, fingerprint, status, active, scopes}`, 404 when no agent matches). **No herald change** — the cycle only adds a `herald.GetAgentByFingerprint` wrapper in cwb-client. (Reachability note: that route is not a gateway public-path, so an external caller goes through the gateway's bearer-auth — `enroll` carries the human token via the existing `cmdutil.Session`. On the tailnet test the edge is herald directly; confirm the route is reachable in that deployment at test time.)
 
 ## Data flow (end to end)
 
 ```
-human, once:
-  cw agent enroll --slug plumb --url <nexus> --org <org> --responsible-human <id>
+human, once (agent already provisioned at herald):
+  cw agent enroll --slug plumb --url <nexus>
     derive(owner_seed, "plumb") -> priv,pub,fp
-    GET by-fingerprint @edge -> found? attach key_id : prompt+CreateAgent -> key_id
+    GET by-fingerprint @edge -> found? key_id=id : abort (provision first / typo guard)
     write plumb.keyfile.json { key, key_id, url=<nexus>, slug, fingerprint }
 
 aspect, every start:
@@ -102,24 +102,23 @@ aspect, every start:
 - **No keyfile / `NEXUS_HERALD_KEYFILE` unset** → register with no assertion; existing behavior. (Dark by default.)
 - **Keyfile load/decode/fingerprint-mismatch** → fail aspect startup with a clear error (a malformed credential is operator error, surface it — unlike a runtime discovery hiccup).
 - **Discovery or signing failure at register** → log + register without the assertion (transport still works; herald-bind retried next connect). Best-effort, not a hard gate, because omitting the assertion is the safe degrade and 3a only fails-closed on a *presented* bad assertion.
-- **`enroll` lookup ambiguous / herald down** → abort with the herald error; never write a keyfile on an uncertain create-or-attach.
-- **`enroll` not-found, non-interactive, no `--create`** → abort naming slug + fingerprint (the typo guard).
+- **`enroll` herald down / lookup error** → abort with the herald error; never write a keyfile on an uncertain lookup.
+- **`enroll` not-found (404)** → abort naming slug + fingerprint, pointing to provisioning (the typo / not-yet-provisioned guard).
 
 ## Testing
 
 - **cwb-client (Piece 1):** `AgentAssertionFromKey` produces a JWT that decodes to the expected claims; `AgentAssertion(seed,slug,…)` and `AgentAssertionFromKey(DeriveAgentKey(seed,slug),…)` produce byte-identical assertions at a fixed clock (proves the refactor is lossless).
 - **heraldkeyfile (Piece 2):** load a good keyfile → fields + `PrivateKey()` round-trip; missing field → error; bad base64 / wrong key length → error; fingerprint-mismatch → error.
 - **runtime (Piece 3):** with a fake broker (the `wsclient` `fakeServer` harness) + a stub discovery endpoint, assert the `register` frame carries a non-empty `Assertion` whose decoded `aud` == the stub token endpoint and `iss/sub` == `key_id`; with no keyfile, assert `Assertion` is empty. (Decode-only, no signature verify — mirrors `identity.DecodeAccessClaims`.)
-- **enroll (Piece 4):** unit with a stub herald — found-fingerprint → attach (no create, keyfile `key_id` == existing); not-found + `--create` → create called, keyfile written `0600` with all five fields; not-found non-interactive no `--create` → abort, no file written.
-- **Gated live (skips offline):** against dMon herald on the tailnet (edge = herald directly). `enroll --create` a throwaway `cwb-test-*` agent → keyfile written; bring up a `HeraldEdge` broker; start a minimal aspect with `NEXUS_HERALD_KEYFILE` → it discovers, signs, registers; assert the ack `herald_subject` == the enrolled `key_id`. Proves producer→consumer→broker→herald end-to-end (everything except the not-yet-built gateway, which only changes the edge url).
+- **enroll (Piece 4):** unit with a stub herald — found-fingerprint → keyfile written `0600` with all five fields and `key_id` == the looked-up `id`; not-found (404) → abort, no file written; herald error → abort, no file written.
+- **Gated live (skips offline):** against dMon herald on the tailnet (edge = herald directly), using a pre-provisioned throwaway `cwb-test-*` agent. `enroll --slug … --url …` → keyfile written; bring up a `HeraldEdge` broker; start a minimal aspect with `NEXUS_HERALD_KEYFILE` → it discovers, signs, registers; assert the ack `herald_subject` == the enrolled `key_id`. Proves producer→consumer→broker→herald end-to-end (everything except the not-yet-built gateway, which only changes the edge url).
 
 ## Build order
 
-1. **cwb-client** `AgentAssertionFromKey` + refactor + tests → merge → pin into nexus & cw.
-2. **(herald)** confirm/add get-agent-by-fingerprint + `herald.GetAgentByFingerprint` wrapper (re-pin cwb-client if touched).
-3. **cw** `agent enroll` + tests (depends on 1, 2).
-4. **nexus** `runtime/heraldkeyfile` + `agent.Config`/`main.go` wiring + `sendRegister` signing + tests.
-5. **Gated live test** end-to-end. CI-gated merges (nexus + cw + cwb-client each green before merge; no `--admin` bypass).
+1. **cwb-client** `AgentAssertionFromKey` + refactor + `herald.GetAgentByFingerprint` wrapper + tests → merge → pin into nexus & cw.
+2. **cw** `agent enroll` (attach-only) + tests (depends on 1).
+3. **nexus** `runtime/heraldkeyfile` + `agent.Config`/`main.go` wiring + `sendRegister` signing + tests.
+4. **Gated live test** end-to-end. CI-gated merges (nexus + cw + cwb-client each green before merge; no `--admin` bypass).
 
 ## Out of scope (deferred)
 
@@ -127,6 +126,7 @@ aspect, every start:
 - **3b** — post-auth config/key distribution (the broker serving the herald-bound aspect its config + downstream keys).
 - Replacing the transport bearer with herald (convergence).
 - Re-enrolling / key rotation / revocation flows for an already-enrolled agent.
+- **Mint-if-missing in `enroll`** — deferred until herald's human-facing create surface is settled (current HTTP create is the self-provision→pending→validate handshake or gRPC-admin-via-interchange). Related pre-existing bug: **`cw agent create` posts to `POST /api/orgs/{org}/agents`, a route current herald no longer serves** — flagged for a separate fix, not this cycle.
 
 ## References
 
