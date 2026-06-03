@@ -31,6 +31,12 @@ type RegisterPayload struct {
 	// (debugging, late-spawn aspects that want full backlog). Live
 	// frames after Register always flow regardless of this flag.
 	RequestReplay bool `json:"request_replay,omitempty"`
+
+	// Assertion is an optional casket assertion for herald-auth
+	// (bootstrap step 3a). When present and the broker has a custodian
+	// configured (HeraldEdge), it is redeemed to bind a herald identity
+	// + per-aspect CWB client to the connection.
+	Assertion string `json:"assertion,omitempty"`
 }
 
 // RegisterAckPayload tells the client what cadence to heartbeat at
@@ -39,6 +45,11 @@ type RegisterPayload struct {
 type RegisterAckPayload struct {
 	HeartbeatIntervalS int `json:"heartbeat_interval_s"`
 	StaleAfterS        int `json:"stale_after_s"`
+
+	// HeraldSubject is set when the register's assertion was redeemed
+	// (bootstrap step 3a). Empty when no assertion was presented or
+	// herald-auth is disabled.
+	HeraldSubject string `json:"herald_subject,omitempty"`
 }
 
 // DeregisterPayload is sent on graceful shutdown.
@@ -90,6 +101,10 @@ type ForwardedRegisterPayload struct {
 	// RequestReplay mirrors RegisterPayload.RequestReplay. Outposts
 	// MUST propagate. Default false per NEX-131 — replay is opt-in.
 	RequestReplay bool `json:"request_replay,omitempty"`
+
+	// Assertion mirrors RegisterPayload.Assertion so a casket assertion
+	// survives the outpost relay (bootstrap step 3a).
+	Assertion string `json:"assertion,omitempty"`
 }
 
 // -------------------------------------------------------------------

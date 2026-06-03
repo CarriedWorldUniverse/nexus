@@ -3,14 +3,17 @@ package broker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 
+	"github.com/CarriedWorldUniverse/cwb-client/client"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
@@ -25,6 +28,10 @@ func newTestServer(t *testing.T) (*httptest.Server, *roster.Roster, *Broker) {
 		HeartbeatIntervalS: 15,
 		StaleAfter:         30 * time.Second,
 	}, r)
+	// Real startup sets b.ctx in ListenAndServe; the test harness bypasses it,
+	// so init it here — handlers (e.g. the register herald-auth redeem) use it.
+	b.ctx, b.ctxCancel = context.WithCancel(context.Background())
+	t.Cleanup(b.ctxCancel)
 	srv := httptest.NewServer(newMux(b))
 	t.Cleanup(srv.Close)
 	return srv, r, b
@@ -733,5 +740,155 @@ func TestUnknownKindDropped(t *testing.T) {
 	ack := recvFrame(t, c)
 	if ack.Kind != frames.KindRegisterAck {
 		t.Errorf("register after unknown-kind drop failed; got %q", ack.Kind)
+	}
+}
+
+// -------------------------------------------------------------------
+// Herald-auth on register (bootstrap step 3a)
+// -------------------------------------------------------------------
+
+// fakeCustodian injects a redeem/forget seam so the register handshake
+// can be unit-tested without a live herald. forgot is mutex-guarded
+// because Forget fires on the serve goroutine during cleanup while the
+// test reads it.
+type fakeCustodian struct {
+	redeem func(ctx context.Context, assertion string) (string, error)
+
+	mu     sync.Mutex
+	forgot []string
+}
+
+func (f *fakeCustodian) Redeem(ctx context.Context, a string) (string, error) {
+	return f.redeem(ctx, a)
+}
+
+func (f *fakeCustodian) Client(subject string) (*client.Client, error) {
+	return client.WithStaticToken("http://x", "tok"), nil
+}
+
+func (f *fakeCustodian) Forget(subject string) {
+	f.mu.Lock()
+	f.forgot = append(f.forgot, subject)
+	f.mu.Unlock()
+}
+
+func (f *fakeCustodian) forgotten() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.forgot))
+	copy(out, f.forgot)
+	return out
+}
+
+// registerWith sends a register frame carrying the given assertion and
+// returns the broker's reply (ack or error). Matches the required
+// RegisterRequest fields validateRegister enforces (see
+// TestRegisterFrameAddsRoster).
+func registerWith(t *testing.T, c *websocket.Conn, name, assertion string) frames.Envelope {
+	t.Helper()
+	env, err := frames.NewRequest(frames.KindRegister, frames.RegisterPayload{
+		RegisterRequest: schemas.RegisterRequest{
+			Name:         name,
+			ContextMode:  schemas.ContextGlobal,
+			Provider:     "claude-api",
+			Port:         0,
+			Capabilities: []string{"smoke"},
+			SessionID:    "sess-1",
+			Home:         "/tmp/x",
+			StartedAt:    time.Now().UTC(),
+		},
+		Assertion: assertion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendFrame(t, c, env)
+	return recvFrame(t, c)
+}
+
+func ackSubject(t *testing.T, env frames.Envelope) string {
+	t.Helper()
+	var p frames.RegisterAckPayload
+	if err := frames.PayloadAs(env, &p); err != nil {
+		t.Fatalf("ack payload: %v", err)
+	}
+	return p.HeraldSubject
+}
+
+func TestRegisterHeraldAssertionBinds(t *testing.T) {
+	srv, _, b := newTestServer(t)
+	b.custodian = &fakeCustodian{redeem: func(_ context.Context, a string) (string, error) {
+		if a == "" {
+			return "", fmt.Errorf("empty")
+		}
+		return "agent-1", nil
+	}}
+	c := dialWS(t, srv, "testtoken")
+	ack := registerWith(t, c, "ha", "a-real-looking-assertion")
+	if ack.Kind != frames.KindRegisterAck {
+		t.Fatalf("kind=%s", ack.Kind)
+	}
+	if got := ackSubject(t, ack); got != "agent-1" {
+		t.Fatalf("herald_subject=%q want agent-1", got)
+	}
+}
+
+func TestRegisterNoAssertion(t *testing.T) {
+	srv, _, b := newTestServer(t)
+	b.custodian = &fakeCustodian{redeem: func(context.Context, string) (string, error) { return "x", nil }}
+	c := dialWS(t, srv, "testtoken")
+	ack := registerWith(t, c, "na", "")
+	if ack.Kind != frames.KindRegisterAck || ackSubject(t, ack) != "" {
+		t.Fatalf("no-assertion register should not bind; ack=%s subj=%q", ack.Kind, ackSubject(t, ack))
+	}
+}
+
+func TestRegisterBadAssertion(t *testing.T) {
+	srv, r, b := newTestServer(t)
+	b.custodian = &fakeCustodian{redeem: func(context.Context, string) (string, error) {
+		return "", fmt.Errorf("herald rejected")
+	}}
+	c := dialWS(t, srv, "testtoken")
+	ack := registerWith(t, c, "bad", "nope")
+	// respondError emits <kind>.error — for a register frame that is
+	// "register.error" (there is no generic frames.KindError).
+	if want := frames.Kind("register.error"); ack.Kind != want {
+		t.Fatalf("bad assertion should error with %s, got %s", want, ack.Kind)
+	}
+	// A failed assertion must leave NO roster state — the redeem runs before
+	// roster.Register, so no phantom "live" aspect can be created.
+	if _, ok := r.Get("bad"); ok {
+		t.Fatal("failed-assertion register must not leave the aspect in the roster")
+	}
+}
+
+func TestRegisterCustodianNil(t *testing.T) {
+	srv, _, b := newTestServer(t)
+	b.custodian = nil // herald-auth disabled
+	c := dialWS(t, srv, "testtoken")
+	ack := registerWith(t, c, "off", "ignored-assertion")
+	if ack.Kind != frames.KindRegisterAck || ackSubject(t, ack) != "" {
+		t.Fatalf("custodian-nil should ignore the assertion; ack=%s subj=%q", ack.Kind, ackSubject(t, ack))
+	}
+}
+
+func TestRegisterForgetOnClose(t *testing.T) {
+	srv, _, b := newTestServer(t)
+	fc := &fakeCustodian{redeem: func(context.Context, string) (string, error) { return "agent-1", nil }}
+	b.custodian = fc
+	c := dialWS(t, srv, "testtoken")
+	registerWith(t, c, "fc", "sig")
+	_ = c.Close(websocket.StatusNormalClosure, "bye")
+	// cleanup runs async on the serve goroutine; poll briefly.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(fc.forgotten()) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	got := fc.forgotten()
+	if len(got) == 0 || got[0] != "agent-1" {
+		t.Fatalf("Forget not called on close: %v", got)
 	}
 }
