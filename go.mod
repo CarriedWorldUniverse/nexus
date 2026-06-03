@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	filippo.io/edwards25519 v1.2.0
 	github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260529023501-39174f6a3471
-	github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603045028-1db44b18fd1a
+	github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603072406-8845dff34026
 	github.com/CarriedWorldUniverse/ledger v0.1.4
 	github.com/anthropics/anthropic-sdk-go v1.38.0
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
