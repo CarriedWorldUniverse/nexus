@@ -483,6 +483,10 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		// asking a human. Relay to operators (identity-checked); the
 		// aspect's own Request holds the pending channel.
 		c.handleEscalationRequestFrame(env)
+	case frames.KindCWBRequest:
+		// Relays an outbound CWB call; run in a goroutine to avoid stalling the
+		// per-connection read loop on a slow pillar (same pattern as dispatch/turn).
+		go c.handleCWBRequest(env)
 	default:
 		c.log.Info("frame kind not yet handled", "kind", env.Kind)
 	}
