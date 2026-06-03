@@ -4,8 +4,8 @@ github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260529023501-39174f6a3471 h1:6
 github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260529023501-39174f6a3471/go.mod h1:nEWWic3aiWRjyUzmjdafUtqXoqS9f92KuUuuKpT5NYE=
 github.com/CarriedWorldUniverse/casket-go v0.1.0 h1:t+DvXs8vhaNcTfkSS/sqK47fBTNVRdHfF7DT/ur0jtY=
 github.com/CarriedWorldUniverse/casket-go v0.1.0/go.mod h1:v0y8kPW/WmusBw+Q3ZtRYhVwoK/WVVVXHWSc/oRVWBo=
-github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603072406-8845dff34026 h1:OlC2i6v0ISNXm1EDJRyuAbA6vg8wwE8dEgSIrjf064A=
-github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603072406-8845dff34026/go.mod h1:mYs7BzEiFdFx5hDaahzRutND9gjxixt++t/S+XbQQvA=
+github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603092700-bad238fd9d58 h1:EOFOdPFVNdmtqoJEDwRGJAdy1/yQid8VVeaJ4goQN6I=
+github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603092700-bad238fd9d58/go.mod h1:mYs7BzEiFdFx5hDaahzRutND9gjxixt++t/S+XbQQvA=
 github.com/CarriedWorldUniverse/ledger v0.1.4 h1:gtu/8E1f2yRXMubTaS5IiG6mUmjYuuHObWZJos+2OGA=
 github.com/CarriedWorldUniverse/ledger v0.1.4/go.mod h1:2aeFr46SOJ19rDnwsSwGJA9CZqNrtYXY1BQ6vfzMEog=
 github.com/anthropics/anthropic-sdk-go v1.38.0 h1:bA4DcK+91gorIX+5VTONnynyt9LRU4nnN6rRQ+j/NIg=

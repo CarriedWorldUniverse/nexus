@@ -30,6 +30,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
+	"github.com/CarriedWorldUniverse/nexus/nexus/cwb/cwbproxy"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/framecomms"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
@@ -503,6 +504,14 @@ func main() {
 	// SECURITY: never enable in production — there is no replacement
 	// authn for operator-role connections when this is on.
 	authBypass := os.Getenv("NEXUS_AUTH_BYPASS") == "1"
+
+	// NEXUS_CWB_EDGE: the interchange (CWB edge) base URL. Optional /
+	// dark-by-default — when unset, the per-aspect token custodian is
+	// not constructed (HeraldEdge empty) AND the CWB reverse-proxy routes
+	// are not registered, so behavior is unchanged. When set, both
+	// surfaces are enabled.
+	cwbEdge := os.Getenv("NEXUS_CWB_EDGE")
+
 	if authBypass {
 		logger.Warn("operator auth bypass ENABLED — DO NOT use in production",
 			"reason", "NEXUS_AUTH_BYPASS=1 set in environment")
@@ -519,6 +528,7 @@ func main() {
 		AllowLegacyMaster:  allowLegacy,
 		OperatorAuthBypass: authBypass,
 		Tokens:             tokenStore,
+		HeraldEdge:         cwbEdge,
 		StaleAfter:         *staleAfter,
 		Logger:             logger,
 		Projection:         proj,
@@ -588,6 +598,16 @@ func main() {
 			mux.Handle("/api/issues", ledgerHandler)
 			mux.Handle("/api/issues/", ledgerHandler)
 			mux.Handle("/healthz/issues", ledgerHandler)
+			// NEXUS_CWB_EDGE: pass-through reverse-proxy to the CWB edge
+			// (interchange) for /herald/ /cairn/ /ledger/ /knowledge/.
+			// Dark-by-default — only registered when the edge is set.
+			if cwbEdge != "" {
+				if err := cwbproxy.Register(mux, cwbEdge); err != nil {
+					logger.Error("cwb reverse-proxy", "err", err)
+					os.Exit(1)
+				}
+				logger.Info("CWB reverse-proxy enabled", "edge", cwbEdge)
+			}
 		},
 	}, r)
 

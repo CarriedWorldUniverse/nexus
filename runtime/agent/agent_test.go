@@ -69,6 +69,15 @@ type fakeNexus struct {
 	deregisters atomic.Int32
 
 	lastAssertion atomic.Value // string
+
+	// onCWB, when set, handles cwb.request frames: it's called with the
+	// decoded request payload and its return value is written back as a
+	// cwb.response. nil → cwb.request frames fan out to inboundCh.
+	onCWB func(frames.CWBRequestPayload) frames.CWBResponsePayload
+
+	// cwbErr, when non-empty, makes cwb.request frames reply with a
+	// cwb.request.error carrying this message (checked before onCWB).
+	cwbErr string
 }
 
 func newFakeNexus(t *testing.T, token string) *fakeNexus {
@@ -149,6 +158,25 @@ func (f *fakeNexus) serveLoop(wsc *websocket.Conn) {
 			ack, _ := frames.NewResponse(frames.KindDeregister, env.ID, nil)
 			raw, _ := frames.Encode(ack)
 			_ = wsc.Write(ctx, websocket.MessageText, raw)
+		case frames.KindCWBRequest:
+			if f.cwbErr != "" {
+				errResp, _ := frames.NewResponse(frames.Kind(string(frames.KindCWBRequest)+".error"), env.ID, map[string]string{"error": f.cwbErr})
+				raw, _ := frames.Encode(errResp)
+				_ = wsc.Write(ctx, websocket.MessageText, raw)
+				continue
+			}
+			if f.onCWB != nil {
+				var p frames.CWBRequestPayload
+				_ = frames.PayloadAs(env, &p)
+				resp, _ := frames.NewResponse(frames.KindCWBResponse, env.ID, f.onCWB(p))
+				raw, _ := frames.Encode(resp)
+				_ = wsc.Write(ctx, websocket.MessageText, raw)
+			} else {
+				select {
+				case f.inboundCh <- env:
+				default:
+				}
+			}
 		default:
 			// Non-blocking fan-out — a full channel means the test
 			// isn't consuming fast enough; drop and log for debug.

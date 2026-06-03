@@ -193,6 +193,28 @@ type DispatchErrorPayload struct {
 }
 
 // -------------------------------------------------------------------
+// CWB data-plane relay
+// -------------------------------------------------------------------
+
+// CWBRequestPayload is an aspect's CWB API call relayed over the WS. The broker
+// executes it through the connection's custodied herald client (token injected)
+// and replies with CWBResponsePayload. Pillar+path (not a URL) so the broker
+// pins the destination host to the CWB edge.
+type CWBRequestPayload struct {
+	Pillar string `json:"pillar"`
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	Body   []byte `json:"body,omitempty"` // raw JSON request body
+}
+
+// CWBResponsePayload is the relayed CWB response (status + raw body); the
+// aspect's cwb-client wrapper maps non-2xx to an error as usual.
+type CWBResponsePayload struct {
+	Status int    `json:"status"`
+	Body   []byte `json:"body,omitempty"`
+}
+
+// -------------------------------------------------------------------
 // Chat / comms
 // -------------------------------------------------------------------
 

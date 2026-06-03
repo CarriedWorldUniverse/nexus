@@ -70,6 +70,10 @@ const (
 	KindDispatchResult Kind = "dispatch.result"
 	KindDispatchError  Kind = "dispatch.error"
 
+	// CWB data-plane relay (aspect REST/gRPC calls bridged WS<->HTTP by the broker).
+	KindCWBRequest  Kind = "cwb.request"
+	KindCWBResponse Kind = "cwb.response"
+
 	// Chat — the existing comms surface in frame form.
 	KindChatSend       Kind = "chat.send"
 	KindChatDeliver    Kind = "chat.deliver"
@@ -316,6 +320,7 @@ func IsKnown(k Kind) bool {
 		KindOutpostRegister, KindOutpostRegisterAck, KindOutpostDeregister,
 		KindTurn, KindTurnResult,
 		KindDispatch, KindDispatchResult, KindDispatchError,
+		KindCWBRequest, KindCWBResponse,
 		KindChatSend, KindChatDeliver, KindChatReaction, KindChatRead,
 		KindChatReadResult, KindAnnounceFile, KindShareFile, KindFileResult,
 		KindAspectActivity,
