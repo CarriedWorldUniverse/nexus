@@ -14,14 +14,19 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/CarriedWorldUniverse/cwb-client/identity"
+	"github.com/CarriedWorldUniverse/cwb-client/oidc"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 	"github.com/CarriedWorldUniverse/nexus/runtime/context/tree"
+	"github.com/CarriedWorldUniverse/nexus/runtime/heraldkeyfile"
 	"github.com/CarriedWorldUniverse/nexus/runtime/providers"
 	"github.com/CarriedWorldUniverse/nexus/runtime/wsclient"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
@@ -54,6 +59,11 @@ type Config struct {
 
 	// AuthToken is the bearer token sent on the WS upgrade.
 	AuthToken string
+
+	// HeraldKeyfile, when non-nil, makes the aspect sign a casket assertion
+	// from its bootstrap key and present it in the register frame (herald
+	// bootstrap). nil → no assertion (existing behavior).
+	HeraldKeyfile *heraldkeyfile.Keyfile
 
 	// Logger is optional; nil falls back to slog.Default().
 	Logger *slog.Logger
@@ -268,10 +278,60 @@ func (a *Agent) registerLoop(ctx context.Context, done chan struct{}) {
 	}
 }
 
+// buildAssertion signs the herald register-handshake assertion from the
+// bootstrap keyfile. Returns "" (no error) when no keyfile is configured.
+// The audience is herald's token endpoint, discovered through the keyfile
+// url (the nexus relay) — the aspect's only egress.
+func (a *Agent) buildAssertion(ctx context.Context) (string, error) {
+	kf := a.cfg.HeraldKeyfile
+	if kf == nil {
+		return "", nil
+	}
+	priv, err := kf.PrivateKey()
+	if err != nil {
+		return "", fmt.Errorf("herald keyfile: %w", err)
+	}
+	edge := httpEdge(kf.URL)
+	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tokenURL, err := oidc.New(edge).TokenEndpoint(dctx)
+	if err != nil {
+		return "", fmt.Errorf("discover token endpoint via %s: %w", edge, err)
+	}
+	return identity.AgentAssertionFromKey(priv, kf.KeyID, tokenURL)
+}
+
+// httpEdge maps the keyfile relay url to the http(s) origin used for OIDC
+// discovery: ws/wss → http/https, scheme lowercased, any path/query dropped
+// (discovery is rooted at the origin). Falls back to the raw string if it
+// can't be parsed into a host.
+func httpEdge(u string) string {
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Host == "" {
+		return u
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	switch scheme {
+	case "wss", "https":
+		scheme = "https"
+	case "ws", "http":
+		scheme = "http"
+	}
+	return scheme + "://" + parsed.Host
+}
+
 // sendRegister sends a register frame and waits for the ack. Marks
 // the agent as registered on success.
 func (a *Agent) sendRegister(ctx context.Context) error {
+	assertion, aerr := a.buildAssertion(ctx)
+	if aerr != nil {
+		// Best-effort: register without herald-binding; the connection
+		// still comes up on the transport bearer. Retried next reconnect.
+		a.log.Warn("herald assertion skipped", "err", aerr)
+	}
+
 	req, err := frames.NewRequest(frames.KindRegister, frames.RegisterPayload{
+		Assertion: assertion,
 		RegisterRequest: schemas.RegisterRequest{
 			Name:         a.cfg.Aspect.Name,
 			ContextMode:  a.cfg.Aspect.ContextMode,

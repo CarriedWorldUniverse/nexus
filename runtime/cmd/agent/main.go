@@ -27,6 +27,7 @@ import (
 
 	"github.com/CarriedWorldUniverse/nexus/runtime/agent"
 	"github.com/CarriedWorldUniverse/nexus/runtime/handexec"
+	"github.com/CarriedWorldUniverse/nexus/runtime/heraldkeyfile"
 	"github.com/CarriedWorldUniverse/nexus/runtime/providers"
 	claudeapi "github.com/CarriedWorldUniverse/nexus/runtime/providers/claude-api"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
@@ -88,6 +89,16 @@ func main() {
 		os.Exit(2)
 	}
 
+	var heraldKF *heraldkeyfile.Keyfile
+	if p := os.Getenv("NEXUS_HERALD_KEYFILE"); p != "" {
+		heraldKF, err = heraldkeyfile.Load(p)
+		if err != nil {
+			log.Error("load herald keyfile", "err", err)
+			os.Exit(2)
+		}
+		log.Info("herald bootstrap keyfile loaded", "slug", heraldKF.Slug, "agent", heraldKF.KeyID)
+	}
+
 	a, err := agent.New(agent.Config{
 		Home:                      absHome,
 		Aspect:                    cfg,
@@ -95,6 +106,7 @@ func main() {
 		UpstreamURL:               upstreamURL,
 		UpstreamIsExplicitOutpost: isExplicitOutpost,
 		AuthToken:                 token,
+		HeraldKeyfile:             heraldKF,
 		Logger:                    log,
 	})
 	if err != nil {
