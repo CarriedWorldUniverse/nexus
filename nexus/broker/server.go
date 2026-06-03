@@ -26,6 +26,7 @@ import (
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
+	"github.com/CarriedWorldUniverse/nexus/nexus/cwb/custodian"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
@@ -81,6 +82,10 @@ type Config struct {
 	HeartbeatIntervalS int           // value returned to aspects on register
 	StaleAfter         time.Duration // aspect becomes "stale" after this gap
 	Logger             *slog.Logger
+
+	// HeraldEdge, when set (NEXUS_HERALD_EDGE), enables herald-auth on register:
+	// an aspect's assertion is redeemed via the custodian. Empty = disabled.
+	HeraldEdge string
 
 	// Projection receives session.entry.appended frames from aspects.
 	// Optional — if nil, the broker logs and drops session-projection
@@ -385,6 +390,10 @@ type Broker struct {
 	// (1 per aspect per 60s) and reject the spammy case.
 	sessionRefreshMu     sync.Mutex
 	lastSessionRefreshAt map[string]time.Time
+
+	// custodian redeems casket assertions presented on register
+	// (bootstrap step 3a). nil unless HeraldEdge is configured.
+	custodian Custodian
 }
 
 func New(cfg Config, r *roster.Roster) *Broker {
@@ -436,6 +445,9 @@ func New(cfg Config, r *roster.Roster) *Broker {
 		b.observability.SetOnFrame(b.BroadcastObserveFrame)
 	} else {
 		b.observability = observability.NewHub(500, b.BroadcastObserveFrame)
+	}
+	if cfg.HeraldEdge != "" {
+		b.custodian = custodian.New(cfg.HeraldEdge)
 	}
 	return b
 }
