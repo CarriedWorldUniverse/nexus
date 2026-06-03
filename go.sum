@@ -4,6 +4,8 @@ github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260529023501-39174f6a3471 h1:6
 github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260529023501-39174f6a3471/go.mod h1:nEWWic3aiWRjyUzmjdafUtqXoqS9f92KuUuuKpT5NYE=
 github.com/CarriedWorldUniverse/casket-go v0.1.0 h1:t+DvXs8vhaNcTfkSS/sqK47fBTNVRdHfF7DT/ur0jtY=
 github.com/CarriedWorldUniverse/casket-go v0.1.0/go.mod h1:v0y8kPW/WmusBw+Q3ZtRYhVwoK/WVVVXHWSc/oRVWBo=
+github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603045028-1db44b18fd1a h1:m8jl+5HLFCR61IHUYgj+fHxsez93Y7/5f/cZmx5qTg0=
+github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603045028-1db44b18fd1a/go.mod h1:mYs7BzEiFdFx5hDaahzRutND9gjxixt++t/S+XbQQvA=
 github.com/CarriedWorldUniverse/ledger v0.1.4 h1:gtu/8E1f2yRXMubTaS5IiG6mUmjYuuHObWZJos+2OGA=
 github.com/CarriedWorldUniverse/ledger v0.1.4/go.mod h1:2aeFr46SOJ19rDnwsSwGJA9CZqNrtYXY1BQ6vfzMEog=
 github.com/anthropics/anthropic-sdk-go v1.38.0 h1:bA4DcK+91gorIX+5VTONnynyt9LRU4nnN6rRQ+j/NIg=
@@ -30,6 +32,8 @@ github.com/frankban/quicktest v1.14.6 h1:7Xjx+VpznH+oBnejlPUj8oUpdxnVs4f8XU8WnHk
 github.com/frankban/quicktest v1.14.6/go.mod h1:4ptaffx2x8+WTWXmUCuVU6aPUX1/Mz7zb5vbUoiM6w0=
 github.com/fxamacker/cbor/v2 v2.9.2 h1:X4Ksno9+x3cz0TZv69ec1hxP/+tymuR8PXQJyDwfh78=
 github.com/fxamacker/cbor/v2 v2.9.2/go.mod h1:vM4b+DJCtHn+zz7h3FFp/hDAI9WNWCsZj23V5ytsSxQ=
+github.com/go-jose/go-jose/v4 v4.1.4 h1:moDMcTHmvE6Groj34emNPLs/qtYXRVcd6S7NHbHz3kA=
+github.com/go-jose/go-jose/v4 v4.1.4/go.mod h1:x4oUasVrzR7071A4TnHLGSPpNOm2a21K9Kf04k1rs08=
 github.com/go-viper/mapstructure/v2 v2.5.0 h1:vM5IJoUAy3d7zRSVtIwQgBj7BiWtMPfmPEgAXnvj1Ro=
 github.com/go-viper/mapstructure/v2 v2.5.0/go.mod h1:oJDH3BJKyqBA2TXFhDsKDGDTlndYOZ6rGS0BRZIxGhM=
 github.com/go-webauthn/webauthn v0.17.3 h1:XHZ0TXV7k8vChcE4TFgPitOPJ5cb7h1dpAeFDS0cjCo=
