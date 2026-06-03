@@ -83,7 +83,7 @@ type Config struct {
 	StaleAfter         time.Duration // aspect becomes "stale" after this gap
 	Logger             *slog.Logger
 
-	// HeraldEdge, when set (NEXUS_HERALD_EDGE), enables herald-auth on register:
+	// HeraldEdge, when set (NEXUS_CWB_EDGE), enables herald-auth on register:
 	// an aspect's assertion is redeemed via the custodian. Empty = disabled.
 	HeraldEdge string
 
