@@ -39,6 +39,9 @@ var supportedProviders = map[string]bool{
 	"claudecode": true, // alias for claude-code
 	"claude-code": true,
 	"openai":     true,
+	"codex":      true, // alias for codex-cli
+	"codex-cli":  true,
+	"codexcli":   true, // alias for codex-cli
 }
 
 type providerBindingResponse struct {
