@@ -52,6 +52,7 @@ import (
 	"github.com/CarriedWorldUniverse/bridle"
 	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
 	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
+	codexcliprovider "github.com/CarriedWorldUniverse/bridle/provider/codexcli"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
@@ -327,8 +328,10 @@ func buildProvider(cfg schemas.AspectConfig) (bridle.Provider, error) {
 		// subscription, not API key, so this is the safe default for
 		// the rebuild deploy.
 		return claudecodeprovider.New(), nil
+	case "codex-cli", "codex", "codexcli":
+		return codexcliprovider.New(), nil
 	default:
-		return nil, fmt.Errorf("unsupported provider %q (claude-api and claude-code supported in v1)", cfg.Provider)
+		return nil, fmt.Errorf("unsupported provider %q (claude-api, claude-code, codex-cli supported in v1)", cfg.Provider)
 	}
 }
 
