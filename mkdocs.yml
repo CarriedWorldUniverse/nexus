@@ -84,6 +84,8 @@ nav:
     - Funnel compaction: 2026-05-01-funnel-compaction-design.md
     - Funnel/bridle caching: 2026-05-03-funnel-bridle-caching-spec.md
     - Storage abstraction: 2026-05-05-storage-abstraction-spec.md
+    - Credential custodian: 2026-06-04-credential-custodian-design.md
+    - Nexus token custodian: 2026-06-03-nexus-token-custodian-design.md
     - Hand dispatch v0.1: 2026-04-30-hand-dispatch-v0_1.md
     - Provider adapter: 2026-04-24-provider-adapter-spec.md
     - Skill delivery: 2026-05-15-skill-delivery-design.md
