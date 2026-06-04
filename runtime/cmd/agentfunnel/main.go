@@ -456,6 +456,17 @@ func main() {
 	}
 
 	systemPrompt := composeSystemPrompt(res)
+	// Parse the validate response's mcp_profile into the funnel's MCP server
+	// list so non-claude-code providers (openai, codex) receive the servers
+	// in their TurnRequest. Empty/unparsed → keep MCP non-nil-but-empty,
+	// which is what claude-code's .mcp.json discovery (NEX-170) wants.
+	mcpCfg, perr := parseMCPProfile(res.MCPProfile)
+	if perr != nil {
+		log.Warn("agentfunnel: mcp_profile parse failed; non-claude-code providers get no MCP tools this run", "err", perr)
+	}
+	if mcpCfg == nil {
+		mcpCfg = &bridle.MCPClientConfig{}
+	}
 	f, err := funnel.New(funnel.Config{
 		AspectID: res.AspectName,
 		// Static binding fields kept populated for back-compat (some
@@ -475,10 +486,11 @@ func main() {
 		// updates — no funnel rebuild, no aspect restart.
 		BindingFn:    func() funnel.Binding { return *bindingCache.Load() },
 		SystemPrompt: systemPrompt,
-		// MCP: non-nil enables MCP tool discovery via cmd.Dir/.mcp.json
-		// for claude-code subprocess. .mcp.json is materialised from the
-		// validate response by materialiseMCP (NEX-170) before funnel init.
-		MCP: &bridle.MCPClientConfig{},
+		// MCP carries the aspect's mcp_profile servers (parseMCPProfile
+		// above) so non-claude-code providers get them in TurnRequest.MCP.
+		// claude-code ignores this and discovers via cmd.Dir/.mcp.json,
+		// materialised from the validate response by materialiseMCP (NEX-170).
+		MCP: mcpCfg,
 		// ContextMode (#226.5): funnel-driven aspects key per-thread
 		// sessions on the chat thread root, so each chat thread keeps
 		// its own claude-code jsonl. schemas.ContextMode and
