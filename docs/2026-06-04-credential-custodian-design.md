@@ -1,8 +1,10 @@
 # credential custodian — design
 
-**Date:** 2026-06-04
+**Date:** 2026-06-04 (amended 2026-06-05 — lynxai relationship + credential-store decision)
 **Status:** design
 **Scope:** AI-usable password, 2FA, and third-party credential storage for Carried World. Defines **Custodian** as a CWB service beside Herald: a place to store credentials that should not be given to AI directly, and a broker for credentialed acts that can be requested by CWB clients such as Nexus.
+
+**In one line — a LastPass for AI:** a human stocks a credential vault; an AI agent then uses those credentials (username, password, passkey, OTP) to complete web work through a browser — primarily [lynxai](https://github.com/CarriedWorldUniverse/lynxai), the AI-native headless browser — **without the model ever seeing the raw secret**. Custodian is the single authoritative store and policy authority; the browser (lynxai) is the execution arm that fills the form.
 
 ## Goal
 
@@ -34,9 +36,16 @@ CWB platform
 - **Ledger** is the issue/work/audit plane: tickets, approvals, actor attribution, append-only timeline, and operator-reviewed state transitions.
 - **Cairn** is the CWB git/PR/code-review surface — the GitHub analogue.
 - **Commonplace** is the CWB knowledge store.
+- **lynxai** (the AI-native headless browser) is the primary browser execution surface: it already resolves credentials by name and fills forms, and becomes a Custodian client (its local vault subsumed — see "Primary surface: lynxai").
 - **Bridle/toolrunner/browser surfaces** execute work but should not be trusted as long-term secret holders.
 
 This spec defines Custodian as the CWB service for third-party credentials and 2FA.
+
+## Primary surface: lynxai
+
+The first and primary execution surface is **lynxai**, the AI-native headless browser. When an agent does web work through lynxai (`/fetch`, `/extract`, future `/drive`) and a target needs authentication, lynxai resolves the credential **by name** against Custodian and fills the form out of model context — the agent passes a reference like `{"name": "github-bot"}`, never the secret.
+
+**Decision (2026-06-05): one store, lynxai fills.** Custodian is the single authoritative secret store and policy authority. lynxai does not hold long-term secrets: its local credential vault is subsumed into Custodian, and lynxai becomes a Custodian client. The by-name reference pattern lynxai already uses survives unchanged — it resolves against Custodian instead of a local vault, and every use lands in the one Ledger-recorded audit trail rather than a per-surface one. This keeps a single source of truth and a single audit plane while preserving lynxai's strength: driving the browser and filling forms. Other execution surfaces (toolrunner, future agents over CWB) are Custodian clients on the same footing.
 
 ## Boundary
 
@@ -45,7 +54,7 @@ Herald authenticates the caller.
 Custodian protects and exercises external secrets.
 Ledger records work context, approvals, and audit events.
 Nexus requests credentialed acts as a CWB client.
-Bridle/toolrunner/browser executes with delegated handles.
+lynxai / toolrunner (the browser + tool surfaces) execute with delegated handles.
 ```
 
 ### Herald responsibilities
@@ -304,15 +313,15 @@ Encryption requirements:
 
 ## Browser integration
 
-For website logins, the safest default path is a controlled browser session:
+For website logins, the safest default path is a controlled **lynxai** browser session:
 
-1. A CWB client such as Nexus starts or selects a browser session for the run.
+1. A CWB client such as Nexus starts or selects a lynxai browser session for the run.
 2. Agent navigates but cannot inspect Custodian secrets.
-3. Agent requests `login.form_fill` for a target.
+3. Agent requests `login.form_fill` for a target, referencing the credential by name.
 4. Custodian checks policy and, if needed, asks Ledger to record/resolve human approval.
-5. Custodian injects username/password into the browser.
+5. Custodian injects username/password into the lynxai session.
 6. If 2FA appears, Custodian either injects TOTP under policy or asks Ledger for human approval.
-7. Browser returns an authenticated session handle.
+7. lynxai returns an authenticated session handle.
 
 The model can observe page state and continue work, but it never sees the password or TOTP seed. If an OTP code must be typed into an untrusted browser automation surface, it should be treated as a short-lived secret and redacted from logs.
 
@@ -408,7 +417,8 @@ packages for browser/toolrunner binding, but Custodian itself is a CWB service.
 ### Phase 2 — encrypted Custodian MVP
 
 - Store password + TOTP seed classes.
-- Implement broker-assisted browser form fill and TOTP generation.
+- Implement broker-assisted browser form fill and TOTP generation through lynxai.
+- Integrate lynxai as a Custodian client: point its by-name credential resolution at Custodian, retire its local vault, and migrate existing lynxai-stored credentials into Custodian (its per-surface audit folds into the Ledger timeline).
 - No raw release path except disabled test-only fixtures.
 
 ### Phase 3 — delegated handles
@@ -460,6 +470,10 @@ Ledger    = why/when/who authorized and audited the act
 Nexus     = task/runtime context and execution
 ```
 
+### Credential store ownership (lynxai)
+
+One store, lynxai fills (2026-06-05). Custodian is the single authoritative credential store; lynxai does not keep its own long-term vault. lynxai's existing by-name credential resolution and form-fill capability are retained, but resolution points at Custodian and lynxai's stored credentials migrate in. This avoids two competing vaults and two audit trails, and makes lynxai the first concrete Custodian execution surface.
+
 ## Open questions
 
 - Should Ledger mirror credential metadata, or should it store only request/approval/audit events that reference Custodian credential ids?
@@ -470,6 +484,7 @@ Nexus     = task/runtime context and execution
 ## References
 
 - `docs/2026-06-03-nexus-token-custodian-design.md`
+- lynxai — the AI-native headless browser execution surface (CarriedWorldUniverse/lynxai)
 - `nexus/cwb/custodian`
 - Ledger specs and append-only event model
 - OWASP Secrets Management / MFA / Password Storage guidance
