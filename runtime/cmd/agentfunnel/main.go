@@ -54,6 +54,7 @@ import (
 	"github.com/CarriedWorldUniverse/bridle"
 	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
 	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
+	codexcliprovider "github.com/CarriedWorldUniverse/bridle/provider/codexcli"
 	openaiprovider "github.com/CarriedWorldUniverse/bridle/provider/openai"
 	toolrunner "github.com/CarriedWorldUniverse/bridle/toolrunner"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
@@ -717,8 +718,14 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 			os.Getenv("OPENAI_API_KEY"),
 			os.Getenv("OPENAI_BASE_URL"),
 		), nil
+	case "codex-cli", "codex", "codexcli":
+		// Headless Codex CLI (subprocess-stream): owns its own session +
+		// resume, so a codex aspect gets cross-turn memory without the
+		// funnel SessionTail path. Uses the operator's codex login; the
+		// model comes from the validate binding (or the codex config default).
+		return codexcliprovider.New(), nil
 	default:
-		return nil, fmt.Errorf("unsupported provider %q (claude-api, claude-code, openai supported)", provider)
+		return nil, fmt.Errorf("unsupported provider %q (claude-api, claude-code, openai, codex-cli supported)", provider)
 	}
 }
 
