@@ -1313,11 +1313,13 @@ func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, user
 	// Append the triage contract (when applicable) to the user message
 	// so the model sees it inside this turn's prompt. Moved out of
 	// bridle on 2026-05-23 — see triage_contract.go for the why.
-	if contract := triageContractFor(st.pending, f.cfg.Tools); contract != "" {
-		if userMessage != "" {
-			userMessage = userMessage + "\n\n" + contract
-		} else {
-			userMessage = contract
+	if triageContractInjection {
+		if contract := triageContractFor(st.pending, f.cfg.Tools); contract != "" {
+			if userMessage != "" {
+				userMessage = userMessage + "\n\n" + contract
+			} else {
+				userMessage = contract
+			}
 		}
 	}
 	return bridle.TurnRequest{

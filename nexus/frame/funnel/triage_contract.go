@@ -24,6 +24,15 @@ import (
 //     call triage() when triage isn't callable just makes it loop), or
 //   - no inbox item has a chat msg_id (synthetic/internal items don't
 //     participate in triage).
+// triageContractInjection toggles whether the funnel injects the triage
+// contract into the turn's user message (see the call site in funnel.go's
+// request lowering). Disabled 2026-06-05 per operator — the contract is
+// provider-agnostic but only fulfillable when the provider exposes the
+// triage tool, and it caused more friction than value (notably derailing
+// codex aspects, which have no triage tool). triageContractFor itself is
+// kept intact; flip this to true (or make it provider-aware) to re-enable.
+const triageContractInjection = false
+
 func triageContractFor(inbox []bridle.InboxItem, tools []bridle.ToolDef) string {
 	hasTriage := false
 	for _, t := range tools {
