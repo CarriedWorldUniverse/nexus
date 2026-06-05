@@ -7,21 +7,27 @@ import (
 )
 
 type JobConfig struct {
-	Image        string
-	Namespace    string
-	NodeIP       string
-	BrokerHost   string
-	BriefTimeout string
-	GitCredName  string
+	Image         string
+	Namespace     string
+	NodeIP        string
+	BrokerHost    string
+	BriefTimeout  string
+	GitCredName   string
+	LynxAIBaseURL string
+	LynxAIKey     string
 }
 
 func int32p(v int32) *int32 { return &v }
 
 // BuildJob mirrors deploy/worker/job.yaml for one dispatch brief.
-func BuildJob(b Brief, cfg JobConfig, taskID string) *batchv1.Job {
+func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.Job {
 	if cfg.BriefTimeout == "" {
 		cfg.BriefTimeout = "30m"
 	}
+	if provider == "" {
+		provider = "codex-cli"
+	}
+	codexProvider := provider == "codex-cli"
 	labels := map[string]string{
 		"app":                   "nexus-builder",
 		"nexus.dispatch/agent":  b.Agent,
@@ -30,6 +36,49 @@ func BuildJob(b Brief, cfg JobConfig, taskID string) *batchv1.Job {
 	annotations := map[string]string{}
 	if b.Thread != "" {
 		annotations["nexus.dispatch/thread"] = b.Thread
+	}
+	env := []corev1.EnvVar{
+		{Name: "CW_SEAM_URL", Value: "https://" + cfg.BrokerHost + ":7888"},
+		{Name: "GOCACHE", Value: "/cache/go"},
+	}
+	if cfg.LynxAIBaseURL != "" {
+		env = append(env, corev1.EnvVar{Name: "LYNXAI_BASE_URL", Value: cfg.LynxAIBaseURL})
+	}
+	if cfg.LynxAIKey != "" {
+		env = append(env, corev1.EnvVar{Name: "LYNXAI_KEY", Value: cfg.LynxAIKey})
+	}
+	volumeMounts := []corev1.VolumeMount{
+		{Name: "work", MountPath: "/work"},
+		{Name: "cache", MountPath: "/cache"},
+		{Name: "keyfile", MountPath: "/etc/nexus", ReadOnly: true},
+		// Brief ConfigMap mounts as its OWN directory — must NOT be a
+		// file inside /etc/nexus (the keyfile Secret's mount point), or
+		// the OCI runtime fails with "not a directory" (NEX-437).
+		{Name: "brief", MountPath: "/etc/dispatch", ReadOnly: true},
+	}
+	volumes := []corev1.Volume{
+		{Name: "work", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "nexus-builder-work"}}},
+		{Name: "cache", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "nexus-builder-work"}}},
+		{Name: "keyfile", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "aspect-keyfile-" + b.Agent}}},
+		{Name: "brief", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "brief-" + taskID}}}},
+	}
+	var initContainers []corev1.Container
+	if codexProvider {
+		initContainers = append(initContainers, corev1.Container{
+			Name:            "codex-auth",
+			Image:           cfg.Image,
+			ImagePullPolicy: corev1.PullNever,
+			Command:         []string{"sh", "-c", "mkdir -p /root/.codex && cp /codex-secret/auth.json /root/.codex/auth.json && chmod 600 /root/.codex/auth.json"},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "codex-home", MountPath: "/root/.codex"},
+				{Name: "codex-secret", MountPath: "/codex-secret", ReadOnly: true},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: "codex-home", MountPath: "/root/.codex"})
+		volumes = append(volumes,
+			corev1.Volume{Name: "codex-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "codex-auth"}}},
+			corev1.Volume{Name: "codex-home", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		)
 	}
 
 	return &batchv1.Job{
@@ -50,16 +99,7 @@ func BuildJob(b Brief, cfg JobConfig, taskID string) *batchv1.Job {
 						IP:        cfg.NodeIP,
 						Hostnames: []string{cfg.BrokerHost},
 					}},
-					InitContainers: []corev1.Container{{
-						Name:            "codex-auth",
-						Image:           cfg.Image,
-						ImagePullPolicy: corev1.PullNever,
-						Command:         []string{"sh", "-c", "mkdir -p /root/.codex && cp /codex-secret/auth.json /root/.codex/auth.json && chmod 600 /root/.codex/auth.json"},
-						VolumeMounts: []corev1.VolumeMount{
-							{Name: "codex-home", MountPath: "/root/.codex"},
-							{Name: "codex-secret", MountPath: "/codex-secret", ReadOnly: true},
-						},
-					}},
+					InitContainers: initContainers,
 					Containers: []corev1.Container{{
 						Name:            "builder",
 						Image:           cfg.Image,
@@ -71,29 +111,10 @@ func BuildJob(b Brief, cfg JobConfig, taskID string) *batchv1.Job {
 							"-reply-topic", b.Thread,
 							"-builder-timeout", cfg.BriefTimeout,
 						},
-						Env: []corev1.EnvVar{
-							{Name: "CW_SEAM_URL", Value: "https://" + cfg.BrokerHost + ":7888"},
-							{Name: "GOCACHE", Value: "/cache/go"},
-						},
-						VolumeMounts: []corev1.VolumeMount{
-							{Name: "work", MountPath: "/work"},
-							{Name: "cache", MountPath: "/cache"},
-							{Name: "keyfile", MountPath: "/etc/nexus", ReadOnly: true},
-							// Brief ConfigMap mounts as its OWN directory — must NOT be a
-							// file inside /etc/nexus (the keyfile Secret's mount point), or
-							// the OCI runtime fails with "not a directory" (NEX-437).
-							{Name: "brief", MountPath: "/etc/dispatch", ReadOnly: true},
-							{Name: "codex-home", MountPath: "/root/.codex"},
-						},
+						Env:          env,
+						VolumeMounts: volumeMounts,
 					}},
-					Volumes: []corev1.Volume{
-						{Name: "work", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "nexus-builder-work"}}},
-						{Name: "cache", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "nexus-builder-work"}}},
-						{Name: "keyfile", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "aspect-keyfile-" + b.Agent}}},
-						{Name: "codex-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "codex-auth"}}},
-						{Name: "brief", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "brief-" + taskID}}}},
-						{Name: "codex-home", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-					},
+					Volumes: volumes,
 				},
 			},
 		},

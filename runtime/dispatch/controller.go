@@ -135,7 +135,11 @@ func (c *Controller) spawn(ctx context.Context, b Brief) error {
 	if err := c.Provision(ctx, b, taskID); err != nil {
 		return err
 	}
-	job := BuildJob(b, c.Cfg, taskID)
+	provider := b.Provider
+	if provider == "" {
+		provider = "codex-cli"
+	}
+	job := BuildJob(b, c.Cfg, taskID, provider)
 	if err := c.K8s.CreateJob(ctx, job); err != nil {
 		return fmt.Errorf("create job: %w", err)
 	}

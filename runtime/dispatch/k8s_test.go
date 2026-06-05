@@ -14,7 +14,7 @@ import (
 
 func TestCreateAndListJobs(t *testing.T) {
 	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}
-	job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, JobConfig{Namespace: "nexus"}, "t1")
+	job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, JobConfig{Namespace: "nexus"}, "t1", "codex-cli")
 	if err := k.CreateJob(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
