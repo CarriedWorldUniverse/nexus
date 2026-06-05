@@ -306,9 +306,31 @@ func (c *Client) sendRegister(ctx context.Context) (int64, error) {
 		return since, fmt.Errorf("wsasp: send register frame: %w", err)
 	}
 	if resp.Kind != frames.KindRegisterAck {
-		return since, fmt.Errorf("wsasp: register response kind = %s, want %s", resp.Kind, frames.KindRegisterAck)
+		return since, fmt.Errorf("wsasp: register response kind = %s, want %s%s",
+			resp.Kind, frames.KindRegisterAck, registerErrorReason(resp))
 	}
 	return since, nil
+}
+
+func registerErrorReason(resp frames.Envelope) string {
+	var payload struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+		Reason  string `json:"reason"`
+	}
+	if err := frames.PayloadAs(resp, &payload); err != nil {
+		return ""
+	}
+	switch {
+	case payload.Error != "":
+		return ": " + payload.Error
+	case payload.Message != "":
+		return ": " + payload.Message
+	case payload.Reason != "":
+		return ": " + payload.Reason
+	default:
+		return ""
+	}
 }
 
 // drainPendingLoop flushes the outbound buffer once register has

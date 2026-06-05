@@ -344,6 +344,17 @@ func TestRegisterPrecedesDrainedSendsAfterReconnect(t *testing.T) {
 	}
 }
 
+func TestRegisterErrorReason(t *testing.T) {
+	const reason = "provider required"
+	resp, err := frames.NewResponse(frames.Kind("register.error"), "register-1", map[string]string{"error": reason})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := registerErrorReason(resp); got != ": "+reason {
+		t.Fatalf("registerErrorReason = %q, want %q", got, ": "+reason)
+	}
+}
+
 // Regression for NEX-237: NewClient must forward Config.TokenProvider into
 // the underlying wsclient.Config. Prior to the fix the field was silently
 // dropped, which meant aspects wired with a JWT-refresh closure would dial

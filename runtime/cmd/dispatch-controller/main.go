@@ -124,6 +124,11 @@ func main() {
 	}
 
 	sessionID := uuid.NewString()
+	registerProvider := dispatchControllerRegisterProvider(res.Provider)
+	if registerProvider != res.Provider {
+		log.Warn("dispatch-controller: validation response has empty provider; using controller registration provider",
+			"provider", registerProvider)
+	}
 	wsCfg := wsasp.Config{
 		URL:           wsURL,
 		AuthToken:     res.SessionJWT,
@@ -137,7 +142,7 @@ func main() {
 		Register: schemas.RegisterRequest{
 			Name:           res.AspectName,
 			ContextMode:    cm,
-			Provider:       res.Provider,
+			Provider:       registerProvider,
 			PID:            os.Getpid(),
 			StartedAt:      time.Now().UTC(),
 			Model:          res.Model,
@@ -166,6 +171,13 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("dispatch-controller: stopped")
+}
+
+func dispatchControllerRegisterProvider(provider string) string {
+	if strings.TrimSpace(provider) == "" {
+		return "dispatch-controller"
+	}
+	return provider
 }
 
 func fail(log *slog.Logger, what string, err error) {
