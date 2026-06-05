@@ -505,6 +505,43 @@ func TestGitKind_RejectsIncompleteBundle(t *testing.T) {
 	}
 }
 
+func TestGrant(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	if err := s.Set(ctx, UpsertParams{
+		Name:           "g",
+		Kind:           KindGit,
+		Bundle:         map[string]any{"username": "u", "password": "p", "host": "github.com"},
+		AllowedAspects: []string{"worker-1"},
+		Mode:           ModeFetch,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Grant(ctx, "g", "worker-2"); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	c, _ := s.Get(ctx, "g")
+	if !c.AllowedFor("worker-1") || !c.AllowedFor("worker-2") {
+		t.Fatalf("allowed = %v", c.AllowedAspects)
+	}
+	// idempotent — no duplicate
+	if err := s.Grant(ctx, "g", "worker-2"); err != nil {
+		t.Fatal(err)
+	}
+	c2, _ := s.Get(ctx, "g")
+	if len(c2.AllowedAspects) != 2 {
+		t.Fatalf("dup grant: %v", c2.AllowedAspects)
+	}
+	// bundle still decryptable after grant (untouched)
+	if _, err := s.GitBundle(c2); err != nil {
+		t.Fatalf("bundle after grant: %v", err)
+	}
+	// missing credential
+	if err := s.Grant(ctx, "nope", "x"); err != ErrNotFound {
+		t.Fatalf("grant missing: want ErrNotFound, got %v", err)
+	}
+}
+
 func TestEncryptIsNondeterministic(t *testing.T) {
 	s, _ := newTestStore(t)
 	c1, n1, err := s.encrypt([]byte("same-plaintext"))

@@ -333,6 +333,36 @@ func (s *Store) Set(ctx context.Context, p UpsertParams) error {
 	return nil
 }
 
+// Grant adds an aspect to a credential's allowed list (idempotent). Only
+// the allowed_aspects column is updated — the encrypted bundle is left
+// untouched, so widening access never needs the plaintext bundle.
+func (s *Store) Grant(ctx context.Context, name, aspect string) error {
+	c, err := s.Get(ctx, name)
+	if err != nil {
+		return err
+	}
+	for _, a := range c.AllowedAspects {
+		if a == aspect {
+			return nil // already granted
+		}
+	}
+	allowedJSON, err := json.Marshal(append(c.AllowedAspects, aspect))
+	if err != nil {
+		return fmt.Errorf("marshal allowed_aspects: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE credentials SET allowed_aspects = ?, updated_at = ? WHERE name = ?`,
+		string(allowedJSON), now, name)
+	if err != nil {
+		return fmt.Errorf("grant: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func validateUpsert(p UpsertParams) error {
 	if strings.TrimSpace(p.Name) == "" {
 		return errors.New("credentials: name required")
