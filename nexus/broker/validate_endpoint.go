@@ -183,6 +183,12 @@ func (b *Broker) registerKeyfileEndpoints(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/nexus_id", b.handleNexusID)
 	mux.HandleFunc("POST /api/aspect/validate", b.handleAspectValidate)
 
+	// NEX-435: agent credential seam. An agent fetches a scoped, audited
+	// credential bundle with its own session JWT — the HTTP counterpart of
+	// the WS credential.fetch frame (the cw git-credential-helper uses it).
+	// The handler guards on the credential store being wired.
+	mux.HandleFunc("POST /api/agent/credential.fetch", b.handleAgentCredentialFetch)
+
 	// Part 9c: aspect self-edit personality. Uses session JWT (sub
 	// claim) for auth, NOT admin bearer. Gated on Store being wired
 	// since the aspect row is the write target.
