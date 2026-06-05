@@ -369,6 +369,14 @@ func main() {
 	if *builderMode {
 		onTaskDone = builderOnTaskDone(stop, log, res.AspectName)
 		doneSentinel = builderDoneSentinel
+		// Export the session JWT so cw — git's credential helper in the
+		// worker image — can authenticate to the M1 custodian seam for
+		// git clone/push during the build (NEX-437). cw's git-helper reads
+		// CW_TOKEN; CW_SEAM_URL is supplied via the Job env. The codex/git
+		// subprocess inherits this process's environment.
+		if err := os.Setenv("CW_TOKEN", res.SessionJWT); err != nil {
+			log.Warn("agentfunnel: failed to export CW_TOKEN for builder git auth", "err", err)
+		}
 	}
 	commsRunner := funnel.CommsRunner{
 		Gateway:    gateway,
