@@ -77,6 +77,8 @@ func main() {
 	autoRecall := flag.Bool("auto-recall", false, "enable turn-time recall from the Commonplace (search the cross-session knowledge store with each incoming message and inject the strongest matches into the system prompt). Off by default.")
 	autoRecallTopK := flag.Int("auto-recall-topk", 0, "auto-recall: max strongest matches to inject (0 = funnel default)")
 	autoRecallMaxRank := flag.Float64("auto-recall-max-rank", 0, "auto-recall: BM25 relevance gate; only hits with score < this inject (ranks are negative, lower = stronger; 0 = no gate)")
+	builderMode := flag.Bool("builder", false, "builder/one-shot mode: drain the dispatched brief, run to the task_done signal, then exit")
+	builderTimeout := flag.Duration("builder-timeout", 30*time.Minute, "max wall-clock for a builder run before forced exit")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -256,6 +258,9 @@ func main() {
 		Expires: res.SessionExpiresAt,
 	})
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// TokenProvider returns the cached JWT when it's still healthy.
 	// Falls back to a keyfile re-validate when sessionState is empty
 	// or the JWT is within 1 minute of expiry (post-restart cold start,
@@ -357,10 +362,15 @@ func main() {
 	// field was nil → CommsRunner returned "knowledge gateway not
 	// configured" on every call.
 	knowledgeGateway := wsasp.NewKnowledgeGateway(wsClient)
+	var onTaskDone func(string)
+	if *builderMode {
+		onTaskDone = builderOnTaskDone(stop, log, res.AspectName)
+	}
 	commsRunner := funnel.CommsRunner{
-		Gateway:   gateway,
-		Knowledge: knowledgeGateway,
-		AspectID:  res.AspectName,
+		Gateway:    gateway,
+		Knowledge:  knowledgeGateway,
+		AspectID:   res.AspectName,
+		OnTaskDone: onTaskDone,
 	}
 
 	// Phase E remote forwarding: agentfunnel's funnel runs in a
@@ -467,7 +477,7 @@ func main() {
 	if mcpCfg == nil {
 		mcpCfg = &bridle.MCPClientConfig{}
 	}
-	f, err := funnel.New(funnel.Config{
+	cfg := funnel.Config{
 		AspectID: res.AspectName,
 		// Static binding fields kept populated for back-compat (some
 		// non-aspect callers still construct without BindingFn) but
@@ -485,6 +495,7 @@ func main() {
 		// new binding takes effect on the next turn after the cache
 		// updates — no funnel rebuild, no aspect restart.
 		BindingFn:    func() funnel.Binding { return *bindingCache.Load() },
+		OnTaskDone:   onTaskDone,
 		SystemPrompt: systemPrompt,
 		// MCP carries the aspect's mcp_profile servers (parseMCPProfile
 		// above) so non-claude-code providers get them in TurnRequest.MCP.
@@ -537,7 +548,8 @@ func main() {
 		// dir resolution as the cursor file (--cursor-dir / cwd).
 		IdempotencyFile: filepath.Join(resolveCursorDir(*cursorDir), "funnel-seen.json"),
 		Logger:          log,
-	})
+	}
+	f, err := funnel.New(cfg)
 	if err != nil {
 		fail(log, "funnel.New", err)
 	}
@@ -550,9 +562,6 @@ func main() {
 		"system_prompt_bytes", len(systemPrompt),
 		"central_version", res.CentralVersion,
 		"personality_version", res.Personality.Version)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// JWT pre-expiry monitor — safety net only.
 	//
@@ -579,6 +588,17 @@ func main() {
 	go sessionRefreshLoop(ctx, state, wsClient, 1*time.Hour, log)
 
 	go deliberateLoop(ctx, f, log)
+
+	if *builderMode {
+		go func() {
+			select {
+			case <-ctx.Done():
+			case <-time.After(*builderTimeout):
+				log.Error("agentfunnel: builder timeout — forcing exit", "timeout", *builderTimeout)
+				stop()
+			}
+		}()
+	}
 
 	if err := wsClient.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("agentfunnel: wsClient.Run", "err", err)
@@ -623,6 +643,13 @@ func composeSystemPrompt(res *keyfile.ValidationResult) string {
 		}
 	}
 	return strings.Join(parts, "\n\n---\n\n")
+}
+
+func builderOnTaskDone(stop context.CancelFunc, log *slog.Logger, aspect string) func(string) {
+	return func(summary string) {
+		log.Info("agentfunnel: builder task_done — exiting", "aspect", aspect, "summary", summary)
+		stop()
+	}
 }
 
 // jwtExpiryMonitor cancels ctx (via stop) shortly before the JWT

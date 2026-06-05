@@ -304,9 +304,15 @@ type Config struct {
 	// and for ensuring the Harness embedded in Binding is safe to use
 	// for one turn.
 	BindingFn func() Binding
-	MCP       *bridle.MCPClientConfig // optional; nil = no MCP-loaded tools
-	Tools     []bridle.ToolDef        // explicit in-process tool defs (incl. send_comms)
-	Runner    bridle.ToolRunner       // executes Tools
+
+	// OnTaskDone, when non-nil, is invoked when the aspect emits the
+	// task_done comms action: the builder-mode completion signal.
+	// nil for always-on aspects (the action is then a no-op).
+	OnTaskDone func(summary string)
+
+	MCP    *bridle.MCPClientConfig // optional; nil = no MCP-loaded tools
+	Tools  []bridle.ToolDef        // explicit in-process tool defs (incl. send_comms)
+	Runner bridle.ToolRunner       // executes Tools
 
 	// AutoRecall, when Enabled with a non-nil Gateway, searches the
 	// Commonplace (cross-session knowledge store) with each turn's incoming
@@ -657,6 +663,7 @@ func New(cfg Config) (*Funnel, error) {
 	if cfg.Runner == nil {
 		return nil, errors.New("funnel: Runner required")
 	}
+	cfg.Runner = withTaskDoneCallback(cfg.Runner, cfg.OnTaskDone)
 	if cfg.Compaction.ThresholdTokens == 0 {
 		cfg.Compaction = DefaultCompactionPolicy()
 	}
