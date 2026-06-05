@@ -111,6 +111,13 @@ func TestAgentCredentialFetch_Git(t *testing.T) {
 		t.Fatalf("bundle = %v", got.Bundle)
 	}
 
+	// no name — resolve by kind+host (the cw git-helper path)
+	respH := rig.fetch(t, rig.mintJWT(t, "worker-1"), `{"kind":"git","host":"github.com"}`)
+	defer respH.Body.Close()
+	if respH.StatusCode != 200 {
+		t.Fatalf("no-name+host git status=%d want 200", respH.StatusCode)
+	}
+
 	// disallowed agent → 403 + AuditDenied row
 	resp2 := rig.fetch(t, rig.mintJWT(t, "worker-2"), `{"kind":"git","name":"worker-git"}`)
 	defer resp2.Body.Close()
