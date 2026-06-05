@@ -54,6 +54,7 @@ const (
 	KindProvider Kind = "provider" // Anthropic/OpenAI-shape API creds
 	KindJira     Kind = "jira"     // Atlassian email/token/subdomain
 	KindIMAP     Kind = "imap"     // Mailbox host/port/user/password/ssl
+	KindGit      Kind = "git"      // Git push credential: username/password(PAT)/host
 	// Future kinds register here as the bundle validators are added.
 )
 
@@ -62,7 +63,7 @@ const (
 // silently working as opaque blobs.
 func IsKnownKind(k Kind) bool {
 	switch k {
-	case KindProvider, KindJira, KindIMAP:
+	case KindProvider, KindJira, KindIMAP, KindGit:
 		return true
 	default:
 		return false
@@ -189,6 +190,13 @@ type IMAPBundle struct {
 	User     string `json:"user"`
 	Password string `json:"password"`
 	SSL      bool   `json:"ssl"`
+}
+
+// GitBundle is the parsed shape of a kind='git' bundle.
+type GitBundle struct {
+	Username string `json:"username"`
+	Password string `json:"password"` // PAT or token; NEVER log
+	Host     string `json:"host"`     // e.g. github.com
 }
 
 // UpsertParams carries the inputs for Set. Bundle is the kind-specific
@@ -399,6 +407,16 @@ func validateBundle(kind Kind, bundle map[string]any) error {
 			return err
 		}
 		// port + ssl have defaults at the consumer; not required here.
+	case KindGit:
+		if err := requireString("username"); err != nil {
+			return err
+		}
+		if err := requireString("password"); err != nil {
+			return err
+		}
+		if err := requireString("host"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -503,6 +521,22 @@ func (s *Store) IMAPBundle(c Credential) (IMAPBundle, error) {
 		return IMAPBundle{}, fmt.Errorf("unmarshal imap bundle: %w", err)
 	}
 	return ib, nil
+}
+
+// GitBundle returns the decrypted bundle for a kind='git' credential.
+func (s *Store) GitBundle(c Credential) (GitBundle, error) {
+	if c.Kind != KindGit {
+		return GitBundle{}, fmt.Errorf("%w: have %q want %q", ErrKindMismatch, c.Kind, KindGit)
+	}
+	plaintext, err := s.decrypt(c.encryptedBundle, c.nonce)
+	if err != nil {
+		return GitBundle{}, fmt.Errorf("decrypt bundle: %w", err)
+	}
+	var gb GitBundle
+	if err := json.Unmarshal(plaintext, &gb); err != nil {
+		return GitBundle{}, fmt.Errorf("unmarshal git bundle: %w", err)
+	}
+	return gb, nil
 }
 
 // EnvForCredential builds the {API_KEY, BASE_URL} env-var pair a
