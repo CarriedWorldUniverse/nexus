@@ -220,6 +220,8 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 			b.requireAdmin(http.HandlerFunc(b.handleAdminCredentialDelete)))
 		mux.Handle("GET /api/admin/credentials/{name}/audit",
 			b.requireAdmin(http.HandlerFunc(b.handleAdminCredentialAudit)))
+		mux.Handle("POST /api/admin/credentials/{name}/grant",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminCredentialGrant)))
 		// Per-aspect credential defaults (NEX-76). Read + write on the
 		// default_{anthropic,openai,jira,imap}_credential columns on
 		// aspects. Gated on Credentials.Store being configured for the
