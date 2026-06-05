@@ -310,6 +310,14 @@ type Config struct {
 	// nil for always-on aspects (the action is then a no-op).
 	OnTaskDone func(summary string)
 
+	// DoneSentinel, when non-empty, is a marker the funnel watches for in
+	// each turn's reply text; when present it fires OnTaskDone. This is the
+	// codex-reachable completion path (NEX-440): codex and other subprocess-
+	// stream providers ignore bridle ToolDefs, so the task_done *tool* is
+	// invisible to them — but a sentinel in the reply is reachable by every
+	// provider. Builder mode sets this; always-on aspects leave it empty.
+	DoneSentinel string
+
 	MCP    *bridle.MCPClientConfig // optional; nil = no MCP-loaded tools
 	Tools  []bridle.ToolDef        // explicit in-process tool defs (incl. send_comms)
 	Runner bridle.ToolRunner       // executes Tools
@@ -1003,7 +1011,24 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (result Del
 	// empty reply, judge-suppressed, or output repeating a recent turn.
 	f.recordTurnOutcome(turnResult.FinalText, decision.ShouldPost)
 
+	// NEX-440: builder-mode completion via a reply sentinel (codex-reachable).
+	f.maybeSignalDone(turnResult.FinalText)
+
 	return f.dispatchReturn(ctx, st, turnResult, decision), nil
+}
+
+// maybeSignalDone fires OnTaskDone when the configured DoneSentinel appears in
+// the turn's reply text. This is the provider-agnostic completion path for
+// builder mode: codex ignores the task_done ToolDef, but emits reply text, so
+// a sentinel is the one signal every provider can reach (NEX-440).
+func (f *Funnel) maybeSignalDone(finalText string) {
+	if f.cfg.DoneSentinel == "" || f.cfg.OnTaskDone == nil {
+		return
+	}
+	if strings.Contains(finalText, f.cfg.DoneSentinel) {
+		f.log.Info("funnel: builder done sentinel detected", "sentinel", f.cfg.DoneSentinel)
+		f.cfg.OnTaskDone("done (reply sentinel)")
+	}
 }
 
 // --- NEX-365 Tier-1 loop damping -------------------------------------------
