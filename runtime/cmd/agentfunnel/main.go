@@ -80,6 +80,7 @@ func main() {
 	builderMode := flag.Bool("builder", false, "builder/one-shot mode: drain the dispatched brief, run to the task_done signal, then exit")
 	builderTimeout := flag.Duration("builder-timeout", 30*time.Minute, "max wall-clock for a builder run before forced exit")
 	briefFile := flag.String("brief-file", "", "builder mode: read the seed brief from this file instead of the broker inbox")
+	replyTopic := flag.String("reply-topic", "", "builder mode: attach this topic to natural reply posts")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -537,7 +538,8 @@ func main() {
 		// to call. Mirrors cmd/nexus/main.go's Frame funnel wiring.
 		ChatGateway:      gateway,
 		StreamTextToChat: true, // NEX-240: stream text blocks to chat as they arrive
-		AspectHome:       cwd,  // NEX-241: stderr log + session isolation anchor
+		ReplyTopic:       builderReplyTopic(*builderMode, *replyTopic),
+		AspectHome:       cwd, // NEX-241: stderr log + session isolation anchor
 		// NEX-302: per-aspect main-turn sampling overrides from
 		// aspect.json on the aspect's home dir. Empty / unset block
 		// leaves funnel's pass-through with zero-valued
@@ -678,6 +680,13 @@ func builderOnTaskDone(stop context.CancelFunc, log *slog.Logger, aspect string)
 		log.Info("agentfunnel: builder task_done — exiting", "aspect", aspect, "summary", summary)
 		stop()
 	}
+}
+
+func builderReplyTopic(builderMode bool, topic string) string {
+	if !builderMode {
+		return ""
+	}
+	return topic
 }
 
 // jwtExpiryMonitor cancels ctx (via stop) shortly before the JWT

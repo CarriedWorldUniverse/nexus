@@ -368,6 +368,11 @@ type Config struct {
 	// suppressed (text was already streamed). Requires ChatGateway.
 	StreamTextToChat bool
 
+	// ReplyTopic, when set, is attached to natural reply posts emitted
+	// by the return handler or streaming chat sink. Explicit send_chat
+	// tool calls continue to carry their own topic argument.
+	ReplyTopic string
+
 	// Return is the post-deliberation routing seam (NEX-82). The
 	// engine calls Return.OnTurnStart at turn pickup and Return.Handle
 	// at turn end. Implementations decide what to do with the result
@@ -716,6 +721,7 @@ func New(cfg Config) (*Funnel, error) {
 				AspectID:         cfg.AspectID,
 				Logger:           cfg.Logger,
 				SuppressAutoPost: cfg.StreamTextToChat,
+				ReplyTopic:       cfg.ReplyTopic,
 			}
 		} else {
 			cfg.Return = NoopReturnHandler{}
@@ -1936,6 +1942,7 @@ func (f *Funnel) buildTurnSink(replyTo int64) bridle.EventSink {
 		&streamingChatSink{
 			gateway:  f.cfg.ChatGateway,
 			replyTo:  replyTo,
+			topic:    f.cfg.ReplyTopic,
 			aspectID: f.cfg.AspectID,
 		},
 		sink,

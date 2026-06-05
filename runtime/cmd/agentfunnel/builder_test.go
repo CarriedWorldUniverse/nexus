@@ -18,3 +18,12 @@ func TestBuilderOnTaskDoneCancels(t *testing.T) {
 		t.Fatal("OnTaskDone did not cancel the context")
 	}
 }
+
+func TestBuilderReplyTopicOnlyAppliesInBuilderMode(t *testing.T) {
+	if got := builderReplyTopic(true, "NEX-443"); got != "NEX-443" {
+		t.Errorf("builderReplyTopic(true): got %q, want NEX-443", got)
+	}
+	if got := builderReplyTopic(false, "NEX-443"); got != "" {
+		t.Errorf("builderReplyTopic(false): got %q, want empty", got)
+	}
+}

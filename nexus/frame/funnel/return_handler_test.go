@@ -152,6 +152,26 @@ func TestNexusChatReturnHandler_ShouldPostAutoPosts(t *testing.T) {
 	}
 }
 
+func TestNexusChatReturnHandler_AutoPostCarriesReplyTopic(t *testing.T) {
+	g := &fakeGateway{}
+	h := &NexusChatReturnHandler{Gateway: g, ReplyTopic: "NEX-443"}
+	result := DeliberateResult{
+		TurnResult: bridle.TurnResult{FinalText: "Builder complete."},
+		Filter:     FilterDecision{ShouldPost: true},
+	}
+
+	if err := h.Handle(context.Background(), result, TurnTrigger{MsgID: 4242}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	if len(g.sentMessages) != 1 {
+		t.Fatalf("expected 1 SendChat, got %d", len(g.sentMessages))
+	}
+	if g.sentMessages[0].Topic != "NEX-443" {
+		t.Errorf("auto-post topic: got %q, want NEX-443", g.sentMessages[0].Topic)
+	}
+}
+
 // TestNexusChatReturnHandler_FilterSuppressedSubstantive pins the 🙊
 // path: filter says don't post, but the model had substantive text →
 // react with 🙊 so operator can audit the suppression.

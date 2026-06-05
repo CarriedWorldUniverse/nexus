@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   from_agent          TEXT NOT NULL,
   content             TEXT NOT NULL,
   reply_to            INTEGER,
+  topic               TEXT,
   parent_msg_id       INTEGER,           -- linked-list parent; NULL = thread root
   thread_root_msg_id  INTEGER,           -- canonical thread identity; NULL for legacy rows pre-#226 migration
   kind                TEXT NOT NULL DEFAULT 'chat',    -- chat | hand | system

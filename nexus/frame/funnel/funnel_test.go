@@ -1224,12 +1224,12 @@ func TestDeliberate_SuccessPath_PassesToolNamesToFilter(t *testing.T) {
 	}
 	rf := &recordingFilter{}
 	f, err := New(Config{
-		AspectID: "test",
-		Harness:  bridle.NewHarness(prov),
-		Provider: "scripted",
-		Model:    "m",
-		Runner:   noopRunner{},
-		Filter:   rf,
+		AspectID:        "test",
+		Harness:         bridle.NewHarness(prov),
+		Provider:        "scripted",
+		Model:           "m",
+		Runner:          noopRunner{},
+		Filter:          rf,
 		MaxStepsPerTurn: 5,
 	})
 	if err != nil {
@@ -1385,6 +1385,45 @@ func TestStreamTextToChat_SingleBlockNoRegression(t *testing.T) {
 	}
 	if chat.sends[0].ReplyTo != 100 {
 		t.Errorf("reply_to=%d want 100", chat.sends[0].ReplyTo)
+	}
+}
+
+func TestStreamTextToChat_CarriesReplyTopic(t *testing.T) {
+	chat := &recordingChatGateway{}
+	prov := &multiBlockProvider{
+		events: []bridle.Event{
+			bridle.ModelChunk{Text: "Builder reply"},
+		},
+	}
+
+	f, err := New(Config{
+		AspectID:         "test-aspect",
+		SystemPrompt:     "test",
+		Harness:          bridle.NewHarness(prov),
+		Provider:         "multi-block",
+		Model:            "test-model",
+		Runner:           NullRunner{},
+		ChatGateway:      chat,
+		StreamTextToChat: true,
+		ReplyTopic:       "NEX-443",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.ReceiveWithMsgID(bridle.InboxItem{
+		From: "operator", Content: "hello", ThreadRoot: 42,
+	}, 100)
+
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(chat.sends) != 1 {
+		t.Fatalf("expected 1 chat send, got %d", len(chat.sends))
+	}
+	if chat.sends[0].Topic != "NEX-443" {
+		t.Errorf("streamed topic=%q want NEX-443", chat.sends[0].Topic)
 	}
 }
 

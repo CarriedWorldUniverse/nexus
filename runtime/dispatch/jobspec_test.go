@@ -24,6 +24,9 @@ func TestBuildJob(t *testing.T) {
 	if !contains(c.Args, "-builder") || !contains(c.Args, "-brief-file") {
 		t.Errorf("args missing builder/-brief-file: %v", c.Args)
 	}
+	if !argValueEquals(c.Args, "-reply-topic", "NEX-999") {
+		t.Errorf("args missing -reply-topic NEX-999: %v", c.Args)
+	}
 	if *job.Spec.BackoffLimit != 0 {
 		t.Errorf("backoffLimit = %d, want 0", *job.Spec.BackoffLimit)
 	}
@@ -46,6 +49,15 @@ func contains(ss []string, s string) bool {
 	for _, x := range ss {
 		if x == s {
 			return true
+		}
+	}
+	return false
+}
+
+func argValueEquals(ss []string, key, want string) bool {
+	for i := 0; i < len(ss)-1; i++ {
+		if ss[i] == key {
+			return ss[i+1] == want
 		}
 	}
 	return false

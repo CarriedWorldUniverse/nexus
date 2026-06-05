@@ -122,6 +122,7 @@ func turnSink(hook ObservabilityHook) bridle.EventSink {
 type streamingChatSink struct {
 	gateway  ChatGateway
 	replyTo  int64
+	topic    string
 	aspectID string
 
 	mu        sync.Mutex
@@ -161,7 +162,7 @@ func (s *streamingChatSink) flushLocked() {
 	if s.lastMsgID != 0 {
 		replyTo = s.lastMsgID
 	}
-	msgID, err := s.gateway.SendChat(context.Background(), text, replyTo, "")
+	msgID, err := s.gateway.SendChat(context.Background(), text, replyTo, s.topic)
 	if err != nil {
 		return
 	}
