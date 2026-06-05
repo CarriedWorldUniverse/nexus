@@ -1,0 +1,28 @@
+# Shared builder storage (NEX-436). Single-node dMon → hostPath, RWX.
+# /work/<task-id> per-run workspace + shared caches. Multi-node later →
+# per-agent PVCs + a read-through cache mirror.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nexus-builder-work
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes: ["ReadWriteMany"]
+  hostPath:
+    path: /var/lib/nexus-builder   # on the dMon node (chmod 777)
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nexus-builder-work
+  namespace: nexus
+spec:
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 50Gi
+  volumeName: nexus-builder-work
+  storageClassName: ""

@@ -1,0 +1,44 @@
+# Builder Job template (NEX-436). Substitute ${AGENT} / ${TASK_ID} at apply
+# (envsubst). M3's dispatch controller will create this programmatically;
+# for M2 it's applied by hand to run a builder for a dispatched brief.
+#
+# Runs agentfunnel in -builder mode AS the named agent: validate → drain the
+# pending inbox brief once → run the task → push (via cw) + open the PR as
+# that agent → post the result → exit on task_done.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: builder-${AGENT}-${TASK_ID}
+  namespace: nexus
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      # The broker runs on the dMon HOST (systemd, :7888) with a cert for
+      # its tailnet name; map that name to the node IP so the pod reaches it
+      # AND the TLS hostname still matches.
+      hostAliases:
+        - ip: "192.168.143.133"            # dMon node internal IP
+          hostnames: ["dmonextreme.tail41686e.ts.net"]
+      containers:
+        - name: builder
+          image: localhost/nexus-builder:dev
+          imagePullPolicy: Never            # imported into k3s containerd
+          args: ["-k", "/etc/nexus/keyfile.json", "-builder"]
+          env:
+            # M1 custodian seam (broker on the host). The cw git-credential
+            # helper + provider keys resolve through this.
+            - { name: CW_SEAM_URL, value: "https://dmonextreme.tail41686e.ts.net:7888" }
+            - { name: GOCACHE, value: "/cache/go" }
+            # codex auth in-pod: prefer OPENAI_API_KEY brokered via the seam
+            # (kind=provider). See README — codex-pod-auth is the open item.
+          volumeMounts:
+            - { name: work, mountPath: /work }
+            - { name: cache, mountPath: /cache }
+            - { name: keyfile, mountPath: /etc/nexus, readOnly: true }
+      volumes:
+        - { name: work, persistentVolumeClaim: { claimName: nexus-builder-work } }
+        - { name: cache, persistentVolumeClaim: { claimName: nexus-builder-work } }
+        - { name: keyfile, secret: { secretName: aspect-keyfile-${AGENT} } }
