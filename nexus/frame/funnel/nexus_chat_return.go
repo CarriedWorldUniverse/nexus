@@ -46,6 +46,10 @@ type NexusChatReturnHandler struct {
 	// Emoji resolution still fires — the turn lifecycle signals remain
 	// intact. Set by the funnel when Config.StreamTextToChat is true.
 	SuppressAutoPost bool
+
+	// ReplyTopic is attached to natural auto-post replies. Empty
+	// preserves the historical un-topic'd reply behavior.
+	ReplyTopic string
 }
 
 // Verify NexusChatReturnHandler satisfies the interface at compile time.
@@ -122,7 +126,7 @@ func (h *NexusChatReturnHandler) Handle(ctx context.Context, result DeliberateRe
 	// Posted before the auto-post so the notice appears above the
 	// reply it qualifies.
 	if notice := strings.TrimSpace(result.Filter.SystemNotice); notice != "" {
-		if _, err := h.Gateway.SendChat(ctx, notice, trigger.MsgID, ""); err != nil {
+		if _, err := h.Gateway.SendChat(ctx, notice, trigger.MsgID, h.ReplyTopic); err != nil {
 			h.warn("funnel: system notice post failed",
 				"trigger_msg_id", trigger.MsgID,
 				"err", err)
@@ -141,7 +145,7 @@ func (h *NexusChatReturnHandler) Handle(ctx context.Context, result DeliberateRe
 	if result.Filter.ShouldPost && !h.SuppressAutoPost && !postedViaTool {
 		text := strings.TrimSpace(result.TurnResult.FinalText)
 		if text != "" {
-			if msgID, err := h.Gateway.SendChat(ctx, text, trigger.MsgID, ""); err != nil {
+			if msgID, err := h.Gateway.SendChat(ctx, text, trigger.MsgID, h.ReplyTopic); err != nil {
 				h.warn("funnel: auto-post failed",
 					"trigger_msg_id", trigger.MsgID,
 					"err", err)

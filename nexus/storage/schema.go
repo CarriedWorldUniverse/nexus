@@ -146,6 +146,7 @@ func createPostMigrationIndexes(ctx context.Context, db *sql.DB) error {
 	stmts := []string{
 		`CREATE INDEX IF NOT EXISTS idx_chat_parent_msg_id      ON chat_messages(parent_msg_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_chat_thread_root_msg_id ON chat_messages(thread_root_msg_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_chat_topic              ON chat_messages(topic)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {
@@ -340,6 +341,11 @@ var columnsToAdd = []columnAddition{
 		table:  "chat_messages",
 		column: "thread_root_msg_id",
 		ddl:    "ALTER TABLE chat_messages ADD COLUMN thread_root_msg_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL",
+	},
+	{
+		table:  "chat_messages",
+		column: "topic",
+		ddl:    "ALTER TABLE chat_messages ADD COLUMN topic TEXT",
 	},
 }
 

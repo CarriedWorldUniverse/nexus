@@ -227,7 +227,13 @@ var ErrEmptyContent = errors.New("chat.Insert: content is required")
 // Insert writes a row and returns the persisted Message. Resolves the
 // linked-list thread columns (parent_msg_id, thread_root_msg_id; task
 // #226) inside a BEGIN IMMEDIATE transaction so concurrent replies
-// chain via serialized INSERT order rather than branching the tree:
+// chain via serialized INSERT order rather than branching the tree.
+//
+// When topic is non-empty, topic is the canonical thread identity:
+// thread_root_msg_id is copied from the earliest existing message with
+// that topic, or self-rooted when this row starts the topic. reply_to is
+// still stored exactly as supplied so clients can render the display
+// parent. Existing no-topic reply_to behavior is left unchanged:
 //
 //   - Top-level (replyTo == 0): parent_msg_id = NULL, then
 //     thread_root_msg_id = self id (UPDATE after the INSERT mints the
@@ -255,12 +261,14 @@ func (s *SQLStore) Insert(ctx context.Context, from, content string, replyTo int
 	// reply_to stored as NULL when zero so the foreign key applies
 	// cleanly. thread_id is the schema's FK to threads(id), separate
 	// concept from the linked-list thread_root_msg_id; left NULL for
-	// v1 chat traffic. Topic remains reserved at the API boundary
-	// pending #226-followup work that may surface named subjects.
-	_ = topic
+	// v1 chat traffic.
 	var replyToArg any = nil
 	if replyTo != 0 {
 		replyToArg = replyTo
+	}
+	var topicArg any = nil
+	if topic != "" {
+		topicArg = topic
 	}
 
 	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{})
@@ -275,7 +283,24 @@ func (s *SQLStore) Insert(ctx context.Context, from, content string, replyTo int
 
 	var threadRootArg any = nil
 	var parentArg any = nil
-	if replyTo != 0 {
+	if topic != "" {
+		var topicRoot sql.NullInt64
+		err := tx.QueryRowContext(ctx, `
+			SELECT COALESCE(thread_root_msg_id, id)
+			  FROM chat_messages
+			 WHERE topic = ?
+			 ORDER BY id ASC
+			 LIMIT 1
+		`, topic).Scan(&topicRoot)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			// First message for this topic self-roots after INSERT.
+		case err != nil:
+			return Message{}, fmt.Errorf("chat.Insert: resolve topic thread_root: %w", err)
+		default:
+			threadRootArg = topicRoot.Int64
+		}
+	} else if replyTo != 0 {
 		// Inherit the thread root from the replyTo target. Coalesce
 		// covers legacy rows where backfill hasn't populated the
 		// column (theoretically impossible after Part 1's backfill,
@@ -317,9 +342,9 @@ func (s *SQLStore) Insert(ctx context.Context, from, content string, replyTo int
 	}
 
 	res, err := tx.ExecContext(ctx, `
-		INSERT INTO chat_messages (thread_id, from_agent, content, reply_to, parent_msg_id, thread_root_msg_id, kind)
-		VALUES (NULL, ?, ?, ?, ?, ?, 'chat')
-	`, from, content, replyToArg, parentArg, threadRootArg)
+		INSERT INTO chat_messages (thread_id, from_agent, content, reply_to, topic, parent_msg_id, thread_root_msg_id, kind)
+		VALUES (NULL, ?, ?, ?, ?, ?, ?, 'chat')
+	`, from, content, replyToArg, topicArg, parentArg, threadRootArg)
 	if err != nil {
 		return Message{}, fmt.Errorf("chat.Insert: exec: %w", err)
 	}
@@ -346,7 +371,7 @@ func (s *SQLStore) Insert(ctx context.Context, from, content string, replyTo int
 	var topicCol sql.NullString
 	var createdAtRaw string
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at, parent_msg_id, thread_root_msg_id
+		SELECT id, from_agent, content, reply_to, topic, kind, created_at, parent_msg_id, thread_root_msg_id
 		FROM chat_messages WHERE id = ?
 	`, id).Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw, &parentCol, &threadRootCol)
 	if err != nil {
@@ -728,7 +753,7 @@ func (s *SQLStore) ListSince(ctx context.Context, sinceID int64, limit int) ([]M
 		limit = maxScanLimit
 	}
 	const query = `
-		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at, parent_msg_id, thread_root_msg_id
+		SELECT id, from_agent, content, reply_to, topic, kind, created_at, parent_msg_id, thread_root_msg_id
 		FROM chat_messages
 		WHERE id > ?
 		ORDER BY id ASC
@@ -784,7 +809,7 @@ func (s *SQLStore) GetByID(ctx context.Context, id int64) (Message, error) {
 	var topicCol sql.NullString
 	var createdAtRaw string
 	err := s.DB.QueryRowContext(ctx, `
-		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at, parent_msg_id, thread_root_msg_id
+		SELECT id, from_agent, content, reply_to, topic, kind, created_at, parent_msg_id, thread_root_msg_id
 		FROM chat_messages WHERE id = ?
 	`, id).Scan(&msg.ID, &msg.From, &msg.Content, &replyToCol, &topicCol, &msg.Kind, &createdAtRaw, &parentCol, &threadRootCol)
 	if err != nil {
@@ -932,7 +957,7 @@ func (s *SQLStore) ListReplies(ctx context.Context, parentID int64) ([]Message, 
 		return nil, fmt.Errorf("chat.ListReplies: parent_id must be positive")
 	}
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT id, from_agent, content, reply_to, thread_id, kind, created_at, parent_msg_id, thread_root_msg_id
+		SELECT id, from_agent, content, reply_to, topic, kind, created_at, parent_msg_id, thread_root_msg_id
 		FROM chat_messages
 		WHERE reply_to = ?
 		ORDER BY id ASC
@@ -1005,7 +1030,7 @@ func (s *SQLStore) ListPage(ctx context.Context, beforeID, afterID int64, limit 
 	)
 	switch {
 	case afterID > 0:
-		q = `SELECT id, from_agent, content, reply_to, thread_id, kind, created_at, parent_msg_id, thread_root_msg_id
+		q = `SELECT id, from_agent, content, reply_to, topic, kind, created_at, parent_msg_id, thread_root_msg_id
 		     FROM chat_messages WHERE id > ? ORDER BY id ASC LIMIT ?`
 		args = []any{afterID, probe}
 	default:
@@ -1014,7 +1039,7 @@ func (s *SQLStore) ListPage(ctx context.Context, beforeID, afterID int64, limit 
 		if anchor <= 0 {
 			anchor = 1<<63 - 1 // MaxInt64
 		}
-		q = `SELECT id, from_agent, content, reply_to, thread_id, kind, created_at, parent_msg_id, thread_root_msg_id
+		q = `SELECT id, from_agent, content, reply_to, topic, kind, created_at, parent_msg_id, thread_root_msg_id
 		     FROM chat_messages WHERE id < ? ORDER BY id DESC LIMIT ?`
 		args = []any{anchor, probe}
 	}

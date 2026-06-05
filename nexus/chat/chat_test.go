@@ -77,9 +77,6 @@ func TestSQLStore_InsertRejectsEmpty(t *testing.T) {
 }
 
 func TestSQLStore_InsertWithReplyTo(t *testing.T) {
-	// Topic is currently a no-op pass-through (see Insert comment);
-	// once topics get a backing table or column this test will assert
-	// round-trip. For now: validate reply_to wires correctly.
 	s := openTestStore(t)
 	ctx := context.Background()
 
@@ -97,6 +94,82 @@ func TestSQLStore_InsertWithReplyTo(t *testing.T) {
 	}
 	if reply.ID <= parent.ID {
 		t.Errorf("ids should be monotonic: parent=%d reply=%d", parent.ID, reply.ID)
+	}
+}
+
+func TestSQLStore_InsertSameTopicSharesThreadRoot(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	root, err := s.Insert(ctx, "operator", "dispatch started", 0, "NEX-443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := s.Insert(ctx, "anvil", "builder spawned", 0, "NEX-443")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if root.ThreadRootMsgID != root.ID {
+		t.Errorf("topic root thread_root: got %d, want self %d", root.ThreadRootMsgID, root.ID)
+	}
+	if next.ThreadRootMsgID != root.ThreadRootMsgID {
+		t.Errorf("same-topic thread_root: got %d, want %d", next.ThreadRootMsgID, root.ThreadRootMsgID)
+	}
+	if next.Topic != "NEX-443" {
+		t.Errorf("topic round-trip: got %q, want NEX-443", next.Topic)
+	}
+	if next.ReplyTo != 0 {
+		t.Errorf("same-topic top-level reply_to: got %d, want 0", next.ReplyTo)
+	}
+}
+
+func TestSQLStore_InsertNoTopicKeepsReplyThreading(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	root, err := s.Insert(ctx, "operator", "root", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := s.Insert(ctx, "anvil", "reply", root.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if reply.ThreadRootMsgID != root.ID {
+		t.Errorf("no-topic reply thread_root: got %d, want %d", reply.ThreadRootMsgID, root.ID)
+	}
+	if reply.ParentMsgID != root.ID {
+		t.Errorf("no-topic reply parent: got %d, want %d", reply.ParentMsgID, root.ID)
+	}
+	if reply.Topic != "" {
+		t.Errorf("no-topic reply topic: got %q, want empty", reply.Topic)
+	}
+}
+
+func TestSQLStore_InsertReplyWithinTopicStaysInTopicThread(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	topicRoot, err := s.Insert(ctx, "controller", "status", 0, "NEX-443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRoot, err := s.Insert(ctx, "operator", "unrelated", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := s.Insert(ctx, "builder", "done", otherRoot.ID, "NEX-443")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if reply.ReplyTo != otherRoot.ID {
+		t.Errorf("topic reply_to should preserve display parent: got %d, want %d", reply.ReplyTo, otherRoot.ID)
+	}
+	if reply.ThreadRootMsgID != topicRoot.ID {
+		t.Errorf("topic reply thread_root: got %d, want topic root %d", reply.ThreadRootMsgID, topicRoot.ID)
 	}
 }
 
@@ -160,7 +233,6 @@ func TestSQLStore_InsertResolvesThreadColumns(t *testing.T) {
 		t.Errorf("r3 reply_to (hint preserved): got %d, want root %d", r3.ReplyTo, root.ID)
 	}
 }
-
 
 func TestSQLStore_ThreadParticipants(t *testing.T) {
 	// Powers the Slack/Teams-style routing in recipients.go: every

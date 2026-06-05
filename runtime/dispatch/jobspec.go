@@ -68,6 +68,7 @@ func BuildJob(b Brief, cfg JobConfig, taskID string) *batchv1.Job {
 							"-k", "/etc/nexus/keyfile.json",
 							"-builder",
 							"-brief-file", "/etc/dispatch/brief.md",
+							"-reply-topic", b.Thread,
 							"-builder-timeout", cfg.BriefTimeout,
 						},
 						Env: []corev1.EnvVar{
