@@ -29,5 +29,10 @@ COPY agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp cw /usr/local/bi
 # (npm i -g @anthropic-ai/claude-code) when claude-backed builders are wanted.
 RUN npm config set prefix /root/.npm-global && npm i -g @openai/codex && codex --version
 
+# cw is git's credential helper: clone/push auth flows through the M1 custodian
+# seam, never a baked secret (NEX-437). cw's git-helper reads CW_TOKEN (the
+# session JWT, exported by agentfunnel in -builder mode) + CW_SEAM_URL (Job env).
+RUN git config --system credential.helper '!cw credential git-helper'
+
 WORKDIR /work
 ENTRYPOINT ["/usr/local/bin/agentfunnel"]
