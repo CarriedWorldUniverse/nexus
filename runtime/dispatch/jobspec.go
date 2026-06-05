@@ -12,6 +12,7 @@ type JobConfig struct {
 	NodeIP       string
 	BrokerHost   string
 	BriefTimeout string
+	GitCredName  string
 }
 
 func int32p(v int32) *int32 { return &v }

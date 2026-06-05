@@ -126,10 +126,11 @@ type Client struct {
 	ws  *wsclient.Client
 	log *slog.Logger
 
-	mu         sync.Mutex
-	cursor     int64             // highest processed msg_id
-	pending    []frames.Envelope // outbound buffer while WS is down
-	registered chan struct{}     // closed when register has been sent on the current connection
+	mu          sync.Mutex
+	cursor      int64             // highest processed msg_id
+	pending     []frames.Envelope // outbound buffer while WS is down
+	registered  chan struct{}     // closed when register has been sent on the current connection
+	registering bool              // true while a register request is in flight
 }
 
 // NewClient builds the aspect host. Loads the cursor from disk
@@ -176,6 +177,7 @@ func (c *Client) Run(ctx context.Context) error {
 	c.setRegisteredBarrier(registered)
 
 	go c.handleConnectEvents(ctx)
+	go c.ensureRegisteredLoop(ctx)
 	go c.drainPendingLoop(ctx)
 	return c.ws.Run(ctx)
 }
@@ -217,18 +219,7 @@ func (c *Client) handleConnectEvents(ctx context.Context) {
 				return
 			}
 			if ev.Connected {
-				if err := c.sendRegister(ctx); err != nil {
-					c.log.Warn("wsasp: register send failed; barrier stays open until next reconnect (drain parked)",
-						"aspect", c.cfg.Register.Name, "err", err)
-					continue
-				}
-				barrier := c.registeredBarrier()
-				select {
-				case <-barrier:
-					// Already closed (duplicate Connected=true event) — leave it.
-				default:
-					close(barrier)
-				}
+				c.ensureRegistered(ctx)
 			} else {
 				c.setRegisteredBarrier(make(chan struct{}))
 			}
@@ -236,28 +227,88 @@ func (c *Client) handleConnectEvents(ctx context.Context) {
 	}
 }
 
-// sendRegister builds and sends the register frame with the current
-// cursor and the caller-supplied RegisterRequest. Returns the
-// underlying error on failure so handleConnectEvents can decide
-// whether to close the register barrier (which gates outbound chat
-// sends against the just-connected WS — only safe to open once
-// register has actually landed).
-func (c *Client) sendRegister(ctx context.Context) error {
+// ensureRegisteredLoop is a defensive backstop for callers that miss the
+// wsclient Connected event. Events() is intentionally a single-consumer
+// channel; if a startup race or future caller drains it first, a connected
+// socket would otherwise sit unregistered forever.
+func (c *Client) ensureRegisteredLoop(ctx context.Context) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if c.ws.Connected() {
+				c.ensureRegistered(ctx)
+			}
+		}
+	}
+}
+
+func (c *Client) ensureRegistered(ctx context.Context) {
+	barrier := c.registeredBarrier()
+	select {
+	case <-barrier:
+		return
+	default:
+	}
+
+	c.mu.Lock()
+	if c.registering {
+		c.mu.Unlock()
+		return
+	}
+	c.registering = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.registering = false
+		c.mu.Unlock()
+	}()
+
+	since, err := c.sendRegister(ctx)
+	if err != nil {
+		c.log.Warn("wsasp: register send failed; barrier stays open until next reconnect (drain parked)",
+			"aspect", c.cfg.Register.Name, "err", err)
+		return
+	}
+	select {
+	case <-barrier:
+		// Already closed by a concurrent successful registration.
+	default:
+		close(barrier)
+	}
+	c.log.Info("wsasp: register acknowledged",
+		"aspect", c.cfg.Register.Name,
+		"since_msg_id", since)
+}
+
+// sendRegister builds the register frame with the current cursor and waits
+// for the broker's register.ack. The register barrier only opens after the
+// broker has accepted the registration.
+func (c *Client) sendRegister(ctx context.Context) (int64, error) {
 	c.mu.Lock()
 	since := c.cursor
 	c.mu.Unlock()
 
-	env, err := frames.New(frames.KindRegister, frames.RegisterPayload{
+	env, err := frames.NewRequest(frames.KindRegister, frames.RegisterPayload{
 		RegisterRequest: c.cfg.Register,
 		SinceMsgID:      since,
 	})
 	if err != nil {
-		return fmt.Errorf("wsasp: build register frame: %w", err)
+		return since, fmt.Errorf("wsasp: build register frame: %w", err)
 	}
-	if err := c.ws.Send(ctx, env); err != nil {
-		return fmt.Errorf("wsasp: send register frame: %w", err)
+	regCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	resp, err := c.ws.Request(regCtx, env)
+	if err != nil {
+		return since, fmt.Errorf("wsasp: send register frame: %w", err)
 	}
-	return nil
+	if resp.Kind != frames.KindRegisterAck {
+		return since, fmt.Errorf("wsasp: register response kind = %s, want %s", resp.Kind, frames.KindRegisterAck)
+	}
+	return since, nil
 }
 
 // drainPendingLoop flushes the outbound buffer once register has

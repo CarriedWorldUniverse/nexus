@@ -31,6 +31,7 @@ func main() {
 	nodeIP := flag.String("node-ip", "192.168.143.133", "dMon node IP for hostAliases")
 	brokerHost := flag.String("broker-host", "dmonextreme.tail41686e.ts.net", "broker tailnet host")
 	briefTimeout := flag.String("brief-timeout", "30m", "max builder wall-clock timeout passed to agentfunnel")
+	gitCredName := flag.String("git-cred-name", os.Getenv("NEXUS_DISPATCH_GIT_CRED_NAME"), "git credential name to grant to dispatched builders (env: NEXUS_DISPATCH_GIT_CRED_NAME; empty skips grant)")
 	maxConc := flag.Int("max-concurrent", 4, "max concurrent builder Jobs")
 	flag.Parse()
 
@@ -92,6 +93,7 @@ func main() {
 			NodeIP:       *nodeIP,
 			BrokerHost:   *brokerHost,
 			BriefTimeout: *briefTimeout,
+			GitCredName:  *gitCredName,
 		},
 		MaxConc: *maxConc,
 	}
