@@ -39,6 +39,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/identity"
+	"github.com/CarriedWorldUniverse/nexus/nexus/issuesrest"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability/jsonlsink"
@@ -597,6 +598,7 @@ func main() {
 			ledgerHandler := ledgerSvc.Handler()
 			mux.Handle("/api/issues", ledgerHandler)
 			mux.Handle("/api/issues/", ledgerHandler)
+			mux.Handle(issuesrest.ProjectsPath, projectsHandler(ledgerSvc))
 			mux.Handle("/healthz/issues", ledgerHandler)
 			// NEXUS_CWB_EDGE: pass-through reverse-proxy to the CWB edge
 			// (interchange) for /herald/ /cairn/ /ledger/ /knowledge/.

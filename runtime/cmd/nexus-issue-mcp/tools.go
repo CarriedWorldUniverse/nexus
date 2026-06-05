@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/issuesrest"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
@@ -322,7 +323,7 @@ func registerTools(srv *mcpserver.MCPServer, c *client, log *slog.Logger) {
 		mcpgo.WithDescription("List projects (the keyspace aspects can create issues against — NEX, WAKE, OSS, ...). Org-scoped by the calling token; archived projects excluded unless include_archived=true."),
 		mcpgo.WithBoolean("include_archived"),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		path := "/api/projects"
+		path := issuesrest.ProjectsPath
 		if req.GetBool("include_archived", false) {
 			path += "?include_archived=true"
 		}
