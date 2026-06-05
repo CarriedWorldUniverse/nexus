@@ -27,6 +27,7 @@ import (
 type agentCredFetchRequest struct {
 	Kind string `json:"kind"`
 	Name string `json:"name,omitempty"`
+	Host string `json:"host,omitempty"` // git: helper-supplied host for scope resolution
 }
 
 type agentCredFetchResponse struct {
@@ -74,10 +75,14 @@ func (b *Broker) handleAgentCredentialFetch(w http.ResponseWriter, r *http.Reque
 
 	ctx := r.Context()
 	var cred credentials.Credential
-	if req.Name == "" {
-		cred, err = cstore.ResolveDefaultBundle(ctx, agentID, credentials.Kind(req.Kind))
-	} else {
+	switch {
+	case req.Name != "":
 		cred, err = cstore.Get(ctx, req.Name)
+	case credentials.Kind(req.Kind) == credentials.KindGit:
+		// git has no default column; resolve by scope (+ host) instead.
+		cred, err = cstore.ResolveGitForAspect(ctx, agentID, req.Host)
+	default:
+		cred, err = cstore.ResolveDefaultBundle(ctx, agentID, credentials.Kind(req.Kind))
 	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, "credential not found")

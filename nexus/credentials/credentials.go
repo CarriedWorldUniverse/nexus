@@ -657,6 +657,58 @@ func (s *Store) ResolveDefaultBundle(ctx context.Context, aspect string, kind Ki
 	return c, nil
 }
 
+// ResolveGitForAspect finds the git credential an aspect may use for a
+// host. A git credential helper only knows the host (not a credential
+// name), and git has no per-aspect default column, so resolution is by
+// scope: among kind=git credentials the aspect is allowed for, return the
+// one whose bundle host matches; when host is empty, return the sole
+// allowed git credential. ErrNoDefault if none match (or host is empty and
+// the aspect is allowed for more than one).
+func (s *Store) ResolveGitForAspect(ctx context.Context, aspect, host string) (Credential, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM credentials WHERE kind = ?`, string(KindGit))
+	if err != nil {
+		return Credential{}, fmt.Errorf("list git credentials: %w", err)
+	}
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return Credential{}, err
+		}
+		names = append(names, n)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return Credential{}, err
+	}
+
+	var sole Credential
+	soleCount := 0
+	for _, n := range names {
+		c, err := s.Get(ctx, n)
+		if err != nil || !c.AllowedFor(aspect) {
+			continue
+		}
+		if host != "" {
+			gb, err := s.GitBundle(c)
+			if err != nil {
+				continue
+			}
+			if gb.Host == host {
+				return c, nil
+			}
+			continue
+		}
+		sole = c
+		soleCount++
+	}
+	if host == "" && soleCount == 1 {
+		return sole, nil
+	}
+	return Credential{}, ErrNoDefault
+}
+
 // AspectDefaults describes the per-aspect default-credential
 // configuration. Used by admin REST and CLI to read/write the
 // columns on the aspects table without callers knowing the
