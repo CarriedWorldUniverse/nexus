@@ -180,6 +180,7 @@ func TestCommsToolDefs_HasAllTools(t *testing.T) {
 		ToolNameGetShared:       false,
 		ToolNameStoreKnowledge:  false,
 		ToolNameSearchKnowledge: false,
+		ToolNameTaskDone:        false,
 	}
 	for _, d := range defs {
 		want[d.Name] = true
@@ -374,6 +375,46 @@ func TestCommsRunner_UnknownToolErrors(t *testing.T) {
 	_, err := r.Run(context.Background(), bridle.ToolCall{Name: "not_a_real_tool"})
 	if err == nil {
 		t.Error("expected error for unknown tool name")
+	}
+}
+
+func TestTaskDoneInvokesCallback(t *testing.T) {
+	var got string
+	called := false
+	r := CommsRunner{
+		Gateway: &fakeGateway{},
+		OnTaskDone: func(summary string) {
+			called = true
+			got = summary
+		},
+	}
+
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameTaskDone,
+		Args: mustJSON(map[string]any{"summary": "PR #999 opened"}),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !called || got != "PR #999 opened" {
+		t.Fatalf("OnTaskDone called=%v summary=%q", called, got)
+	}
+	if !strings.Contains(string(res), "PR #999 opened") {
+		t.Errorf("result should carry summary, got %s", res)
+	}
+}
+
+func TestTaskDoneNoCallbackIsNoOp(t *testing.T) {
+	r := CommsRunner{Gateway: &fakeGateway{}}
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameTaskDone,
+		Args: mustJSON(map[string]any{"summary": "x"}),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(string(res), `"ok":true`) {
+		t.Errorf("expected ok result, got %s", res)
 	}
 }
 

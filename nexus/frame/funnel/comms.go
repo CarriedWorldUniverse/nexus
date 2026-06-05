@@ -220,6 +220,7 @@ const (
 	ToolNameGetShared       = "get_shared"
 	ToolNameStoreKnowledge  = "store_knowledge"
 	ToolNameSearchKnowledge = "search_knowledge"
+	ToolNameTaskDone        = "task_done"
 	// ToolNameTriage — every chat msg the funnel receives must be
 	// triaged before the turn ends (per inbox-triage contract,
 	// 2026-05-10-funnel-triage-contract.md). The model calls this
@@ -369,6 +370,16 @@ func CommsToolDefs() []bridle.ToolDef {
 			}),
 		},
 		{
+			Name:        ToolNameTaskDone,
+			Description: "Call when the dispatched task is fully complete (PR opened + reported). Ends your run.",
+			InputSchema: mustJSON(map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"summary": map[string]any{"type": "string", "description": "Optional one-line completion summary."},
+				},
+			}),
+		},
+		{
 			Name: ToolNameTriage,
 			Description: "Mark how this turn handled an inbox message. MUST be called exactly once for every chat msg_id listed in the 'Triage requirement' section of the inbox before the turn ends. " +
 				"Use decision='reply' when you used send_chat to address that msg_id (the funnel correlates by recency). " +
@@ -417,6 +428,11 @@ type CommsRunner struct {
 	// can't audit. Production paths set this; legacy callers (aspect
 	// runtime, agentfunnel) leave it nil until they migrate.
 	Triage chat.TriageStore
+
+	// OnTaskDone is called when the aspect emits task_done. Builder-mode
+	// runtimes use this as their clean completion signal; always-on
+	// aspects leave it nil.
+	OnTaskDone func(summary string)
 }
 
 // Run dispatches a tool call by name. Unknown tool names return an
@@ -454,11 +470,31 @@ func (r CommsRunner) Run(ctx context.Context, call bridle.ToolCall) (json.RawMes
 		return r.runStoreKnowledge(ctx, call.Args)
 	case ToolNameSearchKnowledge:
 		return r.runSearchKnowledge(ctx, call.Args)
+	case ToolNameTaskDone:
+		return r.runTaskDone(ctx, call.Args)
 	case ToolNameTriage:
 		return r.runTriage(ctx, call.Args)
 	default:
 		return nil, fmt.Errorf("CommsRunner: unknown tool %q", call.Name)
 	}
+}
+
+func (r CommsRunner) runTaskDone(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var args struct {
+		Summary string `json:"summary"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return errorResult(err), nil
+		}
+	}
+	if r.OnTaskDone != nil {
+		r.OnTaskDone(args.Summary)
+	}
+	return mustJSON(map[string]any{"ok": true, "summary": args.Summary}), nil
 }
 
 // runTriage records a per-msg-id triage decision into the
@@ -797,6 +833,22 @@ func mustJSON(v any) json.RawMessage {
 // (the model can read it and recover) rather than aborting the turn.
 func ComposeRunner(comms CommsRunner, next bridle.ToolRunner) bridle.ToolRunner {
 	return composedRunner{comms: comms, next: next}
+}
+
+func withTaskDoneCallback(runner bridle.ToolRunner, onTaskDone func(string)) bridle.ToolRunner {
+	if onTaskDone == nil {
+		return runner
+	}
+	switch r := runner.(type) {
+	case CommsRunner:
+		r.OnTaskDone = onTaskDone
+		return r
+	case composedRunner:
+		r.comms.OnTaskDone = onTaskDone
+		return r
+	default:
+		return runner
+	}
 }
 
 type composedRunner struct {
