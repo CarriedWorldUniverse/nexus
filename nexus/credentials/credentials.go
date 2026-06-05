@@ -54,6 +54,7 @@ const (
 	KindProvider Kind = "provider" // Anthropic/OpenAI-shape API creds
 	KindJira     Kind = "jira"     // Atlassian email/token/subdomain
 	KindIMAP     Kind = "imap"     // Mailbox host/port/user/password/ssl
+	KindGit      Kind = "git"      // Git push credential: username/password(PAT)/host
 	// Future kinds register here as the bundle validators are added.
 )
 
@@ -62,7 +63,7 @@ const (
 // silently working as opaque blobs.
 func IsKnownKind(k Kind) bool {
 	switch k {
-	case KindProvider, KindJira, KindIMAP:
+	case KindProvider, KindJira, KindIMAP, KindGit:
 		return true
 	default:
 		return false
@@ -189,6 +190,13 @@ type IMAPBundle struct {
 	User     string `json:"user"`
 	Password string `json:"password"`
 	SSL      bool   `json:"ssl"`
+}
+
+// GitBundle is the parsed shape of a kind='git' bundle.
+type GitBundle struct {
+	Username string `json:"username"`
+	Password string `json:"password"` // PAT or token; NEVER log
+	Host     string `json:"host"`     // e.g. github.com
 }
 
 // UpsertParams carries the inputs for Set. Bundle is the kind-specific
@@ -325,6 +333,36 @@ func (s *Store) Set(ctx context.Context, p UpsertParams) error {
 	return nil
 }
 
+// Grant adds an aspect to a credential's allowed list (idempotent). Only
+// the allowed_aspects column is updated — the encrypted bundle is left
+// untouched, so widening access never needs the plaintext bundle.
+func (s *Store) Grant(ctx context.Context, name, aspect string) error {
+	c, err := s.Get(ctx, name)
+	if err != nil {
+		return err
+	}
+	for _, a := range c.AllowedAspects {
+		if a == aspect {
+			return nil // already granted
+		}
+	}
+	allowedJSON, err := json.Marshal(append(c.AllowedAspects, aspect))
+	if err != nil {
+		return fmt.Errorf("marshal allowed_aspects: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE credentials SET allowed_aspects = ?, updated_at = ? WHERE name = ?`,
+		string(allowedJSON), now, name)
+	if err != nil {
+		return fmt.Errorf("grant: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func validateUpsert(p UpsertParams) error {
 	if strings.TrimSpace(p.Name) == "" {
 		return errors.New("credentials: name required")
@@ -399,6 +437,16 @@ func validateBundle(kind Kind, bundle map[string]any) error {
 			return err
 		}
 		// port + ssl have defaults at the consumer; not required here.
+	case KindGit:
+		if err := requireString("username"); err != nil {
+			return err
+		}
+		if err := requireString("password"); err != nil {
+			return err
+		}
+		if err := requireString("host"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -505,6 +553,22 @@ func (s *Store) IMAPBundle(c Credential) (IMAPBundle, error) {
 	return ib, nil
 }
 
+// GitBundle returns the decrypted bundle for a kind='git' credential.
+func (s *Store) GitBundle(c Credential) (GitBundle, error) {
+	if c.Kind != KindGit {
+		return GitBundle{}, fmt.Errorf("%w: have %q want %q", ErrKindMismatch, c.Kind, KindGit)
+	}
+	plaintext, err := s.decrypt(c.encryptedBundle, c.nonce)
+	if err != nil {
+		return GitBundle{}, fmt.Errorf("decrypt bundle: %w", err)
+	}
+	var gb GitBundle
+	if err := json.Unmarshal(plaintext, &gb); err != nil {
+		return GitBundle{}, fmt.Errorf("unmarshal git bundle: %w", err)
+	}
+	return gb, nil
+}
+
 // EnvForCredential builds the {API_KEY, BASE_URL} env-var pair a
 // provider would consume. Only meaningful for kind='provider'.
 // Returns ErrKindMismatch for non-provider kinds.
@@ -591,6 +655,58 @@ func (s *Store) ResolveDefaultBundle(ctx context.Context, aspect string, kind Ki
 		return Credential{}, fmt.Errorf("%w: aspect default %q is kind %q, requested %q", ErrKindMismatch, c.Name, c.Kind, kind)
 	}
 	return c, nil
+}
+
+// ResolveGitForAspect finds the git credential an aspect may use for a
+// host. A git credential helper only knows the host (not a credential
+// name), and git has no per-aspect default column, so resolution is by
+// scope: among kind=git credentials the aspect is allowed for, return the
+// one whose bundle host matches; when host is empty, return the sole
+// allowed git credential. ErrNoDefault if none match (or host is empty and
+// the aspect is allowed for more than one).
+func (s *Store) ResolveGitForAspect(ctx context.Context, aspect, host string) (Credential, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM credentials WHERE kind = ?`, string(KindGit))
+	if err != nil {
+		return Credential{}, fmt.Errorf("list git credentials: %w", err)
+	}
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return Credential{}, err
+		}
+		names = append(names, n)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return Credential{}, err
+	}
+
+	var sole Credential
+	soleCount := 0
+	for _, n := range names {
+		c, err := s.Get(ctx, n)
+		if err != nil || !c.AllowedFor(aspect) {
+			continue
+		}
+		if host != "" {
+			gb, err := s.GitBundle(c)
+			if err != nil {
+				continue
+			}
+			if gb.Host == host {
+				return c, nil
+			}
+			continue
+		}
+		sole = c
+		soleCount++
+	}
+	if host == "" && soleCount == 1 {
+		return sole, nil
+	}
+	return Credential{}, ErrNoDefault
 }
 
 // AspectDefaults describes the per-aspect default-credential

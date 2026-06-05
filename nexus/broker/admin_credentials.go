@@ -251,6 +251,41 @@ func (b *Broker) handleAdminCredentialDelete(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleAdminCredentialGrant adds an aspect to a credential's allowed list
+// (POST /api/admin/credentials/{name}/grant, body {"aspect":"..."}). Only
+// widens access — the encrypted bundle is untouched. The per-worker scoped
+// grant behind `cw credential issue-git-permission` (NEX-435).
+func (b *Broker) handleAdminCredentialGrant(w http.ResponseWriter, r *http.Request) {
+	if b.cfg.Credentials == nil {
+		writeError(w, http.StatusServiceUnavailable, "credentials store not configured")
+		return
+	}
+	name := r.PathValue("name")
+	var req struct {
+		Aspect string `json:"aspect"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Aspect == "" {
+		writeError(w, http.StatusBadRequest, `body must be {"aspect":"..."}`)
+		return
+	}
+	if err := b.cfg.Credentials.Grant(r.Context(), name, req.Aspect); err != nil {
+		if errors.Is(err, credentials.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "credential not found")
+			return
+		}
+		b.log.Error("admin credential grant", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	b.log.Info("admin credential grant", "name", name, "aspect", req.Aspect)
+	c, err := b.cfg.Credentials.Get(r.Context(), name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, c.ToMetadata())
+}
+
 func (b *Broker) handleAdminCredentialAudit(w http.ResponseWriter, r *http.Request) {
 	if b.cfg.Credentials == nil {
 		writeError(w, http.StatusServiceUnavailable, "credentials store not configured")
