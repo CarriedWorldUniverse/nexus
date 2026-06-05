@@ -88,12 +88,14 @@ func main() {
 	ctrl := &dispatch.Controller{
 		K8s: &dispatch.K8s{Client: cs, Namespace: *namespace},
 		Cfg: dispatch.JobConfig{
-			Image:        *image,
-			Namespace:    *namespace,
-			NodeIP:       *nodeIP,
-			BrokerHost:   *brokerHost,
-			BriefTimeout: *briefTimeout,
-			GitCredName:  *gitCredName,
+			Image:         *image,
+			Namespace:     *namespace,
+			NodeIP:        *nodeIP,
+			BrokerHost:    *brokerHost,
+			BriefTimeout:  *briefTimeout,
+			GitCredName:   *gitCredName,
+			LynxAIBaseURL: os.Getenv("LYNXAI_BASE_URL"),
+			LynxAIKey:     os.Getenv("LYNXAI_KEY"),
 		},
 		MaxConc: *maxConc,
 	}
