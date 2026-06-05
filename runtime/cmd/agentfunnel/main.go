@@ -79,6 +79,7 @@ func main() {
 	autoRecallMaxRank := flag.Float64("auto-recall-max-rank", 0, "auto-recall: BM25 relevance gate; only hits with score < this inject (ranks are negative, lower = stronger; 0 = no gate)")
 	builderMode := flag.Bool("builder", false, "builder/one-shot mode: drain the dispatched brief, run to the task_done signal, then exit")
 	builderTimeout := flag.Duration("builder-timeout", 30*time.Minute, "max wall-clock for a builder run before forced exit")
+	briefFile := flag.String("brief-file", "", "builder mode: read the seed brief from this file instead of the broker inbox")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -559,6 +560,16 @@ func main() {
 	funnelPtr = f
 	bridge = wsasp.NewBridge(f)
 
+	if *builderMode && *briefFile != "" {
+		item, err := readBriefFile(*briefFile)
+		if err != nil {
+			log.Error("agentfunnel: brief file unreadable", "err", err)
+			os.Exit(1)
+		}
+		f.Receive(item)
+		log.Info("agentfunnel: seeded builder brief from file", "path", *briefFile, "bytes", len(item.Content))
+	}
+
 	log.Info("agentfunnel: starting deliberation loop",
 		"aspect", res.AspectName,
 		"session", sessionID,
@@ -608,6 +619,14 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("agentfunnel: stopped")
+}
+
+func readBriefFile(path string) (bridle.InboxItem, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return bridle.InboxItem{}, fmt.Errorf("read brief file: %w", err)
+	}
+	return bridle.InboxItem{From: "dispatch", Content: string(b)}, nil
 }
 
 // composeSystemPrompt layers the validation result into the four-
