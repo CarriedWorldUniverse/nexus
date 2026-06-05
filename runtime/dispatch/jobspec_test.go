@@ -1,6 +1,9 @@
 package dispatch
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestBuildJob(t *testing.T) {
 	cfg := JobConfig{
@@ -23,6 +26,19 @@ func TestBuildJob(t *testing.T) {
 	}
 	if *job.Spec.BackoffLimit != 0 {
 		t.Errorf("backoffLimit = %d, want 0", *job.Spec.BackoffLimit)
+	}
+	// NEX-437: the brief must mount in its own directory, never as a file
+	// inside /etc/nexus (the keyfile Secret's mount) — else the OCI runtime
+	// fails the container with "not a directory".
+	for _, m := range c.VolumeMounts {
+		if m.Name == "brief" {
+			if strings.HasPrefix(m.MountPath, "/etc/nexus") {
+				t.Errorf("brief mount %q collides with the keyfile Secret at /etc/nexus", m.MountPath)
+			}
+		}
+	}
+	if !contains(c.Args, "/etc/dispatch/brief.md") {
+		t.Errorf("-brief-file should point at /etc/dispatch/brief.md, args: %v", c.Args)
 	}
 }
 

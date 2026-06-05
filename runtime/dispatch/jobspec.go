@@ -67,7 +67,7 @@ func BuildJob(b Brief, cfg JobConfig, taskID string) *batchv1.Job {
 						Args: []string{
 							"-k", "/etc/nexus/keyfile.json",
 							"-builder",
-							"-brief-file", "/etc/nexus/brief.md",
+							"-brief-file", "/etc/dispatch/brief.md",
 							"-builder-timeout", cfg.BriefTimeout,
 						},
 						Env: []corev1.EnvVar{
@@ -78,7 +78,10 @@ func BuildJob(b Brief, cfg JobConfig, taskID string) *batchv1.Job {
 							{Name: "work", MountPath: "/work"},
 							{Name: "cache", MountPath: "/cache"},
 							{Name: "keyfile", MountPath: "/etc/nexus", ReadOnly: true},
-							{Name: "brief", MountPath: "/etc/nexus/brief.md", SubPath: "brief.md", ReadOnly: true},
+							// Brief ConfigMap mounts as its OWN directory — must NOT be a
+							// file inside /etc/nexus (the keyfile Secret's mount point), or
+							// the OCI runtime fails with "not a directory" (NEX-437).
+							{Name: "brief", MountPath: "/etc/dispatch", ReadOnly: true},
 							{Name: "codex-home", MountPath: "/root/.codex"},
 						},
 					}},
