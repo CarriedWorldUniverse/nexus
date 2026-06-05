@@ -94,6 +94,17 @@ func (b *Broker) handleAgentCredentialFetch(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Mode gate: plaintext fetch requires mode=fetch or mode=both. A
+	// proxy-mode credential (e.g. a provider key meant to stay broker-side)
+	// must never be returned in plaintext. Mirrors the WS fetch path.
+	if cred.Mode != credentials.ModeFetch && cred.Mode != credentials.ModeBoth {
+		_ = cstore.RecordAudit(ctx, credentials.AuditEvent{
+			CredentialName: cred.Name, Aspect: agentID, Action: credentials.AuditDenied,
+		})
+		writeError(w, http.StatusForbidden, "credential mode forbids fetch")
+		return
+	}
+
 	bundle, err := cstore.Bundle(cred)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "decrypt failed")

@@ -138,3 +138,47 @@ func TestAgentCredentialFetch_Git(t *testing.T) {
 		t.Fatalf("no-bearer status=%d want 401", resp3.StatusCode)
 	}
 }
+
+func TestAgentCredentialFetch_Provider(t *testing.T) {
+	rig := newAgentCredTestRig(t)
+	ctx := context.Background()
+
+	// fetchable provider cred → returned to the allowed worker, audited
+	if err := rig.creds.Set(ctx, credentials.UpsertParams{
+		Name:           "worker-prov",
+		Kind:           credentials.KindProvider,
+		Bundle:         map[string]any{"api_shape": "openai", "base_url": "https://api", "key": "sk-x", "default_model": "m"},
+		AllowedAspects: []string{"worker-1"},
+		Mode:           credentials.ModeFetch,
+	}); err != nil {
+		t.Fatalf("seed provider: %v", err)
+	}
+	resp := rig.fetch(t, rig.mintJWT(t, "worker-1"), `{"kind":"provider","name":"worker-prov"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("provider fetch status=%d want 200", resp.StatusCode)
+	}
+	var got agentCredFetchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Bundle["key"] != "sk-x" {
+		t.Fatalf("provider bundle = %v", got.Bundle)
+	}
+
+	// proxy-mode provider cred → 403 (mode forbids plaintext fetch)
+	if err := rig.creds.Set(ctx, credentials.UpsertParams{
+		Name:           "proxy-prov",
+		Kind:           credentials.KindProvider,
+		Bundle:         map[string]any{"api_shape": "openai", "base_url": "https://api", "key": "sk-secret"},
+		AllowedAspects: []string{"worker-1"},
+		Mode:           credentials.ModeProxy,
+	}); err != nil {
+		t.Fatalf("seed proxy provider: %v", err)
+	}
+	resp2 := rig.fetch(t, rig.mintJWT(t, "worker-1"), `{"kind":"provider","name":"proxy-prov"}`)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 403 {
+		t.Fatalf("proxy-mode fetch status=%d want 403", resp2.StatusCode)
+	}
+}
