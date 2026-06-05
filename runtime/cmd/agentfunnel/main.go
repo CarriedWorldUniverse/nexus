@@ -377,6 +377,18 @@ func main() {
 		if err := os.Setenv("CW_TOKEN", res.SessionJWT); err != nil {
 			log.Warn("agentfunnel: failed to export CW_TOKEN for builder git auth", "err", err)
 		}
+		// Agent-attributed git records (NEX-437): commits are authored by the
+		// dispatched agent, not a generic default. Env overrides any image-baked
+		// git user config; the codex/git subprocess inherits it.
+		gitEmail := res.AspectName + "@agents.carriedworld.com"
+		for k, v := range map[string]string{
+			"GIT_AUTHOR_NAME": res.AspectName, "GIT_AUTHOR_EMAIL": gitEmail,
+			"GIT_COMMITTER_NAME": res.AspectName, "GIT_COMMITTER_EMAIL": gitEmail,
+		} {
+			if err := os.Setenv(k, v); err != nil {
+				log.Warn("agentfunnel: failed to export "+k+" for builder git author", "err", err)
+			}
+		}
 	}
 	commsRunner := funnel.CommsRunner{
 		Gateway:    gateway,
