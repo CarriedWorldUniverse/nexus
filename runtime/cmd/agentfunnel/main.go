@@ -363,8 +363,10 @@ func main() {
 	// configured" on every call.
 	knowledgeGateway := wsasp.NewKnowledgeGateway(wsClient)
 	var onTaskDone func(string)
+	doneSentinel := ""
 	if *builderMode {
 		onTaskDone = builderOnTaskDone(stop, log, res.AspectName)
+		doneSentinel = builderDoneSentinel
 	}
 	commsRunner := funnel.CommsRunner{
 		Gateway:    gateway,
@@ -496,6 +498,7 @@ func main() {
 		// updates — no funnel rebuild, no aspect restart.
 		BindingFn:    func() funnel.Binding { return *bindingCache.Load() },
 		OnTaskDone:   onTaskDone,
+		DoneSentinel: doneSentinel,
 		SystemPrompt: systemPrompt,
 		// MCP carries the aspect's mcp_profile servers (parseMCPProfile
 		// above) so non-claude-code providers get them in TurnRequest.MCP.
@@ -644,6 +647,12 @@ func composeSystemPrompt(res *keyfile.ValidationResult) string {
 	}
 	return strings.Join(parts, "\n\n---\n\n")
 }
+
+// builderDoneSentinel is the reply marker a builder emits to signal a finished
+// task. Unlike the task_done ToolDef, a sentinel in the reply text is reachable
+// by codex (which ignores bridle ToolDefs) and every other provider — NEX-440.
+// The dispatch brief instructs the builder to end its final message with it.
+const builderDoneSentinel = "<<TASK_COMPLETE>>"
 
 func builderOnTaskDone(stop context.CancelFunc, log *slog.Logger, aspect string) func(string) {
 	return func(summary string) {

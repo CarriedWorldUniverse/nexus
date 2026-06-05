@@ -450,6 +450,50 @@ func TestDeliberate_AccumulatesAcrossTurns(t *testing.T) {
 	}
 }
 
+// NEX-440: a builder signals completion with a reply sentinel (codex-reachable,
+// unlike the task_done ToolDef). When DoneSentinel appears in the turn's reply,
+// the funnel fires OnTaskDone; when absent (or DoneSentinel unset) it does not.
+func TestDeliberate_DoneSentinelFiresOnTaskDone(t *testing.T) {
+	mkFunnel := func(t *testing.T, finalText string, sentinel string, onDone func(string)) *Funnel {
+		prov := &scriptedProvider{results: []bridle.ProviderResult{{
+			FinalText:    finalText,
+			Usage:        bridle.Usage{InputTokens: 10, OutputTokens: 5},
+			SessionDelta: []bridle.SessionEvent{{Role: bridle.RoleAssistant, Content: finalText}},
+		}}}
+		f, err := New(Config{
+			AspectID: "frame", Harness: bridle.NewHarness(prov),
+			Provider: "scripted", Model: "m", Runner: noopRunner{},
+			DoneSentinel: sentinel, OnTaskDone: onDone,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+
+	// Sentinel present → OnTaskDone fires.
+	fired := false
+	f := mkFunnel(t, "work finished <<TASK_COMPLETE>>", "<<TASK_COMPLETE>>", func(string) { fired = true })
+	f.Receive(bridle.InboxItem{From: "operator", Content: "go"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if !fired {
+		t.Error("OnTaskDone should fire when the reply contains the sentinel")
+	}
+
+	// Sentinel absent → OnTaskDone does not fire.
+	fired2 := false
+	f2 := mkFunnel(t, "still working on it", "<<TASK_COMPLETE>>", func(string) { fired2 = true })
+	f2.Receive(bridle.InboxItem{From: "operator", Content: "go"})
+	if _, err := f2.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if fired2 {
+		t.Error("OnTaskDone must not fire when the reply lacks the sentinel")
+	}
+}
+
 // codex manages its own thread/context, so the funnel must NOT run its
 // compaction for it (the post-compaction rotation crashes the next codex
 // turn — NEX-439). Over threshold, turn 2 makes only ONE provider call
