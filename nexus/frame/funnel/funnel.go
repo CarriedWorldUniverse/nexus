@@ -1215,6 +1215,17 @@ func (f *Funnel) popHeadForTurn(userMessage string) (*deliberateState, error) {
 // rotation). Tracks consecutive failures and force-rotates after the
 // limit so deterministic failures don't burn API calls forever.
 func (f *Funnel) maybeCompact(ctx context.Context, st *deliberateState) {
+	// codex manages its own thread + context window: it resumes its own
+	// thread across turns (codex exec resume <thread_id>) and auto-compacts
+	// internally. The funnel's SessionTail-based compaction doesn't apply —
+	// codex ignores SessionTail — and the post-compaction session rotation
+	// crashes the next codex turn (subprocess exit 1, NEX-439), which breaks
+	// long/multi-step runs (e.g. M2 builder agents). Leave codex to
+	// self-manage. (claude-code uses the rewriter PostTurnHook instead and
+	// is unaffected.)
+	if st.binding.Provider == bridle.ProviderCodexCLI {
+		return
+	}
 	threshold := f.cfg.Compaction.ThresholdTokens
 	if f.cumulativeTokens < threshold {
 		return

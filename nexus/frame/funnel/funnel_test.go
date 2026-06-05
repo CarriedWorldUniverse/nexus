@@ -450,6 +450,56 @@ func TestDeliberate_AccumulatesAcrossTurns(t *testing.T) {
 	}
 }
 
+// codex manages its own thread/context, so the funnel must NOT run its
+// compaction for it (the post-compaction rotation crashes the next codex
+// turn — NEX-439). Over threshold, turn 2 makes only ONE provider call
+// (the main turn, no summarize) and the session does not rotate. Only two
+// scripted results are supplied, so the test fails if a summarize call is
+// attempted.
+func TestDeliberate_SkipsCompactionForCodex(t *testing.T) {
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{
+			FinalText:    "first turn output",
+			Usage:        bridle.Usage{InputTokens: 100_000, OutputTokens: 60_000},
+			SessionDelta: []bridle.SessionEvent{{Role: bridle.RoleAssistant, Content: "first turn output"}},
+		},
+		{
+			FinalText:    "second turn",
+			Usage:        bridle.Usage{InputTokens: 500, OutputTokens: 100},
+			SessionDelta: []bridle.SessionEvent{{Role: bridle.RoleAssistant, Content: "second turn"}},
+		},
+	}}
+	f, err := New(Config{
+		AspectID: "frame", Harness: bridle.NewHarness(prov),
+		Provider: bridle.ProviderCodexCLI, Model: "m", Runner: noopRunner{},
+		Compaction: CompactionPolicy{ThresholdTokens: 150_000, MaxSummaryTokens: 4096},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.Receive(bridle.InboxItem{From: "operator", Content: "first"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.CumulativeTokens(); got != 160_000 {
+		t.Fatalf("after turn 1: cumulative=%d want 160000", got)
+	}
+	preSession := f.SessionID()
+
+	f.Receive(bridle.InboxItem{From: "operator", Content: "second"})
+	preCalls := prov.calls.Load()
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := prov.calls.Load() - preCalls; got != 1 {
+		t.Errorf("codex turn 2 should make 1 provider call (compaction skipped), got %d", got)
+	}
+	if f.SessionID() != preSession {
+		t.Errorf("codex session must not rotate (compaction skipped): pre=%s post=%s", preSession, f.SessionID())
+	}
+}
+
 // Compaction triggers a summarize turn when cumulativeTokens crosses
 // threshold. The summary becomes the new SessionTail; counter resets.
 func TestDeliberate_CompactsAtThreshold(t *testing.T) {
