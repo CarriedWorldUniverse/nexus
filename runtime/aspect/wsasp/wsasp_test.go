@@ -287,6 +287,11 @@ func TestRegisterPrecedesDrainedSendsAfterReconnect(t *testing.T) {
 				continue
 			}
 			record(env)
+			if env.Kind == frames.KindRegister {
+				ack, _ := frames.NewResponse(frames.KindRegisterAck, env.ID, frames.RegisterAckPayload{})
+				raw, _ := frames.Encode(ack)
+				_ = wsc.Write(r.Context(), websocket.MessageText, raw)
+			}
 		}
 	}))
 	t.Cleanup(srv.Close)
