@@ -1,0 +1,86 @@
+# nexus broker (NEX-457) — pure routing/dispatch/admin hub. No embedded Frame
+# (removed NEX-456); DB via sqld (NEX-455 libSQL DSN). Replaces host nexus.service.
+#
+# hostNetwork: the broker must stay reachable at dmonextreme.tail41686e.ts.net:7888
+# — that name is the TLS cert SAN AND the broker URL baked into every aspect
+# keyfile. Binding the host net namespace preserves that exact endpoint with no
+# cert/keyfile re-mint. The host nexus.service MUST be stopped before this starts
+# (both bind :7888). dnsPolicy ClusterFirstWithHostNet keeps cluster DNS so the
+# pod still resolves sqld.cwb.svc.cluster.local.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-broker
+  namespace: nexus
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: nexus-broker
+  template:
+    metadata:
+      labels:
+        app: nexus-broker
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: broker
+          image: localhost/nexus-broker:dev
+          imagePullPolicy: Never
+          args:
+            - "-addr"
+            - ":7888"
+            - "-data-dir"
+            - "/var/lib/nexus"
+            - "-tls-cert"
+            - "/etc/nexus-tls/broker.crt"
+            - "-tls-key"
+            - "/etc/nexus-tls/broker.key"
+            - "-aspect-dir"
+            - "/var/lib/nexus/aspects"
+          env:
+            - name: NEXUS_DATA_DIR
+              value: /var/lib/nexus
+            - name: NEXUS_ASPECT_DIR
+              value: /var/lib/nexus/aspects
+            # libSQL DSN → sqld platform service in the cwb namespace (NEX-455).
+            - name: NEXUS_DB_DSN
+              value: "http://sqld.cwb.svc.cluster.local:8080"
+          envFrom:
+            # NEXUS_TOKEN / NEXUS_AUTH_BYPASS / NEXUS_OPERATOR_RPID — created at
+            # cutover from the host /etc/nexus/nexus.env (claude.env is dropped).
+            - secretRef:
+                name: nexus-broker-env
+          ports:
+            - name: broker
+              containerPort: 7888
+              hostPort: 7888
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/nexus-tls
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/nexus
+      volumes:
+        - name: tls
+          secret:
+            secretName: broker-tls
+        - name: data
+          persistentVolumeClaim:
+            claimName: nexus-broker-data
+---
+# Aspect-dir + on-disk broker state (the DB itself lives in sqld). Seeded at
+# cutover from the host /var/lib/nexus/aspects (~134M).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nexus-broker-data
+  namespace: nexus
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
