@@ -42,6 +42,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	goruntime "runtime"
@@ -81,6 +82,8 @@ func main() {
 	builderTimeout := flag.Duration("builder-timeout", 30*time.Minute, "max wall-clock for a builder run before forced exit")
 	briefFile := flag.String("brief-file", "", "builder mode: read the seed brief from this file instead of the broker inbox")
 	replyTopic := flag.String("reply-topic", "", "builder mode: attach this topic to natural reply posts")
+	repoFlag := flag.String("repo", "", "builder mode: dispatched repo (owner/name) for PR-existence verification")
+	ticketFlag := flag.String("ticket", "", "builder mode: dispatched ticket, for the builder/<ticket> branch")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -623,7 +626,11 @@ func main() {
 	// before expiry triggers a supervisor restart.
 	go sessionRefreshLoop(ctx, state, wsClient, 1*time.Hour, log)
 
-	go deliberateLoop(ctx, f, log)
+	var onComplete func() bool
+	if *builderMode {
+		onComplete = builderCompleteCheck(stop, log, res.AspectName, *repoFlag, *ticketFlag)
+	}
+	go deliberateLoop(ctx, f, log, onComplete)
 
 	if *builderMode {
 		go func() {
@@ -702,6 +709,46 @@ func builderOnTaskDone(stop context.CancelFunc, log *slog.Logger, aspect string)
 	}
 }
 
+// builderCompleteCheck returns an onComplete callback for the builder loop.
+// When the judge rules a turn complete (DoD met, NEX-471), it first verifies
+// the PR actually exists (NEX-468 — the judge has false-positived "PR opened"
+// before) and only then stops the builder. Returns true when it stopped.
+func builderCompleteCheck(stop context.CancelFunc, log *slog.Logger, aspect, repo, ticket string) func() bool {
+	return func() bool {
+		ok, err := prExists(repo, ticket)
+		if err != nil {
+			log.Warn("agentfunnel: judge complete but PR check errored — not exiting", "aspect", aspect, "err", err)
+			return false
+		}
+		if !ok {
+			log.Info("agentfunnel: judge says complete but no PR found — continuing", "aspect", aspect, "repo", repo, "ticket", ticket)
+			return false
+		}
+		log.Info("agentfunnel: judge complete + PR verified — exiting", "aspect", aspect, "ticket", ticket)
+		stop()
+		return true
+	}
+}
+
+// prExistsFn is the gh-backed PR lookup for builder/<ticket>, swappable in tests.
+var prExistsFn = func(repo, ticket string) (bool, error) {
+	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--head", "builder/"+ticket, "--json", "url", "-q", ".[0].url").CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("gh pr list: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
+// prExists reports whether a PR exists for builder/<ticket> in repo. Missing
+// repo/ticket returns an error so the builder does not exit on an unverifiable
+// "complete" (fail-closed toward NEX-468).
+func prExists(repo, ticket string) (bool, error) {
+	if repo == "" || ticket == "" {
+		return false, fmt.Errorf("prExists: repo/ticket not set (repo=%q ticket=%q)", repo, ticket)
+	}
+	return prExistsFn(repo, ticket)
+}
+
 func builderReplyTopic(builderMode bool, topic string) string {
 	if !builderMode {
 		return ""
@@ -754,7 +801,7 @@ func jwtExpiryMonitor(ctx context.Context, expiryFn func() time.Time, lead time.
 // ErrEmptyInbox — rather than waiting one tick per item (which would
 // stretch a 5-msg burst to ~1.25s). The inner loop respects ctx
 // cancellation between iterations.
-func deliberateLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger) {
+func deliberateLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, onComplete func() bool) {
 	t := time.NewTicker(250 * time.Millisecond)
 	defer t.Stop()
 	for {
@@ -766,7 +813,7 @@ func deliberateLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger) {
 				if ctx.Err() != nil {
 					return
 				}
-				_, err := f.Deliberate(ctx, "")
+				result, err := f.Deliberate(ctx, "")
 				if errors.Is(err, funnel.ErrEmptyInbox) {
 					break
 				}
@@ -776,6 +823,12 @@ func deliberateLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger) {
 					}
 					log.Warn("agentfunnel: deliberate", "err", err)
 					break
+				}
+				// NEX-471/NEX-468: in builder mode, when the judge rules the
+				// turn complete (DoD met) and the PR is verified to exist, exit
+				// promptly instead of idling to -builder-timeout.
+				if onComplete != nil && result.Filter.Class == funnel.FilterClassComplete && onComplete() {
+					return
 				}
 			}
 		}
