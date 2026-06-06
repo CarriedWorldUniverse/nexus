@@ -106,18 +106,18 @@ const judgeMaxOutputTokens = 150
 // judgeResponseFormat returns the response_format spec for the judge
 // turn. NEX-297 L2 + NEX-300 follow-up:
 //
-//   strict=false (default): json_object — guarantees the model
-//     returns valid JSON but doesn't enforce shape. Portable across
-//     OpenAI AND DeepSeek /v1 AND OpenAI-compatible third-party
-//     endpoints. The prompt + parseJudgeJSON tolerance handle shape.
+//	strict=false (default): json_object — guarantees the model
+//	  returns valid JSON but doesn't enforce shape. Portable across
+//	  OpenAI AND DeepSeek /v1 AND OpenAI-compatible third-party
+//	  endpoints. The prompt + parseJudgeJSON tolerance handle shape.
 //
-//   strict=true (operator opt-in via EnforceJSONSchema): json_schema
-//     with judgeVerdictSchema and Strict=true. Model is GUARANTEED to
-//     emit a payload matching the schema. NEX-292's parse_failure
-//     path becomes effectively unreachable. Only safe on verified-
-//     capable providers (real api.openai.com); flagged off-by-default
-//     because DeepSeek /v1 rejects this variant with 400 "type
-//     unavailable" and every judge call would error.
+//	strict=true (operator opt-in via EnforceJSONSchema): json_schema
+//	  with judgeVerdictSchema and Strict=true. Model is GUARANTEED to
+//	  emit a payload matching the schema. NEX-292's parse_failure
+//	  path becomes effectively unreachable. Only safe on verified-
+//	  capable providers (real api.openai.com); flagged off-by-default
+//	  because DeepSeek /v1 rejects this variant with 400 "type
+//	  unavailable" and every judge call would error.
 func judgeResponseFormat(strict bool) *bridle.ResponseFormat {
 	if strict {
 		return &bridle.ResponseFormat{
@@ -270,6 +270,16 @@ type FilterDecision struct {
 	// should treat empty-Class as "complete" when ShouldPost and
 	// "scratch" when !ShouldPost.
 	Class string
+
+	// GoalDone reports the judge’s goal-completion decision, orthogonal
+	// to ShouldPost (NEX-477). The judge emits two independent signals:
+	// “should this turn be posted?” (ShouldPost) and “is the Definition
+	// of Done met?” (GoalDone). Decoupling them lets a builder post a
+	// progress reply for an unfinished goal AND keep working — an unmet
+	// goal never suppresses a worthwhile post. Derived from Class: true
+	// only for FilterClassComplete. Empty-Class (legacy / always-post)
+	// filters leave it false.
+	GoalDone bool
 
 	// SystemNotice, when non-empty, instructs the funnel's return
 	// handler to post a separate system-author message to the thread
@@ -486,7 +496,8 @@ const filterJudgeTimeout = 30 * time.Second
 
 // filterJudgePrompt is the system prompt for the cheap-model filter.
 // Reply format is a single JSON object:
-//   {"class": "complete" | "scratch" | "goal_not_met" | "blocked", "reason": "one short phrase"}
+//
+//	{"class": "complete" | "scratch" | "goal_not_met" | "blocked", "reason": "one short phrase"}
 //
 // The four-class format (NEX-210) extends the prior binary {post, reason}
 // shape. When DoD context is present in the user message, the judge
@@ -907,8 +918,8 @@ func (f *CheapModelFilter) clearDegradationIfRecovered(aspect string) string {
 // parseJudgeJSON extracts the verdict from the cheap-model's JSON
 // response. Accepts two formats:
 //
-//   New (NEX-210): {"class": "complete"|"scratch"|"goal_not_met"|"blocked", "reason": "…"}
-//   Legacy:        {"post": true|false, "reason": "…"}
+//	New (NEX-210): {"class": "complete"|"scratch"|"goal_not_met"|"blocked", "reason": "…"}
+//	Legacy:        {"post": true|false, "reason": "…"}
 //
 // The new format is preferred. When both fields are present, class wins.
 // When only post is present, the parser derives class from it (complete/scratch).
@@ -974,7 +985,7 @@ func parseJudgeJSON(raw string) (FilterDecision, error) {
 			// in the prompt; treat as parse failure so caller posts.
 			return FilterDecision{}, fmt.Errorf("unknown class %q: %s", class, objText)
 		}
-		return FilterDecision{ShouldPost: shouldPost, Reason: reason, Class: class}, nil
+		return FilterDecision{ShouldPost: shouldPost, Reason: reason, Class: class, GoalDone: class == FilterClassComplete}, nil
 	}
 
 	// Legacy binary format: derive from post field.
@@ -988,5 +999,5 @@ func parseJudgeJSON(raw string) (FilterDecision, error) {
 	if !*verdict.Post {
 		class = FilterClassScratch
 	}
-	return FilterDecision{ShouldPost: *verdict.Post, Reason: reason, Class: class}, nil
+	return FilterDecision{ShouldPost: *verdict.Post, Reason: reason, Class: class, GoalDone: class == FilterClassComplete}, nil
 }

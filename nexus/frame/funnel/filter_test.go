@@ -978,3 +978,31 @@ func TestCheapModelFilter_NEX292_NegativeCooldownDisablesRateLimit(t *testing.T)
 		}
 	}
 }
+
+// TestParseJudgeJSON_GoalDone verifies the NEX-477 goal/post split: GoalDone is
+// the orthogonal goal-completion signal, true only when the verdict is complete.
+func TestParseJudgeJSON_GoalDone(t *testing.T) {
+	cases := []struct {
+		name         string
+		raw          string
+		wantGoalDone bool
+	}{
+		{"complete is goal done", `{"class": "complete", "reason": "done"}`, true},
+		{"goal_not_met is not done", `{"class": "goal_not_met", "reason": "wip"}`, false},
+		{"scratch is not done", `{"class": "scratch", "reason": "thin"}`, false},
+		{"blocked is not done", `{"class": "blocked", "reason": "stuck"}`, false},
+		{"legacy post true is done", `{"post": true, "reason": "ok"}`, true},
+		{"legacy post false is not done", `{"post": false, "reason": "no"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseJudgeJSON(tc.raw)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.GoalDone != tc.wantGoalDone {
+				t.Errorf("GoalDone: got %v want %v", got.GoalDone, tc.wantGoalDone)
+			}
+		})
+	}
+}

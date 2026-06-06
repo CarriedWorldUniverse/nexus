@@ -80,6 +80,7 @@ func main() {
 	autoRecallMaxRank := flag.Float64("auto-recall-max-rank", 0, "auto-recall: BM25 relevance gate; only hits with score < this inject (ranks are negative, lower = stronger; 0 = no gate)")
 	builderMode := flag.Bool("builder", false, "builder/one-shot mode: drain the dispatched brief, run to the task_done signal, then exit")
 	builderTimeout := flag.Duration("builder-timeout", 30*time.Minute, "max wall-clock for a builder run before forced exit")
+	builderMaxTurns := flag.Int("builder-max-turns", 20, "builder mode: max goal-pursuit turns before the ralph-loop gives up (NEX-477); -builder-timeout is the outer wall-clock backstop")
 	briefFile := flag.String("brief-file", "", "builder mode: read the seed brief from this file instead of the broker inbox")
 	replyTopic := flag.String("reply-topic", "", "builder mode: attach this topic to natural reply posts")
 	repoFlag := flag.String("repo", "", "builder mode: dispatched repo (owner/name) for PR-existence verification")
@@ -585,14 +586,16 @@ func main() {
 	funnelPtr = f
 	bridge = wsasp.NewBridge(f)
 
+	var seedBrief bridle.InboxItem
 	if *builderMode && *briefFile != "" {
-		item, err := readBriefFile(*briefFile)
+		b, err := readBriefFile(*briefFile)
 		if err != nil {
 			log.Error("agentfunnel: brief file unreadable", "err", err)
 			os.Exit(1)
 		}
-		f.Receive(item)
-		log.Info("agentfunnel: seeded builder brief from file", "path", *briefFile, "bytes", len(item.Content))
+		seedBrief = b
+		f.Receive(seedBrief)
+		log.Info("agentfunnel: seeded builder brief from file", "path", *briefFile, "bytes", len(seedBrief.Content))
 	}
 
 	log.Info("agentfunnel: starting deliberation loop",
@@ -626,11 +629,27 @@ func main() {
 	// before expiry triggers a supervisor restart.
 	go sessionRefreshLoop(ctx, state, wsClient, 1*time.Hour, log)
 
-	var onComplete func() bool
-	if *builderMode {
-		onComplete = builderCompleteCheck(stop, log, res.AspectName, *repoFlag, *ticketFlag)
+	// NEX-477: a builder with a captured Definition of Done (its seed brief)
+	// runs the goal-pursuit loop — it posts progress and keeps working toward
+	// the DoD instead of idling to the timeout when a turn lands goal_not_met.
+	// Builders seeded via the broker inbox (no captured DoD) and always-on
+	// aspects fall back to the plain cadence loop.
+	if *builderMode && seedBrief.Content != "" {
+		goalCfg := funnel.GoalConfig{
+			TicketID:   *ticketFlag,
+			DoD:        seedBrief.Content,
+			MaxTurns:   *builderMaxTurns,
+			ThreadRoot: seedBrief.ThreadRoot,
+		}
+		verifyPR := builderPRVerifier(log, res.AspectName, *repoFlag, *ticketFlag)
+		go builderGoalLoop(ctx, f, log, goalCfg, verifyPR, stop)
+	} else {
+		var onComplete func() bool
+		if *builderMode {
+			onComplete = builderCompleteCheck(stop, log, res.AspectName, *repoFlag, *ticketFlag)
+		}
+		go deliberateLoop(ctx, f, log, onComplete)
 	}
-	go deliberateLoop(ctx, f, log, onComplete)
 
 	if *builderMode {
 		go func() {
@@ -709,19 +728,32 @@ func builderOnTaskDone(stop context.CancelFunc, log *slog.Logger, aspect string)
 	}
 }
 
-// builderCompleteCheck returns an onComplete callback for the builder loop.
-// When the judge rules a turn complete (DoD met, NEX-471), it first verifies
-// the PR actually exists (NEX-468 — the judge has false-positived "PR opened"
-// before) and only then stops the builder. Returns true when it stopped.
-func builderCompleteCheck(stop context.CancelFunc, log *slog.Logger, aspect, repo, ticket string) func() bool {
+// builderPRVerifier returns a pure check: does a PR exist for builder/<ticket>?
+// It logs the miss/error but has NO side effects (no stop), so a goal-loop can
+// decide for itself what to do next. Fail-closed: a gh error reports false
+// (NEX-468 — never declare completion we cannot verify).
+func builderPRVerifier(log *slog.Logger, aspect, repo, ticket string) func() bool {
 	return func() bool {
 		ok, err := prExists(repo, ticket)
 		if err != nil {
-			log.Warn("agentfunnel: judge complete but PR check errored — not exiting", "aspect", aspect, "err", err)
+			log.Warn("agentfunnel: PR check errored — treating as not-yet-open", "aspect", aspect, "err", err)
 			return false
 		}
 		if !ok {
-			log.Info("agentfunnel: judge says complete but no PR found — continuing", "aspect", aspect, "repo", repo, "ticket", ticket)
+			log.Info("agentfunnel: no PR found for builder branch", "aspect", aspect, "repo", repo, "ticket", ticket)
+		}
+		return ok
+	}
+}
+
+// builderCompleteCheck returns an onComplete callback for the plain builder
+// loop (broker-inbox builders without a captured DoD). When the judge rules a
+// turn complete (NEX-471) it verifies the PR exists (NEX-468) and only then
+// stops the builder. Returns true when it stopped.
+func builderCompleteCheck(stop context.CancelFunc, log *slog.Logger, aspect, repo, ticket string) func() bool {
+	verify := builderPRVerifier(log, aspect, repo, ticket)
+	return func() bool {
+		if !verify() {
 			return false
 		}
 		log.Info("agentfunnel: judge complete + PR verified — exiting", "aspect", aspect, "ticket", ticket)
@@ -831,6 +863,102 @@ func deliberateLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, onC
 					return
 				}
 			}
+		}
+	}
+}
+
+// builderPRRepromptCap bounds how many times the builder goal-loop will
+// re-prompt for a missing PR after the judge ruled the goal complete. The
+// judge can false-positive "done" (NEX-468); rather than exit empty-handed we
+// push back so the builder opens the PR — but only a few times, so a model
+// that keeps claiming done without pushing cannot loop forever. GoalLoop
+// MaxTurns and -builder-timeout are the outer backstops.
+const builderPRRepromptCap = 3
+
+// builderStep is builderDecide's verdict for the builder goal-loop.
+type builderStep int
+
+const (
+	builderContinue   builderStep = iota // intermediate goal_not_met — keep pursuing
+	builderExit                          // terminal: verified-complete, blocked, or exhausted
+	builderRepromptPR                    // judge says complete but no PR — push back for it
+)
+
+// builderDecide maps a GoalLoop result plus a PR-verification outcome to the
+// builder's next step. Pure (no funnel, no I/O) so it is unit-testable.
+//
+//   - blocked                                  -> exit (escalated)
+//   - not done (intermediate goal_not_met)     -> continue (Pursue enqueued a continuation)
+//   - done + PR verified                       -> exit (success)
+//   - done, reason "complete", no PR, budget   -> reprompt for the PR
+//   - any other done (scratch / loop_cap / no
+//     PR with budget exhausted)                -> exit
+func builderDecide(result funnel.GoalResult, prVerified bool, prRepromptsLeft int) builderStep {
+	if result.Blocked {
+		return builderExit
+	}
+	if !result.Done {
+		return builderContinue
+	}
+	if prVerified {
+		return builderExit
+	}
+	if result.Reason == "complete" && prRepromptsLeft > 0 {
+		return builderRepromptPR
+	}
+	return builderExit
+}
+
+// builderGoalLoop drives a dispatch builder to its Definition of Done using the
+// goal-pursuit loop (NEX-477). Unlike the bare deliberateLoop — which drains
+// the inbox and then idles when the judge rules goal_not_met — GoalLoop posts
+// the progress reply (ShouldPost) AND enqueues a continuation so the builder
+// keeps working toward the DoD until it is met, blocked, or capped. Completion
+// is gated on the PR actually existing (NEX-468/471): if the judge rules
+// complete but no PR is found, the builder is re-prompted to open it rather
+// than exiting empty-handed. The -builder-timeout goroutine remains the
+// wall-clock backstop.
+func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cfg funnel.GoalConfig, verifyPR func() bool, stop context.CancelFunc) {
+	gl := funnel.NewGoalLoop(f, cfg)
+	prRepromptsLeft := builderPRRepromptCap
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		result, err := gl.Pursue(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			log.Warn("agentfunnel: builder goal-loop pursue", "err", err)
+			return
+		}
+		prVerified := false
+		if result.Done && !result.Blocked {
+			// Only spend a gh call when the loop thinks it is finished.
+			prVerified = verifyPR()
+		}
+		switch builderDecide(result, prVerified, prRepromptsLeft) {
+		case builderContinue:
+			continue
+		case builderRepromptPR:
+			prRepromptsLeft--
+			log.Info("agentfunnel: judge complete but no PR — re-prompting", "ticket", cfg.TicketID, "reprompts_left", prRepromptsLeft)
+			f.ReceiveSynthetic(bridle.InboxItem{
+				From:       "system",
+				Source:     "builder_pr_check",
+				ThreadRoot: cfg.ThreadRoot,
+				Content: fmt.Sprintf(
+					"[CONTINUATION] The Definition of Done requires an open pull request from branch builder/%s, "+
+						"but none was found. Push your branch and open the PR with the gh CLI (gh pr create). "+
+						"If you cannot, say so explicitly and name the blocker. End your final message with %s once the PR is open.",
+					cfg.TicketID, builderDoneSentinel),
+			})
+			continue
+		case builderExit:
+			log.Info("agentfunnel: builder goal-loop done", "ticket", cfg.TicketID, "reason", result.Reason, "blocked", result.Blocked, "pr_verified", prVerified, "turns", result.TurnsRun)
+			stop()
+			return
 		}
 	}
 }
