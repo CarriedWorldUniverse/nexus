@@ -43,6 +43,17 @@ COPY agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp cw /usr/local/bi
 # (npm i -g @anthropic-ai/claude-code) when claude-backed builders are wanted.
 RUN npm config set prefix /root/.npm-global && npm i -g @openai/codex && codex --version
 
+# The agent (codex) spawns login shells (sh -lc), which re-source /etc/profile
+# and RESET PATH to the distro default — dropping /usr/local/go/bin and
+# /root/.npm-global/bin, so `go` and `codex` aren't found and the agent searches.
+# Fix both ways: symlink the off-PATH tools into /usr/local/bin (on PATH for
+# every shell), and re-add the dirs via /etc/profile.d for login shells.
+RUN ln -sf /usr/local/go/bin/go /usr/local/bin/go \
+ && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
+ && ln -sf /root/.npm-global/bin/codex /usr/local/bin/codex \
+ && printf 'export PATH=/usr/local/go/bin:/root/.npm-global/bin:/root/go/bin:$PATH\n' > /etc/profile.d/cwb-path.sh \
+ && chmod 0644 /etc/profile.d/cwb-path.sh
+
 # cw is git's credential helper: clone/push auth flows through the M1 custodian
 # seam, never a baked secret (NEX-437). cw's git-helper reads CW_TOKEN (the
 # session JWT, exported by agentfunnel in -builder mode) + CW_SEAM_URL (Job env).
