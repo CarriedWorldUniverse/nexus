@@ -32,25 +32,50 @@ func (k *K8s) PutBriefConfigMap(ctx context.Context, taskID, brief string) error
 	return err
 }
 
-func (k *K8s) CreateJob(ctx context.Context, job *batchv1.Job) error {
-	_, err := k.Client.BatchV1().Jobs(k.Namespace).Create(ctx, job, metav1.CreateOptions{})
+func (k *K8s) CreateJob(ctx context.Context, job *batchv1.Job) (*batchv1.Job, error) {
+	return k.Client.BatchV1().Jobs(k.Namespace).Create(ctx, job, metav1.CreateOptions{})
+}
+
+// SetBriefOwner makes the Job own the brief ConfigMap so it is garbage-collected
+// when the Job is removed (TTLSecondsAfterFinished). NEX-461: briefs otherwise
+// leak — accumulating one per dispatch forever.
+func (k *K8s) SetBriefOwner(ctx context.Context, taskID string, job *batchv1.Job) error {
+	cm, err := k.Client.CoreV1().ConfigMaps(k.Namespace).Get(ctx, "brief-"+taskID, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	cm.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "batch/v1",
+		Kind:       "Job",
+		Name:       job.Name,
+		UID:        job.UID,
+	}}
+	_, err = k.Client.CoreV1().ConfigMaps(k.Namespace).Update(ctx, cm, metav1.UpdateOptions{})
 	return err
 }
 
-// ListActiveJobs returns ticket -> job name for non-finished builder Jobs.
-func (k *K8s) ListActiveJobs(ctx context.Context) (map[string]string, error) {
+// ActiveJob is a live builder Job re-adopted on controller start.
+type ActiveJob struct {
+	Name  string
+	Agent string
+}
+
+// ListActiveJobs returns ticket -> live builder Job (name + agent) for
+// non-finished builder Jobs. The agent is needed to rebuild per-agent
+// serialization state across a controller restart (NEX-464).
+func (k *K8s) ListActiveJobs(ctx context.Context) (map[string]ActiveJob, error) {
 	jl, err := k.Client.BatchV1().Jobs(k.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "app=nexus-builder"})
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]string{}
+	out := map[string]ActiveJob{}
 	for i := range jl.Items {
 		j := &jl.Items[i]
 		if j.Status.Succeeded > 0 || j.Status.Failed > 0 {
 			continue
 		}
 		if ticket := j.Labels["nexus.dispatch/ticket"]; ticket != "" {
-			out[ticket] = j.Name
+			out[ticket] = ActiveJob{Name: j.Name, Agent: j.Labels["nexus.dispatch/agent"]}
 		}
 	}
 	return out, nil

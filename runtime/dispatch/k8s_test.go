@@ -15,17 +15,42 @@ import (
 func TestCreateAndListJobs(t *testing.T) {
 	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}
 	job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, JobConfig{Namespace: "nexus"}, "t1", "codex-cli")
-	if err := k.CreateJob(context.Background(), job); err != nil {
+	if _, err := k.CreateJob(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
 	active, err := k.ListActiveJobs(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if active["NEX-1"] == "" {
+	if active["NEX-1"].Name == "" {
 		t.Errorf("ticket NEX-1 not in active set: %v", active)
 	}
+	if active["NEX-1"].Agent != "anvil" {
+		t.Errorf("active NEX-1 agent = %q, want anvil", active["NEX-1"].Agent)
+	}
 	_ = metav1.ObjectMeta{}
+}
+
+func TestSetBriefOwner(t *testing.T) {
+	// NEX-461: the brief ConfigMap must end up owned by its Job so it GCs with it.
+	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}
+	if err := k.PutBriefConfigMap(context.Background(), "t1", "the brief"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := k.CreateJob(context.Background(), BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, JobConfig{Namespace: "nexus"}, "t1", "codex-cli"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetBriefOwner(context.Background(), "t1", job); err != nil {
+		t.Fatal(err)
+	}
+	cm, err := k.Client.CoreV1().ConfigMaps("nexus").Get(context.Background(), "brief-t1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cm.OwnerReferences) != 1 || cm.OwnerReferences[0].Name != job.Name {
+		t.Errorf("brief not owned by its Job: %+v", cm.OwnerReferences)
+	}
 }
 
 func TestWatchJobsDone(t *testing.T) {
