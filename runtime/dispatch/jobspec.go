@@ -110,6 +110,8 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 							"-brief-file", "/etc/dispatch/brief.md",
 							"-reply-topic", b.Thread,
 							"-builder-timeout", cfg.BriefTimeout,
+							"-repo", b.Repo,
+							"-ticket", b.Ticket,
 						},
 						Env:          env,
 						VolumeMounts: volumeMounts,

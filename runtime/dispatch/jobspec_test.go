@@ -167,3 +167,17 @@ func TestBuildJob_WorkspaceCleanPerJob(t *testing.T) {
 		t.Error("cache volume should stay a PVC for the Go build cache")
 	}
 }
+
+func TestBuildJob_PassesRepoTicket(t *testing.T) {
+	// NEX-471/NEX-468: the builder needs -repo + -ticket to verify the PR exists
+	// before exiting on a judge "complete".
+	cfg := JobConfig{Namespace: "nexus", Image: "img"}
+	b := Brief{Agent: "anvil", Ticket: "NEX-7", Repo: "CarriedWorldUniverse/nexus", Thread: "NEX-7"}
+	c := BuildJob(b, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+	if !argValueEquals(c.Args, "-repo", "CarriedWorldUniverse/nexus") {
+		t.Errorf("args missing -repo: %v", c.Args)
+	}
+	if !argValueEquals(c.Args, "-ticket", "NEX-7") {
+		t.Errorf("args missing -ticket: %v", c.Args)
+	}
+}
