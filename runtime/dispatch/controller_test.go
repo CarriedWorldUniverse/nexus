@@ -11,7 +11,7 @@ import (
 
 func newTestController(maxConc int) *Controller {
 	return &Controller{
-		K8s:     &K8s{Client: fake.NewSimpleClientset(keyfileSecret("anvil"), keyfileSecret("a")), Namespace: "nexus"},
+		K8s:     &K8s{Client: fake.NewSimpleClientset(keyfileSecret("anvil"), keyfileSecret("a"), keyfileSecret("b")), Namespace: "nexus"},
 		Cfg:     JobConfig{Namespace: "nexus", Image: "img"},
 		MaxConc: maxConc,
 		active:  map[string]string{},
@@ -35,14 +35,51 @@ func TestHandle_Idempotent(t *testing.T) {
 }
 
 func TestHandle_ConcurrencyCap(t *testing.T) {
+	// Distinct agents so the cap (not per-agent serialization) is what queues T2.
 	c := newTestController(1)
 	_ = c.handle(context.Background(), Brief{Agent: "a", Ticket: "T1", Task: "x"})
-	_ = c.handle(context.Background(), Brief{Agent: "a", Ticket: "T2", Task: "x"})
+	_ = c.handle(context.Background(), Brief{Agent: "b", Ticket: "T2", Task: "x"})
 	if len(c.active) != 1 {
 		t.Errorf("cap not enforced: active=%d want 1", len(c.active))
 	}
 	if len(c.queue) != 1 {
 		t.Errorf("over-cap brief not queued: queue=%d want 1", len(c.queue))
+	}
+}
+
+func TestHandle_SerializesPerAgent(t *testing.T) {
+	// NEX-464: under the cap, a second ticket for the SAME agent must queue
+	// (the broker allows only one session per aspect name).
+	c := newTestController(4)
+	_ = c.handle(context.Background(), Brief{Agent: "a", Ticket: "T1", Task: "x"})
+	_ = c.handle(context.Background(), Brief{Agent: "a", Ticket: "T2", Task: "x"})
+	if len(c.active) != 1 {
+		t.Errorf("same-agent second job spawned concurrently: active=%d want 1", len(c.active))
+	}
+	if len(c.queue) != 1 {
+		t.Errorf("same-agent second brief not queued: queue=%d want 1", len(c.queue))
+	}
+	// A different agent under the cap runs immediately.
+	_ = c.handle(context.Background(), Brief{Agent: "b", Ticket: "T3", Task: "x"})
+	if len(c.active) != 2 {
+		t.Errorf("different agent should run concurrently: active=%d want 2", len(c.active))
+	}
+}
+
+func TestOnJobDone_DrainsQueuedSameAgent(t *testing.T) {
+	// When agent a's builder finishes, its queued second ticket can now run.
+	c := newTestController(4)
+	_ = c.handle(context.Background(), Brief{Agent: "a", Ticket: "T1", Thread: "T1", Task: "x"})
+	_ = c.handle(context.Background(), Brief{Agent: "a", Ticket: "T2", Thread: "T2", Task: "x"})
+	if len(c.queue) != 1 {
+		t.Fatalf("setup: T2 should be queued, queue=%d", len(c.queue))
+	}
+	c.onJobDone(context.Background(), "T1", "T1", true)
+	if _, live := c.active["T2"]; !live {
+		t.Errorf("queued same-agent T2 not drained after T1 finished: active=%v", c.active)
+	}
+	if len(c.queue) != 0 {
+		t.Errorf("queue not drained: %d", len(c.queue))
 	}
 }
 

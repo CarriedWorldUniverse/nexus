@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 )
@@ -38,11 +39,12 @@ type Controller struct {
 	Poster  Poster
 	NewID   func() string
 
-	mu     sync.Mutex
-	active map[string]string
-	queue  []Brief
-	acked  map[string]bool
-	seq    int
+	mu      sync.Mutex
+	active  map[string]string
+	agentOf map[string]string // ticket -> agent, for per-agent serialization (NEX-464)
+	queue   []Brief
+	acked   map[string]bool
+	seq     int
 }
 
 func (c *Controller) Init(ctx context.Context) error {
@@ -52,6 +54,9 @@ func (c *Controller) Init(ctx context.Context) error {
 	}
 	if c.active == nil {
 		c.active = map[string]string{}
+	}
+	if c.agentOf == nil {
+		c.agentOf = map[string]string{}
 	}
 	if c.acked == nil {
 		c.acked = map[string]bool{}
@@ -64,8 +69,9 @@ func (c *Controller) Init(ctx context.Context) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for ticket, job := range active {
-		c.active[ticket] = job
+	for ticket, aj := range active {
+		c.active[ticket] = aj.Name
+		c.agentOf[ticket] = aj.Agent
 	}
 	return nil
 }
@@ -108,6 +114,9 @@ func (c *Controller) handle(ctx context.Context, b Brief) error {
 	if c.active == nil {
 		c.active = map[string]string{}
 	}
+	if c.agentOf == nil {
+		c.agentOf = map[string]string{}
+	}
 	if c.acked == nil {
 		c.acked = map[string]bool{}
 	}
@@ -119,6 +128,14 @@ func (c *Controller) handle(ctx context.Context, b Brief) error {
 		c.post(b.Thread, "dispatch accepted for "+b.Agent+" on "+b.Ticket)
 	}
 	if _, live := c.active[b.Ticket]; live {
+		return nil
+	}
+	// NEX-464: one builder per aspect at a time. The broker allows a single
+	// session per aspect name, so a second concurrent job for the same agent
+	// can't register — queue it until the agent's current builder finishes.
+	if c.agentBusy(b.Agent) {
+		c.queue = append(c.queue, b)
+		c.post(b.Thread, "dispatch queued — "+b.Agent+" already has a live builder")
 		return nil
 	}
 	if len(c.active) >= c.MaxConc {
@@ -140,26 +157,63 @@ func (c *Controller) spawn(ctx context.Context, b Brief) error {
 		provider = "codex-cli"
 	}
 	job := BuildJob(b, c.Cfg, taskID, provider)
-	if err := c.K8s.CreateJob(ctx, job); err != nil {
+	created, err := c.K8s.CreateJob(ctx, job)
+	if err != nil {
 		return fmt.Errorf("create job: %w", err)
 	}
-	c.active[b.Ticket] = job.Name
-	c.post(b.Thread, "builder spawned as "+b.Agent+" ("+job.Name+")")
+	// NEX-461: make the Job own the brief ConfigMap so it GCs with the Job
+	// (the Job itself TTL-deletes via TTLSecondsAfterFinished).
+	if err := c.K8s.SetBriefOwner(ctx, taskID, created); err != nil {
+		slog.Warn("dispatch: brief will not auto-GC; SetBriefOwner failed", "task", taskID, "err", err)
+	}
+	c.active[b.Ticket] = created.Name
+	c.agentOf[b.Ticket] = b.Agent
+	c.post(b.Thread, "builder spawned as "+b.Agent+" ("+created.Name+")")
 	return nil
+}
+
+// agentBusy reports whether the agent already has a live builder. NEX-464.
+// Caller holds c.mu.
+func (c *Controller) agentBusy(agent string) bool {
+	for _, a := range c.agentOf {
+		if a == agent {
+			return true
+		}
+	}
+	return false
+}
+
+// drainQueue spawns queued briefs that can now run — under the concurrency cap
+// and whose agent is free. Caller holds c.mu.
+func (c *Controller) drainQueue(ctx context.Context) {
+	for len(c.active) < c.MaxConc {
+		idx := -1
+		for i, q := range c.queue {
+			if !c.agentBusy(q.Agent) {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return
+		}
+		next := c.queue[idx]
+		c.queue = append(c.queue[:idx], c.queue[idx+1:]...)
+		if err := c.spawn(ctx, next); err != nil {
+			c.post(next.Thread, "dispatch failed: "+err.Error())
+		}
+	}
 }
 
 func (c *Controller) onJobDone(ctx context.Context, ticket, thread string, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.active, ticket)
+	delete(c.agentOf, ticket)
 	if ok {
 		c.post(thread, "builder completed: "+ticket)
 	} else {
 		c.post(thread, "builder FAILED: "+ticket+" - see Job logs; re-dispatch to retry")
 	}
-	if len(c.queue) > 0 && len(c.active) < c.MaxConc {
-		next := c.queue[0]
-		c.queue = c.queue[1:]
-		_ = c.spawn(ctx, next)
-	}
+	c.drainQueue(ctx)
 }
