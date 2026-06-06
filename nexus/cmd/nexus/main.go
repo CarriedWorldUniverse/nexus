@@ -516,6 +516,10 @@ func main() {
 	// with the §6.2 fresh-handle write verifier (Part 2) for
 	// defence-in-depth on subtler write-loss modes.
 	go func() {
+		if !storage.ResolveOpenConfig(*dataDir).UsesLocalFile {
+			logger.Info("storage watcher: skipped for remote libSQL database", "env_var", storage.EnvDBDSN)
+			return
+		}
 		dbPath := storage.ResolvePath(*dataDir)
 		err := storage.WatchFileReplacement(ctx, dbPath, 0 /*default interval*/, logger, stop)
 		// Three exit paths:
@@ -545,6 +549,10 @@ func main() {
 	// partial-write rollback, and long-handle-with-FS-mismatch that
 	// stat-only detection misses.
 	go func() {
+		if !storage.ResolveOpenConfig(*dataDir).UsesLocalFile {
+			logger.Info("storage verifier: skipped for remote libSQL database", "env_var", storage.EnvDBDSN)
+			return
+		}
 		dbPath := storage.ResolvePath(*dataDir)
 		err := storage.WatchWriteDurability(ctx, dbPath, db, 0 /*default interval*/, logger, stop)
 		if errors.Is(err, storage.ErrWriteDurabilityFailed) {

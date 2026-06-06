@@ -1,4 +1,4 @@
-// Package storage opens the Nexus SQLite database and runs the
+// Package storage opens the Nexus SQLite-compatible database and runs the
 // idempotent schema DDL. Per registration spec v0.5 §2.8 and §10: the
 // schema lives in source (schema.sql, embedded below); the database
 // itself is runtime-created under NEXUS_DATA_DIR and never committed.
@@ -26,6 +26,7 @@ import (
 	"time"
 
 	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/tursodatabase/libsql-client-go/libsql"
 )
 
 //go:embed schema.sql
@@ -37,24 +38,31 @@ const DefaultDataDir = "./data"
 // DBFileName is the fixed filename inside the data dir.
 const DBFileName = "nexus.db"
 
-// Open resolves the data directory (NEXUS_DATA_DIR env or dir arg, falling
-// back to DefaultDataDir), creates it if missing, opens nexus.db inside
-// it (SQLite creates the file if absent), and runs Bootstrap.
-//
-// The returned *sql.DB has WAL mode, foreign keys on, and the Nexus
-// schema in place. Safe to call on every startup.
-func Open(ctx context.Context, dir string, log *slog.Logger) (*sql.DB, error) {
-	if dir == "" {
-		dir = os.Getenv("NEXUS_DATA_DIR")
-	}
-	if dir == "" {
-		dir = DefaultDataDir
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("storage: mkdir %q: %w", dir, err)
+// EnvDBDSN points the broker database at a libSQL server. When unset,
+// storage keeps the historical SQLite file path under NEXUS_DATA_DIR.
+const EnvDBDSN = "NEXUS_DB_DSN"
+
+// OpenConfig is the resolved database target used by Open.
+type OpenConfig struct {
+	DriverName    string
+	DSN           string
+	Path          string
+	UsesLocalFile bool
+}
+
+// ResolveOpenConfig chooses the database driver and DSN without opening a
+// network or file connection. It is factored for tests and for callers that
+// need to know whether file-only safety checks should run.
+func ResolveOpenConfig(dir string) OpenConfig {
+	if dsn := os.Getenv(EnvDBDSN); dsn != "" {
+		return OpenConfig{
+			DriverName:    "libsql",
+			DSN:           dsn,
+			UsesLocalFile: false,
+		}
 	}
 
-	path := filepath.Join(dir, DBFileName)
+	path := ResolvePath(dir)
 	// Windows paths need forward slashes and URI-style prefix so the
 	// driver doesn't parse backslashes as escape characters.
 	uriPath := filepath.ToSlash(path)
@@ -72,17 +80,40 @@ func Open(ctx context.Context, dir string, log *slog.Logger) (*sql.DB, error) {
 	// read the same MAX and fork the thread (#226 invariant violation).
 	// Under WAL, writers serialize at BEGIN; reads stay non-blocking.
 	dsn := "file:" + uriPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_txlock=immediate"
+	return OpenConfig{
+		DriverName:    "sqlite3",
+		DSN:           dsn,
+		Path:          path,
+		UsesLocalFile: true,
+	}
+}
 
-	db, err := sql.Open("sqlite3", dsn)
+// Open resolves the data directory (NEXUS_DATA_DIR env or dir arg, falling
+// back to DefaultDataDir), creates it if missing, opens nexus.db inside
+// it (SQLite creates the file if absent), and runs Bootstrap.
+//
+// If NEXUS_DB_DSN is set, Open connects with the libSQL database/sql driver
+// using that DSN instead. Bootstrap and all application queries run through
+// the returned *sql.DB either way. SQLite-file opens configure WAL, foreign
+// keys, busy timeout, and immediate transactions through driver pragmas;
+// libSQL opens skip those file-specific pragmas.
+func Open(ctx context.Context, dir string, log *slog.Logger) (*sql.DB, error) {
+	cfg := ResolveOpenConfig(dir)
+	dir = filepath.Dir(ResolvePath(dir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("storage: mkdir %q: %w", dir, err)
+	}
+
+	db, err := sql.Open(cfg.DriverName, cfg.DSN)
 	if err != nil {
-		return nil, fmt.Errorf("storage: sql.Open %q: %w", path, err)
+		return nil, fmt.Errorf("storage: sql.Open %q: %w", cfg.openTarget(), err)
 	}
 
 	pingCtx, pingCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer pingCancel()
 	if err := db.PingContext(pingCtx); err != nil {
 		closeOnError(db, log, "ping failure")
-		return nil, fmt.Errorf("storage: ping %q: %w", path, err)
+		return nil, fmt.Errorf("storage: ping %q: %w", cfg.openTarget(), err)
 	}
 
 	if err := Bootstrap(ctx, db); err != nil {
@@ -91,9 +122,20 @@ func Open(ctx context.Context, dir string, log *slog.Logger) (*sql.DB, error) {
 	}
 
 	if log != nil {
-		log.Info("storage opened", "path", path)
+		if cfg.UsesLocalFile {
+			log.Info("storage opened", "driver", cfg.DriverName, "path", cfg.Path)
+		} else {
+			log.Info("storage opened", "driver", cfg.DriverName, "dsn", cfg.DSN)
+		}
 	}
 	return db, nil
+}
+
+func (c OpenConfig) openTarget() string {
+	if c.UsesLocalFile {
+		return c.Path
+	}
+	return c.DSN
 }
 
 // closeOnError closes the DB during an Open error path and logs any close
