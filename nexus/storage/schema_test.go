@@ -2,10 +2,60 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
+
+func TestResolveOpenConfigDefaultsToSQLiteFile(t *testing.T) {
+	t.Setenv(EnvDBDSN, "")
+	t.Setenv("NEXUS_DATA_DIR", "")
+
+	dir := t.TempDir()
+	cfg := ResolveOpenConfig(dir)
+
+	if cfg.DriverName != "sqlite3" {
+		t.Fatalf("DriverName = %q, want sqlite3", cfg.DriverName)
+	}
+	if !cfg.UsesLocalFile {
+		t.Fatalf("UsesLocalFile = false, want true")
+	}
+	if cfg.Path != filepath.Join(dir, DBFileName) {
+		t.Fatalf("Path = %q, want %q", cfg.Path, filepath.Join(dir, DBFileName))
+	}
+	if !strings.HasPrefix(cfg.DSN, "file:"+filepath.ToSlash(cfg.Path)+"?") {
+		t.Fatalf("DSN = %q, want file URI for %q", cfg.DSN, cfg.Path)
+	}
+	if !strings.Contains(cfg.DSN, "_pragma=journal_mode(WAL)") {
+		t.Fatalf("DSN = %q, want WAL pragma on SQLite-file path", cfg.DSN)
+	}
+}
+
+func TestResolveOpenConfigUsesLibSQLDSNFromEnv(t *testing.T) {
+	const dsn = "http://sqld.cwb.svc.cluster.local:8080"
+	t.Setenv(EnvDBDSN, dsn)
+
+	cfg := ResolveOpenConfig(t.TempDir())
+
+	if cfg.DriverName != "libsql" {
+		t.Fatalf("DriverName = %q, want libsql", cfg.DriverName)
+	}
+	if cfg.UsesLocalFile {
+		t.Fatalf("UsesLocalFile = true, want false")
+	}
+	if cfg.DSN != dsn {
+		t.Fatalf("DSN = %q, want %q", cfg.DSN, dsn)
+	}
+	if cfg.Path != "" {
+		t.Fatalf("Path = %q, want empty for remote libSQL", cfg.Path)
+	}
+	if !slices.Contains(sql.Drivers(), "libsql") {
+		t.Fatalf("database/sql driver libsql is not registered; drivers: %v", sql.Drivers())
+	}
+}
 
 func TestOpenCreatesAndBootstraps(t *testing.T) {
 	dir := t.TempDir()

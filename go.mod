@@ -14,6 +14,7 @@ require (
 	github.com/mark3labs/mcp-go v0.54.1
 	github.com/ncruces/go-sqlite3 v0.34.1
 	github.com/oklog/ulid/v2 v2.1.1
+	github.com/tursodatabase/libsql-client-go v0.0.0-20260528064733-9d5d30a29a60
 	golang.org/x/crypto v0.51.0
 	k8s.io/api v0.32.0
 	k8s.io/apimachinery v0.32.0
@@ -21,6 +22,7 @@ require (
 )
 
 require (
+	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/emersion/go-message v0.18.2 // indirect
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
@@ -54,6 +56,7 @@ require (
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	golang.org/x/exp v0.0.0-20240325151524-a685a6edb6d8 // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/term v0.43.0 // indirect
