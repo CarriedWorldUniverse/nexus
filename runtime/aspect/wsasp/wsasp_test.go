@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -334,12 +335,108 @@ func TestRegisterPrecedesDrainedSendsAfterReconnect(t *testing.T) {
 	if len(order) < 4 {
 		t.Fatalf("server only received %d frames: %v", len(order), order)
 	}
+	if !c.Ready() {
+		t.Fatal("client should be ready after reconnect/register barrier opens")
+	}
 	if order[0] != frames.KindRegister {
 		t.Fatalf("first frame should be register, got %v; full order: %v", order[0], order)
 	}
 	for i := 1; i < 4; i++ {
 		if order[i] != frames.KindChatSend {
 			t.Fatalf("frame %d should be chat.send, got %v", i, order[i])
+		}
+	}
+}
+
+func TestReconnectReRegistersBeforeDraining(t *testing.T) {
+	var (
+		connCount atomic.Int32
+		mu        sync.Mutex
+		order     []frames.Kind
+	)
+	record := func(env frames.Envelope) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, env.Kind)
+	}
+
+	firstRegister := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connN := connCount.Add(1)
+		wsc, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer wsc.Close(websocket.StatusNormalClosure, "done")
+		for {
+			_, data, err := wsc.Read(r.Context())
+			if err != nil {
+				return
+			}
+			env, err := frames.Decode(data)
+			if err != nil {
+				continue
+			}
+			record(env)
+			if env.Kind == frames.KindRegister {
+				ack, _ := frames.NewResponse(frames.KindRegisterAck, env.ID, frames.RegisterAckPayload{})
+				raw, _ := frames.Encode(ack)
+				_ = wsc.Write(r.Context(), websocket.MessageText, raw)
+				if connN == 1 {
+					_ = wsc.CloseNow()
+					close(firstRegister)
+					return
+				}
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(Config{
+		URL:        "ws" + strings.TrimPrefix(srv.URL, "http"),
+		AspectName: "test",
+		OnDeliver:  func(DeliveredMessage) {},
+		Register:   schemas.RegisterRequest{Name: "test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+
+	select {
+	case <-firstRegister:
+	case <-ctx.Done():
+		t.Fatal("first connection did not register")
+	}
+
+	_, _ = c.SendChat(context.Background(), "after-drop", 0, "")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		got := append([]frames.Kind(nil), order...)
+		mu.Unlock()
+		if len(got) >= 3 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) < 3 {
+		t.Fatalf("server only received %d frames: %v", len(order), order)
+	}
+	want := []frames.Kind{frames.KindRegister, frames.KindRegister, frames.KindChatSend}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("frame %d = %v, want %v; full order: %v", i, order[i], want[i], order)
 		}
 	}
 }
@@ -396,6 +493,46 @@ func TestNewClient_ForwardsTokenProviderToWSClient(t *testing.T) {
 	}
 	if got := results[0].String(); got != "fresh-token" {
 		t.Errorf("TokenProvider returned %q, want %q", got, "fresh-token")
+	}
+}
+
+func TestNewClient_ForwardsPingSettingsToWSClient(t *testing.T) {
+	c, err := NewClient(Config{
+		URL:          "wss://example/connect",
+		AspectName:   "anvil",
+		OnDeliver:    noopDeliver,
+		PingInterval: 3 * time.Second,
+		PingTimeout:  2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wsCfg := reflect.ValueOf(c.ws).Elem().FieldByName("cfg")
+	intervalField := wsCfg.FieldByName("PingInterval")
+	timeoutField := wsCfg.FieldByName("PingTimeout")
+	if !intervalField.IsValid() || !timeoutField.IsValid() {
+		t.Fatal("wsclient.Config ping fields missing — schema changed")
+	}
+	if got := time.Duration(intervalField.Int()); got != 3*time.Second {
+		t.Fatalf("PingInterval = %s, want 3s", got)
+	}
+	if got := time.Duration(timeoutField.Int()); got != 2*time.Second {
+		t.Fatalf("PingTimeout = %s, want 2s", got)
+	}
+}
+
+func TestReadyFalseBeforeRun(t *testing.T) {
+	c, err := NewClient(Config{
+		URL:        "wss://example/connect",
+		AspectName: "anvil",
+		OnDeliver:  noopDeliver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Ready() {
+		t.Fatal("new client should not be ready before the WS connects and registers")
 	}
 }
 

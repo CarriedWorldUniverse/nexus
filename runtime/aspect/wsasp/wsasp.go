@@ -52,6 +52,11 @@ type Config struct {
 	// without system-wide trust. Nil = default system trust store.
 	TLSConfig *tls.Config
 
+	// PingInterval / PingTimeout, when non-zero, are passed to the
+	// underlying wsclient keepalive loop. Leave zero for wsclient defaults.
+	PingInterval time.Duration
+	PingTimeout  time.Duration
+
 	// AspectName is the registered aspect id.
 	AspectName string
 
@@ -159,6 +164,8 @@ func NewClient(cfg Config) (*Client, error) {
 		AuthToken:     cfg.AuthToken,
 		TokenProvider: cfg.TokenProvider,
 		TLSConfig:     cfg.TLSConfig,
+		PingInterval:  cfg.PingInterval,
+		PingTimeout:   cfg.PingTimeout,
 		Handler:       wsclient.HandlerFunc(c.handleFrame),
 	})
 	if err != nil {
@@ -697,6 +704,25 @@ func CursorFileForAspect(home string) string {
 // etc.). Cheap; no locks beyond what wsclient itself takes.
 func (c *Client) Connected() bool {
 	return c.ws.Connected()
+}
+
+// Ready reports whether the WS is connected and registered with the
+// broker on the current connection. A connected socket with a parked
+// register barrier is not ready to receive or flush dispatch/chat frames.
+func (c *Client) Ready() bool {
+	if !c.ws.Connected() {
+		return false
+	}
+	barrier := c.registeredBarrier()
+	if barrier == nil {
+		return false
+	}
+	select {
+	case <-barrier:
+		return true
+	default:
+		return false
+	}
 }
 
 // Compile-time check that DeliveredMessage round-trips into a

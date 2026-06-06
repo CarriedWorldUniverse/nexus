@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -33,6 +34,7 @@ func main() {
 	briefTimeout := flag.String("brief-timeout", "30m", "max builder wall-clock timeout passed to agentfunnel")
 	gitCredName := flag.String("git-cred-name", os.Getenv("NEXUS_DISPATCH_GIT_CRED_NAME"), "git credential name to grant to dispatched builders (env: NEXUS_DISPATCH_GIT_CRED_NAME; empty skips grant)")
 	maxConc := flag.Int("max-concurrent", 4, "max concurrent builder Jobs")
+	healthAddr := flag.String("health-addr", ":8080", "HTTP listen address for /healthz (empty disables)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -136,6 +138,8 @@ func main() {
 		AuthToken:     res.SessionJWT,
 		TokenProvider: tokenProvider,
 		TLSConfig:     brokerTLS,
+		PingInterval:  10 * time.Second,
+		PingTimeout:   5 * time.Second,
 		AspectName:    res.AspectName,
 		CursorFile:    wsasp.CursorFileForAspect(resolveCursorDir(*cursorDir)),
 		OnDeliver: func(msg wsasp.DeliveredMessage) {
@@ -158,6 +162,9 @@ func main() {
 		fail(log, "wsasp.NewClient", err)
 	}
 	ctrl.Poster = dispatch.NewWsPoster(ctx, wsClient)
+	if *healthAddr != "" {
+		startHealthServer(ctx, *healthAddr, wsClient, log)
+	}
 
 	go jwtExpiryMonitor(ctx, func() time.Time { return state.Snapshot().Expires }, time.Minute, stop, log)
 	go func() {
@@ -180,6 +187,54 @@ func dispatchControllerRegisterProvider(provider string) string {
 		return "dispatch-controller"
 	}
 	return provider
+}
+
+type readinessChecker interface {
+	Connected() bool
+	Ready() bool
+}
+
+func dispatchHealthHandler(checker readinessChecker) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		switch {
+		case !checker.Connected():
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("ws disconnected\n"))
+		case !checker.Ready():
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("ws registering\n"))
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok\n"))
+		}
+	})
+}
+
+func startHealthServer(ctx context.Context, addr string, checker readinessChecker, log *slog.Logger) {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           dispatchHealthHandler(checker),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Warn("dispatch-controller: health server shutdown failed", "err", err)
+		}
+	}()
+	go func() {
+		log.Info("dispatch-controller: health server listening", "addr", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("dispatch-controller: health server failed", "err", err)
+		}
+	}()
 }
 
 func fail(log *slog.Logger, what string, err error) {
