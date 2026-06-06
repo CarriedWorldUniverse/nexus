@@ -106,8 +106,8 @@ func (b *Broker) handleAspectSelfEdit(w http.ResponseWriter, r *http.Request) {
 		"old_version", change.OldVersion,
 		"new_version", change.NewVersion)
 
-	// Same listener as admin edits — keeps in-process Frame refresh
-	// and future broadcast wiring uniform regardless of edit origin.
+	// Same listener as admin edits, keeping future broadcast wiring
+	// uniform regardless of edit origin.
 	if b.cfg.OnPersonalityChange != nil {
 		b.cfg.OnPersonalityChange(change.AspectName, change.NewVersion)
 	}

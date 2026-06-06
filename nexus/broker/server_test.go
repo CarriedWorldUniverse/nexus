@@ -117,3 +117,55 @@ func TestListenAndServe_TLSAcceptsHTTPSRejectsHTTP(t *testing.T) {
 		}
 	}
 }
+
+func TestListenAndServe_StartsWithoutEmbeddedFrame(t *testing.T) {
+	certPath, keyPath := testcerts.Mint(t)
+	r := roster.New()
+	addr := freeAddr(t)
+	b := New(Config{
+		Addr:               addr,
+		HeartbeatIntervalS: 15,
+		TLSCertFile:        certPath,
+		TLSKeyFile:         keyPath,
+		Admin: &AdminCallbacks{
+			Shutdown: func(context.Context) error { return nil },
+		},
+		RecipientPolicy: &RecipientPolicy{
+			Aspects: func() []string { return r.AspectNames() },
+		},
+	}, r)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveErrCh := make(chan error, 1)
+	go func() { serveErrCh <- b.ListenAndServe(ctx) }()
+
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+		Timeout:   500 * time.Millisecond,
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	var resp *http.Response
+	var err error
+	for time.Now().Before(deadline) {
+		resp, err = client.Get("https://" + addr + "/health")
+		if err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("broker without embedded Frame never came up: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("HTTPS /health status = %d, want 200", resp.StatusCode)
+	}
+
+	cancel()
+	if err := <-serveErrCh; err != nil && !errors.Is(err, context.Canceled) {
+		if !strings.Contains(err.Error(), "Server closed") {
+			t.Logf("ListenAndServe returned: %v", err)
+		}
+	}
+}

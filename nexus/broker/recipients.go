@@ -5,15 +5,10 @@
 //
 //   - Default: parent message's author + any explicit @-mentions in
 //     the body. Reply-into-broadcast does NOT auto-fan-out.
-//   - @all: explicit broadcast to every registered aspect. Frame
-//     itself is included.
-//   - Frame is the host: it always sees its own deliberation surface,
-//     so a frame-addressed reply still reaches Frame even though
-//     Frame doesn't have a WS connection of its own.
+//   - @all: explicit broadcast to every registered aspect.
 //
 // The broker calls Compute() on every chat.send before fanning out;
-// Frame in-process consumption stays through the existing
-// ChatRouter.RouteChat path.
+// out-of-process aspects receive messages through chat.deliver.
 
 package broker
 
@@ -60,12 +55,6 @@ type RecipientPolicy struct {
 	Parent             ParentLookup
 	Aspects            AspectLookup
 	ThreadParticipants ThreadParticipantsLookup
-
-	// FrameName is the embedded Frame's aspect name, if any. Frame
-	// is always included when @all fires; it's also the implicit
-	// recipient of a @-less reply if the parent author is empty
-	// (no parent to address — Frame is the default operator partner).
-	FrameName string
 }
 
 // Compute returns the set of aspect names that should receive a
@@ -119,14 +108,6 @@ func (p RecipientPolicy) Compute(sender, content string, replyTo int64) []string
 		}
 	}
 
-	// If no recipients computed AND there's no parent (top-level
-	// post with no @-mentions and no reply target), default to
-	// Frame — it's the operator's partner aspect and the natural
-	// fallback when nobody else is named.
-	if len(set) == 0 && replyTo == 0 && p.FrameName != "" && p.FrameName != sender {
-		set[p.FrameName] = struct{}{}
-	}
-
 	return sortedKeys(set)
 }
 
@@ -162,8 +143,8 @@ func hasAll(mentions []string) bool {
 	return false
 }
 
-// expandAll returns every registered aspect plus Frame, minus the
-// sender. Sorted for stable iteration.
+// expandAll returns every registered aspect minus the sender. Sorted for
+// stable iteration.
 func (p RecipientPolicy) expandAll(sender string) []string {
 	set := map[string]struct{}{}
 	if p.Aspects != nil {
@@ -172,9 +153,6 @@ func (p RecipientPolicy) expandAll(sender string) []string {
 				set[name] = struct{}{}
 			}
 		}
-	}
-	if p.FrameName != "" && p.FrameName != sender {
-		set[p.FrameName] = struct{}{}
 	}
 	return sortedKeys(set)
 }

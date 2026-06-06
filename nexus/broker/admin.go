@@ -151,13 +151,11 @@ func (b *Broker) requireAdmin(next http.Handler) http.Handler {
 }
 
 // registerAdmin wires /api/admin/* routes onto mux. Called from
-// ListenAndServe when the broker is configured with AdminCallbacks
-// (the embedded Frame supplies them per P5).
+// ListenAndServe when the broker is configured with AdminCallbacks.
 func (b *Broker) registerAdmin(mux *http.ServeMux) {
 	if b.cfg.Admin == nil {
 		// No admin callbacks configured; skip registration. /api/admin
-		// returns 404 in this state, which is correct — admin surface
-		// requires a Frame to back it.
+		// returns 404 in this state.
 		return
 	}
 	if b.adminOps == nil {

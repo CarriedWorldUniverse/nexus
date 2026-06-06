@@ -31,24 +31,20 @@ func TestExtractMentions(t *testing.T) {
 	}
 }
 
-func TestRecipientPolicy_DefaultsToFrameOnTopLevelPost(t *testing.T) {
-	// Top-level (no reply_to), no @-mentions: defaults to Frame.
+func TestRecipientPolicy_TopLevelPostWithoutMentionsHasNoRecipients(t *testing.T) {
 	p := RecipientPolicy{
-		FrameName: "frame",
-		Aspects:   func() []string { return []string{"anvil", "frame", "wren"} },
+		Aspects: func() []string { return []string{"anvil", "frame", "wren"} },
 	}
 	got := p.Compute("operator", "hello", 0)
-	want := []string{"frame"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %v, want %v", got, want)
+	if len(got) != 0 {
+		t.Errorf("got %v, want no recipients", got)
 	}
 }
 
 func TestRecipientPolicy_ParentAuthorPlusMentions(t *testing.T) {
 	p := RecipientPolicy{
-		Parent:    func(msgID int64) (string, error) { return "anvil", nil },
-		Aspects:   func() []string { return []string{"anvil", "wren", "frame"} },
-		FrameName: "frame",
+		Parent:  func(msgID int64) (string, error) { return "anvil", nil },
+		Aspects: func() []string { return []string{"anvil", "wren", "frame"} },
 	}
 	// Reply to a message anvil wrote, mentioning wren too.
 	got := p.Compute("operator", "@wren check this thread", 42)
@@ -60,9 +56,8 @@ func TestRecipientPolicy_ParentAuthorPlusMentions(t *testing.T) {
 
 func TestRecipientPolicy_ExcludesSender(t *testing.T) {
 	p := RecipientPolicy{
-		Parent:    func(int64) (string, error) { return "anvil", nil },
-		Aspects:   func() []string { return []string{"anvil", "wren"} },
-		FrameName: "frame",
+		Parent:  func(int64) (string, error) { return "anvil", nil },
+		Aspects: func() []string { return []string{"anvil", "wren"} },
 	}
 	// Anvil replying to themselves with a self-mention should
 	// produce no recipients (sender always excluded).
@@ -75,9 +70,8 @@ func TestRecipientPolicy_ExcludesSender(t *testing.T) {
 func TestRecipientPolicy_AllBroadcast(t *testing.T) {
 	p := RecipientPolicy{
 		Aspects: func() []string {
-			return []string{"anvil", "forge", "wren"}
+			return []string{"anvil", "forge", "frame", "wren"}
 		},
-		FrameName: "frame",
 	}
 	got := p.Compute("operator", "@all stand up", 0)
 	want := []string{"anvil", "forge", "frame", "wren"}
@@ -88,8 +82,7 @@ func TestRecipientPolicy_AllBroadcast(t *testing.T) {
 
 func TestRecipientPolicy_AllExcludesSender(t *testing.T) {
 	p := RecipientPolicy{
-		Aspects:   func() []string { return []string{"anvil", "forge"} },
-		FrameName: "frame",
+		Aspects: func() []string { return []string{"anvil", "forge", "frame"} },
 	}
 	got := p.Compute("anvil", "@all stand up", 0)
 	want := []string{"forge", "frame"}
@@ -102,9 +95,8 @@ func TestRecipientPolicy_AllOverridesParentAndMentions(t *testing.T) {
 	// @all is the broadcast escape hatch. Even if there's a parent
 	// and explicit @-mentions, @all means everyone.
 	p := RecipientPolicy{
-		Parent:    func(int64) (string, error) { return "anvil", nil },
-		Aspects:   func() []string { return []string{"anvil", "wren"} },
-		FrameName: "frame",
+		Parent:  func(int64) (string, error) { return "anvil", nil },
+		Aspects: func() []string { return []string{"anvil", "frame", "wren"} },
 	}
 	got := p.Compute("operator", "@anvil @wren — actually @all should see this", 42)
 	want := []string{"anvil", "frame", "wren"}
@@ -131,9 +123,8 @@ func TestRecipientPolicy_NoFanoutOnReplyChain(t *testing.T) {
 	// to anvil (parent author). Wren who participated earlier
 	// doesn't see this push (they'd have to chat.read, per Lock 2).
 	p := RecipientPolicy{
-		Parent:    func(int64) (string, error) { return "anvil", nil },
-		Aspects:   func() []string { return []string{"anvil", "wren", "frame"} },
-		FrameName: "frame",
+		Parent:  func(int64) (string, error) { return "anvil", nil },
+		Aspects: func() []string { return []string{"anvil", "wren", "frame"} },
 	}
 	got := p.Compute("operator", "ack thanks", 42) // no @-mentions
 	want := []string{"anvil"}
@@ -146,8 +137,7 @@ func TestRecipientPolicy_NilParentLookupSafe(t *testing.T) {
 	// Some deployments may not have a parent lookup wired (e.g.
 	// tests). Reply-into-thread degrades to mentions-only.
 	p := RecipientPolicy{
-		Aspects:   func() []string { return []string{"anvil"} },
-		FrameName: "frame",
+		Aspects: func() []string { return []string{"anvil"} },
 	}
 	got := p.Compute("operator", "@anvil please", 42)
 	want := []string{"anvil"}
@@ -170,9 +160,7 @@ func TestRecipientPolicy_DedupesParentInMentions(t *testing.T) {
 }
 
 func TestRecipientPolicy_FrameIsValidExplicitMention(t *testing.T) {
-	p := RecipientPolicy{
-		FrameName: "frame",
-	}
+	p := RecipientPolicy{}
 	got := p.Compute("operator", "@frame what's the status?", 0)
 	want := []string{"frame"}
 	if !reflect.DeepEqual(got, want) {

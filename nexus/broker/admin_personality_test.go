@@ -188,8 +188,8 @@ func TestAdminPersonalityEdit_MalformedBody(t *testing.T) {
 }
 
 // TestAdminPersonalityEdit_FiresOnPersonalityChange — Part 7c hook.
-// Successful edits invoke the OnPersonalityChange callback so the
-// embedded Frame can refresh in-process. Failed edits do NOT fire it.
+// Successful edits invoke the OnPersonalityChange callback. Failed edits
+// do NOT fire it.
 func TestAdminPersonalityEdit_FiresOnPersonalityChange(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(context.Background(), dir, nil)

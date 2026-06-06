@@ -74,9 +74,8 @@ type Config struct {
 	// resolved from agent_tokens. Required for per-aspect identity
 	// resolution; if nil, the broker constructs an empty store and
 	// only the legacy AuthToken (if set) will authenticate. The
-	// caller (cmd/nexus) is responsible for calling
-	// ReconcileAgentTokens / ReconcileFrameToken before
-	// ListenAndServe.
+	// caller (cmd/nexus) is responsible for calling ReconcileAgentTokens
+	// before ListenAndServe.
 	Tokens *TokenStore
 
 	HeartbeatIntervalS int           // value returned to aspects on register
@@ -99,19 +98,9 @@ type Config struct {
 	// implements the generic dispatch protocol.)
 	HandQueue *handqueue.Queue
 
-	// Admin wires the embedded Frame's admin-action callbacks (#79
-	// lock — REST-only admin surface). When nil, the /api/admin/*
-	// endpoints are not registered. P5 supplies these from the
-	// EmbeddedFrame; pre-§6.5 deployments without a Frame leave Admin
-	// nil and lose the admin surface (correct — no Frame = no admin).
+	// Admin wires broker-owned admin-action callbacks. When nil, the
+	// /api/admin/* endpoints are not registered.
 	Admin *AdminCallbacks
-
-	// ChatRouter routes chat.send frames to the embedded Frame's
-	// deliberation funnel (§6.5 P6). When nil, chat.send frames are
-	// logged as "not yet handled" — same behaviour as before P6.
-	// Only chat.send is routed here; chat.deliver and other comms
-	// frames are handled by the aspect WS path.
-	ChatRouter *ChatRouterCallbacks
 
 	// Replayer drives Lock 6 reconnect/replay. When an aspect registers
 	// with since_msg_id > 0, the broker queries chat history for
@@ -130,9 +119,8 @@ type Config struct {
 
 	// RecipientPolicy decides which aspects receive chat.deliver for
 	// each chat.send. When non-nil, HandleChatSend uses it to fan out
-	// after persistence. When nil, only persistence + the legacy
-	// ChatRouter callback fire (live aspects don't see cross-aspect
-	// chats; Lock 6 replay still works on register).
+	// after persistence. When nil, live fan-out is skipped; Lock 6
+	// replay still works on register.
 	RecipientPolicy *RecipientPolicy
 
 	// AspectHomes maps registered aspect-name → canonical filesystem
@@ -232,18 +220,10 @@ type Config struct {
 	KeyfileValidator *KeyfileValidator
 
 	// OnPersonalityChange is invoked after a successful personality
-	// edit (CLI Part 7a or REST Part 7b). cmd/nexus wires this to
-	// EmbeddedFrame.RefreshPersonality so the in-process Frame picks
-	// up the change on its next deliberation turn (per spec §11
-	// in-process refresh callback).
-	//
-	// Per spec §6: a separate WS frame `personality.refresh` should
-	// also broadcast to remote agentfunnels. Deferred — for v0.1,
-	// remote aspects pick up at next JWT re-validation (1h TTL).
-	// When a future broker grows the broadcast, it lands here too.
-	//
-	// nil callback is a no-op (legacy boot path, or Frame not yet
-	// embedded).
+	// edit (CLI Part 7a or REST Part 7b). Today remote aspects pick
+	// up changes at next JWT re-validation (1h TTL); a future
+	// `personality.refresh` broadcast can land behind this hook.
+	// nil callback is a no-op.
 	OnPersonalityChange func(aspectName string, newVersion int64)
 
 	// OperatorLogin wires the dashboard-ws-port login + register
@@ -268,14 +248,10 @@ type Config struct {
 	KnowledgeStore *knowledge.Store
 
 	// OnNexusMDChange is invoked after a successful central nexus_md
-	// edit (REST Part 9c via PUT /api/admin/nexus-md). cmd/nexus wires
-	// this to EmbeddedFrame.RefreshCentral so the in-process Frame
-	// picks up the change on the next turn (Part 9b's SystemPromptFn
-	// callback path).
-	//
-	// Network-wide change: every live aspect's composed prompt
-	// includes central content, so the future WS broadcast will land
-	// here too (Part 9d). nil callback is a no-op.
+	// edit (REST Part 9c via PUT /api/admin/nexus-md). Network-wide
+	// change: every aspect's composed prompt includes central content,
+	// so the future WS broadcast will land here too (Part 9d).
+	// nil callback is a no-op.
 	OnNexusMDChange func(newVersion int64)
 
 	// Credentials is the broker-mediated API-credential store (task
@@ -286,12 +262,8 @@ type Config struct {
 	Credentials *credentials.Store
 
 	// Observability is a pre-constructed Hub the broker should adopt
-	// instead of building its own. Use case: the embedded Frame's
-	// funnel needs an ObservabilityHook at construction time, which
-	// happens BEFORE broker.New. Pre-construct the Hub with a deferred
-	// onFrame closure, hand it to both the funnel and broker.Config;
-	// broker.New rewires the onFrame to its own broadcaster. Nil
-	// leaves broker.New constructing its own Hub (legacy path).
+	// instead of building its own. Nil leaves broker.New constructing
+	// its own Hub.
 	Observability *observability.Hub
 
 	// DashboardDir, when set, makes the broker serve the dashboard SPA
@@ -311,17 +283,6 @@ type Config struct {
 	// broker's own routes (/connect, /api/*, /dashboard/*, /health,
 	// /chat.html, /js/*, /{$}); the broker does not de-conflict.
 	HTTPRegistrar func(*http.ServeMux)
-}
-
-// ChatRouterCallbacks wires the broker's chat.send handling to the
-// Frame funnel. A nil RouteChat is treated as "no router" — the
-// broker logs and drops chat.send frames.
-type ChatRouterCallbacks struct {
-	// RouteChat is called for every chat.send frame the broker receives.
-	// It runs in a goroutine; the broker does not block on it. Errors
-	// are logged; the caller can't surface them to the sender (WS chat
-	// send is fire-and-forget per the transport spec).
-	RouteChat func(ctx context.Context, msgID int64, from, content string, replyTo int64, topic string)
 }
 
 // Broker owns the HTTP server and its roster.
@@ -452,10 +413,7 @@ func New(cfg Config, r *roster.Roster) *Broker {
 	return b
 }
 
-// ObservabilityHub returns the broker's observability Hub. Used by
-// in-process callers (the embedded Frame's funnel) to fetch the
-// per-aspect Grouper they pass as funnel.Config.ObservabilityHook.
-// Remote aspects forward observability frames over WS instead.
+// ObservabilityHub returns the broker's observability Hub.
 func (b *Broker) ObservabilityHub() *observability.Hub { return b.observability }
 
 // reserveConn accounts a new /connect against the global + per-IP

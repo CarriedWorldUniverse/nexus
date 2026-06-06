@@ -1,11 +1,9 @@
 // Package obsforward wires a remote aspect's funnel observability hook
 // to the broker over the existing aspect WS connection.
 //
-// Topology: nexus's observability.Hub lives in the broker process. The
-// embedded Frame's funnel shares the heap with the Hub and feeds it
-// directly (cmd/nexus/main.go). Remote aspects — agentfunnel on
-// <operator-host>, dMon, etc — run their funnel in a different process, so
-// their bridle events have to traverse the WS to reach the Hub.
+// Topology: nexus's observability.Hub lives in the broker process.
+// Aspects run their funnel in a different process, so their bridle
+// events have to traverse the WS to reach the Hub.
 //
 // This package provides:
 //   - WSForwarder: implements funnel.ObservabilityHook by marshalling

@@ -41,7 +41,7 @@ func decodeObserveFrame(t *testing.T, env frames.Envelope) (frames.ObserveFrameP
 	}
 	var f observability.Frame
 	if err := json.Unmarshal(op.Frame, &f); err != nil {
-		t.Fatalf("embedded frame decode: %v", err)
+		t.Fatalf("observe frame decode: %v", err)
 	}
 	return op, f
 }

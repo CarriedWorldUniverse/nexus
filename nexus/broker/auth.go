@@ -11,15 +11,15 @@
 //   - Override handlers (Drift D) check the admin flag and reject with
 //     `admin_required` if false.
 //
-// The reserved id `frame` is the orchestrator/operator-substrate
-// identity; its token carries admin=true. Aspect tokens never carry
-// admin=true.
+// The reserved id `frame` is a legacy admin identity used by older
+// operator/orchestrator flows; its token carries admin=true. Aspect
+// tokens minted by ReconcileAgentTokens never carry admin=true.
 //
 // Bootstrap path: ReconcileAgentTokens is called at broker startup with
 // the known aspect ids (autospawn discovery list). Each id either
 // loads its existing token from agent_tokens or mints a fresh one and
-// persists. ReconcileFrameToken does the same for the special `frame`
-// identity, with admin=true.
+// persists. Admin tokens are minted explicitly by ReconcileFrameToken
+// or ReconcileFrameTokenFor where legacy/operator flows still need them.
 package broker
 
 import (
@@ -82,8 +82,8 @@ type TokenStore struct {
 	legacyMaster string
 }
 
-// NewTokenStore returns an empty store. Use ReconcileAgentTokens and
-// ReconcileFrameToken to populate.
+// NewTokenStore returns an empty store. Use ReconcileAgentTokens to
+// populate aspect tokens; admin-token helpers are explicit opt-ins.
 func NewTokenStore() *TokenStore {
 	return &TokenStore{
 		byToken: make(map[string]TokenInfo),
@@ -118,7 +118,7 @@ func GenerateAgentToken() (string, error) {
 // ids is a no-op (idempotent).
 //
 // admin defaults to false for these ids — aspect tokens never carry
-// admin=true. Use ReconcileFrameToken for the Frame identity.
+// admin=true.
 func (s *TokenStore) ReconcileAgentTokens(ctx context.Context, db *sql.DB, ids []string) error {
 	for _, id := range ids {
 		if id == "" {
@@ -131,22 +131,15 @@ func (s *TokenStore) ReconcileAgentTokens(ctx context.Context, db *sql.DB, ids [
 	return nil
 }
 
-// ReconcileFrameToken loads or mints the default Frame identity token
-// (FrameAgentID) and persists with admin=true. Used by callers that
-// don't yet know the operator-chosen Frame name (legacy startup paths
-// that pre-date §6.5's data-driven Frame identity). New callers should
-// prefer ReconcileFrameTokenFor with the actual name from frame.Detect.
+// ReconcileFrameToken loads or mints the legacy default admin identity
+// token (FrameAgentID) and persists it with admin=true.
 func (s *TokenStore) ReconcileFrameToken(ctx context.Context, db *sql.DB) (string, error) {
 	return s.ReconcileFrameTokenFor(ctx, db, FrameAgentID)
 }
 
 // ReconcileFrameTokenFor loads or mints an admin-flagged token for the
-// supplied identity. Returns the token string so the caller can wire it
-// into the embedded Frame's auth context.
-//
-// Per §6.5, the Frame's name is operator-chosen at first-boot and lives
-// in aspect.json, not as a hardcoded constant. Callers in P5+ pass that
-// name here so the persisted token row matches the Frame's actual id.
+// supplied identity. Returns the token string for callers that need a
+// persisted admin bearer.
 //
 // Failure mode: reconcileOne enforces "stored value wins" — if a row
 // already exists with admin=0 (e.g., the operator promoted a previously
