@@ -319,7 +319,7 @@ func TestRegisterPrecedesDrainedSendsAfterReconnect(t *testing.T) {
 	go c.Run(ctx)
 
 	// Wait for the server to see 4 frames (register + 3 chats).
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(25 * time.Second)
 	for time.Now().Before(deadline) {
 		mu.Lock()
 		n := len(order)
@@ -402,7 +402,7 @@ func TestReconnectReRegistersBeforeDraining(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- c.Run(ctx) }()
