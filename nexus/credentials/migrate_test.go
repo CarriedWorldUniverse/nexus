@@ -20,6 +20,7 @@ func newMigrationTestDB(t *testing.T) (*Store, *sql.DB) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 	_, err = db.Exec(`
 		CREATE TABLE provider_credentials (
@@ -149,6 +150,113 @@ func TestMigrateLegacyTable_HappyPath(t *testing.T) {
 			t.Errorf("%s: default_model got %q want %q", tc.name, pb.DefaultModel, tc.defaultModel)
 		}
 	}
+}
+
+func TestMigrateLegacyTable_RepairsCredentialAuditFKWithoutLegacyTable(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+
+	_, err = db.Exec(`
+		PRAGMA foreign_keys=ON;
+		CREATE TABLE credentials (
+			name TEXT PRIMARY KEY,
+			description TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL,
+			encrypted_bundle BLOB NOT NULL,
+			encryption_nonce BLOB NOT NULL,
+			allowed_aspects TEXT NOT NULL DEFAULT '["*"]',
+			mode TEXT NOT NULL DEFAULT 'proxy',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			last_used_at TEXT
+		);
+		CREATE TABLE credential_audit (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			credential_name TEXT NOT NULL,
+			aspect TEXT NOT NULL,
+			action TEXT NOT NULL
+				CHECK (action IN ('proxy_call','plaintext_fetch','fetch','denied')),
+			ts TEXT NOT NULL DEFAULT (datetime('now')),
+			details TEXT NOT NULL DEFAULT '{}',
+			FOREIGN KEY (credential_name) REFERENCES provider_credentials(name) ON DELETE CASCADE
+		);
+		CREATE INDEX idx_credential_audit_credential_ts
+			ON credential_audit(credential_name, ts);
+		CREATE INDEX idx_credential_audit_aspect_ts
+			ON credential_audit(aspect, ts);
+	`)
+	if err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+
+	secret := []byte("test-session-signing-secret-32-bytes-padded")
+	s, err := NewStore(db, secret)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ctx := context.Background()
+
+	if target := credentialAuditFKTarget(t, db); target != "provider_credentials" {
+		t.Fatalf("precondition FK target got %q want provider_credentials", target)
+	}
+	if err := s.MigrateLegacyTable(ctx); err != nil {
+		t.Fatalf("MigrateLegacyTable: %v", err)
+	}
+	if target := credentialAuditFKTarget(t, db); target != "credentials" {
+		t.Fatalf("FK target got %q want credentials", target)
+	}
+
+	if err := s.Set(ctx, UpsertParams{
+		Name:        "openai-prod",
+		Description: "seeded",
+		Kind:        KindProvider,
+		Bundle: map[string]any{
+			"api_shape": string(ShapeOpenAI),
+			"base_url":  "https://api.openai.com/v1",
+			"key":       "sk-test",
+		},
+		AllowedAspects: []string{"*"},
+		Mode:           ModeProxy,
+	}); err != nil {
+		t.Fatalf("Set credential: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO credential_audit (credential_name, aspect, action, details)
+		VALUES ('openai-prod', 'builder', 'fetch', '{}')
+	`); err != nil {
+		t.Fatalf("insert audit row after repair: %v", err)
+	}
+}
+
+func credentialAuditFKTarget(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA foreign_key_list(credential_audit)`)
+	if err != nil {
+		t.Fatalf("foreign_key_list: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id, seq            int
+			table, from, to    string
+			onUpdate, onDelete string
+			match              string
+		)
+		if err := rows.Scan(&id, &seq, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			t.Fatalf("scan foreign key: %v", err)
+		}
+		if from == "credential_name" {
+			return table
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate foreign keys: %v", err)
+	}
+	return ""
 }
 
 func TestMigrateLegacyTable_Idempotent(t *testing.T) {
