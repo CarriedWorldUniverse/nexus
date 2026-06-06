@@ -1,0 +1,93 @@
+{{- $name := include "hosted-service.name" . -}}
+{{- $namespace := include "hosted-service.namespace" . -}}
+{{- $kind := default "Deployment" .Values.kind -}}
+{{- if not (or (eq $kind "Deployment") (eq $kind "StatefulSet")) -}}
+{{- fail "kind must be Deployment or StatefulSet" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: {{ $kind }}
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+{{ include "hosted-service.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  {{- if eq $kind "StatefulSet" }}
+  serviceName: {{ $name }}
+  {{- end }}
+  selector:
+    matchLabels:
+{{ include "hosted-service.selectorLabels" . | indent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "hosted-service.selectorLabels" . | indent 8 }}
+    spec:
+      {{- if eq .Values.identity.mode "custodian" }}
+      initContainers:
+        - name: identity-custodian
+          image: busybox:1.36
+          command: ["/bin/sh", "-c"]
+          args: ["echo identity custodian placeholder; true"]
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: {{ .Values.image | quote }}
+          {{- with .Values.command }}
+          command:
+{{ toYaml . | indent 12 }}
+          {{- end }}
+          {{- with .Values.args }}
+          args:
+{{ toYaml . | indent 12 }}
+          {{- end }}
+          {{- if gt (int .Values.port) 0 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.port }}
+          {{- end }}
+          {{- if .Values.env }}
+          env:
+            {{- if kindIs "map" .Values.env }}
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- else }}
+{{ toYaml .Values.env | indent 12 }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.envFromSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ . }}
+          {{- end }}
+          {{- if or .Values.storage.size (eq .Values.identity.mode "secret") }}
+          volumeMounts:
+            {{- if .Values.storage.size }}
+            - name: data
+              mountPath: {{ .Values.storage.mountPath | quote }}
+            {{- end }}
+            {{- if eq .Values.identity.mode "secret" }}
+            - name: keyfile
+              mountPath: {{ .Values.identity.mountPath | quote }}
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.storage.size (eq .Values.identity.mode "secret") }}
+      volumes:
+        {{- if .Values.storage.size }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $name }}-data
+        {{- end }}
+        {{- if eq .Values.identity.mode "secret" }}
+        - name: keyfile
+          secret:
+            secretName: {{ include "hosted-service.identitySecretName" . }}
+            items:
+              - key: {{ .Values.identity.key }}
+                path: keyfile.json
+        {{- end }}
+      {{- end }}

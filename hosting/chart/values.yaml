@@ -1,0 +1,31 @@
+name: ""
+namespace: ""
+
+# Deployment or StatefulSet.
+kind: Deployment
+
+image: ""
+command: []
+args: []
+
+env: {}
+envFromSecret: ""
+
+replicas: 1
+port: 0
+
+storage:
+  size: ""
+  mountPath: /var/lib/data
+  accessModes:
+    - ReadWriteOnce
+
+tailnetEdge: false
+tailnetName: ""
+
+identity:
+  # none, secret, or custodian.
+  mode: none
+  secretName: ""
+  key: keyfile.json
+  mountPath: /etc/nexus

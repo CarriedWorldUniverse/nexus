@@ -1,0 +1,6 @@
+apiVersion: v2
+name: hosted-service
+description: Convention chart for Nexus hosted services.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

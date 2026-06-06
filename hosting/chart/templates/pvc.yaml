@@ -1,0 +1,15 @@
+{{- if .Values.storage.size -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "hosted-service.name" . }}-data
+  namespace: {{ include "hosted-service.namespace" . }}
+  labels:
+{{ include "hosted-service.labels" . | indent 4 }}
+spec:
+  accessModes:
+{{ toYaml .Values.storage.accessModes | indent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.size | quote }}
+{{- end }}
