@@ -80,13 +80,9 @@ func (b *Broker) handleAdminPersonalityEdit(w http.ResponseWriter, r *http.Reque
 		"old_version", change.OldVersion,
 		"new_version", change.NewVersion)
 
-	// Spec §11 in-process refresh callback. cmd/nexus wires this to
-	// EmbeddedFrame.RefreshPersonality so the Frame picks up the
-	// new prompt on its next deliberation turn (per Part 6's
-	// SystemPromptFn). For non-Frame aspects, this is a no-op today;
-	// remote agentfunnels pick up at next JWT re-validation (1h TTL).
-	// A future broadcast (`personality.refresh` WS frame) will land
-	// here too.
+	// Personality-change hook. Remote agentfunnels pick up at next JWT
+	// re-validation (1h TTL) today; a future broadcast
+	// (`personality.refresh` WS frame) will land here too.
 	if b.cfg.OnPersonalityChange != nil {
 		b.cfg.OnPersonalityChange(change.AspectName, change.NewVersion)
 	}

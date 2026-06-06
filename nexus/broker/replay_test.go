@@ -35,8 +35,7 @@ func TestReplayer_DeliversAddressedMessages(t *testing.T) {
 	m3, _ := s.Insert(ctx, "operator", "@anvil third", 0, "")
 
 	r := NewReplayer(s, RecipientPolicy{
-		Aspects:   func() []string { return []string{"anvil", "forge"} },
-		FrameName: "frame",
+		Aspects: func() []string { return []string{"anvil", "forge"} },
 	})
 	got, err := r.AddressedSince(ctx, "anvil", 0)
 	if err != nil {

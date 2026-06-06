@@ -1,10 +1,7 @@
 // Inbound observability frames from remote aspects.
 //
-// The embedded Frame's funnel feeds the observability Hub directly
-// (same process), so these handlers are only used for agentfunnel and
-// other remote aspect runtimes. The handlers decode each inbound
-// observe.* frame and call the matching method on the per-aspect
-// Grouper, mirroring what the embedded path does in-process.
+// The handlers decode each inbound observe.* frame and call the
+// matching method on the per-aspect Grouper.
 //
 // Attribution (keel-cli #236): the aspect identity for the Grouper is
 // always taken from c.registeredAs — the wsConn's authenticated

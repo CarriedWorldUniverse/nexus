@@ -227,10 +227,8 @@ func (c *wsConn) recordCredentialAuditDenied(ctx context.Context, aspect, name, 
 // authorization (aspects can only read their own row).
 //
 // NEX-293: out-of-process aspects (anvil, harrow, etc. via
-// agentfunnel) need the same admin-override visibility the
-// in-process Frame already has via cmd/nexus/main.go's
-// applyAspectModelOverrides. This frame is the WS-side equivalent of
-// that direct credentials.Store.GetAspectModelConfig call.
+// agentfunnel) need admin-override visibility at runtime. This frame
+// is the WS-side credentials.Store.GetAspectModelConfig call.
 //
 // Empty/missing aspect row → all-empty-string result (mirrors the
 // store's all-nil-pointers semantics). Genuine errors (DB down, etc.)
@@ -263,11 +261,9 @@ func (c *wsConn) handleAspectModelConfigGet(env frames.Envelope) {
 	}
 
 	// NEX-294: return the EFFECTIVE values (per-aspect override layered
-	// over network defaults) so out-of-process aspects see the same
-	// merged view the in-process Frame computes via
-	// applyAspectModelOverrides. Without this layering, agentfunnel
-	// would only see per-aspect rows + miss any network-wide judge /
-	// compact policy the operator set.
+	// over network defaults). Without this layering, agentfunnel would
+	// only see per-aspect rows + miss any network-wide judge / compact
+	// policy the operator set.
 	defaults, derr := cstore.GetNetworkDefaults(ctx)
 	if derr != nil {
 		// Non-fatal: log + treat defaults as empty. Per-aspect values

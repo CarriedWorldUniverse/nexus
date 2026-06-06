@@ -5,11 +5,9 @@
 // writes via aspects.EditPersonality. Per spec §8.1.
 //
 // The post-edit broadcast (personality.refresh push frame for live
-// remote aspects, in-process callback for embedded Frame) lives in
-// Part 7c. v0.1 of this subcommand prints the new version and exits;
-// the running broker picks up the change automatically because keel
-// reads via funnel.SystemPromptFn (Part 6) and remote aspects pick up
-// at next JWT re-validation cycle (default 1h, spec §6).
+// remote aspects) lives in Part 7c. v0.1 of this subcommand prints
+// the new version and exits; running aspects pick up at next JWT
+// re-validation cycle (default 1h, spec §6).
 
 package main
 
@@ -136,7 +134,7 @@ func runPersonalityEdit(args []string) int {
 	fmt.Println("Note: this CLI writes directly to the DB. A running broker will NOT")
 	fmt.Println("see the change until it restarts (or until the running broker's REST")
 	fmt.Println("endpoint is hit — `PUT /api/admin/aspect/<name>/personality`, which")
-	fmt.Println("triggers an in-process refresh on the embedded Frame).")
+	fmt.Println("runs the broker's personality-change hook).")
 	fmt.Println("Remote aspects pick up at next JWT re-validation (default 1h, per spec §6).")
 	return 0
 }

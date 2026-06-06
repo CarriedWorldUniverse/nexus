@@ -112,8 +112,7 @@ func runAdminNexusMDEdit(args []string) int {
 	fmt.Println()
 	fmt.Println("Note: this CLI writes directly to the DB. A running broker will NOT")
 	fmt.Println("see the change until it restarts (or until the running broker's REST")
-	fmt.Println("endpoint is hit — `PUT /api/admin/nexus-md`, which triggers an")
-	fmt.Println("in-process refresh on the embedded Frame).")
+	fmt.Println("endpoint is hit — `PUT /api/admin/nexus-md`).")
 	fmt.Println("Remote aspects pick up at next JWT re-validation (default 1h).")
 	return 0
 }

@@ -112,11 +112,9 @@ func TestDiscoverOptOut(t *testing.T) {
 	}
 }
 
-func TestDiscoverSkipsFrame(t *testing.T) {
-	// Frame aspects (role: frame) embed in the Nexus process; they must
-	// not also be subprocess-spawned, or the broker roster collides on
-	// the name. Discover skips them — embedding is the frame package's
-	// job, not autospawn's.
+func TestDiscoverIncludesFrameRole(t *testing.T) {
+	// Frame aspects now run out-of-process and register like any other
+	// aspect, so discovery must include them.
 	base := t.TempDir()
 
 	writeAspect(t, base, "keel", schemas.AspectConfig{
@@ -133,8 +131,15 @@ func TestDiscoverSkipsFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Name != "wren" {
-		t.Errorf("discovered %+v, want only [wren] (frame skipped)", got)
+	if len(got) != 2 {
+		t.Fatalf("discovered %+v, want keel and wren", got)
+	}
+	names := map[string]bool{}
+	for _, c := range got {
+		names[c.Name] = true
+	}
+	if !names["keel"] || !names["wren"] {
+		t.Errorf("discovered %+v, want keel and wren", got)
 	}
 }
 
@@ -295,7 +300,7 @@ func TestChildEnvCaseInsensitivePathPassthrough(t *testing.T) {
 	parent := []string{
 		"Path=C:\\Windows\\System32;C:\\Users\\jacin\\AppData\\Roaming\\npm", // Windows TitleCase
 		"USERPROFILE=C:\\Users\\jacin",
-		"APPDATA=C:\\Users\\jacin\\AppData\\Roaming",                          // claude.cmd install dir
+		"APPDATA=C:\\Users\\jacin\\AppData\\Roaming", // claude.cmd install dir
 		"LOCALAPPDATA=C:\\Users\\jacin\\AppData\\Local",
 		"SYSTEMROOT=C:\\Windows",
 		"WINDIR=C:\\Windows",

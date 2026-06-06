@@ -8,9 +8,8 @@
 //	  response: { "old_version": N, "new_version": N+1 }
 //
 // Writes to nexus_settings.nexus_md (Part 9a). Bumps version on every
-// write. Fires Config.OnNexusMDChange so cmd/nexus's listener (Part 9d)
-// can call EmbeddedFrame.RefreshCentral and the live Frame picks up
-// the new content on its next deliberation turn.
+// write. Fires Config.OnNexusMDChange so follow-up broadcast or cache
+// invalidation wiring can react to the new version.
 //
 // Distinct from `PUT /api/admin/aspect/<name>/personality` (Part 7b)
 // which writes to aspect_personalities — that's the per-aspect delta;
@@ -75,9 +74,8 @@ func (b *Broker) handleAdminNexusMDEdit(w http.ResponseWriter, r *http.Request) 
 		"new_version", newVersion,
 		"bytes", len(req.NexusMD))
 
-	// Part 9d hook: fire OnNexusMDChange so cmd/nexus can call
-	// EmbeddedFrame.RefreshCentral and remote-aspect broadcast can
-	// land here once the WS frame protocol ships.
+	// Part 9d hook: fire OnNexusMDChange so remote-aspect broadcast or
+	// cache invalidation can land here once the WS frame protocol ships.
 	if b.cfg.OnNexusMDChange != nil {
 		b.cfg.OnNexusMDChange(newVersion)
 	}

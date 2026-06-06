@@ -4,22 +4,17 @@
 //
 //   - Out-of-process aspect WS:  handleChatSendFrame (ws.go) → HandleChatSend
 //   - Operator browser WS:        handleChatSendFrame (same path) → HandleChatSend
-//   - In-process Frame gateway:   framecomms.Gateway.SendChat → HandleChatSend
 //
 // Every chat.send results in:
 //   1. INSERT chat_messages row (ChatStore.Insert)
 //   2. Compute recipients per Lock 2 (RecipientPolicy.Compute)
 //   3. Fan out chat.deliver frames to each recipient's live WS
-//   4. Fire ChatRouter.RouteChat to trigger Frame's deliberation funnel
-//      (legacy callback; eventually retires when the Frame becomes
-//      a chat.deliver recipient like every other aspect)
+//   4. Emit chat observability frames
 //
 // Without this single path:
 //   - Operator/aspect chat.send didn't persist (FK errors on usage.Record)
 //   - Live chat.deliver fan-out was missing entirely (only replay-on-register
 //     delivered messages)
-//   - framecomms.Gateway and the WS path had diverged implementations of
-//     "post a chat message"
 
 package broker
 
@@ -39,9 +34,7 @@ import (
 // it for reply chains, usage attribution, etc.
 //
 // Errors propagate to the caller. The WS shim treats them as warn-and-
-// drop (chat.send is fire-and-forget per transport spec); the
-// in-process Frame gateway propagates them up to the funnel runner so
-// the model sees a tool error.
+// drop because chat.send is fire-and-forget per transport spec.
 func (b *Broker) HandleChatSend(ctx context.Context, from, content string, replyTo int64, topic string) (int64, error) {
 	if b.cfg.ChatStore == nil {
 		return 0, errors.New("broker.HandleChatSend: ChatStore not configured")
@@ -59,10 +52,9 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 	}
 
 	// 2. Compute recipients. RecipientPolicy.Compute excludes the
-	// sender, so a Frame post never routes back to the Frame — no
-	// self-loop. When no policy is configured, fan-out is skipped
-	// silently (legacy mode); only persistence + ChatRouter callback
-	// fire.
+	// sender, preventing self-delivery loops. When no policy is
+	// configured, fan-out is skipped silently; persistence still
+	// succeeds and replay can serve future reconnects.
 	var recipients []string
 	if b.cfg.RecipientPolicy != nil {
 		recipients = b.cfg.RecipientPolicy.Compute(from, content, replyTo)
@@ -117,26 +109,7 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 		b.broadcastChatDeliverToOperators(deliverEnv)
 	}
 
-	// 4. Frame's funnel trigger (legacy ChatRouter callback). The
-	// callback runs the Frame's deliberation loop when the message
-	// matches the Frame's interest predicate. Eventually the Frame
-	// becomes one of the chat.deliver recipients above and this
-	// callback retires.
-	if b.cfg.ChatRouter != nil && b.cfg.ChatRouter.RouteChat != nil {
-		// Detach the goroutine from the caller's ctx. The Frame's
-		// SendChat path passes the funnel's per-turn deliberation ctx;
-		// when that turn ends the ctx cancels, which would kill any
-		// nested deliberation RouteChat triggers. Match the dispatch
-		// handler's pattern: prefer broker-lifetime ctx, fall back to
-		// Background.
-		routerCtx := b.ctx
-		if routerCtx == nil {
-			routerCtx = context.Background()
-		}
-		go b.cfg.ChatRouter.RouteChat(routerCtx, msg.ID, from, content, replyTo, topic)
-	}
-
-	// 5. Observability (Phase B): emit ChatFrames for the sender
+	// 4. Observability (Phase B): emit ChatFrames for the sender
 	// (outbound) and each computed recipient (inbound). Lazy-create
 	// groupers per aspect via the Hub. Non-aspect senders (operator,
 	// frame) still get a Grouper today — they only become visible if
