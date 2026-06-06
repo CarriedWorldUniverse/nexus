@@ -35,6 +35,14 @@ RUN GH_VERSION=2.62.0 \
  && rm -rf /tmp/helm* /tmp/linux-amd64 \
  && gh --version && helm version --short
 
+# kubectl — cluster introspection for always-on infra aspects (e.g. keel as the
+# error-alert handler). Access is gated by RBAC/ServiceAccount, not the binary,
+# so it is inert for dispatch builders (default SA, no perms). Matches the k3s
+# server minor (v1.35).
+RUN KUBECTL_VERSION=v1.35.5 \
+ && curl -fsSL https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl -o /usr/local/bin/kubectl \
+ && chmod +x /usr/local/bin/kubectl && kubectl version --client
+
 # Prebuilt nexus binaries + cw (built on the host by build.sh, copied into
 # the context). agentfunnel runs the builder; the nexus-*-mcp servers + cw
 # are the aspect's tool surface.
