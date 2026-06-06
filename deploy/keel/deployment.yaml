@@ -1,0 +1,54 @@
+# keel (NEX-457) — the always-on Frame aspect, now a standalone pod (no longer
+# embedded in the broker). Runs agentfunnel as `keel` on gemma (cheap, local).
+# Replaces the in-process Frame removed in NEX-456.
+#
+# In-cluster broker reach: keel is NOT on the tailnet. It dials the broker over
+# plain HTTPS at nexus.tail41686e.ts.net:7888 — the hostAlias maps that name to
+# the broker's pinned ClusterIP so the name resolves in-cluster AND the broker's
+# Let's Encrypt cert (CN=nexus.tail41686e.ts.net) validates via system CA trust.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keel
+  namespace: nexus
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: keel
+  template:
+    metadata:
+      labels:
+        app: keel
+    spec:
+      hostAliases:
+        - ip: "10.43.138.250"            # nexus-broker pinned ClusterIP
+          hostnames: ["nexus.tail41686e.ts.net"]
+      containers:
+        - name: keel
+          image: localhost/nexus-builder:dev   # has agentfunnel + nexus-*-mcp + cw
+          imagePullPolicy: Never
+          workingDir: /work
+          command: ["/usr/local/bin/agentfunnel"]
+          # keel is a global-context aspect (the Frame sees the whole network).
+          # Broker URL + provider/model come from the keyfile envelope + the
+          # binding (keel → openai/gemma) returned on validate.
+          args: ["-k", "/etc/nexus/keyfile.json", "-context-mode", "global"]
+          env:
+            # gemma via the local Ollama OpenAI-compatible endpoint. `ollama`
+            # is a placeholder key (the local server ignores it); no secret.
+            - { name: OPENAI_BASE_URL, value: "http://gemma-ollama.nexus.svc.cluster.local:11434/v1" }
+            - { name: OPENAI_API_KEY, value: "ollama" }
+            # custodian seam for any brokered creds/git (same broker URL).
+            - { name: CW_SEAM_URL, value: "https://nexus.tail41686e.ts.net:7888" }
+          volumeMounts:
+            - { name: keyfile, mountPath: /etc/nexus, readOnly: true }
+            - { name: work, mountPath: /work }
+      volumes:
+        - name: keyfile
+          secret:
+            secretName: aspect-keyfile-keel
+        - name: work
+          emptyDir: {}

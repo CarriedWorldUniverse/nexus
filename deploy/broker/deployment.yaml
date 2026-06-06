@@ -122,6 +122,9 @@ metadata:
   namespace: nexus
 spec:
   type: ClusterIP
+  # Pinned so in-cluster aspects can hostAlias nexus.tail41686e.ts.net → this
+  # IP (the name must resolve to the broker AND match its TLS cert).
+  clusterIP: 10.43.138.250
   selector:
     app: nexus-broker
   ports:
