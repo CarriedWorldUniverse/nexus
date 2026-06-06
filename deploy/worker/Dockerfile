@@ -19,6 +19,20 @@ ENV PATH=/usr/local/go/bin:/usr/local/bin:/root/go/bin:/root/.npm-global/bin:$PA
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*
 
+# gh (PR creation in github mode — cw setup-git github authenticates it) and
+# helm (render/lint charts — hosting-platform work).
+RUN GH_VERSION=2.62.0 \
+ && curl -fsSL https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz -o /tmp/gh.tgz \
+ && tar -C /tmp -xzf /tmp/gh.tgz \
+ && install /tmp/gh_${GH_VERSION}_linux_amd64/bin/gh /usr/local/bin/gh \
+ && rm -rf /tmp/gh* \
+ && HELM_VERSION=3.16.3 \
+ && curl -fsSL https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz -o /tmp/helm.tgz \
+ && tar -C /tmp -xzf /tmp/helm.tgz \
+ && install /tmp/linux-amd64/helm /usr/local/bin/helm \
+ && rm -rf /tmp/helm* /tmp/linux-amd64 \
+ && gh --version && helm version --short
+
 # Prebuilt nexus binaries + cw (built on the host by build.sh, copied into
 # the context). agentfunnel runs the builder; the nexus-*-mcp servers + cw
 # are the aspect's tool surface.
