@@ -8,7 +8,9 @@
 # host first — the host has the git auth for cw's private modules).
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates curl gnupg xz-utils && rm -rf /var/lib/apt/lists/*
+      git ca-certificates curl gnupg xz-utils \
+      ripgrep jq fd-find tree make \
+   && rm -rf /var/lib/apt/lists/*
 
 # Go toolchain — builders compile Go work.
 RUN curl -fsSL https://go.dev/dl/go1.26.3.linux-amd64.tar.gz -o /tmp/go.tgz \
@@ -51,6 +53,7 @@ RUN npm config set prefix /root/.npm-global && npm i -g @openai/codex && codex -
 RUN ln -sf /usr/local/go/bin/go /usr/local/bin/go \
  && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
  && ln -sf /root/.npm-global/bin/codex /usr/local/bin/codex \
+ && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
  && printf 'export PATH=/usr/local/go/bin:/root/.npm-global/bin:/root/go/bin:$PATH\n' > /etc/profile.d/cwb-path.sh \
  && chmod 0644 /etc/profile.d/cwb-path.sh
 
