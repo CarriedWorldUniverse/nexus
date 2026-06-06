@@ -16,21 +16,22 @@ spec:
   template:
     spec:
       restartPolicy: Never
-      # The broker runs on the dMon HOST (systemd, :7888) with a cert for
-      # its tailnet name; map that name to the node IP so the pod reaches it
-      # AND the TLS hostname still matches.
+      # The broker is a k3s pod (NEX-457) reachable on the tailnet at
+      # nexus.tail41686e.ts.net:7888. In-cluster, map that name to the broker's
+      # pinned ClusterIP so it resolves AND the broker's LE cert (CN=nexus.tail…)
+      # validates — no tailscale on the worker.
       hostAliases:
-        - ip: "192.168.143.133"            # dMon node internal IP
-          hostnames: ["dmonextreme.tail41686e.ts.net"]
+        - ip: "10.43.138.250"              # nexus-broker pinned ClusterIP
+          hostnames: ["nexus.tail41686e.ts.net"]
       containers:
         - name: builder
           image: localhost/nexus-builder:dev
           imagePullPolicy: Never            # imported into k3s containerd
           args: ["-k", "/etc/nexus/keyfile.json", "-builder"]
           env:
-            # M1 custodian seam (broker on the host). The cw git-credential
+            # M1 custodian seam (the pod broker). The cw git-credential
             # helper + provider keys resolve through this.
-            - { name: CW_SEAM_URL, value: "https://dmonextreme.tail41686e.ts.net:7888" }
+            - { name: CW_SEAM_URL, value: "https://nexus.tail41686e.ts.net:7888" }
             - { name: GOCACHE, value: "/cache/go" }
             # codex auth in-pod: prefer OPENAI_API_KEY brokered via the seam
             # (kind=provider). See README — codex-pod-auth is the open item.
