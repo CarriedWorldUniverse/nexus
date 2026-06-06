@@ -146,3 +146,24 @@ func envValueEquals(env []corev1.EnvVar, name, want string) bool {
 	}
 	return false
 }
+
+func TestBuildJob_WorkspaceCleanPerJob(t *testing.T) {
+	// NEX-465: /work must be a per-job emptyDir so a fresh clone never sees a
+	// leftover clone from a prior run on the shared PVC (which caused a builder
+	// to work in the wrong repo). The Go build cache stays on the PVC for speed.
+	cfg := JobConfig{Image: "img", Namespace: "nexus", NodeIP: "1.2.3.4", BrokerHost: "h"}
+	job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t1", "codex-cli")
+	vols := map[string]corev1.Volume{}
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		vols[v.Name] = v
+	}
+	if vols["work"].EmptyDir == nil {
+		t.Errorf("work volume must be EmptyDir (clean per job), got %+v", vols["work"].VolumeSource)
+	}
+	if vols["work"].PersistentVolumeClaim != nil {
+		t.Error("work volume must NOT be a shared PVC — stale clones leak between runs")
+	}
+	if vols["cache"].PersistentVolumeClaim == nil {
+		t.Error("cache volume should stay a PVC for the Go build cache")
+	}
+}
