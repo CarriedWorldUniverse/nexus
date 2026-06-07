@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
@@ -36,6 +37,16 @@ import (
 // Errors propagate to the caller. The WS shim treats them as warn-and-
 // drop because chat.send is fire-and-forget per transport spec.
 func (b *Broker) HandleChatSend(ctx context.Context, from, content string, replyTo int64, topic string) (int64, error) {
+	// Intercept !dispatch before ChatStore: these are job-submission
+	// commands, not chat messages. They must not pollute the chat log
+	// or fan out as chat.deliver to recipients.
+	if strings.HasPrefix(strings.TrimSpace(content), "!dispatch") {
+		if err := b.submitDispatch(ctx, from, content); err != nil {
+			b.log.Warn("!dispatch: submit failed", "err", err, "from", from)
+		}
+		return 0, nil
+	}
+
 	if b.cfg.ChatStore == nil {
 		return 0, errors.New("broker.HandleChatSend: ChatStore not configured")
 	}
