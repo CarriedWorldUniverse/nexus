@@ -21,6 +21,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
 	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
+	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/cwb/cwbproxy"
@@ -390,6 +391,47 @@ func main() {
 	// cmd.Dir control vector for stolen aspect tokens).
 	aspectHomes := discoverAspectHomes(*aspectDir, logger)
 
+	// Build the builder pool from env.
+	// CW_BUILDER_POOL=builder-1,builder-2,builder-3,builder-4
+	poolEnv := os.Getenv("CW_BUILDER_POOL")
+	var pool []string
+	if poolEnv != "" {
+		for _, s := range strings.Split(poolEnv, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				pool = append(pool, s)
+			}
+		}
+	}
+	dispatchCfg := dispatch.JobConfig{
+		Image:       os.Getenv("CW_BUILDER_IMAGE"),
+		Namespace:   envOrDefault("CW_K8S_NAMESPACE", "nexus"),
+		NodeIP:      os.Getenv("CW_NODE_IP"),
+		BrokerHost:  os.Getenv("CW_BROKER_HOST"),
+		BriefTimeout: envOrDefault("CW_BRIEF_TIMEOUT", "30m"),
+		GitCredName: os.Getenv("CW_GIT_CRED_NAME"),
+	}
+	var runner dispatch.Submitter
+	if len(pool) > 0 {
+		r := &dispatch.Runner{
+			Cfg:     dispatchCfg,
+			Pool:    pool,
+			MaxConc: len(pool),
+			// K8sIface: nil — k8s client wiring is deferred until the
+			// runner is fully active on the k3s cluster. When nil,
+			// Init skips job-recovery and spawn skips k8s API calls.
+		}
+		if err := r.Init(ctx); err != nil {
+			slog.Error("dispatch runner init failed — dispatch disabled", "pool", pool, "err", err)
+		} else {
+			// WatchLoop requires a live K8sIface; skip when k8s is not wired.
+			if r.K8sIface != nil {
+				go func() { _ = r.WatchLoop(ctx) }()
+			}
+			runner = r
+		}
+	}
+
 	b := broker.New(broker.Config{
 		Addr:               *addr,
 		AuthToken:          token,
@@ -432,6 +474,7 @@ func main() {
 		// reach /api/operator/* once the broker is up.
 		OperatorLogin: buildOperatorLogin(db, nexusIdentity.NexusID, nexusIdentity.SessionSigningSecret, *addr, logger),
 		Observability: obsHub,
+		Runner:        runner,
 		// NEX-144 Phase 0: mount ledger's healthz on the broker's TLS
 		// listener. The registrar runs inside ListenAndServe with the
 		// broker's internal mux, so /healthz/ledger lives alongside
@@ -918,6 +961,14 @@ func isTicketKey(s string) bool {
 		}
 	}
 	return true
+}
+
+// envOrDefault returns os.Getenv(key) when non-empty, otherwise def.
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 func reaper(ctx context.Context, r *roster.Roster, b *broker.Broker, staleAfter, every time.Duration, log *slog.Logger) {

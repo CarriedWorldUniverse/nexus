@@ -20,6 +20,7 @@ Design corpus. Every meaningful design decision lives as a dated spec in `docs/2
 ## Hands + work-routing
 
 - [Hand dispatch v0.1](../2026-04-30-hand-dispatch-v0_1.md) — workers as one-shot subprocesses
+- [Commonplace build graphs + Graphify](../2026-06-07-commonplace-build-graphs-and-graphify-recommendation.md) — Graphify as extractor reference, Commonplace as agent build-knowledge graph
 
 ## Observability + ops
 

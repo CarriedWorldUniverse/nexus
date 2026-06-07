@@ -32,6 +32,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
+	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
@@ -283,6 +284,11 @@ type Config struct {
 	// broker's own routes (/connect, /api/*, /dashboard/*, /health,
 	// /chat.html, /js/*, /{$}); the broker does not de-conflict.
 	HTTPRegistrar func(*http.ServeMux)
+
+	// Runner, when set, intercepts !dispatch chat messages before they
+	// reach the ChatStore — routing them to the dispatch job engine.
+	// If nil, !dispatch messages are treated as ordinary chat.
+	Runner dispatch.Submitter
 }
 
 // Broker owns the HTTP server and its roster.
@@ -355,6 +361,10 @@ type Broker struct {
 	// custodian redeems casket assertions presented on register
 	// (bootstrap step 3a). nil unless HeraldEdge is configured.
 	custodian Custodian
+
+	// runner intercepts !dispatch chat messages before ChatStore.
+	// nil unless cfg.Runner is set.
+	runner dispatch.Submitter
 }
 
 func New(cfg Config, r *roster.Roster) *Broker {
@@ -410,6 +420,7 @@ func New(cfg Config, r *roster.Roster) *Broker {
 	if cfg.HeraldEdge != "" {
 		b.custodian = custodian.New(cfg.HeraldEdge)
 	}
+	b.runner = cfg.Runner
 	return b
 }
 

@@ -6,7 +6,6 @@ Container image builds for the nexus services. Each subdirectory holds the
 
 - `worker/` — builder-agent worker image + the dispatch Job template (`job.yaml`)
 - `broker/` — broker image
-- `dispatch-controller/` — dispatch-controller image
 
 The Kubernetes manifests that host these services — Deployments, Services,
 PVCs, CoreDNS naming, and the reconcile loop — live in the **carriedworld-cloud
