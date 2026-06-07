@@ -78,14 +78,46 @@ func parseDispatchCommand(s string) (Brief, bool, error) {
 	if ok && provider == "" {
 		return Brief{}, true, errors.New("dispatch: !dispatch provider required after %")
 	}
-	task := strings.TrimSpace(strings.TrimPrefix(line, fields[0]+" "+fields[1]))
+	// Optional leading directives after the agent token: repo=, branch=,
+	// ticket=. Consume them in order; the first non-directive field begins
+	// the task. An unknown key=value (or any bare word) is task text — so a
+	// task may itself contain "x=1".
+	var repo, branch, ticket string
+	i := 2
+	for ; i < len(fields); i++ {
+		key, val, isKV := strings.Cut(fields[i], "=")
+		if !isKV {
+			break
+		}
+		switch key {
+		case "repo":
+			repo = val
+		case "branch":
+			branch = val
+		case "ticket":
+			ticket = val
+		default:
+			isKV = false
+		}
+		if !isKV {
+			break
+		}
+	}
+	task := strings.TrimSpace(strings.Join(fields[i:], " "))
 	if task == "" {
 		return Brief{}, true, errors.New("dispatch: !dispatch task required")
 	}
-	ticket := "dispatch-" + fmt.Sprintf("%x", sha256.Sum256([]byte(line)))[:16]
+	// The ticket is the idempotency key + the builder/<ticket> branch name.
+	// Use the operator's explicit ticket when given; otherwise derive a stable
+	// hash of the command line.
+	if ticket == "" {
+		ticket = "dispatch-" + fmt.Sprintf("%x", sha256.Sum256([]byte(line)))[:16]
+	}
 	return Brief{
 		Agent:    agent,
 		Provider: provider,
+		Repo:     repo,
+		Branch:   branch,
 		Ticket:   ticket,
 		Thread:   ticket,
 		Task:     task,
