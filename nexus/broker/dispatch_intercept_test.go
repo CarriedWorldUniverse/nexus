@@ -13,9 +13,9 @@ import (
 
 // fakeSubmitter records Submit calls for assertion in tests.
 type fakeSubmitter struct {
-	mu     sync.Mutex
-	calls  []dispatch.Brief
-	errFn  func(dispatch.Brief) error
+	mu    sync.Mutex
+	calls []dispatch.Brief
+	errFn func(dispatch.Brief) error
 }
 
 func (f *fakeSubmitter) Submit(_ context.Context, b dispatch.Brief) (string, error) {
@@ -34,8 +34,8 @@ func (f *fakeSubmitter) submitCount() int {
 	return len(f.calls)
 }
 
-// fakeChatStore counts Insert calls so tests can assert normal messages
-// still reach the store while !dispatch messages do not.
+// fakeChatStore counts Insert calls so tests can assert that both normal
+// messages and !dispatch posts (the audit-thread root) reach the store.
 type fakeChatStore struct {
 	mu      sync.Mutex
 	inserts []string // content of each Insert call
@@ -101,7 +101,8 @@ func (s *fakeChatStore) GetReactions(_ context.Context, msgIDs []int64) (map[int
 
 // TestDispatchInterceptedBeforeChatStore verifies that:
 //   - Normal chat messages ("hello world") are persisted via ChatStore.
-//   - !dispatch messages are routed to the Submitter and NOT persisted.
+//   - !dispatch posts are ALSO persisted (the audit-thread root, NEX-494) AND
+//     routed to the Submitter; normal messages are not submitted.
 func TestDispatchInterceptedBeforeChatStore(t *testing.T) {
 	store := &fakeChatStore{}
 	sub := &fakeSubmitter{}
@@ -120,19 +121,21 @@ func TestDispatchInterceptedBeforeChatStore(t *testing.T) {
 
 	ctx := context.Background()
 
-	// 1. Normal message — should reach ChatStore, not Submitter.
+	// 1. Normal message — stored, not submitted.
 	if _, err := b.HandleChatSend(ctx, "shadow", "hello world", 0, ""); err != nil {
 		t.Fatalf("HandleChatSend normal: %v", err)
 	}
 
-	// 2. Dispatch message — should reach Submitter, NOT ChatStore.
+	// 2. Dispatch post — stored (audit-thread root) AND submitted.
 	if _, err := b.HandleChatSend(ctx, "shadow", "!dispatch anvil NEX-999 build it", 0, ""); err != nil {
 		t.Fatalf("HandleChatSend dispatch: %v", err)
 	}
 
-	if got := store.insertCount(); got != 1 {
-		t.Errorf("ChatStore.Insert called %d times, want 1 (only for 'hello world')", got)
+	// Both posts are stored (the !dispatch post is the thread root).
+	if got := store.insertCount(); got != 2 {
+		t.Errorf("ChatStore.Insert called %d times, want 2 (both posts stored)", got)
 	}
+	// Only the !dispatch post is routed to the Submitter.
 	if got := sub.submitCount(); got != 1 {
 		t.Errorf("Submitter.Submit called %d times, want 1 (only for !dispatch)", got)
 	}
@@ -150,9 +153,9 @@ func TestDispatchInterceptedBeforeChatStore(t *testing.T) {
 	}
 }
 
-// TestDispatchWithoutRunner — when no Runner is configured, !dispatch
-// messages should still not reach ChatStore, and the error is logged
-// (not returned as a test-visible error since HandleChatSend swallows it).
+// TestDispatchWithoutRunner — when no Runner is configured, the !dispatch post
+// is still stored (the thread root), and the submit error is logged (not
+// returned, since HandleChatSend swallows it).
 func TestDispatchWithoutRunner(t *testing.T) {
 	store := &fakeChatStore{}
 
@@ -170,12 +173,13 @@ func TestDispatchWithoutRunner(t *testing.T) {
 
 	ctx := context.Background()
 
-	// !dispatch with no runner — returns (0, nil), no ChatStore insert.
+	// !dispatch with no runner — the post is still stored (thread root); the
+	// submit error is logged, not returned.
 	if _, err := b.HandleChatSend(ctx, "shadow", "!dispatch anvil NEX-999 build it", 0, ""); err != nil {
 		t.Fatalf("HandleChatSend: unexpected error: %v", err)
 	}
 
-	if got := store.insertCount(); got != 0 {
-		t.Errorf("ChatStore.Insert called %d times, want 0 for !dispatch with no runner", got)
+	if got := store.insertCount(); got != 1 {
+		t.Errorf("ChatStore.Insert called %d times, want 1 (the !dispatch post is stored as the thread root)", got)
 	}
 }

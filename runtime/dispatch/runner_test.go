@@ -3,6 +3,7 @@ package dispatch_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -15,8 +16,8 @@ type fakeK8s struct {
 	jobs    []string
 	secrets map[string]bool
 
-	// createErr, when set, fails CreateJob for jobs whose name contains
-	// the given substring — used to exercise the launch-failure path.
+	// createErr, when set, fails CreateJob — used to exercise the
+	// launch-failure / re-enqueue path.
 	createErr func(jobName string) error
 	// active is returned by ListActiveJobs — used to exercise recovery.
 	active map[string]dispatch.ActiveJob
@@ -52,193 +53,162 @@ func (f *fakeK8s) WatchJobs(_ context.Context, _ func(ticket, thread string, ok 
 	return nil
 }
 
-func TestRunnerSubmitUsesPoolSlot(t *testing.T) {
-	fk := &fakeK8s{}
-	r := &dispatch.Runner{
+func newRunner(fk *fakeK8s) *dispatch.Runner {
+	return &dispatch.Runner{
 		K8sIface: fk,
 		Cfg:      dispatch.JobConfig{Namespace: "nexus", BrokerHost: "nexus.internal"},
-		Pool:     []string{"builder-1", "builder-2"},
-		MaxConc:  2,
 	}
+}
+
+// The worker runs AS the named agent: keyfile = aspect-keyfile-<agent>, job
+// named builder-<agent>-<run>, and the agent is marked busy.
+func TestRunnerRunsAsNamedAgent(t *testing.T) {
+	fk := &fakeK8s{}
+	r := newRunner(fk)
 	if err := r.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
-	b := dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "NEX-1", Task: "do work"}
-	runID, err := r.Submit(context.Background(), b)
+	runID, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "NEX-1", Task: "do work"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if runID == "" {
 		t.Error("runID should not be empty")
 	}
-
-	// second submit should get builder-2
-	b2 := dispatch.Brief{Agent: "anvil", Ticket: "NEX-2", Thread: "NEX-2", Task: "more work"}
-	runID2, err := r.Submit(context.Background(), b2)
-	if err != nil {
-		t.Fatal(err)
+	if !r.AgentBusy("anvil") {
+		t.Error("anvil should be busy after submit")
 	}
-	if runID2 == runID {
-		t.Error("each run should get a distinct ID")
+	if !fk.secrets["anvil"] {
+		t.Error("worker must mount the named agent's keyfile (aspect-keyfile-anvil)")
 	}
-
-	// third should be queued (pool exhausted)
-	b3 := dispatch.Brief{Agent: "plumb", Ticket: "NEX-3", Thread: "NEX-3", Task: "plumb work"}
-	_, err = r.Submit(context.Background(), b3)
-	if err != dispatch.ErrPoolExhausted {
-		t.Errorf("expected ErrPoolExhausted when pool full, got %v", err)
+	if len(fk.jobs) != 1 || !strings.HasPrefix(fk.jobs[0], "builder-anvil-") {
+		t.Errorf("job should be named builder-anvil-*, got %v", fk.jobs)
 	}
 }
 
-func TestRunnerOnJobDoneReleasesSlot(t *testing.T) {
+// One run per agent name at a time (NEX-464); different agents run in parallel.
+func TestRunnerSerializesPerAgentConcurrentAcrossAgents(t *testing.T) {
 	fk := &fakeK8s{}
-	r := &dispatch.Runner{
-		K8sIface: fk,
-		Cfg:      dispatch.JobConfig{Namespace: "nexus", BrokerHost: "nexus.internal"},
-		Pool:     []string{"builder-1"},
-		MaxConc:  1,
-	}
+	r := newRunner(fk)
 	_ = r.Init(context.Background())
 
-	b := dispatch.Brief{Agent: "anvil", Ticket: "NEX-10", Thread: "t1", Task: "work"}
-	runID, _ := r.Submit(context.Background(), b)
-
-	// Before done: pool slot occupied
-	if r.SlotFree("builder-1") {
-		t.Error("builder-1 should be in use")
-	}
-
-	r.OnJobDone("NEX-10", "t1", true)
-
-	// After done: pool slot free
-	if !r.SlotFree("builder-1") {
-		t.Error("builder-1 should be free after job done")
-	}
-	_ = runID
-}
-
-// TestRunnerSubmitDedupesQueuedTicket verifies that re-submitting a ticket
-// that's already queued (pool exhausted) is an idempotent no-op rather than
-// enqueuing a duplicate that would double-spawn when a slot frees.
-func TestRunnerSubmitDedupesQueuedTicket(t *testing.T) {
-	fk := &fakeK8s{}
-	r := &dispatch.Runner{
-		K8sIface: fk,
-		Cfg:      dispatch.JobConfig{Namespace: "nexus", BrokerHost: "nexus.internal"},
-		Pool:     []string{"builder-1"},
-		MaxConc:  1,
-	}
-	if err := r.Init(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	// Fill the single slot.
 	if _, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "t", Task: "a"}); err != nil {
 		t.Fatal(err)
 	}
-	// Queue NEX-2.
-	if _, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-2", Thread: "t", Task: "b"}); err != dispatch.ErrPoolExhausted {
-		t.Fatalf("expected ErrPoolExhausted, got %v", err)
+	// Second task for the SAME agent → queued (empty runID, nil error), no 2nd job.
+	id2, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-2", Thread: "t", Task: "b"})
+	if err != nil {
+		t.Fatalf("queued submit should not error, got %v", err)
 	}
-	// Re-submit NEX-2 while queued — should be a no-op (nil error), not a
-	// second enqueue.
-	if _, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-2", Thread: "t", Task: "b"}); err != nil {
-		t.Fatalf("re-submit of queued ticket should be a no-op, got %v", err)
+	if id2 != "" {
+		t.Errorf("second same-agent submit should queue (empty runID), got %q", id2)
 	}
-
-	// Free the slot. Only ONE NEX-2 job should spawn; if the duplicate was
-	// enqueued, draining would create two jobs (one now, one still queued).
-	before := len(fk.jobs)
-	r.OnJobDone("NEX-1", "t", true)
-	spawned := len(fk.jobs) - before
-	if spawned != 1 {
-		t.Errorf("draining queue spawned %d jobs, want exactly 1 (no duplicate)", spawned)
+	// A DIFFERENT agent runs concurrently.
+	if _, err := r.Submit(context.Background(), dispatch.Brief{Agent: "plumb", Ticket: "NEX-3", Thread: "t", Task: "c"}); err != nil {
+		t.Fatal(err)
 	}
-	// builder-1 should be in use again by the drained NEX-2, with nothing
-	// left queued.
-	if r.SlotFree("builder-1") {
-		t.Error("builder-1 should be in use by drained NEX-2")
+	if !r.AgentBusy("plumb") {
+		t.Error("plumb should run concurrently with anvil")
+	}
+	if len(fk.jobs) != 2 {
+		t.Errorf("expected 2 jobs (anvil + plumb; anvil's NEX-2 queued), got %d", len(fk.jobs))
 	}
 }
 
-// TestRunnerInitRecoversPoolSlot verifies that a Job recovered on Init
-// re-marks its pool slot in use, so a fresh dispatch isn't handed the same
-// builder identity.
-func TestRunnerInitRecoversPoolSlot(t *testing.T) {
+// OnJobDone frees the agent and drains a queued same-agent task onto it.
+func TestRunnerOnJobDoneFreesAgentAndDrains(t *testing.T) {
+	fk := &fakeK8s{}
+	r := newRunner(fk)
+	_ = r.Init(context.Background())
+
+	_, _ = r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "t", Task: "a"})
+	_, _ = r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-2", Thread: "t", Task: "b"}) // queued
+	if !r.AgentBusy("anvil") {
+		t.Fatal("anvil should be busy")
+	}
+	before := len(fk.jobs)
+
+	r.OnJobDone("NEX-1", "t", true)
+
+	if got := len(fk.jobs) - before; got != 1 {
+		t.Errorf("expected 1 drained job for the queued NEX-2, got %d", got)
+	}
+	if !r.AgentBusy("anvil") {
+		t.Error("anvil should be busy again with the drained NEX-2")
+	}
+}
+
+// Re-submitting an already-queued ticket is a no-op (no double-spawn on drain).
+func TestRunnerDedupesQueuedTicket(t *testing.T) {
+	fk := &fakeK8s{}
+	r := newRunner(fk)
+	_ = r.Init(context.Background())
+
+	_, _ = r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "t", Task: "a"})
+	if _, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-2", Thread: "t", Task: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-2", Thread: "t", Task: "b"}); err != nil {
+		t.Fatal(err)
+	}
+
+	before := len(fk.jobs)
+	r.OnJobDone("NEX-1", "t", true)
+	if got := len(fk.jobs) - before; got != 1 {
+		t.Errorf("draining spawned %d jobs, want exactly 1 (no duplicate)", got)
+	}
+}
+
+// A recovered Job re-marks its agent busy so a fresh same-agent dispatch can't
+// double-run the identity; a different agent still runs.
+func TestRunnerInitRecoversAgentBusy(t *testing.T) {
 	fk := &fakeK8s{
 		active: map[string]dispatch.ActiveJob{
-			"NEX-5": {Name: "builder-builder-1-abcd1234", Agent: "anvil", Slot: "builder-1"},
+			"NEX-5": {Name: "builder-anvil-abcd1234", Agent: "anvil"},
 		},
 	}
-	r := &dispatch.Runner{
-		K8sIface: fk,
-		Cfg:      dispatch.JobConfig{Namespace: "nexus", BrokerHost: "nexus.internal"},
-		Pool:     []string{"builder-1", "builder-2"},
-		MaxConc:  2,
-	}
+	r := newRunner(fk)
 	if err := r.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
-	// The recovered Job holds builder-1 — it must NOT be free.
-	if r.SlotFree("builder-1") {
-		t.Error("builder-1 should be marked in use after recovery")
+	if !r.AgentBusy("anvil") {
+		t.Error("anvil should be busy after recovery")
 	}
-	// A new dispatch must land on builder-2, not the occupied builder-1.
-	if _, err := r.Submit(context.Background(), dispatch.Brief{Agent: "plumb", Ticket: "NEX-6", Thread: "t", Task: "x"}); err != nil {
+	id, _ := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-6", Thread: "t", Task: "x"})
+	if id != "" {
+		t.Error("a fresh anvil dispatch should queue while the recovered anvil job runs")
+	}
+	if _, err := r.Submit(context.Background(), dispatch.Brief{Agent: "plumb", Ticket: "NEX-7", Thread: "t", Task: "y"}); err != nil {
 		t.Fatal(err)
 	}
-	if r.SlotFree("builder-2") {
-		t.Error("builder-2 should be taken by the new dispatch")
+	if !r.AgentBusy("plumb") {
+		t.Error("plumb should run despite anvil being busy")
 	}
 }
 
-// TestRunnerReEnqueuesOnLaunchError verifies that when launching a queued
-// brief fails (transient K8s error), the brief is re-enqueued rather than
-// silently dropped, and its slot is released.
+// A drained brief that fails to launch is re-enqueued (not dropped) and its
+// agent freed; a later completion re-drains it successfully.
 func TestRunnerReEnqueuesOnLaunchError(t *testing.T) {
 	fk := &fakeK8s{}
-	r := &dispatch.Runner{
-		K8sIface: fk,
-		Cfg:      dispatch.JobConfig{Namespace: "nexus", BrokerHost: "nexus.internal"},
-		Pool:     []string{"builder-1"},
-		MaxConc:  1,
-	}
-	if err := r.Init(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r := newRunner(fk)
+	_ = r.Init(context.Background())
 
-	// Occupy the slot with NEX-1, queue NEX-2.
-	if _, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "t", Task: "a"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-2", Thread: "t", Task: "b"}); err != dispatch.ErrPoolExhausted {
-		t.Fatalf("expected ErrPoolExhausted, got %v", err)
-	}
+	_, _ = r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "t", Task: "a"})
+	_, _ = r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-2", Thread: "t", Task: "b"}) // queued
 
-	// Make the NEX-2 launch (the drained one) fail on CreateJob.
-	fk.createErr = func(name string) error {
-		return errors.New("transient k8s error")
-	}
+	fk.createErr = func(string) error { return errors.New("transient k8s error") }
 	r.OnJobDone("NEX-1", "t", true)
-
-	// NEX-2 failed to launch: its slot must be released (free again) and the
-	// brief must still be recoverable on the next drain. Clear the error and
-	// drive another drain via a no-op completion to confirm it re-launches.
-	if !r.SlotFree("builder-1") {
-		t.Error("builder-1 should be free after a failed launch rolled back the reservation")
+	if r.AgentBusy("anvil") {
+		t.Error("anvil should be free after the drained NEX-2 launch failed + rolled back")
 	}
+
 	fk.createErr = nil
+	_, _ = r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "t", Task: "a"})
 	before := len(fk.jobs)
-	// Re-submitting NEX-1 then completing it triggers another drain pass.
-	if _, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "t", Task: "a"}); err != nil {
-		t.Fatal(err)
-	}
 	r.OnJobDone("NEX-1", "t", true)
-	// +2 = the NEX-1 relaunch and the drained NEX-2. If NEX-2 had been
-	// dropped on the failed launch, this would be +1.
-	if got := len(fk.jobs) - before; got != 2 {
-		t.Errorf("expected 2 jobs (NEX-1 relaunch + re-enqueued NEX-2), got %d", got)
+	if got := len(fk.jobs) - before; got != 1 {
+		t.Errorf("expected the re-enqueued NEX-2 to launch (1 job), got %d", got)
 	}
 }

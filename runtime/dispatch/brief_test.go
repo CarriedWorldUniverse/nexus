@@ -80,7 +80,6 @@ func TestBriefNewFields(t *testing.T) {
 		Thread:      "NEX-999",
 		RunID:       "run-abc123",
 		ParentRunID: "run-parent",
-		PoolSlot:    "builder-2",
 		Task:        "do the thing",
 	}
 	data, _ := json.Marshal(b)
@@ -93,9 +92,6 @@ func TestBriefNewFields(t *testing.T) {
 	}
 	if got.ParentRunID != "run-parent" {
 		t.Errorf("ParentRunID: got %q", got.ParentRunID)
-	}
-	if got.PoolSlot != "builder-2" {
-		t.Errorf("PoolSlot: got %q", got.PoolSlot)
 	}
 
 	// Verify omitempty: broker-set fields must not appear in the wire

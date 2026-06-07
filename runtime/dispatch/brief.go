@@ -16,17 +16,13 @@ type Brief struct {
 	Ticket   string `json:"ticket"`
 	Branch   string `json:"branch"`
 	Thread   string `json:"thread"`
-	// RunID is set by the broker's Runner at dispatch time. Each
-	// dispatched job gets a unique run identity — used for pool slot
-	// assignment and (later) cost-trace correlation.
+	// RunID is set by the broker's Runner at dispatch time — a unique run
+	// identity per dispatched job, used for the job/run labels and (later)
+	// cost-trace correlation.
 	RunID string `json:"run_id,omitempty"`
 	// ParentRunID is the RunID of the job that sub-dispatched this run.
 	// Empty for root dispatches (operator → shadow).
 	ParentRunID string `json:"parent_run_id,omitempty"`
-	// PoolSlot is the builder-pool aspect name whose keyfile this job
-	// uses (e.g. "builder-2"). Set by Runner.Submit; not parsed from
-	// user input.
-	PoolSlot string `json:"pool_slot,omitempty"`
 
 	Task string `json:"-"`
 }

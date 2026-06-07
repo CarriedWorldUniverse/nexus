@@ -78,16 +78,11 @@ func (k *K8s) SetBriefOwner(ctx context.Context, taskID string, job *batchv1.Job
 type ActiveJob struct {
 	Name  string
 	Agent string
-	// Slot is the builder-pool slot (nexus.dispatch/pool-slot) the Job
-	// occupies. The Runner re-marks this slot in use on recovery so a
-	// restarted broker doesn't double-assign a builder identity. Empty
-	// for pre-pool-slot Jobs; the Runner falls back to Agent.
-	Slot string
 }
 
 // ListActiveJobs returns ticket -> live builder Job for non-finished builder
-// Jobs. Name + Slot let the Runner re-adopt the pool slot across a restart
-// so recovered Jobs' slots aren't re-handed to new dispatches.
+// Jobs. Name + Agent let the Runner re-mark the agent busy across a restart so
+// a recovered Job's agent isn't double-run by a new dispatch.
 func (k *K8s) ListActiveJobs(ctx context.Context) (map[string]ActiveJob, error) {
 	jl, err := k.Client.BatchV1().Jobs(k.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "app=nexus-builder"})
 	if err != nil {
@@ -103,7 +98,6 @@ func (k *K8s) ListActiveJobs(ctx context.Context) (map[string]ActiveJob, error) 
 			out[ticket] = ActiveJob{
 				Name:  j.Name,
 				Agent: j.Labels["nexus.dispatch/agent"],
-				Slot:  j.Labels["nexus.dispatch/pool-slot"],
 			}
 		}
 	}
