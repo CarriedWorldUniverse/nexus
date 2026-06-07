@@ -83,6 +83,7 @@ nav:
     - Aspect-funnel architecture: 2026-05-02-aspect-funnel-architecture.md
     - Funnel compaction: 2026-05-01-funnel-compaction-design.md
     - Funnel/bridle caching: 2026-05-03-funnel-bridle-caching-spec.md
+    - Commonplace build graphs + Graphify: 2026-06-07-commonplace-build-graphs-and-graphify-recommendation.md
     - Storage abstraction: 2026-05-05-storage-abstraction-spec.md
     - Credential custodian: 2026-06-04-credential-custodian-design.md
     - Nexus token custodian: 2026-06-03-nexus-token-custodian-design.md
