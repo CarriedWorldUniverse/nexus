@@ -37,14 +37,32 @@ import (
 // Errors propagate to the caller. The WS shim treats them as warn-and-
 // drop because chat.send is fire-and-forget per transport spec.
 func (b *Broker) HandleChatSend(ctx context.Context, from, content string, replyTo int64, topic string) (int64, error) {
-	// Intercept !dispatch before ChatStore: these are job-submission
-	// commands, not chat messages. They must not pollute the chat log
-	// or fan out as chat.deliver to recipients.
+	// A !dispatch post is the audit-thread ROOT: store it so the dispatched
+	// agent's replies and every follow-on thread under it, giving an auditable
+	// dispatch→work→result chain. The work itself is placed into the worker by
+	// the broker (the spawn), not delivered as chat, so we don't fan it out to
+	// recipients — we store it and trigger the dispatch, threaded under it.
 	if strings.HasPrefix(strings.TrimSpace(content), "!dispatch") {
-		if err := b.submitDispatch(ctx, from, content); err != nil {
-			b.log.Warn("!dispatch: submit failed", "err", err, "from", from)
+		if b.cfg.ChatStore == nil {
+			if err := b.submitDispatch(ctx, from, content, topic); err != nil {
+				b.log.Warn("!dispatch: submit failed", "err", err, "from", from)
+			}
+			return 0, nil
 		}
-		return 0, nil
+		msg, err := b.cfg.ChatStore.Insert(ctx, from, content, replyTo, topic)
+		if err != nil {
+			return 0, fmt.Errorf("broker.HandleChatSend: store dispatch post: %w", err)
+		}
+		// Thread the worker's replies under this post: the post's topic if it
+		// has one, else a thread rooted at the post's message id.
+		thread := topic
+		if thread == "" {
+			thread = fmt.Sprintf("dispatch-%d", msg.ThreadRootMsgID)
+		}
+		if derr := b.submitDispatch(ctx, from, content, thread); derr != nil {
+			b.log.Warn("!dispatch: submit failed", "err", derr, "from", from)
+		}
+		return msg.ID, nil
 	}
 
 	if b.cfg.ChatStore == nil {

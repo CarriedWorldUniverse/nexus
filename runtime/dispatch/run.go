@@ -6,7 +6,6 @@ type Run struct {
 	ParentID string
 	Brief    Brief
 	JobName  string
-	PoolSlot string
 }
 
 // RunResult is the outcome of a completed run.

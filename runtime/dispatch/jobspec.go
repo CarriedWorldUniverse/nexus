@@ -28,24 +28,18 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		provider = "codex-cli"
 	}
 	codexProvider := provider == "codex-cli"
-	keyfileAspect := b.PoolSlot
-	if keyfileAspect == "" {
-		keyfileAspect = b.Agent
-	}
+	// The Job runs AS the named agent: keyfile = aspect-keyfile-<agent>, and
+	// the Job name + labels carry the agent + run id.
+	keyfileAspect := b.Agent
 	runShort := b.RunID
 	if len(runShort) > 8 {
 		runShort = runShort[:8]
 	}
-	slotName := b.PoolSlot
-	if slotName == "" {
-		slotName = b.Agent
-	}
 	labels := map[string]string{
-		"app":                      "nexus-builder",
-		"nexus.dispatch/agent":     b.Agent,
-		"nexus.dispatch/ticket":    b.Ticket,
-		"nexus.dispatch/run-id":    b.RunID,
-		"nexus.dispatch/pool-slot": slotName,
+		"app":                   "nexus-builder",
+		"nexus.dispatch/agent":  b.Agent,
+		"nexus.dispatch/ticket": b.Ticket,
+		"nexus.dispatch/run-id": b.RunID,
 	}
 	annotations := map[string]string{}
 	if b.Thread != "" {
@@ -99,7 +93,7 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "builder-" + slotName + "-" + func() string {
+			Name: "builder-" + b.Agent + "-" + func() string {
 				if runShort != "" {
 					return runShort
 				}
