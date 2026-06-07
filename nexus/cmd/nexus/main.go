@@ -21,7 +21,6 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
 	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
-	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/cwb/cwbproxy"
@@ -35,6 +34,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 )
 
 func main() {
@@ -404,31 +404,45 @@ func main() {
 		}
 	}
 	dispatchCfg := dispatch.JobConfig{
-		Image:       os.Getenv("CW_BUILDER_IMAGE"),
-		Namespace:   envOrDefault("CW_K8S_NAMESPACE", "nexus"),
-		NodeIP:      os.Getenv("CW_NODE_IP"),
-		BrokerHost:  os.Getenv("CW_BROKER_HOST"),
-		BriefTimeout: envOrDefault("CW_BRIEF_TIMEOUT", "30m"),
-		GitCredName: os.Getenv("CW_GIT_CRED_NAME"),
+		Image:         os.Getenv("CW_BUILDER_IMAGE"),
+		Namespace:     envOrDefault("CW_K8S_NAMESPACE", "nexus"),
+		NodeIP:        os.Getenv("CW_NODE_IP"),
+		BrokerHost:    os.Getenv("CW_BROKER_HOST"),
+		BriefTimeout:  envOrDefault("CW_BRIEF_TIMEOUT", "30m"),
+		GitCredName:   os.Getenv("CW_GIT_CRED_NAME"),
+		LynxAIBaseURL: os.Getenv("LYNXAI_BASE_URL"),
+		LynxAIKey:     os.Getenv("LYNXAI_KEY"),
 	}
-	var runner dispatch.Submitter
+	var (
+		runner         dispatch.Submitter
+		dispatchRunner *dispatch.Runner // concrete handle: Poster + WatchLoop wired after broker.New
+	)
 	if len(pool) > 0 {
 		r := &dispatch.Runner{
 			Cfg:     dispatchCfg,
 			Pool:    pool,
 			MaxConc: len(pool),
-			// K8sIface: nil — k8s client wiring is deferred until the
-			// runner is fully active on the k3s cluster. When nil,
-			// Init skips job-recovery and spawn skips k8s API calls.
+		}
+		// In-cluster: build the kube client (recovered from the deleted
+		// dispatch-controller) so the Runner actually spawns Jobs. Outside
+		// k8s (dev/test/non-pod), leave K8sIface nil — Init skips recovery,
+		// spawn skips the k8s API, so dispatch is an inert no-op rather than
+		// a crash.
+		if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+			if k8s, kerr := dispatch.NewInClusterK8s(dispatchCfg.Namespace); kerr != nil {
+				slog.Error("dispatch: in-cluster k8s client failed — Runner will not spawn jobs", "err", kerr)
+			} else {
+				r.K8sIface = k8s
+				slog.Info("dispatch: in-cluster k8s client wired", "namespace", dispatchCfg.Namespace, "pool", pool)
+			}
+		} else {
+			slog.Info("dispatch: not in-cluster (KUBERNETES_SERVICE_HOST unset) — Runner has no k8s client (no job spawn)")
 		}
 		if err := r.Init(ctx); err != nil {
 			slog.Error("dispatch runner init failed — dispatch disabled", "pool", pool, "err", err)
 		} else {
-			// WatchLoop requires a live K8sIface; skip when k8s is not wired.
-			if r.K8sIface != nil {
-				go func() { _ = r.WatchLoop(ctx) }()
-			}
 			runner = r
+			dispatchRunner = r
 		}
 	}
 
@@ -508,6 +522,18 @@ func main() {
 			}
 		},
 	}, r)
+
+	// Wire the dispatch Runner's status Poster to the broker's own chat path
+	// (the in-process equivalent of the deleted controller's wsasp send-chat)
+	// and start the Job watch loop. Done post-New because the Poster needs the
+	// broker. WatchLoop only runs when a k8s client is wired (in-cluster).
+	if dispatchRunner != nil {
+		dispatchRunner.Poster = dispatch.NewWsPoster(ctx, brokerChatSender{b: b})
+		if dispatchRunner.K8sIface != nil {
+			go func() { _ = dispatchRunner.WatchLoop(ctx) }()
+			logger.Info("dispatch: Job watch loop started")
+		}
+	}
 
 	// Activity log persistence: chain a jsonlsink writer onto the Hub's
 	// fan-out alongside the live broker broadcast. Co-exists with
