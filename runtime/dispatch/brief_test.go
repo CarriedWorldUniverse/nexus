@@ -1,6 +1,10 @@
 package dispatch
 
-import "testing"
+import (
+	"bytes"
+	"encoding/json"
+	"testing"
+)
 
 func TestParseBrief(t *testing.T) {
 	msg := "dispatch to a k3s builder\n```json\n" +
@@ -66,5 +70,39 @@ func TestParseBrief_DispatchCommand(t *testing.T) {
 func TestParseBrief_MissingAgent(t *testing.T) {
 	if _, err := ParseBrief([]byte("```json\n{\"ticket\":\"NEX-1\"}\n```\nx")); err == nil {
 		t.Fatal("expected error when agent missing")
+	}
+}
+
+func TestBriefNewFields(t *testing.T) {
+	b := Brief{
+		Agent:       "anvil",
+		Ticket:      "NEX-999",
+		Thread:      "NEX-999",
+		RunID:       "run-abc123",
+		ParentRunID: "run-parent",
+		PoolSlot:    "builder-2",
+		Task:        "do the thing",
+	}
+	data, _ := json.Marshal(b)
+	var got Brief
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RunID != "run-abc123" {
+		t.Errorf("RunID: got %q", got.RunID)
+	}
+	if got.ParentRunID != "run-parent" {
+		t.Errorf("ParentRunID: got %q", got.ParentRunID)
+	}
+	if got.PoolSlot != "builder-2" {
+		t.Errorf("PoolSlot: got %q", got.PoolSlot)
+	}
+
+	// Verify omitempty: broker-set fields must not appear in the wire
+	// format when zero (root dispatches must not emit run_id:"" etc.)
+	bEmpty := Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "NEX-1"}
+	raw, _ := json.Marshal(bEmpty)
+	if bytes.Contains(raw, []byte("run_id")) {
+		t.Errorf("omitempty: run_id should be absent when zero, got %s", raw)
 	}
 }
