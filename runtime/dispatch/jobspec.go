@@ -41,10 +41,11 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		slotName = b.Agent
 	}
 	labels := map[string]string{
-		"app":                   "nexus-builder",
-		"nexus.dispatch/agent":  b.Agent,
-		"nexus.dispatch/ticket": b.Ticket,
-		"nexus.dispatch/run-id": b.RunID,
+		"app":                      "nexus-builder",
+		"nexus.dispatch/agent":     b.Agent,
+		"nexus.dispatch/ticket":    b.Ticket,
+		"nexus.dispatch/run-id":    b.RunID,
+		"nexus.dispatch/pool-slot": slotName,
 	}
 	annotations := map[string]string{}
 	if b.Thread != "" {
@@ -98,12 +99,12 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        "builder-" + slotName + "-" + func() string {
-					if runShort != "" {
-						return runShort
-					}
-					return taskID
-				}(),
+			Name: "builder-" + slotName + "-" + func() string {
+				if runShort != "" {
+					return runShort
+				}
+				return taskID
+			}(),
 			Namespace:   cfg.Namespace,
 			Labels:      labels,
 			Annotations: annotations,
