@@ -28,10 +28,23 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		provider = "codex-cli"
 	}
 	codexProvider := provider == "codex-cli"
+	keyfileAspect := b.PoolSlot
+	if keyfileAspect == "" {
+		keyfileAspect = b.Agent
+	}
+	runShort := b.RunID
+	if len(runShort) > 8 {
+		runShort = runShort[:8]
+	}
+	slotName := b.PoolSlot
+	if slotName == "" {
+		slotName = b.Agent
+	}
 	labels := map[string]string{
 		"app":                   "nexus-builder",
 		"nexus.dispatch/agent":  b.Agent,
 		"nexus.dispatch/ticket": b.Ticket,
+		"nexus.dispatch/run-id": b.RunID,
 	}
 	annotations := map[string]string{}
 	if b.Thread != "" {
@@ -40,6 +53,8 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	env := []corev1.EnvVar{
 		{Name: "CW_SEAM_URL", Value: "https://" + cfg.BrokerHost + ":7888"},
 		{Name: "GOCACHE", Value: "/cache/go"},
+		{Name: "CW_DISPATCH_RUN_ID", Value: b.RunID},
+		{Name: "CW_DISPATCH_PARENT_RUN_ID", Value: b.ParentRunID},
 	}
 	if cfg.LynxAIBaseURL != "" {
 		env = append(env, corev1.EnvVar{Name: "LYNXAI_BASE_URL", Value: cfg.LynxAIBaseURL})
@@ -59,7 +74,7 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	volumes := []corev1.Volume{
 		{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: "cache", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "nexus-builder-work"}}},
-		{Name: "keyfile", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "aspect-keyfile-" + b.Agent}}},
+		{Name: "keyfile", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "aspect-keyfile-" + keyfileAspect}}},
 		{Name: "brief", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "brief-" + taskID}}}},
 	}
 	var initContainers []corev1.Container
@@ -83,7 +98,12 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        "builder-" + b.Agent + "-" + taskID,
+			Name:        "builder-" + slotName + "-" + func() string {
+					if runShort != "" {
+						return runShort
+					}
+					return taskID
+				}(),
 			Namespace:   cfg.Namespace,
 			Labels:      labels,
 			Annotations: annotations,

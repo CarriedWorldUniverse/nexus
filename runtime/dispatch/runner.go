@@ -71,6 +71,7 @@ type Runner struct {
 	NewID    func() string
 
 	mu        sync.Mutex
+	ctx       context.Context   // stored at Init for background callbacks (OnJobDone)
 	poolInUse map[string]string // slot name → runID currently using it
 	active    map[string]*Run   // runID → Run
 	queue     []Brief
@@ -81,6 +82,7 @@ type Runner struct {
 // Init initializes Runner maps and optionally recovers active jobs from K8s.
 func (r *Runner) Init(ctx context.Context) error {
 	r.mu.Lock()
+	r.ctx = ctx
 	if r.MaxConc <= 0 {
 		r.MaxConc = len(r.Pool)
 	}
@@ -185,7 +187,7 @@ func (r *Runner) OnJobDone(ticket, thread string, ok bool) {
 		r.post(thread, "builder FAILED: "+ticket+" — see Job logs; re-dispatch to retry")
 	}
 
-	r.drainQueue(context.Background())
+	r.drainQueue(r.ctx)
 }
 
 func (r *Runner) nextID() string {
@@ -241,6 +243,8 @@ func (r *Runner) spawn(ctx context.Context, b Brief, slot string) (string, error
 }
 
 // drainQueue spawns queued briefs when slots free up. Caller holds r.mu.
+// On spawn error the brief is re-enqueued at the front and draining stops
+// so a transient K8s failure does not silently discard work.
 func (r *Runner) drainQueue(ctx context.Context) {
 	for len(r.queue) > 0 {
 		slot := r.pickFreeSlot()
@@ -250,7 +254,9 @@ func (r *Runner) drainQueue(ctx context.Context) {
 		next := r.queue[0]
 		r.queue = r.queue[1:]
 		if _, err := r.spawn(ctx, next, slot); err != nil {
-			r.post(next.Thread, "dispatch failed: "+err.Error())
+			r.post(next.Thread, "dispatch spawn failed, will retry on next slot free: "+err.Error())
+			r.queue = append([]Brief{next}, r.queue...)
+			return
 		}
 	}
 }
