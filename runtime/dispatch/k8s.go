@@ -2,16 +2,36 @@ package dispatch
 
 import (
 	"context"
+	"fmt"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 type K8s struct {
 	Client    kubernetes.Interface
 	Namespace string
+}
+
+// NewInClusterK8s builds a K8s client from the pod's in-cluster service
+// account. Recovered from the former dispatch-controller main (deleted with
+// the controller in #274) so the broker-inline Runner can spawn Jobs. Only
+// valid when running as a pod inside the cluster — callers gate on that
+// (e.g. KUBERNETES_SERVICE_HOST set) and fall back to a nil K8sIface
+// (no-spawn) for dev/test/non-k8s boots.
+func NewInClusterK8s(namespace string) (*K8s, error) {
+	rc, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("dispatch: in-cluster config: %w", err)
+	}
+	cs, err := kubernetes.NewForConfig(rc)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch: k8s client: %w", err)
+	}
+	return &K8s{Client: cs, Namespace: namespace}, nil
 }
 
 func (k *K8s) EnsureKeyfileSecret(ctx context.Context, agent string) error {
