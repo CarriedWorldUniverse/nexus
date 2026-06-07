@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -391,18 +392,6 @@ func main() {
 	// cmd.Dir control vector for stolen aspect tokens).
 	aspectHomes := discoverAspectHomes(*aspectDir, logger)
 
-	// Build the builder pool from env.
-	// CW_BUILDER_POOL=builder-1,builder-2,builder-3,builder-4
-	poolEnv := os.Getenv("CW_BUILDER_POOL")
-	var pool []string
-	if poolEnv != "" {
-		for _, s := range strings.Split(poolEnv, ",") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				pool = append(pool, s)
-			}
-		}
-	}
 	dispatchCfg := dispatch.JobConfig{
 		Image:         os.Getenv("CW_BUILDER_IMAGE"),
 		Namespace:     envOrDefault("CW_K8S_NAMESPACE", "nexus"),
@@ -413,37 +402,34 @@ func main() {
 		LynxAIBaseURL: os.Getenv("LYNXAI_BASE_URL"),
 		LynxAIKey:     os.Getenv("LYNXAI_KEY"),
 	}
-	var (
-		runner         dispatch.Submitter
-		dispatchRunner *dispatch.Runner // concrete handle: Poster + WatchLoop wired after broker.New
-	)
-	if len(pool) > 0 {
-		r := &dispatch.Runner{
-			Cfg:     dispatchCfg,
-			Pool:    pool,
-			MaxConc: len(pool),
+	// Dispatch Runner: each !dispatch runs AS the named agent (mounts that
+	// agent's keyfile → its persona + attribution). Built unconditionally so
+	// !dispatch works whenever the broker runs; the kube client is wired only
+	// in-cluster (else dispatch is an inert no-op, not a crash). MaxConc caps
+	// total concurrent runs across agents (per-agent concurrency is 1).
+	maxConc := 4
+	if v := os.Getenv("CW_MAX_CONCURRENT"); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+			maxConc = n
 		}
-		// In-cluster: build the kube client (recovered from the deleted
-		// dispatch-controller) so the Runner actually spawns Jobs. Outside
-		// k8s (dev/test/non-pod), leave K8sIface nil — Init skips recovery,
-		// spawn skips the k8s API, so dispatch is an inert no-op rather than
-		// a crash.
-		if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
-			if k8s, kerr := dispatch.NewInClusterK8s(dispatchCfg.Namespace); kerr != nil {
-				slog.Error("dispatch: in-cluster k8s client failed — Runner will not spawn jobs", "err", kerr)
-			} else {
-				r.K8sIface = k8s
-				slog.Info("dispatch: in-cluster k8s client wired", "namespace", dispatchCfg.Namespace, "pool", pool)
-			}
+	}
+	var runner dispatch.Submitter
+	dispatchRunner := &dispatch.Runner{Cfg: dispatchCfg, MaxConc: maxConc}
+	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		if k8s, kerr := dispatch.NewInClusterK8s(dispatchCfg.Namespace); kerr != nil {
+			slog.Error("dispatch: in-cluster k8s client failed — Runner will not spawn jobs", "err", kerr)
 		} else {
-			slog.Info("dispatch: not in-cluster (KUBERNETES_SERVICE_HOST unset) — Runner has no k8s client (no job spawn)")
+			dispatchRunner.K8sIface = k8s
+			slog.Info("dispatch: in-cluster k8s client wired", "namespace", dispatchCfg.Namespace, "max_concurrent", maxConc)
 		}
-		if err := r.Init(ctx); err != nil {
-			slog.Error("dispatch runner init failed — dispatch disabled", "pool", pool, "err", err)
-		} else {
-			runner = r
-			dispatchRunner = r
-		}
+	} else {
+		slog.Info("dispatch: not in-cluster (KUBERNETES_SERVICE_HOST unset) — Runner has no k8s client (no job spawn)")
+	}
+	if err := dispatchRunner.Init(ctx); err != nil {
+		slog.Error("dispatch runner init failed — dispatch disabled", "err", err)
+		dispatchRunner = nil
+	} else {
+		runner = dispatchRunner
 	}
 
 	b := broker.New(broker.Config{

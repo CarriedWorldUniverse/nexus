@@ -2,11 +2,9 @@ package dispatch
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
-	"strconv"
 	"sync"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -14,16 +12,12 @@ import (
 
 var execCommandContext = exec.CommandContext
 
-// ErrPoolExhausted is returned by Submit when all pool slots are in use
-// and the concurrency cap is reached. Callers should queue and retry.
-var ErrPoolExhausted = errors.New("dispatch: all builder pool slots in use")
-
 // Poster sends a status line to a comms thread.
 type Poster interface {
 	Post(thread, text string) error
 }
 
-// ChatSender is the wsasp send-chat shape used by NewWsPoster.
+// ChatSender is the send-chat shape used by NewWsPoster.
 type ChatSender interface {
 	SendChat(ctx context.Context, content string, replyTo int64, topic string) (int64, error)
 }
@@ -59,20 +53,26 @@ type Submitter interface {
 }
 
 // Runner is the broker-embedded dispatch engine.
-// It replaces Controller: no per-agent serialization, just pool-slot tracking.
-// Multiple runs for the same logical agent can proceed in parallel when
-// free pool slots exist.
+//
+// Each dispatch runs AS the named agent (brief.Agent): the Job mounts
+// aspect-keyfile-<agent>, so the worker validates as that agent → loads its
+// persona (SOUL.md/nexus.md) and signs commits/reviews as the agent. The work
+// is attributed to a real team member, not a faceless pool slot.
+//
+// Concurrency is per-agent: one run per agent name at a time (the broker
+// enforces one session per name, NEX-464). Different agents run in parallel.
+// A second task for a busy agent is queued and drains when that agent frees.
+// MaxConc, when > 0, additionally caps total concurrent runs across agents.
 type Runner struct {
 	K8sIface K8sIface
 	Cfg      JobConfig
-	Pool     []string // ordered list of pool-slot aspect names
-	MaxConc  int
+	MaxConc  int // global cap on concurrent runs; 0 = unlimited
 	Poster   Poster
 	NewID    func() string
 
 	mu        sync.Mutex
 	ctx       context.Context   // stored at Init for background callbacks (OnJobDone)
-	poolInUse map[string]string // slot name → runID currently using it
+	agentBusy map[string]string // agent name → runID of its active run
 	active    map[string]*Run   // runID → Run
 	queue     []Brief
 	acked     map[string]bool
@@ -83,11 +83,8 @@ type Runner struct {
 func (r *Runner) Init(ctx context.Context) error {
 	r.mu.Lock()
 	r.ctx = ctx
-	if r.MaxConc <= 0 {
-		r.MaxConc = len(r.Pool)
-	}
-	if r.poolInUse == nil {
-		r.poolInUse = map[string]string{}
+	if r.agentBusy == nil {
+		r.agentBusy = map[string]string{}
 	}
 	if r.active == nil {
 		r.active = map[string]*Run{}
@@ -107,24 +104,16 @@ func (r *Runner) Init(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for ticket, aj := range active {
-		// Recover: map ticket back to a placeholder Run and re-mark its
-		// pool slot in use so a new dispatch can't be handed the same
-		// builder identity while the recovered Job is still running.
-		slot := aj.Slot
-		if slot == "" {
-			// Pre-pool-slot Job (or unlabelled): fall back to the agent
-			// name, which is what older jobs used as the keyfile aspect.
-			slot = aj.Agent
-		}
+		// Recover: re-mark the agent busy so a new dispatch can't double-run
+		// the same identity while the recovered Job is still going.
 		run := &Run{
-			ID:       "recovered-" + ticket,
-			Brief:    Brief{Ticket: ticket, Agent: aj.Agent, PoolSlot: slot},
-			JobName:  aj.Name,
-			PoolSlot: slot,
+			ID:      "recovered-" + ticket,
+			Brief:   Brief{Ticket: ticket, Agent: aj.Agent},
+			JobName: aj.Name,
 		}
 		r.active[run.ID] = run
-		if slot != "" {
-			r.poolInUse[slot] = run.ID
+		if aj.Agent != "" {
+			r.agentBusy[aj.Agent] = run.ID
 		}
 	}
 	return nil
@@ -135,14 +124,14 @@ func (r *Runner) WatchLoop(ctx context.Context) error {
 	return r.K8sIface.WatchJobs(ctx, r.OnJobDone)
 }
 
-// Submit provisions and launches a dispatch run. Returns a RunID.
-// Returns ErrPoolExhausted if all slots are occupied; the brief is queued
-// and will be spawned when a slot becomes free.
+// Submit launches a dispatch run as the named agent and returns its RunID.
+// Returns ("", nil) when the brief is accepted but queued — the agent is busy
+// or the global cap is reached — and will spawn when capacity frees.
 //
-// The runner mutex guards only in-memory bookkeeping (slot reservation +
-// maps). The slow path — provisioning (cw exec), CreateJob (k8s API), and
-// status posts (WS send) — runs OUTSIDE the lock so concurrent dispatches
-// and job-completion callbacks don't serialize behind one run's I/O.
+// The mutex guards only in-memory bookkeeping. The slow path — provisioning
+// (cw exec), CreateJob (k8s API), and status posts (WS send) — runs OUTSIDE
+// the lock so concurrent dispatches and completion callbacks don't serialize
+// behind one run's I/O.
 func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 	r.mu.Lock()
 
@@ -154,9 +143,8 @@ func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 			return id, nil
 		}
 	}
-	// Idempotency: a brief for this ticket already queued (slots were full
-	// on a prior submit) → no-op rather than enqueue a duplicate that would
-	// double-spawn when a slot frees.
+	// Idempotency: a brief for this ticket already queued → no-op rather than
+	// enqueue a duplicate that would double-spawn when capacity frees.
 	for _, q := range r.queue {
 		if q.Ticket == b.Ticket {
 			r.mu.Unlock()
@@ -170,20 +158,18 @@ func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 		ackMsg = "dispatch accepted for " + b.Agent + " on " + b.Ticket
 	}
 
-	slot := r.pickFreeSlot()
-	if slot == "" {
+	if !r.canRun(b.Agent) {
 		r.queue = append(r.queue, b)
 		thread := b.Thread
-		poolLen := len(r.Pool)
 		r.mu.Unlock()
 		if ackMsg != "" {
 			r.post(thread, ackMsg)
 		}
-		r.post(thread, "dispatch queued (all "+strconv.Itoa(poolLen)+" builder slots in use)")
-		return "", ErrPoolExhausted
+		r.post(thread, "dispatch queued ("+b.Agent+" busy)")
+		return "", nil
 	}
 
-	run := r.reserve(b, slot)
+	run := r.reserve(b)
 	r.mu.Unlock()
 
 	if ackMsg != "" {
@@ -192,7 +178,7 @@ func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 	if err := r.launch(ctx, run); err != nil {
 		r.mu.Lock()
 		delete(r.active, run.ID)
-		delete(r.poolInUse, run.PoolSlot)
+		delete(r.agentBusy, run.Brief.Agent)
 		r.mu.Unlock()
 		r.post(run.Brief.Thread, "dispatch failed: "+err.Error())
 		return "", err
@@ -200,33 +186,41 @@ func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 	return run.ID, nil
 }
 
-// reserve assigns brief b to slot: stamps RunID/PoolSlot, creates the run
-// placeholder, and marks the slot in use. Caller holds r.mu.
-func (r *Runner) reserve(b Brief, slot string) *Run {
+// canRun reports whether a run for agent may start now. Caller holds r.mu.
+func (r *Runner) canRun(agent string) bool {
+	if _, busy := r.agentBusy[agent]; busy {
+		return false
+	}
+	if r.MaxConc > 0 && len(r.active) >= r.MaxConc {
+		return false
+	}
+	return true
+}
+
+// reserve stamps a RunID, records the run, and marks the agent busy. Caller holds r.mu.
+func (r *Runner) reserve(b Brief) *Run {
 	runID := r.nextID()
 	b.RunID = runID
-	b.PoolSlot = slot
-	run := &Run{ID: runID, ParentID: b.ParentRunID, Brief: b, PoolSlot: slot}
+	run := &Run{ID: runID, ParentID: b.ParentRunID, Brief: b}
 	r.active[runID] = run
-	r.poolInUse[slot] = runID
+	r.agentBusy[b.Agent] = runID
 	return run
 }
 
-// SlotFree reports whether the named pool slot is available. Used in tests.
-func (r *Runner) SlotFree(slot string) bool {
+// AgentBusy reports whether the named agent has an active run. Used in tests.
+func (r *Runner) AgentBusy(agent string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_, inUse := r.poolInUse[slot]
-	return !inUse
+	_, busy := r.agentBusy[agent]
+	return busy
 }
 
-// OnJobDone releases the pool slot for the completed ticket and drains the
-// queue onto the freed slot. Slot release + queue reservation happen under
-// the lock; status posts and the slow launch of any drained run run outside.
+// OnJobDone frees the completed run's agent and drains any queued briefs whose
+// agent is now free. Bookkeeping happens under the lock; status posts and the
+// slow launch of drained runs happen outside.
 func (r *Runner) OnJobDone(ticket, thread string, ok bool) {
 	r.mu.Lock()
 
-	// Find and release the run for this ticket.
 	var doneID string
 	for id, run := range r.active {
 		if run.Brief.Ticket == ticket {
@@ -240,7 +234,7 @@ func (r *Runner) OnJobDone(ticket, thread string, ok bool) {
 	}
 	run := r.active[doneID]
 	delete(r.active, doneID)
-	delete(r.poolInUse, run.PoolSlot)
+	delete(r.agentBusy, run.Brief.Agent)
 	delete(r.acked, ticket)
 	pending := r.reserveQueued()
 	r.mu.Unlock()
@@ -262,54 +256,44 @@ func (r *Runner) nextID() string {
 	return fmt.Sprintf("run-%d", r.seq)
 }
 
-func (r *Runner) pickFreeSlot() string {
-	for _, slot := range r.Pool {
-		if _, inUse := r.poolInUse[slot]; !inUse {
-			return slot
-		}
-	}
-	return ""
-}
-
-// reserveQueued assigns queued briefs to free slots, reserving each slot and
-// creating its run placeholder. Caller holds r.mu. Returns the reserved runs
-// for the caller to launch outside the lock via launchPending.
+// reserveQueued pulls queued briefs whose agent is now free (and within the
+// global cap) and reserves them, preserving order for the rest. Caller holds
+// r.mu. Returns the reserved runs for the caller to launch via launchPending.
 func (r *Runner) reserveQueued() []*Run {
 	var runs []*Run
-	for len(r.queue) > 0 {
-		slot := r.pickFreeSlot()
-		if slot == "" {
-			break
+	kept := make([]Brief, 0, len(r.queue))
+	for _, b := range r.queue {
+		if r.canRun(b.Agent) {
+			runs = append(runs, r.reserve(b))
+		} else {
+			kept = append(kept, b)
 		}
-		b := r.queue[0]
-		r.queue = r.queue[1:]
-		runs = append(runs, r.reserve(b, slot))
 	}
+	r.queue = kept
 	return runs
 }
 
 // launchPending launches reserved runs outside the lock. On launch error the
 // run's reservation is rolled back and its brief re-enqueued at the front, so
-// a transient K8s failure does not silently discard queued work; draining
-// stops at the first failure and retries on the next slot-free.
+// a transient K8s failure doesn't silently discard queued work; draining stops
+// at the first failure and retries on the next agent-free.
 func (r *Runner) launchPending(ctx context.Context, runs []*Run) {
 	for _, run := range runs {
 		if err := r.launch(ctx, run); err != nil {
 			r.mu.Lock()
 			delete(r.active, run.ID)
-			delete(r.poolInUse, run.PoolSlot)
+			delete(r.agentBusy, run.Brief.Agent)
 			r.queue = append([]Brief{run.Brief}, r.queue...)
 			r.mu.Unlock()
-			r.post(run.Brief.Thread, "dispatch spawn failed, will retry on next slot free: "+err.Error())
+			r.post(run.Brief.Thread, "dispatch spawn failed, will retry on next agent-free: "+err.Error())
 			return
 		}
 	}
 }
 
 // launch provisions and creates the Job for an already-reserved run. Runs
-// OUTSIDE r.mu: provisionRun execs the cw CLI and CreateJob hits the k8s API,
-// neither of which should block other dispatches. Sets run.JobName under the
-// lock once known.
+// OUTSIDE r.mu: provisionRun execs the cw CLI and CreateJob hits the k8s API.
+// Sets run.JobName under the lock once known.
 func (r *Runner) launch(ctx context.Context, run *Run) error {
 	taskID := run.ID
 	if r.K8sIface != nil {
@@ -336,7 +320,7 @@ func (r *Runner) launch(ctx context.Context, run *Run) error {
 	r.mu.Lock()
 	run.JobName = job.Name
 	r.mu.Unlock()
-	r.post(run.Brief.Thread, "builder spawned as "+run.PoolSlot+" ("+job.Name+")")
+	r.post(run.Brief.Thread, "builder spawned as "+run.Brief.Agent+" ("+job.Name+")")
 	return nil
 }
 
@@ -346,21 +330,22 @@ func (r *Runner) post(thread, text string) {
 	}
 }
 
-// provisionRun provisions keyfile secret and brief ConfigMap for a run.
-// Git credential issuance (matching provision.go) is included when GitCredName is set.
+// provisionRun ensures the agent's keyfile secret exists, optionally issues a
+// scoped git credential, and writes the brief ConfigMap. The worker runs AS
+// the named agent, so the keyfile + cred are keyed on b.Agent.
 func provisionRun(ctx context.Context, k K8sIface, cfg JobConfig, b Brief, taskID string) error {
-	if err := k.EnsureKeyfileSecret(ctx, b.PoolSlot); err != nil {
-		return fmt.Errorf("ensure keyfile for %s: %w", b.PoolSlot, err)
+	if err := k.EnsureKeyfileSecret(ctx, b.Agent); err != nil {
+		return fmt.Errorf("ensure keyfile for %s: %w", b.Agent, err)
 	}
 	if cfg.GitCredName != "" && b.Repo != "" {
 		cmd := execCommandContext(ctx, "cw", "credential", "issue-git-permission",
-			"--aspect", b.PoolSlot, "--name", cfg.GitCredName)
+			"--aspect", b.Agent, "--name", cfg.GitCredName)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("provision: git-cred grant: %w (%s)", err, out)
 		}
 	} else {
 		slog.Info("dispatch: skipping git credential grant; git credential name not configured",
-			"agent", b.PoolSlot, "repo", b.Repo)
+			"agent", b.Agent, "repo", b.Repo)
 	}
 	return k.PutBriefConfigMap(ctx, taskID, b.Task)
 }
