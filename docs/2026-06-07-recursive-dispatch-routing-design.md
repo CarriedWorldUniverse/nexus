@@ -1,6 +1,6 @@
 # Recursive Cost-Routed Dispatch — Design
 
-> **Status:** design (brainstormed with the operator, 2026-06-07). Supersedes the flat `dispatch-controller` model. Precedes per-piece specs + implementation plans. The model ladder (esp. gemma's tier) is to be validated empirically before the routing judge is tuned.
+> **Status:** design (brainstormed with the operator, 2026-06-07). Supersedes the flat `dispatch-controller` model. Precedes per-piece specs + implementation plans. The gemma tier is now validated empirically (2026-06-07; see §3 and *Local tier — GPU budget*); the rest of the ladder (Gemini slotting) and the routing judge are tuned from logged costs.
 
 ## One-liner
 
@@ -54,11 +54,20 @@ Capability is **three tiers**; cost, availability, latency, and character vary *
 | **3 — cheap/fast** | gemma (reasoning-off), haiku (tentative) | triage, judging, simple well-scoped slices |
 
 Key model profiles:
-- **gemma (local, on the 5090):** **quite capable (~Tier 2), free, quota-free** — its only real constraint is **slower token generation**. **Parallel decomposition hides that latency** (N independent slices → wall-clock ≈ one slice). So gemma is the **default workhorse for background fan-out**, not merely the floor. Reserve fast cloud models for the **latency-sensitive conversational seat** (shadow talking to the operator).
+- **gemma (local, on the 5090): validated as a real Tier-2 workhorse (2026-06-07).** A genuinely usable LLM — **not frontier, but most work doesn't require frontier**, and decomposition lowers each slice to exactly this tier. Measured ~40–52 tok/s warm: correct Go (`MergeIntervals`), a clean decomposition with a correct dependency DAG, reliable JSON judging, and it caught a subtle empty-slice panic in a bug-find. **Free, quota-free**; its only real constraint is **slower token generation**, which **parallel decomposition hides** (N independent slices → wall-clock ≈ one slice). So gemma is the **default workhorse for background fan-out**, not merely the floor (see *Local tier — GPU budget* below). Reserve fast cloud models for the **latency-sensitive conversational seat** (shadow ↔ operator).
 - **Gemini:** mostly a **provider-diversity** play — a separate (Google) quota pool → more failover headroom per tier. Family spans Tier 1–2/3; the operator's small sub is ~Flash tier.
 - **claude vs gpt at Tier 1:** equal capability; route by character — claude holds the conversation/orchestration, gpt does tool-heavy execution (and tools are scoped around conversations).
 
-> **To validate:** gemma's true tier (capability test — the immediate next step), and the Gemini family's exact slotting.
+> **Validated (2026-06-07):** gemma-12B = solid Tier-2 (profile above + GPU-budget below). **Still to validate:** the Gemini family's exact slotting.
+
+### Local tier — GPU budget & elasticity (dMon, measured 2026-06-07)
+The local tier runs on dMon's **discrete RTX 5090 (24 GB)**. dMon has two GPUs — the discrete card and an **integrated (CPU-based) GPU** that drives the display — so the discrete's full 24 GB is compute/render, with no desktop overhead. Measured footprint:
+
+- **gemma-12B (QAT q4):** **2 parallel × 128k context ≈ 10.6 GB** loaded (model 7.2 + ~3.4 GB KV). Gemma's **sliding-window attention** keeps long-context KV modest (~1.4 GB per 128k slot), so a generous real-work context is affordable. 2×128k was chosen for fewer threads + bigger context; 4×256k was rejected (left only ~1.6 GB free).
+- **voxcpm (voice):** ~6.4 GB, single (one wav per request); a per-request VRAM leak (crept to ~16 GB/day) was fixed (`inference_mode` + `empty_cache`).
+- **Headroom:** **~7.2 GB free** on the discrete for Unity rendering — dMon is a dev machine first.
+
+**Elasticity is the key property:** gemma's keep-alive unloads it after ~5 min idle, returning its ~10.6 GB — so the local tier **yields to Unity** when the operator is rendering, and **reclaims the GPU for parallel dispatch** when it's idle. The "parallel local slices" claim above and the "gemma = always-available floor" below both rest on this measured budget: 2 concurrent 128k slices, free and quota-free, deferring to interactive work.
 
 ### 4. Route-around hierarchy (rate-limit resilience)
 A 429 / quota-exhaustion is a **routing signal, not a failure**. Because within-tier models are ~equivalent, the preference order is:
@@ -89,7 +98,7 @@ The same decomposition step buys: **(a) lower cost** (slices run on cheaper tier
 - **The Claude Workflow tool** is the in-process reference for the decomposition primitives (parallel / pipeline / nested) — and a **bootstrap**: shadow can orchestrate via in-process workflows now while the network-native version is built.
 
 ## Open questions / to validate
-- **gemma's true tier** — empirical capability test (immediate next step; it's why we run it locally).
+- **gemma's true tier** — ✅ validated 2026-06-07: solid Tier-2 (see §3 + *Local tier — GPU budget*).
 - **Gemini family slotting** — measure.
 - **Judge estimate-uncertainty** — the adaptive-escalation policy + how aggressively to decompose by default.
 - **Representation** — deliberately deferred. The requirement is a recreatable *trace*, not a live UI; how (and whether) the tree surfaces in threads/feed is a later, lower-priority call.
