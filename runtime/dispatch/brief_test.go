@@ -67,6 +67,68 @@ func TestParseBrief_DispatchCommand(t *testing.T) {
 	}
 }
 
+func TestParseBrief_DispatchDirectives(t *testing.T) {
+	t.Run("repo + ticket + branch directives", func(t *testing.T) {
+		b, err := ParseBrief([]byte("!dispatch anvil%codex-cli repo=CarriedWorldUniverse/nexus ticket=NEX-510 branch=feat/x implement the thing"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Agent != "anvil" || b.Provider != "codex-cli" {
+			t.Fatalf("agent/provider = %q/%q", b.Agent, b.Provider)
+		}
+		if b.Repo != "CarriedWorldUniverse/nexus" {
+			t.Errorf("repo = %q", b.Repo)
+		}
+		if b.Ticket != "NEX-510" {
+			t.Errorf("ticket = %q, want NEX-510 (explicit, not hash)", b.Ticket)
+		}
+		if b.Branch != "feat/x" {
+			t.Errorf("branch = %q", b.Branch)
+		}
+		if b.Task != "implement the thing" {
+			t.Errorf("task = %q", b.Task)
+		}
+		if b.Thread != "NEX-510" {
+			t.Errorf("thread = %q, want = ticket", b.Thread)
+		}
+	})
+
+	t.Run("no directives stays backward-compatible (hash ticket, empty repo)", func(t *testing.T) {
+		b, err := ParseBrief([]byte("!dispatch anvil fix the bug"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Repo != "" || b.Branch != "" {
+			t.Errorf("repo/branch should be empty: %+v", b)
+		}
+		if b.Task != "fix the bug" {
+			t.Errorf("task = %q", b.Task)
+		}
+		if b.Ticket == "" || b.Ticket != b.Thread {
+			t.Errorf("expected generated hash ticket = thread: %+v", b)
+		}
+	})
+
+	t.Run("unknown key=value is task text, not consumed", func(t *testing.T) {
+		b, err := ParseBrief([]byte("!dispatch anvil repo=org/r set the flag x=1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Repo != "org/r" {
+			t.Errorf("repo = %q", b.Repo)
+		}
+		if b.Task != "set the flag x=1" {
+			t.Errorf("task = %q, want the x=1 preserved in task", b.Task)
+		}
+	})
+
+	t.Run("directives but no task is an error", func(t *testing.T) {
+		if _, err := ParseBrief([]byte("!dispatch anvil repo=org/r ticket=NEX-1")); err == nil {
+			t.Fatal("expected error when only directives and no task")
+		}
+	})
+}
+
 func TestParseBrief_MissingAgent(t *testing.T) {
 	if _, err := ParseBrief([]byte("```json\n{\"ticket\":\"NEX-1\"}\n```\nx")); err == nil {
 		t.Fatal("expected error when agent missing")
