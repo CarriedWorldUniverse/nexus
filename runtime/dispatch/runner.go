@@ -5,15 +5,43 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"strconv"
 	"sync"
 
 	batchv1 "k8s.io/api/batch/v1"
 )
 
+var execCommandContext = exec.CommandContext
+
 // ErrPoolExhausted is returned by Submit when all pool slots are in use
 // and the concurrency cap is reached. Callers should queue and retry.
 var ErrPoolExhausted = errors.New("dispatch: all builder pool slots in use")
+
+// Poster sends a status line to a comms thread.
+type Poster interface {
+	Post(thread, text string) error
+}
+
+// ChatSender is the wsasp send-chat shape used by NewWsPoster.
+type ChatSender interface {
+	SendChat(ctx context.Context, content string, replyTo int64, topic string) (int64, error)
+}
+
+type wsPoster struct {
+	ctx    context.Context
+	sender ChatSender
+}
+
+// NewWsPoster creates a Poster that sends messages to a thread via ChatSender.
+func NewWsPoster(ctx context.Context, sender ChatSender) Poster {
+	return wsPoster{ctx: ctx, sender: sender}
+}
+
+func (p wsPoster) Post(thread, text string) error {
+	_, err := p.sender.SendChat(p.ctx, text, 0, thread)
+	return err
+}
 
 // K8sIface is the subset of K8s used by Runner, extracted for testing.
 type K8sIface interface {
