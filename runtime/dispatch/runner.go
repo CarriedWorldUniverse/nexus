@@ -107,14 +107,25 @@ func (r *Runner) Init(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for ticket, aj := range active {
-		// Recover: map ticket back to a placeholder Run.
+		// Recover: map ticket back to a placeholder Run and re-mark its
+		// pool slot in use so a new dispatch can't be handed the same
+		// builder identity while the recovered Job is still running.
+		slot := aj.Slot
+		if slot == "" {
+			// Pre-pool-slot Job (or unlabelled): fall back to the agent
+			// name, which is what older jobs used as the keyfile aspect.
+			slot = aj.Agent
+		}
 		run := &Run{
 			ID:       "recovered-" + ticket,
-			Brief:    Brief{Ticket: ticket, Agent: aj.Agent},
+			Brief:    Brief{Ticket: ticket, Agent: aj.Agent, PoolSlot: slot},
 			JobName:  aj.Name,
-			PoolSlot: aj.Agent,
+			PoolSlot: slot,
 		}
 		r.active[run.ID] = run
+		if slot != "" {
+			r.poolInUse[slot] = run.ID
+		}
 	}
 	return nil
 }
@@ -127,30 +138,78 @@ func (r *Runner) WatchLoop(ctx context.Context) error {
 // Submit provisions and launches a dispatch run. Returns a RunID.
 // Returns ErrPoolExhausted if all slots are occupied; the brief is queued
 // and will be spawned when a slot becomes free.
+//
+// The runner mutex guards only in-memory bookkeeping (slot reservation +
+// maps). The slow path — provisioning (cw exec), CreateJob (k8s API), and
+// status posts (WS send) — runs OUTSIDE the lock so concurrent dispatches
+// and job-completion callbacks don't serialize behind one run's I/O.
 func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
-	// Idempotency: if a run for this ticket is already active, return its ID.
+	// Idempotency: a run for this ticket already active → return its ID.
 	for _, run := range r.active {
 		if run.Brief.Ticket == b.Ticket {
-			return run.ID, nil
+			id := run.ID
+			r.mu.Unlock()
+			return id, nil
+		}
+	}
+	// Idempotency: a brief for this ticket already queued (slots were full
+	// on a prior submit) → no-op rather than enqueue a duplicate that would
+	// double-spawn when a slot frees.
+	for _, q := range r.queue {
+		if q.Ticket == b.Ticket {
+			r.mu.Unlock()
+			return "", nil
 		}
 	}
 
+	var ackMsg string
 	if !r.acked[b.Ticket] {
 		r.acked[b.Ticket] = true
-		r.post(b.Thread, "dispatch accepted for "+b.Agent+" on "+b.Ticket)
+		ackMsg = "dispatch accepted for " + b.Agent + " on " + b.Ticket
 	}
 
 	slot := r.pickFreeSlot()
 	if slot == "" {
 		r.queue = append(r.queue, b)
-		r.post(b.Thread, "dispatch queued (all "+strconv.Itoa(len(r.Pool))+" builder slots in use)")
+		thread := b.Thread
+		poolLen := len(r.Pool)
+		r.mu.Unlock()
+		if ackMsg != "" {
+			r.post(thread, ackMsg)
+		}
+		r.post(thread, "dispatch queued (all "+strconv.Itoa(poolLen)+" builder slots in use)")
 		return "", ErrPoolExhausted
 	}
 
-	return r.spawn(ctx, b, slot)
+	run := r.reserve(b, slot)
+	r.mu.Unlock()
+
+	if ackMsg != "" {
+		r.post(run.Brief.Thread, ackMsg)
+	}
+	if err := r.launch(ctx, run); err != nil {
+		r.mu.Lock()
+		delete(r.active, run.ID)
+		delete(r.poolInUse, run.PoolSlot)
+		r.mu.Unlock()
+		r.post(run.Brief.Thread, "dispatch failed: "+err.Error())
+		return "", err
+	}
+	return run.ID, nil
+}
+
+// reserve assigns brief b to slot: stamps RunID/PoolSlot, creates the run
+// placeholder, and marks the slot in use. Caller holds r.mu.
+func (r *Runner) reserve(b Brief, slot string) *Run {
+	runID := r.nextID()
+	b.RunID = runID
+	b.PoolSlot = slot
+	run := &Run{ID: runID, ParentID: b.ParentRunID, Brief: b, PoolSlot: slot}
+	r.active[runID] = run
+	r.poolInUse[slot] = runID
+	return run
 }
 
 // SlotFree reports whether the named pool slot is available. Used in tests.
@@ -161,10 +220,11 @@ func (r *Runner) SlotFree(slot string) bool {
 	return !inUse
 }
 
-// OnJobDone releases the pool slot for the completed ticket and drains the queue.
+// OnJobDone releases the pool slot for the completed ticket and drains the
+// queue onto the freed slot. Slot release + queue reservation happen under
+// the lock; status posts and the slow launch of any drained run run outside.
 func (r *Runner) OnJobDone(ticket, thread string, ok bool) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	// Find and release the run for this ticket.
 	var doneID string
@@ -175,11 +235,15 @@ func (r *Runner) OnJobDone(ticket, thread string, ok bool) {
 		}
 	}
 	if doneID == "" {
+		r.mu.Unlock()
 		return
 	}
 	run := r.active[doneID]
 	delete(r.active, doneID)
 	delete(r.poolInUse, run.PoolSlot)
+	delete(r.acked, ticket)
+	pending := r.reserveQueued()
+	r.mu.Unlock()
 
 	if ok {
 		r.post(thread, "builder completed: "+ticket)
@@ -187,7 +251,7 @@ func (r *Runner) OnJobDone(ticket, thread string, ok bool) {
 		r.post(thread, "builder FAILED: "+ticket+" — see Job logs; re-dispatch to retry")
 	}
 
-	r.drainQueue(r.ctx)
+	r.launchPending(r.ctx, pending)
 }
 
 func (r *Runner) nextID() string {
@@ -207,27 +271,61 @@ func (r *Runner) pickFreeSlot() string {
 	return ""
 }
 
-// spawn provisions and creates the Job. Caller holds r.mu.
-func (r *Runner) spawn(ctx context.Context, b Brief, slot string) (string, error) {
-	runID := r.nextID()
-	taskID := runID
-	b.RunID = runID
-	b.PoolSlot = slot
+// reserveQueued assigns queued briefs to free slots, reserving each slot and
+// creating its run placeholder. Caller holds r.mu. Returns the reserved runs
+// for the caller to launch outside the lock via launchPending.
+func (r *Runner) reserveQueued() []*Run {
+	var runs []*Run
+	for len(r.queue) > 0 {
+		slot := r.pickFreeSlot()
+		if slot == "" {
+			break
+		}
+		b := r.queue[0]
+		r.queue = r.queue[1:]
+		runs = append(runs, r.reserve(b, slot))
+	}
+	return runs
+}
 
-	if r.K8sIface != nil {
-		if err := provisionRun(ctx, r.K8sIface, r.Cfg, b, taskID); err != nil {
-			return "", err
+// launchPending launches reserved runs outside the lock. On launch error the
+// run's reservation is rolled back and its brief re-enqueued at the front, so
+// a transient K8s failure does not silently discard queued work; draining
+// stops at the first failure and retries on the next slot-free.
+func (r *Runner) launchPending(ctx context.Context, runs []*Run) {
+	for _, run := range runs {
+		if err := r.launch(ctx, run); err != nil {
+			r.mu.Lock()
+			delete(r.active, run.ID)
+			delete(r.poolInUse, run.PoolSlot)
+			r.queue = append([]Brief{run.Brief}, r.queue...)
+			r.mu.Unlock()
+			r.post(run.Brief.Thread, "dispatch spawn failed, will retry on next slot free: "+err.Error())
+			return
 		}
 	}
-	provider := b.Provider
+}
+
+// launch provisions and creates the Job for an already-reserved run. Runs
+// OUTSIDE r.mu: provisionRun execs the cw CLI and CreateJob hits the k8s API,
+// neither of which should block other dispatches. Sets run.JobName under the
+// lock once known.
+func (r *Runner) launch(ctx context.Context, run *Run) error {
+	taskID := run.ID
+	if r.K8sIface != nil {
+		if err := provisionRun(ctx, r.K8sIface, r.Cfg, run.Brief, taskID); err != nil {
+			return err
+		}
+	}
+	provider := run.Brief.Provider
 	if provider == "" {
 		provider = "claude"
 	}
-	job := BuildJob(b, r.Cfg, taskID, provider)
+	job := BuildJob(run.Brief, r.Cfg, taskID, provider)
 	if r.K8sIface != nil {
 		created, err := r.K8sIface.CreateJob(ctx, job)
 		if err != nil {
-			return "", fmt.Errorf("runner: create job: %w", err)
+			return fmt.Errorf("runner: create job: %w", err)
 		}
 		if err := r.K8sIface.SetBriefOwner(ctx, taskID, created); err != nil {
 			slog.Warn("runner: brief will not auto-GC", "task", taskID, "err", err)
@@ -235,30 +333,11 @@ func (r *Runner) spawn(ctx context.Context, b Brief, slot string) (string, error
 		job = created
 	}
 
-	run := &Run{ID: runID, ParentID: b.ParentRunID, Brief: b, JobName: job.Name, PoolSlot: slot}
-	r.active[runID] = run
-	r.poolInUse[slot] = runID
-	r.post(b.Thread, "builder spawned as "+slot+" ("+job.Name+")")
-	return runID, nil
-}
-
-// drainQueue spawns queued briefs when slots free up. Caller holds r.mu.
-// On spawn error the brief is re-enqueued at the front and draining stops
-// so a transient K8s failure does not silently discard work.
-func (r *Runner) drainQueue(ctx context.Context) {
-	for len(r.queue) > 0 {
-		slot := r.pickFreeSlot()
-		if slot == "" {
-			return
-		}
-		next := r.queue[0]
-		r.queue = r.queue[1:]
-		if _, err := r.spawn(ctx, next, slot); err != nil {
-			r.post(next.Thread, "dispatch spawn failed, will retry on next slot free: "+err.Error())
-			r.queue = append([]Brief{next}, r.queue...)
-			return
-		}
-	}
+	r.mu.Lock()
+	run.JobName = job.Name
+	r.mu.Unlock()
+	r.post(run.Brief.Thread, "builder spawned as "+run.PoolSlot+" ("+job.Name+")")
+	return nil
 }
 
 func (r *Runner) post(thread, text string) {

@@ -19,5 +19,11 @@ func (b *Broker) submitDispatch(ctx context.Context, from, content string) error
 		return fmt.Errorf("broker: bad dispatch brief: %w", err)
 	}
 	_, err = b.runner.Submit(ctx, brief)
+	// ErrPoolExhausted is not a failure: the brief was accepted and queued,
+	// and the runner posts a "dispatch queued" status to the thread. Treat
+	// it as success so it isn't logged as a submit failure.
+	if errors.Is(err, dispatch.ErrPoolExhausted) {
+		return nil
+	}
 	return err
 }

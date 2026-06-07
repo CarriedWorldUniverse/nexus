@@ -54,15 +54,20 @@ func (k *K8s) SetBriefOwner(ctx context.Context, taskID string, job *batchv1.Job
 	return err
 }
 
-// ActiveJob is a live builder Job re-adopted on controller start.
+// ActiveJob is a live builder Job re-adopted on runner start.
 type ActiveJob struct {
 	Name  string
 	Agent string
+	// Slot is the builder-pool slot (nexus.dispatch/pool-slot) the Job
+	// occupies. The Runner re-marks this slot in use on recovery so a
+	// restarted broker doesn't double-assign a builder identity. Empty
+	// for pre-pool-slot Jobs; the Runner falls back to Agent.
+	Slot string
 }
 
-// ListActiveJobs returns ticket -> live builder Job (name + agent) for
-// non-finished builder Jobs. The agent is needed to rebuild per-agent
-// serialization state across a controller restart (NEX-464).
+// ListActiveJobs returns ticket -> live builder Job for non-finished builder
+// Jobs. Name + Slot let the Runner re-adopt the pool slot across a restart
+// so recovered Jobs' slots aren't re-handed to new dispatches.
 func (k *K8s) ListActiveJobs(ctx context.Context) (map[string]ActiveJob, error) {
 	jl, err := k.Client.BatchV1().Jobs(k.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "app=nexus-builder"})
 	if err != nil {
@@ -75,7 +80,11 @@ func (k *K8s) ListActiveJobs(ctx context.Context) (map[string]ActiveJob, error) 
 			continue
 		}
 		if ticket := j.Labels["nexus.dispatch/ticket"]; ticket != "" {
-			out[ticket] = ActiveJob{Name: j.Name, Agent: j.Labels["nexus.dispatch/agent"]}
+			out[ticket] = ActiveJob{
+				Name:  j.Name,
+				Agent: j.Labels["nexus.dispatch/agent"],
+				Slot:  j.Labels["nexus.dispatch/pool-slot"],
+			}
 		}
 	}
 	return out, nil
