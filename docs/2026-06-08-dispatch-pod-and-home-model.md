@@ -20,11 +20,14 @@ This is the **memory/continuity layer** — what makes a dispatched agent a real
 - **Run:** the agent reads/writes its home normally.
 - **Clean despawn:** commit the tracked changes → merge `run-<id>` into `main` (in the bare repo) → `git worktree remove`. The PVC gains one merge of committed history; the working files evaporate with the pod.
 
-**Working repos live on a separate volume, not in the home.** The agent's repo clones / working space mount at `~/repos` (or `~/src`) on a **separate volume** from the home — physically decoupling the durable, versioned home (memory/config) from large, recreatable clones. That volume is tunable on its own:
-- **ephemeral** (`emptyDir`) — fresh clone per run; simplest, self-cleaning; or
-- **persistent cache** (PVC) — clones persist so spawns `git pull` instead of full-cloning (fast), at the cost of occasional GC and per-run isolation when concurrent (a clone worktree per run, mirroring the home model).
+**Working repos: one shared volume — bare mirrors + per-run worktrees.** Repos live on a single **shared** volume (RWX) mounted at `~/src` (or `~/repos`) for *all* agents — so there's **one copy of each repo**, stored bare as a local mirror, with each run taking a worktree off it:
+```
+~/src/nexus/.git                 ← shared bare mirror (the one copy), updated by fetch
+~/src/nexus/<agent>-<runid>      ← per-run worktree off it (e.g. shadow-builder)
+```
+A run works in its worktree, pushes its branch to the real remote (**GitHub** — canonical) and opens the PR, then the worktree is removed (`git worktree prune` on spawn sweeps crash residue). Benefits: a **single disk copy** shared by every agent instead of N full clones of a big repo, cheap/fast worktree creation, and a shared fetch cache. Concurrency is natural — many worktrees off one mirror; git ref-locking serialises the fetch/worktree ops.
 
-The home repo additionally **`.gitignore`s** the repos path + caches/build-artifacts as defense-in-depth, so nothing recreatable ever lands in the versioned home even if something writes there. Net: **home = memory/config (small, durable, versioned); repos = working space (separate, recreatable, fast).** Start ephemeral; add the persistent git-cache as an optimization.
+Key distinction from the home: the **repos** bare repo is a **cache/mirror** (the GitHub remote is canonical — work pushes there), whereas the **home** bare repo **is** canonical (merge to its local `main`). The home additionally `.gitignore`s `~/src` + caches as defense-in-depth, so nothing recreatable lands in the versioned home. Net: **home = memory/config (per-agent, canonical, versioned); repos = working code (shared mirror, GitHub-canonical, fast).**
 
 **Why this model:**
 - **Versioned, auditable memory** — every run's home changes are commits; you can diff how an agent's memory evolved and revert a bad memory.
@@ -48,6 +51,6 @@ The funnel already does *ad-hoc* versions (the judge, the rewriter, observabilit
 ## Implementation deltas (→ tickets, under NEX-491)
 
 1. **NEX-493 → role-generic `pod_image`** (label → role → image; default dev-builder; specialists override). *(refine)*
-2. **Per-agent home = bare-repo worktree-merge store** — PVC bare repo per agent; pod entrypoint does prune+worktree-add (spawn) and commit+merge+remove (despawn); `EnsureHomeRepo(agent)` alongside the keyfile-secret ensure. Plus a **separate repos volume** at `~/repos`/`~/src` (ephemeral, or persistent git-cache) for working clones; home `.gitignore`s recreatable paths as defense. *(new)*
+2. **Per-agent home = bare-repo worktree-merge store** — PVC bare repo per agent; pod entrypoint does prune+worktree-add (spawn) and commit+merge+remove (despawn); `EnsureHomeRepo(agent)` alongside the keyfile-secret ensure. Plus a **shared repos volume** at `~/src` — one bare mirror per repo (`~/src/<repo>/.git`) shared by all agents, per-run worktrees (`~/src/<repo>/<agent>-<runid>`) pushing to GitHub (canonical); home `.gitignore`s `~/src`+caches as defense. *(new)*
 3. **Funnel hook system** — generic hooks on the headless CLI (memory / tool-use / lifecycle), generalising the judge+rewriter+observability. *(new)*
 4. **Hooks survey** — CC + Gemini CLI hooks → funnel recommendation. *(research, feeds #3)*
