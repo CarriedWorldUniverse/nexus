@@ -17,6 +17,7 @@
 // shipped here to keep the slice tight.
 
 const { html, useState, useEffect } = window.__preact;
+import { getDispatchEnabled, setDispatchEnabled } from '../api.js';
 import { getModelConfig, setModelConfig, listCredentials, getNetworkDefaults, listAllAspects } from '../api/admin.js';
 
 const KINDS = [
@@ -64,6 +65,12 @@ function summarizeKind(kind, override, rosterRow, networkDefaults) {
 
 function SourceBadge({ source }) {
   return html`<span class=${'settings-source settings-source-' + source}>${source}</span>`;
+}
+
+function focusedAgent() {
+  const hash = window.location.hash;
+  const m = hash.match(/^#\/configure\/aspects\/([^/?#]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
 }
 
 function KindRow({ aspect, kind, vm, credentials, onSave, onClear, busy }) {
@@ -157,9 +164,24 @@ function KindRow({ aspect, kind, vm, credentials, onSave, onClear, busy }) {
   `;
 }
 
-function AspectCard({ aspect, override, rosterRow, credentials, networkDefaults, onSaved }) {
+function AspectCard({ aspect, override, rosterRow, credentials, networkDefaults, onSaved, focused }) {
   const [busy, setBusy] = useState(false);
+  const [dispatchBusy, setDispatchBusy] = useState(false);
+  const [dispatchEnabled, setDispatchEnabledState] = useState(
+    rosterRow && rosterRow.dispatch_enabled === false ? false : true,
+  );
   const [needsReload, setNeedsReload] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getDispatchEnabled(aspect).then(
+      (d) => {
+        if (!cancelled) setDispatchEnabledState(!!(d && d.enabled));
+      },
+      () => {},
+    );
+    return () => { cancelled = true; };
+  }, [aspect]);
 
   function buildPayloadForKind(kind, { model, credential }) {
     // Each kind has two columns. Provide both fields so empty-string
@@ -192,13 +214,30 @@ function AspectCard({ aspect, override, rosterRow, credentials, networkDefaults,
     }
   }
 
+  async function toggleDispatch() {
+    const next = !dispatchEnabled;
+    setDispatchEnabledState(next);
+    setDispatchBusy(true);
+    try {
+      await setDispatchEnabled(aspect, next);
+    } catch (_) {
+      setDispatchEnabledState(!next);
+    } finally {
+      setDispatchBusy(false);
+    }
+  }
+
   return html`
-    <div class="settings-aspect-card">
+    <div class=${'settings-aspect-card' + (focused ? ' settings-aspect-focused' : '')} data-aspect=${aspect}>
       <div class="settings-aspect-header">
         <span class="settings-aspect-name">${aspect}</span>
         ${rosterRow && rosterRow.provider && html`<span class="settings-aspect-meta">provider: ${rosterRow.provider}</span>`}
         ${rosterRow && rosterRow.live === false && html`<span class="settings-aspect-offline">offline</span>`}
         ${rosterRow && rosterRow.status === 'retired' && html`<span class="settings-aspect-retired">retired</span>`}
+        <label class="settings-dispatch">
+          <input type="checkbox" checked=${dispatchEnabled} onChange=${toggleDispatch} disabled=${dispatchBusy} />
+          Dispatchable
+        </label>
         ${needsReload && html`<span class="settings-reload-banner">Saved. Restart ${aspect} to apply.</span>`}
       </div>
       ${KINDS.map((k) => html`
@@ -227,6 +266,7 @@ export function SettingsAspects() {
   const [overrides, setOverrides] = useState({});
   const [credentials, setCredentials] = useState([]);
   const [networkDefaults, setNetworkDefaults] = useState(null);
+  const [focus, setFocus] = useState(focusedAgent());
 
   async function loadAll() {
     setLoading(true);
@@ -272,6 +312,21 @@ export function SettingsAspects() {
 
   useEffect(() => { loadAll(); }, []);
 
+  useEffect(() => {
+    function onHash() { setFocus(focusedAgent()); }
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  useEffect(() => {
+    if (loading || !focus) return;
+    requestAnimationFrame(() => {
+      const row = Array.from(document.querySelectorAll('.settings-aspect-card'))
+        .find((el) => el.dataset && el.dataset.aspect === focus);
+      if (row) row.scrollIntoView({ block: 'center' });
+    });
+  }, [loading, focus, aspects.length]);
+
   function onSaved(name, fresh) {
     setOverrides((prev) => ({ ...prev, [name]: fresh }));
   }
@@ -308,6 +363,7 @@ export function SettingsAspects() {
             credentials=${credentials}
             networkDefaults=${networkDefaults}
             onSaved=${onSaved}
+            focused=${focus === name}
           />
         `;
       })}
