@@ -62,19 +62,46 @@ func main() {
 	}
 	defer closeLog()
 
-	auth, err := resolveAuth(*keyfilePath, *opToken, *opTokenFile, *nexusURL, *insecureSkip, log)
-	if err != nil {
-		log.Error("auth setup failed", "err", err)
-		os.Exit(2)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Startup auth retry: if the broker is down when the MCP launches (a
+	// session started during a broker restart/blip), don't exit. The runtime
+	// path already reconnects indefinitely (NEX-237 + wsclient backoff), so
+	// startup should be just as resilient — otherwise a momentary broker
+	// outage at session start drops nexus-comms entirely and needs a manual
+	// /mcp. Retry the validate handshake with exponential backoff, bounded so
+	// a genuinely bad keyfile surfaces as a failure rather than hanging
+	// "connecting" forever.
+	var auth *authInfo
+	backoff := 1 * time.Second
+	for attempt := 1; ; attempt++ {
+		var aerr error
+		auth, aerr = resolveAuth(*keyfilePath, *opToken, *opTokenFile, *nexusURL, *insecureSkip, log)
+		if aerr == nil {
+			break
+		}
+		if attempt >= 10 {
+			log.Error("auth setup failed after retries; giving up", "err", aerr, "attempts", attempt)
+			os.Exit(2)
+		}
+		log.Warn("auth setup failed; retrying (broker may be down at startup)",
+			"err", aerr, "attempt", attempt, "delay", backoff)
+		select {
+		case <-ctx.Done():
+			log.Error("auth setup interrupted before success", "err", aerr)
+			os.Exit(2)
+		case <-time.After(backoff):
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
 	}
 
 	log.Info("nexus-comms-mcp starting",
 		"aspect", auth.aspect,
 		"nexus_url", auth.wsURL,
 		"jwt_expires_at", auth.expiresAt.Format(time.RFC3339))
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// Inbox buffer captures every chat.deliver pushed by the broker.
 	// Sized for "the operator typing fast for a few minutes" with

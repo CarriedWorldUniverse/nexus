@@ -393,6 +393,20 @@ func main() {
 				log.Warn("agentfunnel: failed to export "+k+" for builder git author", "err", err)
 			}
 		}
+		// Bridge the external git/gh tooling into our auth ecosystem. The gh
+		// CLI is unauthenticated in the worker image, so PR verification and
+		// creation would fail; `cw setup-git github` wires gh auth + the git
+		// identity from the brokered credential. Runs here — after CW_TOKEN is
+		// exported — because cw needs it to reach the custodian seam. git
+		// clone/push already work via the pre-wired credential helper, so a
+		// failure here is logged loudly but is non-fatal (the PR-verify already
+		// tolerates a not-yet-open PR); it must never run silently.
+		if out, err := exec.CommandContext(ctx, "cw", "setup-git", "github").CombinedOutput(); err != nil {
+			log.Error("agentfunnel: cw setup-git github failed — gh not bridged; PR ops may fail",
+				"err", err, "out", strings.TrimSpace(string(out)))
+		} else {
+			log.Info("agentfunnel: cw setup-git github ok — gh/git bridged for builder")
+		}
 	}
 	commsRunner := funnel.CommsRunner{
 		Gateway:    gateway,
