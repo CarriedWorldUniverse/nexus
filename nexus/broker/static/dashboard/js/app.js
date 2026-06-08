@@ -24,7 +24,12 @@ function getRoute() {
   }
   if (hash.startsWith('#/converse')) return 'converse';
   if (hash.startsWith('#/watch')) return 'watch';
-  if (hash.startsWith('#/configure') || hash.startsWith('#/settings')) return 'configure';
+  if (hash.startsWith('#/settings')) {
+    const target = '#/configure' + hash.slice('#/settings'.length);
+    if (window.location.hash !== target) window.location.hash = target;
+    return 'configure';
+  }
+  if (hash.startsWith('#/configure')) return 'configure';
   if (hash.startsWith('#/agents')) return 'agents';
   if (hash === '#/' || hash === '') return 'watch';
   if (hash === '#/files') return 'files';
