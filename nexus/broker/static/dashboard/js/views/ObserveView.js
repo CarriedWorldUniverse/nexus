@@ -9,14 +9,10 @@
 // wired so Phase E/F drops in without view changes).
 //
 // WHY direct comms.send + onPushKind instead of comms.subscribe:
-// the existing subscribe() helper keys handlers by push-kind only,
-// not by (kind+params). Calling subscribe('subscribe.observe',
-// {aspect:'plumb'}) then subscribe('subscribe.observe',
-// {aspect:'keel'}) would emit only one subscribe frame and route
-// every observe.frame push to both handlers. The lower-level
-// primitives let us own subscribe/unsubscribe lifecycle per-aspect.
-// TODO(comms): extend comms.subscribe to support per-param
-// multi-subscription so views like this can use it normally.
+// this view predates the parameter-aware subscribe helper and owns a
+// slightly custom lifecycle: clear local frames before subscribe, rely
+// on tail replay order, then send an explicit unsubscribe for the old
+// aspect. New focused consumers can use comms.subscribe normally.
 //
 // History: the broker's Observability Hub keeps a per-aspect ring
 // buffer and replays it on every subscribe. We hold a small
