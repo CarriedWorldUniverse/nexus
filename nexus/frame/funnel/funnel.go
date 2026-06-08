@@ -44,6 +44,7 @@ import (
 
 	"github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	funnelhooks "github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/hooks"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/route"
 	"github.com/google/uuid"
 )
@@ -325,9 +326,15 @@ type Config struct {
 	// AutoRecall, when Enabled with a non-nil Gateway, searches the
 	// Commonplace (cross-session knowledge store) with each turn's incoming
 	// message and injects the strongest matches into the system prompt — so
-	// aspects reuse prior knowledge instead of re-deriving it (the Day-3
-	// cost/output lever). Fail-open + bounded; see commonplace.go.
+	// aspects reuse prior knowledge instead of re-deriving it. New funnels
+	// route this through Hooks as the built-in read-memory handler, preserving
+	// the same fail-open + bounded behavior; see commonplace.go.
 	AutoRecall AutoRecallConfig
+
+	// Hooks receives funnel lifecycle events (SessionStart, UserPromptSubmit,
+	// Stop). nil = New installs an empty engine, plus built-in memory hooks
+	// when their Commonplace prerequisites are configured.
+	Hooks *funnelhooks.HookEngine
 
 	// ChatGateway is the chat-posting seam used by the default
 	// NexusChatReturnHandler to auto-post the model's natural reply at
@@ -708,6 +715,10 @@ func New(cfg Config) (*Funnel, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	if cfg.Hooks == nil {
+		cfg.Hooks = funnelhooks.New()
+	}
+	registerBuiltInMemoryHooks(cfg.Hooks, cfg)
 	// Default ReturnHandler wiring (NEX-82). Pre-split callers wired
 	// ChatGateway and the funnel internalised the 👀/auto-post calls;
 	// preserve that by building the default NexusChatReturnHandler
@@ -966,6 +977,11 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (result Del
 	if err != nil {
 		return DeliberateResult{}, err
 	}
+	if block := f.dispatchHooks(ctx, "SessionStart", st, map[string]any{
+		"message": userMessage,
+	}); block != "" {
+		st.hookAdditionalContext = append(st.hookAdditionalContext, block)
+	}
 
 	// NEX-365 Tier-1 loop damping: if this aspect is in a degenerate echo
 	// (K consecutive unproductive turns) and the trigger is NOT the
@@ -1166,7 +1182,8 @@ type deliberateState struct {
 	// so the whole Deliberate sees one coherent triple even if a
 	// config.refresh lands while a turn is in flight (the new binding
 	// applies on the NEXT turn).
-	binding Binding
+	binding               Binding
+	hookAdditionalContext []string
 }
 
 // popHeadForTurn pops the next inbox head (FIFO), builds the trigger
@@ -1347,13 +1364,17 @@ func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, user
 	if binding.Provider == bridle.ProviderClaudeCode {
 		systemPrompt = appendToolkitBlurb(systemPrompt)
 	}
-	// Auto-recall (Commonplace): pull prior knowledge relevant to this
-	// turn's incoming message into the system prompt so the aspect reuses it
-	// instead of re-deriving. Recall on the clean userMessage BEFORE the
-	// triage contract is appended below. Safe-framed (RenderRecalledKnowledge)
-	// + fail-open; no-op unless AutoRecall is configured + enabled.
-	if block := f.recallForTurn(ctx, userMessage); block != "" {
-		systemPrompt = systemPrompt + "\n\n" + block
+	// Pre-turn hooks run on the clean userMessage BEFORE the triage contract
+	// is appended below. The built-in read-memory hook preserves the previous
+	// auto-recall behavior: safe-framed (RenderRecalledKnowledge) + fail-open;
+	// no-op unless AutoRecall is configured + enabled.
+	if block := f.dispatchHooks(ctx, "UserPromptSubmit", st, map[string]any{
+		"message": userMessage,
+	}); block != "" {
+		st.hookAdditionalContext = append(st.hookAdditionalContext, block)
+	}
+	if len(st.hookAdditionalContext) > 0 {
+		systemPrompt = systemPrompt + "\n\n" + strings.Join(st.hookAdditionalContext, "\n\n")
 	}
 	providerEnv, err := f.resolveProviderEnv(ctx, "main")
 	if err != nil {
@@ -1710,6 +1731,14 @@ func (f *Funnel) dispatchReturn(ctx context.Context, st *deliberateState, result
 	// Deliberate's caller already has the result; return-side failures
 	// are observability concerns.
 	deliberate := DeliberateResult{TurnResult: result, Filter: decision}
+	f.dispatchHooks(ctx, "Stop", st, map[string]any{
+		"final_text":   result.FinalText,
+		"stop_reason":  string(result.StopReason),
+		"step_count":   result.StepCount,
+		"tool_names":   toolNamesFromInvocations(result.ToolCalls),
+		"filter_post":  decision.ShouldPost,
+		"filter_class": string(decision.Class),
+	})
 	if err := f.cfg.Return.Handle(ctx, deliberate, st.trigger); err != nil {
 		f.log.Debug("funnel: return handler Handle failed",
 			"aspect", f.cfg.AspectID,
