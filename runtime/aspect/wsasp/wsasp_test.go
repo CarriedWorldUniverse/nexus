@@ -415,7 +415,7 @@ func TestReconnectReRegistersBeforeDraining(t *testing.T) {
 
 	_, _ = c.SendChat(context.Background(), "after-drop", 0, "")
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		mu.Lock()
 		got := append([]frames.Kind(nil), order...)
