@@ -230,6 +230,15 @@ src/
 repos/
 work/
 
+# Per-run auth/credentials are not home memory (re-created each spawn by the
+# codex-auth init + cw setup-git; must never enter the versioned home).
+.codex/
+.config/
+.gitconfig
+.git-credentials
+.netrc
+.ssh/
+
 # Runtime noise.
 *.log
 *.tmp

@@ -64,6 +64,10 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		{Name: "CW_AGENT_HOME_REPO", Value: homeRepoMountPath},
 		{Name: "CW_AGENT_HOME_WORKDIR", Value: homeWorkMountPath},
 		{Name: "CW_SHARED_REPOS_DIR", Value: sharedReposMountPath},
+		// The codex-auth init container writes /root/.codex; the builder
+		// entrypoint moves HOME to the per-agent home worktree, so pin
+		// CODEX_HOME to the auth location, HOME-independent.
+		{Name: "CODEX_HOME", Value: "/root/.codex"},
 	}
 	if cfg.LynxAIBaseURL != "" {
 		env = append(env, corev1.EnvVar{Name: "LYNXAI_BASE_URL", Value: cfg.LynxAIBaseURL})
