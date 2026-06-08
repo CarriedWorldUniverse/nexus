@@ -31,6 +31,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
@@ -117,6 +118,10 @@ type Config struct {
 	// without triggering a fresh deliberation cycle. When nil, chat.read
 	// frames return an empty result with an error string.
 	ChatStore chat.Store
+
+	// RunsStore powers the persisted dispatch run spine. When configured,
+	// New migrates it and adapts it into dispatch.Runner.Recorder.
+	RunsStore runs.Store
 
 	// RecipientPolicy decides which aspects receive chat.deliver for
 	// each chat.send. When non-nil, HandleChatSend uses it to fan out
@@ -421,6 +426,13 @@ func New(cfg Config, r *roster.Roster) *Broker {
 		b.custodian = custodian.New(cfg.HeraldEdge)
 	}
 	b.runner = cfg.Runner
+	if cfg.RunsStore != nil {
+		if err := cfg.RunsStore.Migrate(context.Background()); err != nil {
+			b.log.Warn("runs store migration failed", "err", err)
+		} else if r, ok := cfg.Runner.(*dispatch.Runner); ok {
+			r.Recorder = newRunsAdapter(cfg.RunsStore, b.broadcastRunsUpdate)
+		}
+	}
 	return b
 }
 
