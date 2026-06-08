@@ -41,6 +41,23 @@ func TestRecipientPolicy_TopLevelPostWithoutMentionsHasNoRecipients(t *testing.T
 	}
 }
 
+func TestComputeRoutesDMByMention(t *testing.T) {
+	p := RecipientPolicy{
+		Aspects: func() []string { return []string{"anvil", "shadow", "operator"} },
+	}
+	// A Converse DM to anvil: composer auto-includes "@anvil".
+	got := p.Compute("operator", "@anvil please cancel the run", 0)
+	found := false
+	for _, r := range got {
+		if r == "anvil" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("DM @anvil did not route to anvil: %v", got)
+	}
+}
+
 func TestRecipientPolicy_ParentAuthorPlusMentions(t *testing.T) {
 	p := RecipientPolicy{
 		Parent:  func(msgID int64) (string, error) { return "anvil", nil },
