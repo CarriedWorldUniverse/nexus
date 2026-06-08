@@ -62,9 +62,9 @@ func TestWatchJobsDone(t *testing.T) {
 	defer cancel()
 	done := make(chan bool, 1)
 	go func() {
-		_ = k.WatchJobs(ctx, func(ticket, thread string, ok bool) {
-			if ticket == "NEX-1" && thread == "THREAD-1" {
-				done <- ok
+		_ = k.WatchJobs(ctx, func(jd JobDone) {
+			if jd.Ticket == "NEX-1" && jd.Thread == "THREAD-1" && jd.Agent == "anvil" {
+				done <- jd.OK
 			}
 		})
 	}()
@@ -74,6 +74,7 @@ func TestWatchJobsDone(t *testing.T) {
 			Labels: map[string]string{
 				"app":                   "nexus-builder",
 				"nexus.dispatch/ticket": "NEX-1",
+				"nexus.dispatch/agent":  "anvil",
 			},
 			Annotations: map[string]string{"nexus.dispatch/thread": "THREAD-1"},
 		},

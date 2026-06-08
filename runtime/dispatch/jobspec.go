@@ -13,6 +13,7 @@ type JobConfig struct {
 	BrokerHost    string
 	BriefTimeout  string
 	GitCredName   string
+	ActivityDir   string
 	LynxAIBaseURL string
 	LynxAIKey     string
 }

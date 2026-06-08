@@ -1,16 +1,32 @@
 package dispatch
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 	batchv1 "k8s.io/api/batch/v1"
 )
 
 var execCommandContext = exec.CommandContext
+
+var lookupPRURL = lookupPRURLWithGH
+
+// SetLookupPRURLForTest swaps PR lookup and returns a restore function.
+func SetLookupPRURLForTest(fn func(repo, branch string) (string, error)) func() {
+	old := lookupPRURL
+	lookupPRURL = fn
+	return func() { lookupPRURL = old }
+}
 
 // Poster sends a status line to a comms thread.
 type Poster interface {
@@ -44,7 +60,7 @@ type K8sIface interface {
 	CreateJob(ctx context.Context, job *batchv1.Job) (*batchv1.Job, error)
 	SetBriefOwner(ctx context.Context, taskID string, job *batchv1.Job) error
 	ListActiveJobs(ctx context.Context) (map[string]ActiveJob, error)
-	WatchJobs(ctx context.Context, onDone func(ticket, thread string, ok bool)) error
+	WatchJobs(ctx context.Context, onDone func(JobDone)) error
 }
 
 // Submitter is the interface the broker calls for !dispatch interception.
@@ -206,7 +222,7 @@ func (r *Runner) canRun(agent string) bool {
 func (r *Runner) reserve(b Brief) *Run {
 	runID := r.nextID()
 	b.RunID = runID
-	run := &Run{ID: runID, ParentID: b.ParentRunID, Brief: b}
+	run := &Run{ID: runID, ParentID: b.ParentRunID, Brief: b, Started: time.Now()}
 	r.active[runID] = run
 	r.agentBusy[b.Agent] = runID
 	return run
@@ -223,12 +239,12 @@ func (r *Runner) AgentBusy(agent string) bool {
 // OnJobDone frees the completed run's agent and drains any queued briefs whose
 // agent is now free. Bookkeeping happens under the lock; status posts and the
 // slow launch of drained runs happen outside.
-func (r *Runner) OnJobDone(ticket, thread string, ok bool) {
+func (r *Runner) OnJobDone(done JobDone) {
 	r.mu.Lock()
 
 	var doneID string
 	for id, run := range r.active {
-		if run.Brief.Ticket == ticket {
+		if run.Brief.Ticket == done.Ticket {
 			doneID = id
 			break
 		}
@@ -240,17 +256,147 @@ func (r *Runner) OnJobDone(ticket, thread string, ok bool) {
 	run := r.active[doneID]
 	delete(r.active, doneID)
 	delete(r.agentBusy, run.Brief.Agent)
-	delete(r.acked, ticket)
+	delete(r.acked, done.Ticket)
 	pending := r.reserveQueued()
 	r.mu.Unlock()
 
-	if ok {
-		r.post(thread, "builder completed: "+ticket)
-	} else {
-		r.post(thread, "builder FAILED: "+ticket+" — see Job logs; re-dispatch to retry")
+	if done.Thread == "" {
+		done.Thread = run.Brief.Thread
 	}
+	if done.Agent == "" {
+		done.Agent = run.Brief.Agent
+	}
+	if done.StartedAt.IsZero() {
+		done.StartedAt = run.Started
+	}
+	if done.CompletedAt.IsZero() {
+		done.CompletedAt = time.Now()
+	}
+	r.post(done.Thread, r.completionSummary(run, done))
 
 	r.launchPending(r.ctx, pending)
+}
+
+func (r *Runner) completionSummary(run *Run, done JobDone) string {
+	branch := run.Brief.Branch
+	if branch == "" {
+		branch = "builder/" + run.Brief.Ticket
+	}
+	prURL, prErr := lookupPRURL(run.Brief.Repo, branch)
+	duration := formatDuration(done.StartedAt, done.CompletedAt)
+	turns := r.countActivityTurns(done.Agent, done.StartedAt, done.CompletedAt)
+
+	status := "done"
+	if !done.OK {
+		status = "failed"
+	}
+	lines := []string{
+		"builder " + status + ": " + run.Brief.Ticket,
+		"branch: " + branch,
+		"duration: " + duration,
+		"turns: " + formatCount(turns),
+	}
+	if prURL != "" {
+		lines = append(lines, "PR: "+prURL)
+	} else if prErr != nil {
+		lines = append(lines, "PR: not resolved ("+prErr.Error()+")")
+	} else {
+		lines = append(lines, "PR: not found")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatDuration(start, end time.Time) string {
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return "unknown"
+	}
+	return end.Sub(start).Round(time.Second).String()
+}
+
+func formatCount(n int) string {
+	if n < 0 {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func lookupPRURLWithGH(repo, branch string) (string, error) {
+	if repo == "" {
+		return "", fmt.Errorf("repo not set")
+	}
+	if branch == "" {
+		return "", fmt.Errorf("branch not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := execCommandContext(ctx, "gh", "pr", "list",
+		"--repo", repo,
+		"--head", branch,
+		"--state", "open",
+		"--json", "url",
+		"-q", ".[0].url",
+	).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh pr list: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (r *Runner) countActivityTurns(aspect string, start, end time.Time) int {
+	if r.Cfg.ActivityDir == "" || aspect == "" || start.IsZero() || end.IsZero() {
+		return -1
+	}
+	total := 0
+	for day := dayStart(start); !day.After(end); day = day.AddDate(0, 0, 1) {
+		n, err := countTurnFrames(filepath.Join(r.Cfg.ActivityDir, aspect, day.Format("2006-01-02")+".jsonl"), start, end)
+		if err != nil {
+			slog.Warn("dispatch: activity turn count unavailable", "aspect", aspect, "path", filepath.Join(r.Cfg.ActivityDir, aspect, day.Format("2006-01-02")+".jsonl"), "err", err)
+			return -1
+		}
+		total += n
+	}
+	return total
+}
+
+func dayStart(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
+}
+
+func countTurnFrames(path string, start, end time.Time) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer f.Close()
+
+	var count int
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	for sc.Scan() {
+		var frame observability.Frame
+		if err := json.Unmarshal(sc.Bytes(), &frame); err != nil {
+			return 0, err
+		}
+		if frame.Kind != observability.FrameTurn || frame.TS.Before(start) || frame.TS.After(end) {
+			continue
+		}
+		var turn observability.TurnFrame
+		if err := json.Unmarshal(frame.Payload, &turn); err != nil {
+			return 0, err
+		}
+		if turn.Status != observability.TurnComplete && turn.Status != observability.TurnErrored {
+			continue
+		}
+		if turn.Label != "" && turn.Label != "main" {
+			continue
+		}
+		count++
+	}
+	return count, sc.Err()
 }
 
 func (r *Runner) nextID() string {
