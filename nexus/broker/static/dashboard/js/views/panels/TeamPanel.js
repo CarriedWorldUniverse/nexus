@@ -1,7 +1,6 @@
-const { html, useState, Fragment } = window.__preact;
+const { html } = window.__preact;
 
 import { agents } from '../../state.js';
-import { AgentConfigPanel } from './AgentConfigPanel.js';
 
 function agentID(agent) {
   return typeof agent === 'string' ? agent : (agent.id || agent.name || '');
@@ -16,24 +15,8 @@ function agentState(agent) {
 
 export function TeamPanel({ onClose }) {
   const list = agents.value || [];
-  const [selected, setSelected] = useState('');
 
-  function setLocalDispatchEnabled(id, enabled) {
-    agents.value = (agents.value || []).map((agent) => {
-      if (agentID(agent) !== id || typeof agent === 'string') return agent;
-      return { ...agent, dispatch_enabled: enabled };
-    });
-  }
-
-  const selectedRow = list.find((agent) => agentID(agent) === selected) || null;
-
-  return html`<${Fragment}>
-    <${AgentConfigPanel}
-      agent=${selected}
-      rosterRow=${selectedRow}
-      onClose=${() => setSelected('')}
-      onDispatchEnabledChange=${setLocalDispatchEnabled}
-    />
+  return html`
     <aside class="watch-panel team-panel">
       <header class="watch-panel-head">
         <span>Team</span>
@@ -46,17 +29,17 @@ export function TeamPanel({ onClose }) {
           const dispatchEnabled = typeof agent === 'object' ? agent.dispatch_enabled !== false : true;
           if (!id) return null;
           return html`
-            <li key=${id} class=${'team-row' + (selected === id ? ' team-row-active' : '')}>
+            <li key=${id} class="team-row">
               <span class=${`team-state team-${state}`}></span>
               <span class="team-name">${id}</span>
               <span class=${'team-dispatch ' + (dispatchEnabled ? 'on' : 'off')}>${dispatchEnabled ? 'dispatch' : 'blocked'}</span>
               <span class="team-statelbl">${state}</span>
-              <button class="team-config-btn" onClick=${() => setSelected(id)}>Configure</button>
+              <button class="team-config-btn" onClick=${() => { window.location.hash = '#/configure/aspects/' + encodeURIComponent(id); }}>Configure</button>
             </li>
           `;
         })}
       </ul>
       ${list.length === 0 ? html`<div class="watch-panel-empty">No agents registered.</div>` : null}
     </aside>
-  </${Fragment}>`;
+  `;
 }
