@@ -27,6 +27,9 @@ const (
 	maxJobNameLength     = 63
 	runSuffixHexLength   = 20
 	maxRunSuffixLength   = 24
+	homePVCNamePrefix    = "aspect-home-"
+	homeRepoMountPath    = "/var/lib/nexus/home.git"
+	homeWorkMountPath    = "/agent-home"
 )
 
 // BuildJob mirrors deploy/worker/job.yaml for one dispatch brief.
@@ -56,6 +59,8 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		{Name: "GOCACHE", Value: "/cache/go"},
 		{Name: "CW_DISPATCH_RUN_ID", Value: b.RunID},
 		{Name: "CW_DISPATCH_PARENT_RUN_ID", Value: b.ParentRunID},
+		{Name: "CW_AGENT_HOME_REPO", Value: homeRepoMountPath},
+		{Name: "CW_AGENT_HOME_WORKDIR", Value: homeWorkMountPath},
 	}
 	if cfg.LynxAIBaseURL != "" {
 		env = append(env, corev1.EnvVar{Name: "LYNXAI_BASE_URL", Value: cfg.LynxAIBaseURL})
@@ -66,6 +71,8 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	volumeMounts := []corev1.VolumeMount{
 		{Name: "work", MountPath: "/work"},
 		{Name: "cache", MountPath: "/cache"},
+		{Name: "home-repo", MountPath: homeRepoMountPath},
+		{Name: "home-work", MountPath: homeWorkMountPath},
 		{Name: "keyfile", MountPath: "/etc/nexus", ReadOnly: true},
 		// Brief ConfigMap mounts as its OWN directory — must NOT be a
 		// file inside /etc/nexus (the keyfile Secret's mount point), or
@@ -75,6 +82,8 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	volumes := []corev1.Volume{
 		{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: "cache", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "nexus-builder-work"}}},
+		{Name: "home-repo", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: HomePVCName(b.Agent)}}},
+		{Name: "home-work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: "keyfile", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "aspect-keyfile-" + keyfileAspect}}},
 		{Name: "brief", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "brief-" + taskID}}}},
 	}
@@ -137,6 +146,21 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 			},
 		},
 	}
+}
+
+func HomePVCName(agent string) string {
+	safeAgent := dnsLabelPart(agent)
+	if safeAgent == "" {
+		safeAgent = "agent"
+	}
+	maxAgentLen := maxJobNameLength - len(homePVCNamePrefix)
+	if len(safeAgent) > maxAgentLen {
+		safeAgent = strings.Trim(safeAgent[:maxAgentLen], "-")
+	}
+	if safeAgent == "" {
+		safeAgent = "agent"
+	}
+	return homePVCNamePrefix + safeAgent
 }
 
 func builderJobName(agent, runID, taskID string) string {

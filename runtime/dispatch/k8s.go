@@ -8,6 +8,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -38,6 +39,41 @@ func NewInClusterK8s(namespace string) (*K8s, error) {
 
 func (k *K8s) EnsureKeyfileSecret(ctx context.Context, agent string) error {
 	_, err := k.Client.CoreV1().Secrets(k.Namespace).Get(ctx, "aspect-keyfile-"+agent, metav1.GetOptions{})
+	return err
+}
+
+func (k *K8s) EnsureHomeRepo(ctx context.Context, agent string) error {
+	name := HomePVCName(agent)
+	_, err := k.Client.CoreV1().PersistentVolumeClaims(k.Namespace).Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: k.Namespace,
+			Labels: map[string]string{
+				"app":                  "nexus-builder",
+				"nexus.dispatch/agent": agent,
+				"nexus.dispatch/home":  "true",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("1Gi"),
+				},
+			},
+		},
+	}
+	_, err = k.Client.CoreV1().PersistentVolumeClaims(k.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
 	return err
 }
 

@@ -159,6 +159,27 @@ func main() {
 		"personality_version", res.Personality.Version,
 		"jwt_expires", res.SessionExpiresAt.Format(time.RFC3339))
 
+	if *builderMode {
+		gitEmail := res.AspectName + "@agents.carriedworld.com"
+		for k, v := range map[string]string{
+			"GIT_AUTHOR_NAME": res.AspectName, "GIT_AUTHOR_EMAIL": gitEmail,
+			"GIT_COMMITTER_NAME": res.AspectName, "GIT_COMMITTER_EMAIL": gitEmail,
+		} {
+			if err := os.Setenv(k, v); err != nil {
+				log.Warn("agentfunnel: failed to export "+k+" for builder git author", "err", err)
+			}
+		}
+	}
+
+	var builderHome *agentHomeSession
+	if *builderMode {
+		builderHome, err = setupBuilderHome(context.Background(), res.AspectName, os.Getenv("CW_DISPATCH_RUN_ID"))
+		if err != nil {
+			fail(log, "setup builder home", err)
+		}
+		log.Info("agentfunnel: builder home ready", "aspect", res.AspectName, "home", os.Getenv("HOME"))
+	}
+
 	// 2.5 Materialise MCP profile (NEX-170). Must happen before
 	// the claude-code subprocess spawns so .mcp.json is on disk
 	// and auto-discovered from cwd. Atomic write — never leaves
@@ -380,18 +401,6 @@ func main() {
 		// subprocess inherits this process's environment.
 		if err := os.Setenv("CW_TOKEN", res.SessionJWT); err != nil {
 			log.Warn("agentfunnel: failed to export CW_TOKEN for builder git auth", "err", err)
-		}
-		// Agent-attributed git records (NEX-437): commits are authored by the
-		// dispatched agent, not a generic default. Env overrides any image-baked
-		// git user config; the codex/git subprocess inherits it.
-		gitEmail := res.AspectName + "@agents.carriedworld.com"
-		for k, v := range map[string]string{
-			"GIT_AUTHOR_NAME": res.AspectName, "GIT_AUTHOR_EMAIL": gitEmail,
-			"GIT_COMMITTER_NAME": res.AspectName, "GIT_COMMITTER_EMAIL": gitEmail,
-		} {
-			if err := os.Setenv(k, v); err != nil {
-				log.Warn("agentfunnel: failed to export "+k+" for builder git author", "err", err)
-			}
 		}
 		// Bridge the external git/gh tooling into our auth ecosystem. The gh
 		// CLI is unauthenticated in the worker image, so PR verification and
@@ -679,6 +688,16 @@ func main() {
 	if err := wsClient.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("agentfunnel: wsClient.Run", "err", err)
 		os.Exit(1)
+	}
+	if builderHome != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		if err := builderHome.cleanDespawn(cleanupCtx); err != nil {
+			cancel()
+			log.Error("agentfunnel: builder home clean despawn failed", "err", err)
+			os.Exit(1)
+		}
+		cancel()
+		log.Info("agentfunnel: builder home committed and removed", "aspect", res.AspectName)
 	}
 	log.Info("agentfunnel: stopped")
 }
