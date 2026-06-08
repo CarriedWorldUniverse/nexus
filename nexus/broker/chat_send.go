@@ -43,6 +43,7 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 	// the broker (the spawn), not delivered as chat, so we don't fan it out to
 	// recipients — we store it and trigger the dispatch, threaded under it.
 	if strings.HasPrefix(strings.TrimSpace(content), "!dispatch") {
+		b.log.Info("!dispatch intercepted", "from", from, "topic", topic, "has_chatstore", b.cfg.ChatStore != nil)
 		if b.cfg.ChatStore == nil {
 			if err := b.submitDispatch(ctx, from, content, topic); err != nil {
 				b.log.Warn("!dispatch: submit failed", "err", err, "from", from)
@@ -59,6 +60,7 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 		if thread == "" {
 			thread = fmt.Sprintf("dispatch-%d", msg.ThreadRootMsgID)
 		}
+		b.log.Info("!dispatch post stored, routing to runner", "msg_id", msg.ID, "thread", thread)
 		if derr := b.submitDispatch(ctx, from, content, thread); derr != nil {
 			b.log.Warn("!dispatch: submit failed", "err", derr, "from", from)
 		}
