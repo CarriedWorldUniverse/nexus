@@ -3,9 +3,11 @@ package dispatch
 import (
 	"context"
 	"fmt"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -105,48 +107,106 @@ func (k *K8s) ListActiveJobs(ctx context.Context) (map[string]ActiveJob, error) 
 }
 
 func (k *K8s) WatchJobs(ctx context.Context, onDone func(JobDone)) error {
-	w, err := k.Client.BatchV1().Jobs(k.Namespace).Watch(ctx, metav1.ListOptions{LabelSelector: "app=nexus-builder"})
-	if err != nil {
-		return err
-	}
-	defer w.Stop()
+	seen := map[string]bool{}
+	tick := time.NewTicker(30 * time.Second)
+	defer tick.Stop()
+
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case ev, ok := <-w.ResultChan():
-			if !ok {
-				return nil
-			}
-			j, ok := ev.Object.(*batchv1.Job)
-			if !ok {
-				continue
-			}
-			ticket := j.Labels["nexus.dispatch/ticket"]
-			thread := j.Annotations["nexus.dispatch/thread"]
-			if thread == "" {
-				thread = ticket
-			}
-			if ticket == "" {
-				continue
-			}
-			done := JobDone{
-				Ticket: ticket,
-				Thread: thread,
-				Agent:  j.Labels["nexus.dispatch/agent"],
-			}
-			if j.Status.StartTime != nil {
-				done.StartedAt = j.Status.StartTime.Time
-			}
-			if j.Status.CompletionTime != nil {
-				done.CompletedAt = j.Status.CompletionTime.Time
-			}
-			if j.Status.Succeeded > 0 {
-				done.OK = true
-				onDone(done)
-			} else if j.Status.Failed > 0 {
-				onDone(done)
+		if err := k.reconcileDoneJobs(ctx, seen, onDone); err != nil {
+			return err
+		}
+		w, err := k.Client.BatchV1().Jobs(k.Namespace).Watch(ctx, metav1.ListOptions{LabelSelector: "app=nexus-builder"})
+		if err != nil {
+			return err
+		}
+		restart := false
+		for !restart {
+			select {
+			case <-ctx.Done():
+				w.Stop()
+				return ctx.Err()
+			case <-tick.C:
+				if err := k.reconcileDoneJobs(ctx, seen, onDone); err != nil {
+					w.Stop()
+					return err
+				}
+			case ev, ok := <-w.ResultChan():
+				if !ok {
+					w.Stop()
+					restart = true
+					continue
+				}
+				j, ok := ev.Object.(*batchv1.Job)
+				if !ok {
+					continue
+				}
+				emitJobDone(j, seen, onDone)
 			}
 		}
 	}
+}
+
+func (k *K8s) reconcileDoneJobs(ctx context.Context, seen map[string]bool, onDone func(JobDone)) error {
+	jl, err := k.Client.BatchV1().Jobs(k.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "app=nexus-builder"})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for i := range jl.Items {
+		emitJobDone(&jl.Items[i], seen, onDone)
+	}
+	return nil
+}
+
+func emitJobDone(j *batchv1.Job, seen map[string]bool, onDone func(JobDone)) {
+	ok, terminal := jobTerminal(j)
+	if !terminal {
+		return
+	}
+	seenKey := string(j.UID)
+	if seenKey == "" {
+		seenKey = j.Namespace + "/" + j.Name
+	}
+	if seen[seenKey] {
+		return
+	}
+	ticket := j.Labels["nexus.dispatch/ticket"]
+	if ticket == "" {
+		return
+	}
+	seen[seenKey] = true
+	thread := j.Annotations["nexus.dispatch/thread"]
+	if thread == "" {
+		thread = ticket
+	}
+	done := JobDone{
+		Ticket: ticket,
+		Thread: thread,
+		Agent:  j.Labels["nexus.dispatch/agent"],
+		OK:     ok,
+	}
+	if j.Status.StartTime != nil {
+		done.StartedAt = j.Status.StartTime.Time
+	}
+	if j.Status.CompletionTime != nil {
+		done.CompletedAt = j.Status.CompletionTime.Time
+	}
+	onDone(done)
+}
+
+func jobTerminal(j *batchv1.Job) (ok bool, terminal bool) {
+	for _, c := range j.Status.Conditions {
+		if c.Status != corev1.ConditionTrue {
+			continue
+		}
+		switch c.Type {
+		case batchv1.JobComplete:
+			return true, true
+		case batchv1.JobFailed:
+			return false, true
+		}
+	}
+	return false, false
 }
