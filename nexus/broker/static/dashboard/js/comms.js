@@ -34,12 +34,12 @@ const state = {
   // pending RPCs: correlation_id → {resolve, reject, kind, deadline}
   pending: new Map(),
   // active subscriptions: pushKind (e.g. chat.deliver) → array of
-  // handler fns. Replayed on reconnect by re-issuing the corresponding
-  // subscribe.X frame, looked up via subKinds.
+  // handler fns.
   subs: new Map(),
-  // pushKind → subscribe.X (so reconnect replay can issue the right
-  // frame). Populated alongside subs in subscribe().
-  subKinds: new Map(),
+  // Active server-side subscriptions keyed by kind+payload. Handlers
+  // dispatch by pushKind, but parameterized channels such as
+  // subscribe.observe need one server subscription per aspect.
+  subRequests: new Map(),
   // outbound queue for frames sent before the WS opened OR during a
   // reconnect window. Drained on open. Bounded by a soft cap so a
   // long offline period doesn't grow the queue unboundedly.
@@ -103,6 +103,7 @@ export function close() {
     state.pending.delete(id);
   }
   state.subs.clear();
+  state.subRequests.clear();
   state.outbox.length = 0;
 }
 
@@ -116,16 +117,9 @@ function connect() {
       state.ready = true;
       state.backoffMs = 1000; // reset on successful connect
       // Replay subscriptions over the new connection so server-side
-      // state matches what the SPA thinks it has. state.subs is keyed
-      // by the inbound push kind (chat.deliver, roster.update, etc) so
-      // the per-frame route lookup is cheap. To replay we have to send
-      // the subscribe.X frame, not the push kind — the server doesn't
-      // accept push kinds inbound (logs "frame kind not yet handled"
-      // and never flips subscribedChat). Map back via state.subKinds.
-      for (const pushKind of state.subs.keys()) {
-        const subKind = state.subKinds.get(pushKind);
-        if (!subKind) continue;
-        sendFrame({ kind: subKind, id: correlationID(), ts: nowISO(), payload: {} });
+      // state matches what the SPA thinks it has.
+      for (const req of state.subRequests.values()) {
+        sendFrame({ kind: req.kind, id: correlationID(), ts: nowISO(), payload: req.params || {} });
       }
       // Drain the outbox.
       while (state.outbox.length > 0) {
@@ -279,7 +273,7 @@ export function onPushKind(pushKind, handler) {
   if (!handlers) {
     handlers = [];
     state.subs.set(pushKind, handlers);
-    // Note: no entry in state.subKinds — reconnect won't replay this
+    // Note: no entry in state.subRequests — reconnect won't replay this
     // (there's no subscribe frame to replay). That's correct: the
     // server fans the kind out via the OTHER subscription's gate, so
     // as long as that subscription is replayed, the kind keeps
@@ -310,22 +304,26 @@ export function subscribe(kind, params, handler) {
   // "subscribe.chat.update" — the subscribe frame is the gate, the
   // push frame is named for the data.
   const pushKind = pushKindFor(kind);
+  const cleanParams = params || {};
+  const subKey = subscriptionKey(kind, cleanParams);
 
   let handlers = state.subs.get(pushKind);
-  const fresh = !handlers;
-  if (fresh) {
+  if (!handlers) {
     handlers = [];
     state.subs.set(pushKind, handlers);
-    state.subKinds.set(pushKind, kind);
   }
   handlers.push(handler);
 
-  if (fresh) {
-    // First subscriber for this push kind — issue the subscribe
+  const req = state.subRequests.get(subKey);
+  if (req) {
+    req.count += 1;
+  } else {
+    state.subRequests.set(subKey, { kind, params: cleanParams, pushKind, count: 1 });
+    // First subscriber for this kind+params — issue the subscribe
     // frame. We don't await the ack here; the server will start
     // pushing as soon as it processes the frame, and any pre-ack
     // frames are still routable via state.subs.
-    sendFrame({ kind, id: correlationID(), ts: nowISO(), payload: params || {} });
+    sendFrame({ kind, id: correlationID(), ts: nowISO(), payload: cleanParams });
   }
 
   return function unsubscribe() {
@@ -333,19 +331,30 @@ export function subscribe(kind, params, handler) {
     if (!list) return;
     const i = list.indexOf(handler);
     if (i >= 0) list.splice(i, 1);
-    if (list.length === 0) {
-      state.subs.delete(pushKind);
-      state.subKinds.delete(pushKind);
+    if (list.length === 0) state.subs.delete(pushKind);
+
+    const req = state.subRequests.get(subKey);
+    if (!req) return;
+    req.count -= 1;
+    if (req.count <= 0) {
+      state.subRequests.delete(subKey);
       // Tell the server too. Best-effort — if we're already closed,
       // the server's wsConn cleanup tears down the sub anyway.
       sendFrame({
         kind: kind.replace('subscribe.', 'unsubscribe.'),
         id: correlationID(),
         ts: nowISO(),
-        payload: {},
+        payload: cleanParams,
       });
     }
   };
+}
+
+function subscriptionKey(kind, params) {
+  const keys = Object.keys(params || {}).sort();
+  const stable = {};
+  for (const key of keys) stable[key] = params[key];
+  return `${kind}:${JSON.stringify(stable)}`;
 }
 
 function pushKindFor(subscribeKind) {
@@ -353,6 +362,7 @@ function pushKindFor(subscribeKind) {
     case 'subscribe.chat':           return 'chat.deliver';
     case 'subscribe.roster':         return 'roster.update';
     case 'subscribe.aspect_status':  return 'aspect.status_pulse';
+    case 'subscribe.observe':        return 'observe.frame';
     default: return subscribeKind;
   }
 }
