@@ -22,6 +22,7 @@ type fakeK8s struct {
 	jobs    []string
 	secrets map[string]bool
 	homes   map[string]bool
+	repos   bool
 	owners  []briefOwnerCall
 
 	// createErr, when set, fails CreateJob — used to exercise the
@@ -49,6 +50,11 @@ func (f *fakeK8s) EnsureHomeRepo(_ context.Context, agent string) error {
 		f.homes = map[string]bool{}
 	}
 	f.homes[agent] = true
+	return nil
+}
+
+func (f *fakeK8s) EnsureSharedReposPVC(_ context.Context) error {
+	f.repos = true
 	return nil
 }
 
@@ -108,6 +114,9 @@ func TestRunnerRunsAsNamedAgent(t *testing.T) {
 	}
 	if !fk.homes["anvil"] {
 		t.Error("worker must provision the named agent's home repo PVC")
+	}
+	if !fk.repos {
+		t.Error("worker must provision the shared repos PVC")
 	}
 	if len(fk.jobs) != 1 || !strings.HasPrefix(fk.jobs[0], "builder-anvil-") {
 		t.Errorf("job should be named builder-anvil-*, got %v", fk.jobs)

@@ -25,7 +25,7 @@ func TestBuilderCompleteCheck(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			prExistsFn = tc.fn
 			stopped := false
-			got := builderCompleteCheck(func() { stopped = true }, log, "plumb", "org/repo", "NEX-1")()
+			got := builderCompleteCheck(func() { stopped = true }, log, "plumb", "org/repo", "NEX-1", "")()
 			if got != tc.wantRet {
 				t.Errorf("return = %v, want %v", got, tc.wantRet)
 			}
