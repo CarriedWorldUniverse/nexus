@@ -30,11 +30,13 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
+	"github.com/CarriedWorldUniverse/nexus/nexus/observability/jsonlsink"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
+	"k8s.io/client-go/kubernetes"
 )
 
 // chatHTML is the operator-aspect smoke-test page (chat.html). Served
@@ -122,6 +124,16 @@ type Config struct {
 	// RunsStore powers the persisted dispatch run spine. When configured,
 	// New migrates it and adapts it into dispatch.Runner.Recorder.
 	RunsStore runs.Store
+
+	// ActivityLogDir is the jsonlsink root used for persisted activity
+	// history reads. When empty, run timelines omit historical activity.
+	ActivityLogDir string
+
+	// K8sReader powers env.health. Nil outside in-cluster deployments.
+	K8sReader kubernetes.Interface
+
+	// K8sNamespace is the namespace read by env.health.
+	K8sNamespace string
 
 	// RecipientPolicy decides which aspects receive chat.deliver for
 	// each chat.send. When non-nil, HandleChatSend uses it to fan out
@@ -370,6 +382,10 @@ type Broker struct {
 	// runner intercepts !dispatch chat messages before ChatStore.
 	// nil unless cfg.Runner is set.
 	runner dispatch.Submitter
+
+	activityReader *jsonlsink.Reader
+	k8sReader      kubernetes.Interface
+	k8sNamespace   string
 }
 
 func New(cfg Config, r *roster.Roster) *Broker {
@@ -426,6 +442,11 @@ func New(cfg Config, r *roster.Roster) *Broker {
 		b.custodian = custodian.New(cfg.HeraldEdge)
 	}
 	b.runner = cfg.Runner
+	if cfg.ActivityLogDir != "" {
+		b.activityReader = jsonlsink.NewReader(cfg.ActivityLogDir)
+	}
+	b.k8sReader = cfg.K8sReader
+	b.k8sNamespace = cfg.K8sNamespace
 	if cfg.RunsStore != nil {
 		if err := cfg.RunsStore.Migrate(context.Background()); err != nil {
 			b.log.Warn("runs store migration failed", "err", err)

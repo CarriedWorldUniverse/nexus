@@ -37,6 +37,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
+	"k8s.io/client-go/kubernetes"
 )
 
 func main() {
@@ -434,7 +435,16 @@ func main() {
 	} else {
 		runner = dispatchRunner
 	}
+	var k8sReader kubernetes.Interface
+	var k8sNamespace string
+	if dispatchRunner != nil {
+		if k8s, ok := dispatchRunner.K8sIface.(*dispatch.K8s); ok && k8s != nil {
+			k8sReader = k8s.Client
+			k8sNamespace = k8s.Namespace
+		}
+	}
 
+	activityLogDir := filepath.Join(*dataDir, "activity")
 	b := broker.New(broker.Config{
 		Addr:               *addr,
 		AuthToken:          token,
@@ -450,6 +460,9 @@ func main() {
 		Replayer:           replayer,
 		ChatStore:          chatStore,
 		RunsStore:          runsStore,
+		ActivityLogDir:     activityLogDir,
+		K8sReader:          k8sReader,
+		K8sNamespace:       k8sNamespace,
 		RecipientPolicy:    recipientPolicy,
 		AspectHomes:        aspectHomes,
 		TLSCertFile:        *tlsCert,
@@ -532,7 +545,6 @@ func main() {
 	// Writes happen on background goroutines per aspect; channel-full
 	// drops with logged warning rather than blocking emit. Closed by
 	// the cleanup goroutine on shutdown.
-	activityLogDir := filepath.Join(*dataDir, "activity")
 	activitySink, err := jsonlsink.New(activityLogDir, logger)
 	if err != nil {
 		logger.Warn("activity-log sink disabled", "err", err)
