@@ -68,6 +68,31 @@ func TestParseBrief_DispatchCommand(t *testing.T) {
 }
 
 func TestParseBrief_DispatchDirectives(t *testing.T) {
+	t.Run("dashboard composed command round-trips", func(t *testing.T) {
+		b, err := ParseBrief([]byte("!dispatch anvil%codex-cli repo=org/repo ticket=NEX-1 do the thing"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Agent != "anvil" {
+			t.Errorf("agent = %q, want anvil", b.Agent)
+		}
+		if b.Provider != "codex-cli" {
+			t.Errorf("provider = %q, want codex-cli", b.Provider)
+		}
+		if b.Repo != "org/repo" {
+			t.Errorf("repo = %q, want org/repo", b.Repo)
+		}
+		if b.Ticket != "NEX-1" {
+			t.Errorf("ticket = %q, want NEX-1", b.Ticket)
+		}
+		if b.Thread != "NEX-1" {
+			t.Errorf("thread = %q, want NEX-1", b.Thread)
+		}
+		if b.Task != "do the thing" {
+			t.Errorf("task = %q, want do the thing", b.Task)
+		}
+	})
+
 	t.Run("repo + ticket + branch directives", func(t *testing.T) {
 		b, err := ParseBrief([]byte("!dispatch anvil%codex-cli repo=CarriedWorldUniverse/nexus ticket=NEX-510 branch=feat/x implement the thing"))
 		if err != nil {
