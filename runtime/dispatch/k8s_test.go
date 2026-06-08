@@ -54,6 +54,32 @@ func TestSetBriefOwner(t *testing.T) {
 	}
 }
 
+func TestDeleteJobGracefulAndForce(t *testing.T) {
+	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}
+	ctx := context.Background()
+	mk := func(name string) {
+		_, _ = k.Client.BatchV1().Jobs("nexus").Create(ctx,
+			&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "nexus"}}, metav1.CreateOptions{})
+	}
+	mk("builder-anvil-run-1")
+	if err := k.DeleteJob(ctx, "builder-anvil-run-1", int64p(30)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Client.BatchV1().Jobs("nexus").Get(ctx, "builder-anvil-run-1", metav1.GetOptions{}); err == nil {
+		t.Fatal("graceful delete: job should be gone")
+	}
+	mk("builder-anvil-run-2")
+	if err := k.DeleteJob(ctx, "builder-anvil-run-2", int64p(0)); err != nil {
+		t.Fatal(err)
+	}
+	// deleting a missing job is not an error (idempotent)
+	if err := k.DeleteJob(ctx, "does-not-exist", int64p(0)); err != nil {
+		t.Fatalf("delete missing job should be nil, got %v", err)
+	}
+}
+
+func int64p(v int64) *int64 { return &v }
+
 func TestEnsureHomeRepoCreatesRWOClaimIdempotently(t *testing.T) {
 	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}
 	ctx := context.Background()
