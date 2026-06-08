@@ -2,10 +2,15 @@ package dispatch_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 	batchv1 "k8s.io/api/batch/v1"
 
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
@@ -49,7 +54,7 @@ func (f *fakeK8s) ListActiveJobs(_ context.Context) (map[string]dispatch.ActiveJ
 	return f.active, nil
 }
 
-func (f *fakeK8s) WatchJobs(_ context.Context, _ func(ticket, thread string, ok bool)) error {
+func (f *fakeK8s) WatchJobs(_ context.Context, _ func(dispatch.JobDone)) error {
 	return nil
 }
 
@@ -129,7 +134,7 @@ func TestRunnerOnJobDoneFreesAgentAndDrains(t *testing.T) {
 	}
 	before := len(fk.jobs)
 
-	r.OnJobDone("NEX-1", "t", true)
+	r.OnJobDone(dispatch.JobDone{Ticket: "NEX-1", Thread: "t", OK: true})
 
 	if got := len(fk.jobs) - before; got != 1 {
 		t.Errorf("expected 1 drained job for the queued NEX-2, got %d", got)
@@ -154,7 +159,7 @@ func TestRunnerDedupesQueuedTicket(t *testing.T) {
 	}
 
 	before := len(fk.jobs)
-	r.OnJobDone("NEX-1", "t", true)
+	r.OnJobDone(dispatch.JobDone{Ticket: "NEX-1", Thread: "t", OK: true})
 	if got := len(fk.jobs) - before; got != 1 {
 		t.Errorf("draining spawned %d jobs, want exactly 1 (no duplicate)", got)
 	}
@@ -199,7 +204,7 @@ func TestRunnerReEnqueuesOnLaunchError(t *testing.T) {
 	_, _ = r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-2", Thread: "t", Task: "b"}) // queued
 
 	fk.createErr = func(string) error { return errors.New("transient k8s error") }
-	r.OnJobDone("NEX-1", "t", true)
+	r.OnJobDone(dispatch.JobDone{Ticket: "NEX-1", Thread: "t", OK: true})
 	if r.AgentBusy("anvil") {
 		t.Error("anvil should be free after the drained NEX-2 launch failed + rolled back")
 	}
@@ -207,8 +212,113 @@ func TestRunnerReEnqueuesOnLaunchError(t *testing.T) {
 	fk.createErr = nil
 	_, _ = r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "t", Task: "a"})
 	before := len(fk.jobs)
-	r.OnJobDone("NEX-1", "t", true)
+	r.OnJobDone(dispatch.JobDone{Ticket: "NEX-1", Thread: "t", OK: true})
 	if got := len(fk.jobs) - before; got != 1 {
 		t.Errorf("expected the re-enqueued NEX-2 to launch (1 job), got %d", got)
+	}
+}
+
+type recordingPoster struct {
+	posts []string
+}
+
+func (p *recordingPoster) Post(_, text string) error {
+	p.posts = append(p.posts, text)
+	return nil
+}
+
+func TestRunnerPostsCompletionSummary(t *testing.T) {
+	fk := &fakeK8s{}
+	r := newRunner(fk)
+	poster := &recordingPoster{}
+	r.Poster = poster
+	r.Cfg.ActivityDir = t.TempDir()
+	_ = r.Init(context.Background())
+
+	start := time.Date(2026, 6, 8, 10, 0, 0, 0, time.UTC)
+	end := start.Add(2 * time.Minute)
+	writeTurnFrame(t, r.Cfg.ActivityDir, "anvil", start.Add(time.Minute), observability.TurnComplete, "")
+
+	t.Cleanup(dispatch.SetLookupPRURLForTest(func(repo, branch string) (string, error) {
+		if repo != "CarriedWorldUniverse/nexus" || branch != "builder/NEX-1" {
+			t.Fatalf("lookup args repo=%q branch=%q", repo, branch)
+		}
+		return "https://github.com/CarriedWorldUniverse/nexus/pull/123", nil
+	}))
+
+	_, err := r.Submit(context.Background(), dispatch.Brief{
+		Agent: "anvil", Ticket: "NEX-1", Thread: "thread", Repo: "CarriedWorldUniverse/nexus", Task: "a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OnJobDone(dispatch.JobDone{Ticket: "NEX-1", Thread: "thread", Agent: "anvil", OK: true, StartedAt: start, CompletedAt: end})
+
+	got := poster.posts[len(poster.posts)-1]
+	for _, want := range []string{
+		"builder done: NEX-1",
+		"branch: builder/NEX-1",
+		"duration: 2m0s",
+		"turns: 1",
+		"PR: https://github.com/CarriedWorldUniverse/nexus/pull/123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunnerCompletionSummaryFailSoftNoPR(t *testing.T) {
+	fk := &fakeK8s{}
+	r := newRunner(fk)
+	poster := &recordingPoster{}
+	r.Poster = poster
+	_ = r.Init(context.Background())
+
+	t.Cleanup(dispatch.SetLookupPRURLForTest(func(string, string) (string, error) {
+		return "", errors.New("gh unavailable")
+	}))
+
+	_, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "thread", Task: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OnJobDone(dispatch.JobDone{Ticket: "NEX-1", Thread: "thread", Agent: "anvil", OK: false})
+
+	got := poster.posts[len(poster.posts)-1]
+	for _, want := range []string{
+		"builder failed: NEX-1",
+		"branch: builder/NEX-1",
+		"PR: not resolved",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func writeTurnFrame(t *testing.T, root, aspect string, ts time.Time, status observability.TurnStatus, label string) {
+	t.Helper()
+	dir := filepath.Join(root, aspect)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(observability.TurnFrame{Status: status, Label: label})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := observability.Frame{
+		Kind:    observability.FrameTurn,
+		Aspect:  aspect,
+		TS:      ts,
+		Payload: payload,
+	}
+	line, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, ts.Format("2006-01-02")+".jsonl")
+	if err := os.WriteFile(path, append(line, '\n'), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

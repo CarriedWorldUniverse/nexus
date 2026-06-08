@@ -104,7 +104,7 @@ func (k *K8s) ListActiveJobs(ctx context.Context) (map[string]ActiveJob, error) 
 	return out, nil
 }
 
-func (k *K8s) WatchJobs(ctx context.Context, onDone func(ticket, thread string, ok bool)) error {
+func (k *K8s) WatchJobs(ctx context.Context, onDone func(JobDone)) error {
 	w, err := k.Client.BatchV1().Jobs(k.Namespace).Watch(ctx, metav1.ListOptions{LabelSelector: "app=nexus-builder"})
 	if err != nil {
 		return err
@@ -130,10 +130,22 @@ func (k *K8s) WatchJobs(ctx context.Context, onDone func(ticket, thread string, 
 			if ticket == "" {
 				continue
 			}
+			done := JobDone{
+				Ticket: ticket,
+				Thread: thread,
+				Agent:  j.Labels["nexus.dispatch/agent"],
+			}
+			if j.Status.StartTime != nil {
+				done.StartedAt = j.Status.StartTime.Time
+			}
+			if j.Status.CompletionTime != nil {
+				done.CompletedAt = j.Status.CompletionTime.Time
+			}
 			if j.Status.Succeeded > 0 {
-				onDone(ticket, thread, true)
+				done.OK = true
+				onDone(done)
 			} else if j.Status.Failed > 0 {
-				onDone(ticket, thread, false)
+				onDone(done)
 			}
 		}
 	}
