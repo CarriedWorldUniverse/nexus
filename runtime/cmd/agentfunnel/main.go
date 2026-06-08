@@ -675,7 +675,8 @@ func main() {
 			ThreadRoot: seedBrief.ThreadRoot,
 		}
 		verifyPR := builderPRVerifier(log, res.AspectName, *repoFlag, *ticketFlag, *branchFlag)
-		go builderGoalLoop(ctx, f, log, goalCfg, verifyPR, stop)
+		openPR := builderPROpener(log, *repoFlag, *ticketFlag, *branchFlag)
+		go builderGoalLoop(ctx, f, log, goalCfg, verifyPR, openPR, stop)
 	} else {
 		var onComplete func() bool
 		if *builderMode {
@@ -825,6 +826,55 @@ var prExistsFn = func(repo, branch string) (bool, error) {
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
+// prCreateFn opens a PR for branch via gh, filling title/body from the branch's
+// commits (--fill). Swappable in tests. Returns the printed PR URL.
+var prCreateFn = func(repo, branch string) (string, error) {
+	out, err := exec.Command("gh", "pr", "create", "--repo", repo, "--head", branch, "--base", "main", "--fill").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh pr create: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// branchPushedFn reports whether branch exists on origin (i.e. the agent
+// committed + pushed its work). Swappable in tests.
+var branchPushedFn = func(branch string) (bool, error) {
+	out, err := exec.Command("git", "ls-remote", "--heads", "origin", branch).CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("git ls-remote: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
+// harnessOpenPR opens the PR for a pushed builder branch when the agent
+// committed + pushed but never ran `gh pr create` itself (NEX-528: codex
+// reliably commits + pushes but is flaky at the final PR-open, looping the
+// goal-loop to its timeout). Returns the PR URL and true on success; false when
+// nothing is pushed yet (the agent still has work to do — re-prompt) or on error.
+func harnessOpenPR(log *slog.Logger, repo, head string) (string, bool) {
+	pushed, err := branchPushedFn(head)
+	if err != nil {
+		log.Warn("agentfunnel: harness PR open — branch check failed", "branch", head, "err", err)
+		return "", false
+	}
+	if !pushed {
+		return "", false
+	}
+	url, err := prCreateFn(repo, head)
+	if err != nil {
+		log.Warn("agentfunnel: harness PR open failed", "branch", head, "err", err)
+		return "", false
+	}
+	return url, true
+}
+
+// builderPROpener returns a closure that opens the builder's PR from its pushed
+// branch (NEX-528), passed to builderGoalLoop alongside verifyPR.
+func builderPROpener(log *slog.Logger, repo, ticket, branch string) func() (string, bool) {
+	head := builderBranch(branch, ticket)
+	return func() (string, bool) { return harnessOpenPR(log, repo, head) }
+}
+
 // prExists reports whether a PR exists for branch in repo. Missing repo/branch
 // returns an error so the builder does not exit on an unverifiable
 // "complete" (fail-closed toward NEX-468).
@@ -972,7 +1022,7 @@ func builderDecide(result funnel.GoalResult, prVerified bool, prRepromptsLeft in
 // complete but no PR is found, the builder is re-prompted to open it rather
 // than exiting empty-handed. The -builder-timeout goroutine remains the
 // wall-clock backstop.
-func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cfg funnel.GoalConfig, verifyPR func() bool, stop context.CancelFunc) {
+func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cfg funnel.GoalConfig, verifyPR func() bool, openPR func() (string, bool), stop context.CancelFunc) {
 	gl := funnel.NewGoalLoop(f, cfg)
 	prRepromptsLeft := builderPRRepromptCap
 	for {
@@ -996,6 +1046,15 @@ func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cf
 		case builderContinue:
 			continue
 		case builderRepromptPR:
+			// The agent ruled itself done but no PR exists. If the work is
+			// already pushed, the harness opens the PR itself (NEX-528) rather
+			// than burning reprompt turns to the timeout. Only re-prompt when
+			// nothing is pushed yet (the agent still has work to do).
+			if url, opened := openPR(); opened {
+				log.Info("agentfunnel: builder PR opened by harness (agent pushed but did not open it)", "ticket", cfg.TicketID, "pr", url)
+				stop()
+				return
+			}
 			prRepromptsLeft--
 			log.Info("agentfunnel: judge complete but no PR — re-prompting", "ticket", cfg.TicketID, "reprompts_left", prRepromptsLeft)
 			f.ReceiveSynthetic(bridle.InboxItem{

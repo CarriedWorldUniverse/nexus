@@ -156,6 +156,39 @@ func TestWatchJobsReconcilesExistingTerminalJobs(t *testing.T) {
 	assertWatchedJob(t, done, watchedJob{ticket: "NEX-1", thread: "THREAD-1", ok: true})
 }
 
+func TestWatchJobsEmitsTerminalOnDelete(t *testing.T) {
+	// NEX-528: a manual delete of a stuck/looping (non-terminal) Job must emit a
+	// terminal JobDone so the runner frees the agent without a broker restart.
+	fw := watch.NewFake()
+	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}
+	k.Client.(*fake.Clientset).PrependWatchReactor("jobs", ktesting.DefaultWatchReactor(fw, nil))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan watchedJob, 1)
+	go func() {
+		_ = k.WatchJobs(ctx, func(jd JobDone) {
+			done <- watchedJob{ticket: jd.Ticket, thread: jd.Thread, ok: jd.OK}
+		})
+	}()
+
+	// A non-terminal builder Job (no Complete/Failed condition) that gets deleted.
+	j := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "builder-anvil-stuck",
+			Namespace: "nexus",
+			Labels: map[string]string{
+				"app":                   "nexus-builder",
+				"nexus.dispatch/ticket": "NEX-9",
+				"nexus.dispatch/agent":  "anvil",
+			},
+			Annotations: map[string]string{"nexus.dispatch/thread": "THREAD-9"},
+		},
+	}
+	fw.Delete(j)
+	assertWatchedJob(t, done, watchedJob{ticket: "NEX-9", thread: "THREAD-9", ok: false})
+}
+
 func keyfileSecret(agent string) *corev1.Secret {
 	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "aspect-keyfile-" + agent, Namespace: "nexus"}}
 }
