@@ -88,8 +88,8 @@ func (s *SQLStore) Insert(ctx context.Context, r Run) error {
 func (s *SQLStore) MarkDone(ctx context.Context, runID string, status Status, completedAt time.Time, prURL string, durationSecs int) error {
 	_, err := s.DB.ExecContext(ctx, `
 		UPDATE runs SET status = ?, completed_at = ?, pr_url = ?, duration_secs = ?
-		WHERE run_id = ?`,
-		string(status), completedAt.UnixMilli(), prURL, durationSecs, runID)
+		WHERE run_id = ? AND status = ?`,
+		string(status), completedAt.UnixMilli(), prURL, durationSecs, runID, string(StatusRunning))
 	if err != nil {
 		return fmt.Errorf("runs.MarkDone: %w", err)
 	}

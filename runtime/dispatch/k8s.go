@@ -129,6 +129,22 @@ func (k *K8s) CreateJob(ctx context.Context, job *batchv1.Job) (*batchv1.Job, er
 	return k.Client.BatchV1().Jobs(k.Namespace).Create(ctx, job, metav1.CreateOptions{})
 }
 
+// DeleteJob deletes a builder Job by name with the given grace period (seconds).
+// PropagationPolicy=Foreground so the pod is torn down with the Job. A non-zero
+// grace lets the pod catch SIGTERM (graceful cancel); 0 forces SIGKILL. Missing
+// Job is not an error (idempotent -- it may have completed/TTL'd already).
+func (k *K8s) DeleteJob(ctx context.Context, name string, gracePeriodSecs *int64) error {
+	fg := metav1.DeletePropagationForeground
+	err := k.Client.BatchV1().Jobs(k.Namespace).Delete(ctx, name, metav1.DeleteOptions{
+		GracePeriodSeconds: gracePeriodSecs,
+		PropagationPolicy:  &fg,
+	})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
 // SetBriefOwner makes the Job own the brief ConfigMap so it is garbage-collected
 // when the Job is removed (TTLSecondsAfterFinished). NEX-461: briefs otherwise
 // leak — accumulating one per dispatch forever.
