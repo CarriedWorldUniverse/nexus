@@ -1,8 +1,9 @@
 const { html, useEffect, useRef, useState } = window.__preact;
 
-import { runsList, runGet, runCancel } from '../api.js';
+import { replyToThread, runsList, runGet, runCancel } from '../api.js';
 import { onPushKind, subscribe } from '../comms.js';
 import { MessageBubble } from '../components/MessageBubble.js';
+import { DispatchComposePanel } from './panels/DispatchComposePanel.js';
 import { TeamPanel } from './panels/TeamPanel.js';
 import { EnvHealthPanel } from './panels/EnvHealthPanel.js';
 
@@ -109,7 +110,52 @@ function CancelControls({ run, onCancelled }) {
   `;
 }
 
-function Timeline({ items, selected, selectedRun, loading, partial, error }) {
+function ThreadReplyBox({ run, onReply }) {
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  if (!run) return null;
+  const disabled = busy || !run.dispatch_msg_id || !run.agent;
+  const submit = (e) => {
+    e.preventDefault();
+    const body = text.trim();
+    if (!body) return;
+    setBusy(true);
+    setError('');
+    replyToThread(run, body).then((res) => {
+      setText('');
+      if (onReply) onReply({
+        kind: 'chat',
+        at: Date.now(),
+        chat: {
+          msg_id: res.msg_id,
+          from: 'operator',
+          content: body.startsWith(`@${run.agent}`) ? body : `@${run.agent} ${body}`,
+          reply_to: run.dispatch_msg_id,
+        },
+      });
+    }).catch((err) => {
+      setError(err.message || 'reply failed');
+    }).finally(() => setBusy(false));
+  };
+  return html`
+    <form class="timeline-reply" onSubmit=${submit}>
+      <textarea
+        value=${text}
+        rows="3"
+        disabled=${disabled}
+        placeholder=${run.dispatch_msg_id ? `Reply to ${run.agent || 'agent'}` : 'Thread root unavailable'}
+        onInput=${(e) => setText(e.currentTarget.value)}
+      />
+      <div class="timeline-reply-actions">
+        ${error ? html`<span class="timeline-reply-error">${error}</span>` : null}
+        <button type="submit" disabled=${disabled || !text.trim()}>Reply</button>
+      </div>
+    </form>
+  `;
+}
+
+function Timeline({ items, selected, selectedRun, loading, partial, error, onReply }) {
   if (!selected) {
     return html`<section class="timeline timeline-empty">Select a run.</section>`;
   }
@@ -141,6 +187,7 @@ function Timeline({ items, selected, selectedRun, loading, partial, error }) {
         })}
         ${error ? html`<div class="timeline-error">${error}</div>` : null}
       </div>
+      <${ThreadReplyBox} run=${selectedRun} onReply=${onReply} />
     </section>
   `;
 }
@@ -154,6 +201,7 @@ export function WatchView() {
   const [partial, setPartial] = useState(false);
   const [feedError, setFeedError] = useState('');
   const [timelineError, setTimelineError] = useState('');
+  const [showDispatch, setShowDispatch] = useState(false);
   const [showTeam, setShowTeam] = useState(false);
   const [showEnv, setShowEnv] = useState(false);
   const selectedRef = useRef(null);
@@ -243,14 +291,24 @@ export function WatchView() {
           <span class="watch-selected">${selected || 'No run selected'}</span>
         </div>
         <div class="watch-actions">
+          <button class=${showDispatch ? 'panel-toggle on' : 'panel-toggle'} onClick=${() => setShowDispatch((v) => !v)}>+ Dispatch</button>
           <button class=${showTeam ? 'panel-toggle on' : 'panel-toggle'} onClick=${() => setShowTeam((v) => !v)}>Team</button>
           <button class=${showEnv ? 'panel-toggle on' : 'panel-toggle'} onClick=${() => setShowEnv((v) => !v)}>Env</button>
         </div>
       </div>
       <div class="watch-body">
+        ${showDispatch ? html`<${DispatchComposePanel} onClose=${() => setShowDispatch(false)} onPosted=${() => runsList().then(setRuns).catch(() => {})} />` : null}
         ${showTeam ? html`<${TeamPanel} onClose=${() => setShowTeam(false)} />` : null}
         <${RunFeed} runs=${runs} selected=${selected} onSelect=${setSelected} loading=${loadingRuns} error=${feedError} />
-        <${Timeline} items=${items} selected=${selected} selectedRun=${selectedRun} loading=${loadingRun} partial=${partial} error=${timelineError} />
+        <${Timeline}
+          items=${items}
+          selected=${selected}
+          selectedRun=${selectedRun}
+          loading=${loadingRun}
+          partial=${partial}
+          error=${timelineError}
+          onReply=${(item) => setItems((prev) => [...prev, item])}
+        />
         ${showEnv ? html`<${EnvHealthPanel} onClose=${() => setShowEnv(false)} />` : null}
       </div>
     </div>

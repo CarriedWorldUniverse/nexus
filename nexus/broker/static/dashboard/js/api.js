@@ -126,6 +126,29 @@ export function runCancel(runId, force = false) {
   return rpc('run.cancel', { run_id: runId, force }).then((p) => p || { ok: false });
 }
 
+export function buildDispatchLine({ agent, provider = '', repo = '', ticket = '', branch = '', task = '' }) {
+  const cleanAgent = String(agent || '').trim();
+  const cleanProvider = String(provider || '').trim();
+  const cleanRepo = String(repo || '').trim();
+  const cleanTicket = String(ticket || '').trim();
+  const cleanBranch = String(branch || '').trim();
+  const cleanTask = String(task || '').trim();
+  if (!cleanAgent) throw new Error('agent required');
+  const target = `${cleanAgent}${cleanProvider ? `%${cleanProvider}` : ''}`;
+  const parts = ['!dispatch', target];
+  if (cleanRepo) parts.push(`repo=${cleanRepo}`);
+  if (cleanTicket) parts.push(`ticket=${cleanTicket}`);
+  if (cleanBranch) parts.push(`branch=${cleanBranch}`);
+  if (!cleanTask) throw new Error('task required');
+  parts.push(cleanTask);
+  return parts.join(' ');
+}
+
+export function dispatchCompose(fields) {
+  const line = buildDispatchLine(fields || {});
+  return sendMessage({ from: 'operator', content: line }).then(() => ({ line }));
+}
+
 export function activityHistory(runId, limit = 1000) {
   return rpc('activity.history', { run_id: runId, limit }).then((p) => ({
     items: p.items || [],
@@ -187,6 +210,20 @@ export function sendToAgent(agentId, text) {
   return rpc('aspect.say', {
     aspect: agentId,
     content: text,
+  });
+}
+
+export function replyToThread(run, content) {
+  const aspect = run && run.agent;
+  const replyTo = Number(run && run.dispatch_msg_id) || 0;
+  const body = String(content || '').trim();
+  if (!aspect) return Promise.reject(new Error('run agent required'));
+  if (!replyTo) return Promise.reject(new Error('run thread root unavailable'));
+  if (!body) return Promise.reject(new Error('reply required'));
+  return rpc('aspect.say', {
+    aspect,
+    content: body,
+    reply_to: replyTo,
   });
 }
 

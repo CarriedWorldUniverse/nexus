@@ -333,11 +333,124 @@
   line-height: 1;
 }
 
+.dispatch-form,
 .team-list,
 .env-pvcs {
   list-style: none;
   padding: 0;
   margin: 0;
+}
+
+.dispatch-panel {
+  flex-basis: 300px;
+  width: 300px;
+}
+
+.dispatch-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+
+.dispatch-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.dispatch-field input,
+.dispatch-field select,
+.dispatch-field textarea,
+.timeline-reply textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: 12px var(--font-mono);
+}
+
+.dispatch-field input,
+.dispatch-field select {
+  height: 30px;
+  padding: 0 8px;
+}
+
+.dispatch-field textarea,
+.timeline-reply textarea {
+  resize: vertical;
+  padding: 8px;
+  line-height: 1.35;
+}
+
+.dispatch-task {
+  text-transform: none;
+}
+
+.dispatch-preview {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-abyss);
+  color: var(--text-muted);
+  font: 11px/1.35 var(--font-mono);
+  word-break: break-word;
+}
+
+.dispatch-submit,
+.timeline-reply button {
+  min-height: 30px;
+  border: 1px solid var(--view-accent);
+  border-radius: 4px;
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  font: 12px var(--font-mono);
+  cursor: pointer;
+}
+
+.dispatch-submit:disabled,
+.timeline-reply button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.dispatch-posted {
+  color: var(--color-moss);
+  font: 11px var(--font-mono);
+}
+
+.timeline-reply {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-deep);
+}
+
+.timeline-reply-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.timeline-reply-error {
+  min-width: 0;
+  flex: 1;
+  color: #ffb3b3;
+  font-size: 12px;
 }
 
 .team-row,

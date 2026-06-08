@@ -425,12 +425,7 @@ func (c *wsConn) handleOperatorAspectSay(env frames.Envelope) {
 	}
 	ctx, cancel := c.opCtx()
 	defer cancel()
-	// reply_to is hardcoded to 0 here — AspectSayPayload doesn't
-	// carry a reply_to field today (per dashboard-ws-port spec §3.2,
-	// aspect.say is a top-level "talk to this aspect" affordance).
-	// If the dashboard ever needs threaded replies into a specific
-	// message, add the field to the payload and forward it here.
-	msgID, err := c.broker.HandleChatSend(ctx, "operator", content, 0, "")
+	msgID, err := c.broker.HandleChatSend(ctx, "operator", content, p.ReplyTo, "")
 	if err != nil {
 		// Failures here include both transient (context cancellation)
 		// and permanent (validation rejections). The SPA's comms.js

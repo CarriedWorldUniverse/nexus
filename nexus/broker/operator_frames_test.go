@@ -231,10 +231,15 @@ func TestOperatorFrames_KnowledgeSearch_RoundTrips(t *testing.T) {
 
 func TestOperatorFrames_AspectSay_PrependsMention(t *testing.T) {
 	srv, chatStore, _, tok := newOperatorTestServer(t)
+	parent, err := chatStore.Insert(context.Background(), "operator", "!dispatch anvil do work", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	c := dialWS(t, srv, tok)
 	resp := mustResponse(t, c, frames.KindAspectSay, frames.AspectSayPayload{
 		Aspect:  "anvil",
 		Content: "ping",
+		ReplyTo: parent.ID,
 	})
 	if resp.Kind != frames.KindAspectSayResult {
 		t.Fatalf("kind: got %s", resp.Kind)
@@ -253,6 +258,9 @@ func TestOperatorFrames_AspectSay_PrependsMention(t *testing.T) {
 	}
 	if row.From != "operator" {
 		t.Errorf("from: got %q want operator", row.From)
+	}
+	if row.ReplyTo != parent.ID {
+		t.Errorf("reply_to: got %d want %d", row.ReplyTo, parent.ID)
 	}
 }
 

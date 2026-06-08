@@ -676,6 +676,7 @@ type KnowledgeStoreResultPayload struct {
 type AspectSayPayload struct {
 	Aspect  string `json:"aspect"`
 	Content string `json:"content"`
+	ReplyTo int64  `json:"reply_to,omitempty"`
 }
 
 // AspectSayResultPayload — the new chat msg_id, so the SPA can
