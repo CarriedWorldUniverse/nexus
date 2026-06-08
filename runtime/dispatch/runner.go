@@ -88,6 +88,7 @@ type Runner struct {
 	MaxConc  int // global cap on concurrent runs; 0 = unlimited
 	Poster   Poster
 	NewID    func() string
+	Recorder RunsRecorder
 
 	mu        sync.Mutex
 	ctx       context.Context   // stored at Init for background callbacks (OnJobDone)
@@ -227,6 +228,13 @@ func (r *Runner) reserve(b Brief) *Run {
 	run := &Run{ID: runID, ParentID: b.ParentRunID, Brief: b, Started: time.Now()}
 	r.active[runID] = run
 	r.agentBusy[b.Agent] = runID
+	if r.Recorder != nil {
+		ctx := r.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		r.Recorder.RecordRunStart(ctx, runID, b.Ticket, b.Agent, b.Thread, b.Repo, b.Task, b.ParentRunID, b.DispatchMsgID)
+	}
 	return run
 }
 
@@ -273,6 +281,14 @@ func (r *Runner) OnJobDone(done JobDone) {
 	}
 	if done.CompletedAt.IsZero() {
 		done.CompletedAt = time.Now()
+	}
+	if r.Recorder != nil {
+		ctx := r.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		dur := int(done.CompletedAt.Sub(done.StartedAt).Seconds())
+		r.Recorder.RecordRunDone(ctx, run.ID, statusFor(done.OK), done.CompletedAt, prURLFromDone(done), dur)
 	}
 	r.post(done.Thread, r.completionSummary(run, done))
 
