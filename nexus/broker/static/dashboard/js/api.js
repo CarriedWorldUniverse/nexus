@@ -252,6 +252,22 @@ export function sendMessage({ from, content, replyTo = 0, topic = '', imageUrl =
   return Promise.resolve();
 }
 
+// sendDM posts a 1:1 message to an aspect: the dm:<agent> topic groups the
+// conversation, and the @<agent> mention is what actually routes it.
+export function sendDM(agent, content, replyTo = 0) {
+  const target = String(agent || '').trim();
+  const body = String(content || '').trim();
+  if (!target || !body) return Promise.resolve();
+  const mention = `@${target}`;
+  const withMention = body.includes(mention) ? body : `${mention} ${body}`;
+  return sendMessage({
+    from: 'operator',
+    content: withMention,
+    replyTo,
+    topic: `dm:${target}`,
+  });
+}
+
 // sendToAgent → aspect.say (the broker prepends @<aspect>).
 export function sendToAgent(agentId, text) {
   return rpc('aspect.say', {
