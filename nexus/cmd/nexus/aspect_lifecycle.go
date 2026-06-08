@@ -1,7 +1,8 @@
-// Aspect lifecycle subcommands: retire, resurrect, list, status.
+// Aspect lifecycle subcommands: set, retire, resurrect, list, status.
 //
 // Per agent-network/docs/2026-05-08-nexus-resident-personality-spec.md §9.3 / §9.4.
 //
+// set       — updates provider/model binding without touching keyfiles.
 // retire    — sets status='retired'. All keyfiles permanently dead.
 //             aspect mint refuses (use resurrect first).
 // resurrect — sets status='active' AND bumps keyfile_version. Old
@@ -30,6 +31,102 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 )
+
+// runAspectSet implements `aspect set <name> --provider <p> --model <m>`.
+// Either --provider or --model may be omitted; omitted fields are left
+// unchanged. Unlike re-mint, this does not bump keyfile_version or
+// replace aspect_pubkey.
+func runAspectSet(args []string) int {
+	fs := flag.NewFlagSet("aspect set", flag.ContinueOnError)
+	dataDir := fs.String("data-dir", "", "data directory holding nexus.db (falls back to NEXUS_DATA_DIR env, then ./data). Ignored when --via is set.")
+	provider := fs.String("provider", "", "new AI provider for this aspect")
+	model := fs.String("model", "", "new model name for this aspect")
+	via := fs.String("via", "", "broker URL (https://...) to update through. When set, broker is the single DB writer.")
+	adminToken := fs.String("admin-token", "", "admin bearer token for --via. If empty, reads from NEXUS_ADMIN_TOKEN env.")
+	if len(args) == 0 || args[0] == "" || args[0][0] == '-' {
+		fmt.Fprintln(os.Stderr, "usage: nexus aspect set <name> [--provider <p>] [--model <m>]")
+		return 2
+	}
+	name := args[0]
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "aspect set: unexpected extra args: %v\n", fs.Args())
+		return 2
+	}
+
+	var providerSet, modelSet bool
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "provider":
+			providerSet = true
+		case "model":
+			modelSet = true
+		}
+	})
+	if !providerSet && !modelSet {
+		fmt.Fprintln(os.Stderr, "aspect set: at least one of --provider or --model is required")
+		return 2
+	}
+
+	var providerValue, modelValue *string
+	if providerSet {
+		providerValue = provider
+	}
+	if modelSet {
+		modelValue = model
+	}
+
+	if *via != "" {
+		tok := *adminToken
+		if tok == "" {
+			tok = os.Getenv("NEXUS_ADMIN_TOKEN")
+		}
+		if tok == "" {
+			fmt.Fprintln(os.Stderr, "aspect set: --via set but no admin token (use --admin-token or NEXUS_ADMIN_TOKEN env)")
+			return 2
+		}
+		return runAspectSetViaBroker(name, *via, tok, providerValue, modelValue)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	store, db, code := openStore(ctx, *dataDir)
+	if code != 0 {
+		return code
+	}
+	defer db.Close()
+
+	prior, err := store.Get(ctx, name)
+	if err != nil {
+		if errors.Is(err, aspects.ErrNotFound) {
+			fmt.Fprintf(os.Stderr, "aspect set: %q does not exist\n", name)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "aspect set: lookup: %v\n", err)
+		return 1
+	}
+	if err := store.SetProviderModel(ctx, name, providerValue, modelValue); err != nil {
+		if errors.Is(err, aspects.ErrNotFound) {
+			fmt.Fprintf(os.Stderr, "aspect set: %q does not exist\n", name)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "aspect set: %v\n", err)
+		return 1
+	}
+	updated, err := store.Get(ctx, name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aspect set: readback: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("aspect: %s\n", name)
+	fmt.Printf("provider: %s -> %s\n", prior.Provider, updated.Provider)
+	fmt.Printf("model: %s -> %s\n", prior.Model, updated.Model)
+	fmt.Printf("keyfile_version: %d (unchanged)\n", updated.CurrentKeyfileVersion)
+	return 0
+}
 
 // runAspectRetire implements `aspect retire <name>`.
 func runAspectRetire(args []string) int {

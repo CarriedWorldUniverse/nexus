@@ -163,6 +163,66 @@ func TestBumpKeyfileVersion_NotFound(t *testing.T) {
 	}
 }
 
+func TestSetProviderModel_LeavesKeyfileUntouched(t *testing.T) {
+	s := freshStore(t)
+	ctx := context.Background()
+
+	if err := s.Insert(ctx, Aspect{
+		Name:                  "plumb",
+		AspectPubkey:          fakePubkey(1),
+		Provider:              "claude-api",
+		Model:                 "claude-opus-4-7",
+		CurrentKeyfileVersion: 7,
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	provider := "openai"
+	if err := s.SetProviderModel(ctx, "plumb", &provider, nil); err != nil {
+		t.Fatalf("SetProviderModel provider-only: %v", err)
+	}
+	got, err := s.Get(ctx, "plumb")
+	if err != nil {
+		t.Fatalf("Get provider-only: %v", err)
+	}
+	if got.Provider != "openai" || got.Model != "claude-opus-4-7" {
+		t.Errorf("provider/model = %q/%q; want openai/claude-opus-4-7", got.Provider, got.Model)
+	}
+	if got.CurrentKeyfileVersion != 7 {
+		t.Errorf("keyfile version changed to %d; want 7", got.CurrentKeyfileVersion)
+	}
+	if string(got.AspectPubkey) != string(fakePubkey(1)) {
+		t.Error("aspect pubkey changed")
+	}
+
+	model := "gpt-5"
+	if err := s.SetProviderModel(ctx, "plumb", nil, &model); err != nil {
+		t.Fatalf("SetProviderModel model-only: %v", err)
+	}
+	got, err = s.Get(ctx, "plumb")
+	if err != nil {
+		t.Fatalf("Get model-only: %v", err)
+	}
+	if got.Provider != "openai" || got.Model != "gpt-5" {
+		t.Errorf("provider/model = %q/%q; want openai/gpt-5", got.Provider, got.Model)
+	}
+	if got.CurrentKeyfileVersion != 7 {
+		t.Errorf("keyfile version changed to %d; want 7", got.CurrentKeyfileVersion)
+	}
+	if string(got.AspectPubkey) != string(fakePubkey(1)) {
+		t.Error("aspect pubkey changed")
+	}
+}
+
+func TestSetProviderModel_NotFound(t *testing.T) {
+	s := freshStore(t)
+	provider := "openai"
+	err := s.SetProviderModel(context.Background(), "ghost", &provider, nil)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("SetProviderModel(ghost) = %v; want ErrNotFound", err)
+	}
+}
+
 func TestSetStatus(t *testing.T) {
 	s := freshStore(t)
 	ctx := context.Background()
