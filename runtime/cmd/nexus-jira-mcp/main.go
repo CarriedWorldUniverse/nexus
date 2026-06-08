@@ -8,15 +8,15 @@
 //
 // Tools exposed:
 //
-//   jira.search          — generic JQL search
-//   jira.get             — fetch a single issue
-//   jira.list_my_issues  — what's assigned to me, optionally filtered by status
-//   jira.list_ready      — Ready/To Do work this aspect could claim
-//   jira.claim           — set self as assignee + move to In Progress
-//   jira.comment         — post a plain-text comment
-//   jira.update_status   — transition by status name
-//   jira.create          — file an Epic / Story / Task / Subtask / Bug
-//   jira.complete        — transition to Done (or In Review when awaitReview=true)
+//	jira.search          — generic JQL search
+//	jira.get             — fetch a single issue
+//	jira.list_my_issues  — what's assigned to me, optionally filtered by status
+//	jira.list_ready      — Ready/To Do work this aspect could claim
+//	jira.claim           — set self as assignee + move to In Progress
+//	jira.comment         — post a plain-text comment
+//	jira.update_status   — transition by status name
+//	jira.create          — file an Epic / Story / Task / Subtask / Bug
+//	jira.complete        — transition to Done (or In Review when awaitReview=true)
 //
 // Identity is whoever the broker credential authenticates as. For
 // shadow's keyfile the broker resolves the aspect's default jira
@@ -138,7 +138,8 @@ func main() {
 			os.Exit(2)
 		}
 		fetchCtx, fetchCancel := context.WithTimeout(ctx, 15*time.Second)
-		var bundle interface{ /* shape via brokercreds */ }
+		var bundle interface { /* shape via brokercreds */
+		}
 		_ = bundle
 		cn, b, err := brokercreds.FetchJira(fetchCtx, wsCli, *credentialName)
 		fetchCancel()
@@ -235,22 +236,21 @@ func main() {
 		stop()
 		return
 	}
-	select {
-	case err := <-mcpErrCh:
-		if err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "EOF") {
-			log.Error("MCP stdio loop ended", "err", err)
+	// The broker WS is only needed for the one-time credential.fetch above;
+	// from here jira calls are direct REST with the cached basic-auth creds.
+	// So a broker WS drop must NOT take the MCP down — that was the recurring
+	// nexus-jira disconnect (NEX-482), where the old select exited on wsErrCh
+	// and stopped serving. Tie the process lifetime to the MCP stdio loop
+	// alone; a WS drop is logged in the background and serving continues.
+	go func() {
+		if err := <-wsErrCh; err != nil && !errors.Is(err, context.Canceled) {
+			log.Warn("broker ws exited — non-fatal; jira creds cached, MCP keeps serving", "err", err)
 		}
-	case err := <-wsErrCh:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			log.Warn("ws client exited", "err", err)
-		}
+	}()
+	if err := <-mcpErrCh; err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "EOF") {
+		log.Error("MCP stdio loop ended", "err", err)
 	}
 	stop()
-	// Best-effort drain of the goroutine we didn't read from; ignore err.
-	select {
-	case <-wsErrCh:
-	default:
-	}
 }
 
 // authInfo carries everything we need from the keyfile validate handshake
