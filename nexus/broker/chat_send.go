@@ -45,7 +45,7 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 	if strings.HasPrefix(strings.TrimSpace(content), "!dispatch") {
 		b.log.Info("!dispatch intercepted", "from", from, "topic", topic, "has_chatstore", b.cfg.ChatStore != nil)
 		if b.cfg.ChatStore == nil {
-			if err := b.submitDispatch(ctx, from, content, topic); err != nil {
+			if err := b.submitDispatch(ctx, from, content, topic, 0); err != nil {
 				b.log.Warn("!dispatch: submit failed", "err", err, "from", from)
 			}
 			return 0, nil
@@ -61,7 +61,7 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 			thread = fmt.Sprintf("dispatch-%d", msg.ThreadRootMsgID)
 		}
 		b.log.Info("!dispatch post stored, routing to runner", "msg_id", msg.ID, "thread", thread)
-		if derr := b.submitDispatch(ctx, from, content, thread); derr != nil {
+		if derr := b.submitDispatch(ctx, from, content, thread, msg.ID); derr != nil {
 			b.log.Warn("!dispatch: submit failed", "err", derr, "from", from)
 		}
 		return msg.ID, nil

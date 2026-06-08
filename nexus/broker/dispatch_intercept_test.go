@@ -151,6 +151,9 @@ func TestDispatchInterceptedBeforeChatStore(t *testing.T) {
 	if brief.Task != "NEX-999 build it" {
 		t.Errorf("brief.Task = %q, want %q", brief.Task, "NEX-999 build it")
 	}
+	if brief.DispatchMsgID != 2 {
+		t.Errorf("brief.DispatchMsgID = %d, want 2", brief.DispatchMsgID)
+	}
 }
 
 // TestDispatchWithoutRunner — when no Runner is configured, the !dispatch post
