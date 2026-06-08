@@ -1,5 +1,5 @@
 const { html, useState, useEffect, useRef } = window.__preact;
-import { FeedView } from './FeedView.js';
+import { ConverseView } from './ConverseView.js';
 import { ObserveView } from './ObserveView.js';
 import { FilesView } from './FilesView.js';
 import { Tickets } from './Tickets.js';
@@ -8,10 +8,10 @@ import { DocsView } from './DocsView.js';
 
 // Views hostable inside a split pane. Same component instances as the main
 // routes — they listen to the same singleton signals, so one WS / SSE / poll
-// stack feeds both panes. Chat-like views (Feed) share currentChannel
+// stack feeds both panes. Chat-like views (Converse) share currentChannel
 // globally; using the same view in both panes will keep them in sync.
 const PANE_VIEWS = [
-  { id: 'feed',     label: 'Feed',     Component: FeedView },
+  { id: 'converse', label: 'Converse', Component: ConverseView },
   { id: 'docs',     label: 'Docs',     Component: DocsView },
   { id: 'status',   label: 'Status',   Component: Status },
   { id: 'agents',   label: 'Activity', Component: ObserveView },
@@ -56,13 +56,13 @@ function Pane({ viewId, onChangeView, onSwap }) {
 
 export function SplitView() {
   const [left, setLeft] = useState(() => {
-    const v = localStorage.getItem(LS_LEFT) || 'feed';
-    return v === 'terminal' ? 'feed' : v;
+    const v = localStorage.getItem(LS_LEFT) || 'converse';
+    return (v === 'terminal' || v === 'feed') ? 'converse' : v;
   });
   const [right, setRight] = useState(() => {
     const v = localStorage.getItem(LS_RIGHT) || 'agents';
     // Heal saved 'terminal' references — Terminal view was removed in Phase D.
-    return v === 'terminal' ? 'agents' : v;
+    return v === 'terminal' ? 'agents' : (v === 'feed' ? 'converse' : v);
   });
   const [ratio, setRatio] = useState(loadRatio);
   const [vertical, setVertical] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 720));

@@ -6,8 +6,7 @@ import { Shell } from './components/Shell.js';
 import { Login } from './Login.js';
 import { open as commsOpen } from './comms.js';
 import { initNotifications } from './notifications.js';
-import { FeedView } from './views/FeedView.js';
-import { Chat } from './views/Chat.js';
+import { ConverseView } from './views/ConverseView.js';
 import { ObserveView } from './views/ObserveView.js';
 import { WatchView } from './views/WatchView.js';
 import { FilesView } from './views/FilesView.js';
@@ -16,17 +15,18 @@ import { Status } from './views/Status.js';
 import { DocsView } from './views/DocsView.js';
 import { SplitView } from './views/SplitView.js';
 import { SettingsView } from './views/SettingsView.js';
-import { Placeholder } from './views/Placeholder.js';
 
 function getRoute() {
   const hash = window.location.hash;
-  if (hash.startsWith('#/watch')) return 'watch';
+  if (hash.startsWith('#/chat') || hash.startsWith('#/feed')) {
+    if (window.location.hash !== '#/converse') window.location.hash = '#/converse';
+    return 'converse';
+  }
   if (hash.startsWith('#/converse')) return 'converse';
-  if (hash.startsWith('#/configure')) return 'configure';
-  if (hash.startsWith('#/chat')) return 'chat';
+  if (hash.startsWith('#/watch')) return 'watch';
+  if (hash.startsWith('#/configure') || hash.startsWith('#/settings')) return 'configure';
   if (hash.startsWith('#/agents')) return 'agents';
-  if (hash.startsWith('#/settings')) return 'settings';
-  if (hash === '#/' || hash === '' || hash.startsWith('#/feed')) return 'watch';
+  if (hash === '#/' || hash === '') return 'watch';
   if (hash === '#/files') return 'files';
   if (hash === '#/tickets') return 'tickets';
   if (hash === '#/status') return 'status';
@@ -44,17 +44,14 @@ function getAgentFromHash() {
 function RouteView({ route }) {
   switch (route) {
     case 'watch':    return html`<${WatchView} />`;
-    case 'converse': return html`<${Placeholder} title="Converse" note="Coming in Phase 3" />`;
+    case 'converse': return html`<${ConverseView} />`;
     case 'configure': return html`<${SettingsView} />`;
-    case 'feed':     return html`<${FeedView} />`;
-    case 'chat':     return html`<${Chat} />`;
     case 'agents':   return html`<${ObserveView} />`;
     case 'files':    return html`<${FilesView} />`;
     case 'tickets':  return html`<${Tickets} />`;
     case 'status':   return html`<${Status} />`;
     case 'docs':     return html`<${DocsView} />`;
     case 'split':    return html`<${SplitView} />`;
-    case 'settings': return html`<${SettingsView} />`;
     default:         return html`<${WatchView} />`;
   }
 }
@@ -64,7 +61,13 @@ const route = signal(getRoute());
 // Sync currentChannel from hash on load and on every navigation
 function syncChannelFromHash() {
   const agent = getAgentFromHash();
-  currentChannel.value = agent || 'general';
+  if (agent) {
+    currentChannel.value = agent;
+    return;
+  }
+  if (window.location.hash.startsWith('#/converse')) {
+    currentChannel.value = currentChannel.value || 'general';
+  }
 }
 syncChannelFromHash();
 
@@ -92,7 +95,7 @@ function initMobileKeyboard() {
   window.visualViewport.addEventListener('scroll', onResize);
   onResize();
   document.body.addEventListener('touchmove', (e) => {
-    if (e.target.closest('.chat-messages') || e.target.closest('.chat-channels')) return;
+    if (e.target.closest('.chat-messages') || e.target.closest('.chat-channels') || e.target.closest('.cv-list')) return;
     e.preventDefault();
   }, { passive: false });
 }
