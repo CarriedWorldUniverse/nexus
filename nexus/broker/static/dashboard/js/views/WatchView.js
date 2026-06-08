@@ -1,6 +1,6 @@
 const { html, useEffect, useRef, useState } = window.__preact;
 
-import { runsList, runGet } from '../api.js';
+import { runsList, runGet, runCancel } from '../api.js';
 import { onPushKind, subscribe } from '../comms.js';
 import { MessageBubble } from '../components/MessageBubble.js';
 import { TeamPanel } from './panels/TeamPanel.js';
@@ -93,7 +93,23 @@ function ActivityLine({ item }) {
   `;
 }
 
-function Timeline({ items, selected, loading, partial, error }) {
+function CancelControls({ run, onCancelled }) {
+  if (!run || run.status !== 'running') return null;
+  const stop = (force) => {
+    const target = run.ticket || run.run_id || 'this run';
+    const msg = force ? `Force-kill ${target}? In-flight work is lost.` : `Stop ${target}?`;
+    if (!window.confirm(msg)) return;
+    runCancel(run.run_id, force).then(() => onCancelled && onCancelled());
+  };
+  return html`
+    <span class="run-cancel">
+      <button class="btn-stop" onClick=${() => stop(false)}>Stop</button>
+      <button class="btn-force" onClick=${() => stop(true)}>Force</button>
+    </span>
+  `;
+}
+
+function Timeline({ items, selected, selectedRun, loading, partial, error }) {
   if (!selected) {
     return html`<section class="timeline timeline-empty">Select a run.</section>`;
   }
@@ -101,8 +117,11 @@ function Timeline({ items, selected, loading, partial, error }) {
     <section class="timeline" aria-label="Run timeline">
       <div class="timeline-head">
         <span>Timeline</span>
-        ${loading ? html`<span class="timeline-state">loading</span>` : null}
-        ${partial ? html`<span class="timeline-state warn">partial</span>` : null}
+        <span class="timeline-head-actions">
+          ${loading ? html`<span class="timeline-state">loading</span>` : null}
+          ${partial ? html`<span class="timeline-state warn">partial</span>` : null}
+          <${CancelControls} run=${selectedRun} onCancelled=${() => {}} />
+        </span>
       </div>
       <div class="timeline-scroll">
         ${items.length === 0 && !loading ? html`<div class="timeline-empty">No timeline items yet.</div>` : null}
@@ -139,6 +158,7 @@ export function WatchView() {
   const [showEnv, setShowEnv] = useState(false);
   const selectedRef = useRef(null);
   selectedRef.current = selected;
+  const selectedRun = runs.find((r) => r.run_id === selected) || null;
 
   useEffect(() => {
     let alive = true;
@@ -230,7 +250,7 @@ export function WatchView() {
       <div class="watch-body">
         ${showTeam ? html`<${TeamPanel} onClose=${() => setShowTeam(false)} />` : null}
         <${RunFeed} runs=${runs} selected=${selected} onSelect=${setSelected} loading=${loadingRuns} error=${feedError} />
-        <${Timeline} items=${items} selected=${selected} loading=${loadingRun} partial=${partial} error=${timelineError} />
+        <${Timeline} items=${items} selected=${selected} selectedRun=${selectedRun} loading=${loadingRun} partial=${partial} error=${timelineError} />
         ${showEnv ? html`<${EnvHealthPanel} onClose=${() => setShowEnv(false)} />` : null}
       </div>
     </div>

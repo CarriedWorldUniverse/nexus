@@ -122,6 +122,10 @@ export function runGet(runId) {
   }));
 }
 
+export function runCancel(runId, force = false) {
+  return rpc('run.cancel', { run_id: runId, force }).then((p) => p || { ok: false });
+}
+
 export function activityHistory(runId, limit = 1000) {
   return rpc('activity.history', { run_id: runId, limit }).then((p) => ({
     items: p.items || [],

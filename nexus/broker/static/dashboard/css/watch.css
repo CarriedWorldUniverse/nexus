@@ -121,6 +121,37 @@
   color: var(--color-gold);
 }
 
+.timeline-head-actions,
+.run-cancel {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-stop,
+.btn-force {
+  min-width: 48px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.btn-stop:hover {
+  border-color: var(--color-gold);
+  color: var(--text-primary);
+}
+
+.btn-force:hover {
+  border-color: #cf6679;
+  color: #ffb3b3;
+}
+
 .run-feed-list,
 .timeline-scroll {
   flex: 1 1 auto;
