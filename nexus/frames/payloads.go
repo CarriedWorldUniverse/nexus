@@ -221,6 +221,16 @@ type RunGetPayload struct {
 	RunID string `json:"run_id"`
 }
 
+type RunCancelPayload struct {
+	RunID string `json:"run_id"`
+	Force bool   `json:"force,omitempty"`
+}
+
+type RunCancelResultPayload struct {
+	OK      bool   `json:"ok"`
+	Message string `json:"message,omitempty"`
+}
+
 type ChatItemPayload struct {
 	MsgID   int64  `json:"msg_id"`
 	From    string `json:"from"`

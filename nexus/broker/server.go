@@ -385,6 +385,7 @@ type Broker struct {
 
 	activityReader *jsonlsink.Reader
 	k8sReader      kubernetes.Interface
+	dispatchK8s    *dispatch.K8s
 	k8sNamespace   string
 }
 
@@ -447,6 +448,9 @@ func New(cfg Config, r *roster.Roster) *Broker {
 	}
 	b.k8sReader = cfg.K8sReader
 	b.k8sNamespace = cfg.K8sNamespace
+	if cfg.K8sReader != nil {
+		b.dispatchK8s = &dispatch.K8s{Client: cfg.K8sReader, Namespace: cfg.K8sNamespace}
+	}
 	if cfg.RunsStore != nil {
 		if err := cfg.RunsStore.Migrate(context.Background()); err != nil {
 			b.log.Warn("runs store migration failed", "err", err)

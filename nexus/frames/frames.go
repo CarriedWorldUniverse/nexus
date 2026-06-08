@@ -173,6 +173,8 @@ const (
 	KindRunsListResult        Kind = "runs.list.result"
 	KindRunGet                Kind = "run.get"
 	KindRunGetResult          Kind = "run.get.result"
+	KindRunCancel             Kind = "run.cancel"
+	KindRunCancelResult       Kind = "run.cancel.result"
 	KindActivityHistory       Kind = "activity.history"
 	KindActivityHistoryResult Kind = "activity.history.result"
 	KindEnvHealth             Kind = "env.health"
