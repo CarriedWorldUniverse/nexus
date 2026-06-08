@@ -460,6 +460,7 @@ func main() {
 		Replayer:           replayer,
 		ChatStore:          chatStore,
 		RunsStore:          runsStore,
+		SQLDB:              db,
 		ActivityLogDir:     activityLogDir,
 		K8sReader:          k8sReader,
 		K8sNamespace:       k8sNamespace,

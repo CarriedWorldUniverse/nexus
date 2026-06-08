@@ -10,6 +10,7 @@ package broker
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	_ "embed"
 	"encoding/json"
@@ -124,6 +125,11 @@ type Config struct {
 	// RunsStore powers the persisted dispatch run spine. When configured,
 	// New migrates it and adapts it into dispatch.Runner.Recorder.
 	RunsStore runs.Store
+
+	// SQLDB is the broker's sqld connection (shared by the chat/runs/aspects
+	// stores). env.health pings it to report sqld reachability — sqld lives in
+	// a different namespace, so it's checked by connection, not pod (NEX-533).
+	SQLDB *sql.DB
 
 	// ActivityLogDir is the jsonlsink root used for persisted activity
 	// history reads. When empty, run timelines omit historical activity.
