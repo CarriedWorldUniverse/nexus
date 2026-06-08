@@ -53,3 +53,22 @@ func TestJobDoneRecordsRunDone(t *testing.T) {
 		t.Fatalf("RecordRunDone not called correctly: %+v", rec.done)
 	}
 }
+
+func TestJobDoneRecordsPRURL(t *testing.T) {
+	rec := &fakeRecorder{}
+	r := &Runner{Recorder: rec, NewID: func() string { return "run-pr" }}
+	if err := r.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(SetLookupPRURLForTest(func(repo, branch string) (string, error) {
+		if repo != "org/repo" || branch != "feature/x" {
+			t.Fatalf("lookup args repo=%q branch=%q", repo, branch)
+		}
+		return "https://github.com/org/repo/pull/1", nil
+	}))
+	r.reserve(Brief{Agent: "anvil", Ticket: "NEX-3", Thread: "NEX-3", Repo: "org/repo", Branch: "feature/x"})
+	r.OnJobDone(JobDone{Ticket: "NEX-3", OK: true, CompletedAt: time.UnixMilli(9000)})
+	if len(rec.done) != 1 || rec.done[0].pr != "https://github.com/org/repo/pull/1" {
+		t.Fatalf("RecordRunDone PR URL: %+v", rec.done)
+	}
+}

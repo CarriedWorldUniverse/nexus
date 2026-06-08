@@ -19,4 +19,17 @@ func statusFor(ok bool) string {
 	return "failed"
 }
 
-func prURLFromDone(JobDone) string { return "" }
+func prURLForRun(run *Run) string {
+	if run == nil {
+		return ""
+	}
+	branch := run.Brief.Branch
+	if branch == "" {
+		branch = "builder/" + run.Brief.Ticket
+	}
+	prURL, err := lookupPRURL(run.Brief.Repo, branch)
+	if err != nil {
+		return ""
+	}
+	return prURL
+}

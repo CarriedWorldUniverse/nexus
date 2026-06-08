@@ -288,7 +288,7 @@ func (r *Runner) OnJobDone(done JobDone) {
 			ctx = context.Background()
 		}
 		dur := int(done.CompletedAt.Sub(done.StartedAt).Seconds())
-		r.Recorder.RecordRunDone(ctx, run.ID, statusFor(done.OK), done.CompletedAt, prURLFromDone(done), dur)
+		r.Recorder.RecordRunDone(ctx, run.ID, statusFor(done.OK), done.CompletedAt, prURLForRun(run), dur)
 	}
 	r.post(done.Thread, r.completionSummary(run, done))
 
