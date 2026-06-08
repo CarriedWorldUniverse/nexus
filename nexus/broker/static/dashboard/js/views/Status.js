@@ -82,7 +82,7 @@ function computeThreadsByAspect() {
 }
 
 function openThread(rootId) {
-  window.location.hash = `#/chat?thread=${rootId}`;
+  window.location.hash = `#/converse?thread=${rootId}`;
 }
 
 function renderThreadPills(entries) {

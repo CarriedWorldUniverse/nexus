@@ -56,7 +56,7 @@ function TicketCard({ ticket, colors }) {
         ${ticket.source_msg_id && html`
           <a
             class="card-source-link"
-            href=${'#/chat'}
+            href=${'#/converse'}
             onClick=${e => e.stopPropagation()}
           >↗ msg</a>
         `}
