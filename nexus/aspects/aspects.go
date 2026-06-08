@@ -11,7 +11,7 @@
 //
 //   - Aspect / Personality value types
 //   - Status / StatusActive / StatusRetired enum
-//   - Store interface with Get/List/Insert/Update/Bump/SetStatus and
+//   - Store interface with Get/List/Insert/Update/Bump/SetProviderModel/SetStatus and
 //     PersonalityGet/PersonalitySet helpers
 //   - SQLStore implementation backed by *sql.DB
 //
@@ -98,12 +98,15 @@ type Store interface {
 	// for caller use.
 	BumpKeyfileVersion(ctx context.Context, name string, newPubkey []byte) (int64, error)
 
-	// SetProviderAndModel atomically updates the provider + model
-	// columns. Used by the admin endpoint that flips an aspect's
-	// runtime binding without re-minting (NEX-335). Does NOT touch
-	// keyfile_version or aspect_pubkey — operator's keyfile keeps
-	// working; only the validate-response's Provider/Model change,
-	// which agentfunnel picks up on the next reconnect.
+	// SetProviderModel atomically updates the provider and/or model
+	// columns. Nil means "leave this field unchanged". Used by the
+	// admin endpoint and `nexus aspect set` to flip an aspect's runtime
+	// binding without re-minting. Does NOT touch keyfile_version or
+	// aspect_pubkey.
+	SetProviderModel(ctx context.Context, name string, provider, model *string) error
+
+	// SetProviderAndModel atomically updates both provider + model
+	// columns. Kept as a convenience for callers that require both.
 	SetProviderAndModel(ctx context.Context, name, provider, model string) error
 
 	// SetStatus atomically updates status. Used by retire.
@@ -261,9 +264,10 @@ func (s *SQLStore) Update(ctx context.Context, a Aspect) error {
 	return nil
 }
 
-// SetProviderAndModel atomically updates the provider + model columns
-// on an existing aspect row. Used by the admin endpoint that lets the
-// operator flip an aspect from claude-code → openai etc. without
+// SetProviderModel atomically updates provider and/or model columns on
+// an existing aspect row. Nil field pointers mean "keep the existing
+// value". Used by `nexus aspect set` and the admin endpoint that lets
+// the operator flip an aspect from claude-code to openai etc. without
 // re-minting (the keyfile + aspect_pubkey stay untouched, only the
 // runtime-binding shifts).
 //
@@ -271,24 +275,41 @@ func (s *SQLStore) Update(ctx context.Context, a Aspect) error {
 // every column including status / current_keyfile_version / pubkey —
 // a concurrent BumpKeyfileVersion could be lost in the read-modify-
 // write window.
-func (s *SQLStore) SetProviderAndModel(ctx context.Context, name, provider, model string) error {
+func (s *SQLStore) SetProviderModel(ctx context.Context, name string, provider, model *string) error {
+	if provider == nil && model == nil {
+		return errors.New("aspects.SetProviderModel: provider or model required")
+	}
+	providerValue := ""
+	if provider != nil {
+		providerValue = *provider
+	}
+	modelValue := ""
+	if model != nil {
+		modelValue = *model
+	}
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE aspects SET
-			provider = ?, model = ?,
+			provider = CASE WHEN ? THEN ? ELSE provider END,
+			model = CASE WHEN ? THEN ? ELSE model END,
 			updated_at = datetime('now')
 		WHERE name = ?
-	`, provider, model, name)
+	`, provider != nil, providerValue, model != nil, modelValue, name)
 	if err != nil {
-		return fmt.Errorf("aspects.SetProviderAndModel(%q): %w", name, err)
+		return fmt.Errorf("aspects.SetProviderModel(%q): %w", name, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("aspects.SetProviderAndModel(%q) rows affected: %w", name, err)
+		return fmt.Errorf("aspects.SetProviderModel(%q) rows affected: %w", name, err)
 	}
 	if n == 0 {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// SetProviderAndModel atomically updates both provider + model columns.
+func (s *SQLStore) SetProviderAndModel(ctx context.Context, name, provider, model string) error {
+	return s.SetProviderModel(ctx, name, &provider, &model)
 }
 
 // BumpKeyfileVersion implements Store. Uses RETURNING (SQLite 3.35+)

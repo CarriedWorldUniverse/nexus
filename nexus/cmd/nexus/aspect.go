@@ -51,12 +51,14 @@ import (
 // dispatches.
 func runAspectSubcommand(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: nexus aspect <mint|retire|resurrect|list|status>")
+		fmt.Fprintln(os.Stderr, "usage: nexus aspect <mint|set|retire|resurrect|list|status>")
 		return 2
 	}
 	switch args[0] {
 	case "mint":
 		return runAspectMint(args[1:])
+	case "set":
+		return runAspectSet(args[1:])
 	case "retire":
 		return runAspectRetire(args[1:])
 	case "resurrect":
@@ -66,7 +68,7 @@ func runAspectSubcommand(args []string) int {
 	case "status":
 		return runAspectStatus(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown aspect subcommand %q (expected: mint, retire, resurrect, list, status)\n", args[0])
+		fmt.Fprintf(os.Stderr, "unknown aspect subcommand %q (expected: mint, set, retire, resurrect, list, status)\n", args[0])
 		return 2
 	}
 }
