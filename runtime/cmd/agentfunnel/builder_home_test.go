@@ -5,10 +5,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestBuilderHomeLifecycleInitializesWorktreeAndMergesCleanDespawn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The dispatched builder runs only in a Linux k3s pod; `git worktree
+		// remove` hits Windows file-locking ("being used by another process").
+		t.Skip("builder home lifecycle is Linux-only")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -41,7 +47,11 @@ func TestBuilderHomeLifecycleInitializesWorktreeAndMergesCleanDespawn(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cwd != session.worktree {
+	// os.Getwd resolves symlinks (macOS /var -> /private/var), so compare
+	// the resolved forms rather than the literal worktree path.
+	gotCwd, _ := filepath.EvalSymlinks(cwd)
+	wantWT, _ := filepath.EvalSymlinks(session.worktree)
+	if gotCwd != wantWT {
 		t.Fatalf("cwd = %q, want %q", cwd, session.worktree)
 	}
 	if err := os.WriteFile(filepath.Join(session.worktree, "memory.md"), []byte("remember this\n"), 0o644); err != nil {
