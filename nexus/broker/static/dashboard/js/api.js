@@ -21,7 +21,7 @@
 //      reject with a "not yet wired" error so views render a clean
 //      placeholder rather than hanging on a Promise.
 
-import { rpc, send } from './comms.js';
+import { rpc, send, onPushKind } from './comms.js';
 
 export const BASE = window.location.origin;
 
@@ -108,6 +108,33 @@ export function fetchMessages(channel, afterId = 0) {
     messages: (p.messages || []).map(normalizeChatMessage),
     has_more: p.has_more || false,
   }));
+}
+
+export function runsList(limit = 100) {
+  return rpc('runs.list', { limit }).then((p) => p.runs || []);
+}
+
+export function runGet(runId) {
+  return rpc('run.get', { run_id: runId }).then((p) => ({
+    run: p.run || {},
+    timeline: p.timeline || [],
+    partial: !!p.partial,
+  }));
+}
+
+export function activityHistory(runId, limit = 1000) {
+  return rpc('activity.history', { run_id: runId, limit }).then((p) => ({
+    items: p.items || [],
+    partial: !!p.partial,
+  }));
+}
+
+export function envHealth() {
+  return rpc('env.health', {}).then((p) => p || {});
+}
+
+export function onRunsUpdate(handler) {
+  return onPushKind('runs.update', handler);
 }
 
 // fetchOlderMessages — paginate backward via before_id.
