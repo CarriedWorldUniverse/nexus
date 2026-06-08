@@ -24,7 +24,7 @@ If you're new and just want to see the moving parts:
 
 1. Read **[Architecture](architecture.md)** — covers what an aspect is, how the broker routes messages, where the funnel sits between bridle (per-turn deliberation) and provider (the model).
 2. Browse **[Repos](repos/index.md)** — each repo card has its role + how it talks to nexus.
-3. Skim a spec — try **[aspect-funnel architecture](2026-05-02-aspect-funnel-architecture.md)** or **[hand dispatch v0.1](2026-04-30-hand-dispatch-v0_1.md)** for the substance of the runtime.
+3. Skim a spec — try **[aspect-funnel architecture](archive/2026-05-02-aspect-funnel-architecture.md)** or **[hand dispatch v0.1](archive/2026-04-30-hand-dispatch-v0_1.md)** for the substance of the runtime.
 
 ## Status
 

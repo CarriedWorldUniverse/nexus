@@ -38,5 +38,5 @@ Pure-Go SQLite (`modernc.org/sqlite`) at `interchange.db` by default. No CGO req
 
 ## Where to dig deeper
 
-- [AWS bootstrap spec](../2026-05-01-aws-bootstrap-spec.md) — production deployment shape
-- [Nexus transport spec](../2026-04-25-nexus-transport-spec.md)
+- [AWS bootstrap spec](../archive/2026-05-01-aws-bootstrap-spec.md) — production deployment shape
+- [Nexus transport spec](../archive/2026-04-25-nexus-transport-spec.md)

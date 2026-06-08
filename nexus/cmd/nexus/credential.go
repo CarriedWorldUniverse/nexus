@@ -511,4 +511,3 @@ func readBundle(inline, filePath string, fromStdin bool) ([]byte, error) {
 	}
 	return b, nil
 }
-

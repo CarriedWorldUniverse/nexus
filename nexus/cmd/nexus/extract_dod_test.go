@@ -81,16 +81,16 @@ func TestIsTicketKey(t *testing.T) {
 		{"NEX-226", true},
 		{"NEX-1", true},
 		{"ABC-12345", true},
-		{"Z-0", false},          // too short (3 chars)
-		{"nex-226", false},      // lowercase project
-		{"NEX-", false},         // no digits after dash
-		{"-226", false},         // no project prefix
-		{"NEX226", false},       // no dash
-		{"", false},             // empty
-		{"NEX-abc", false},      // non-digit suffix
-		{"NE-226", true},        // short project prefix
-		{"NEX--226", false},     // double dash
-		{"NEX", false},          // no dash at all
+		{"Z-0", false},      // too short (3 chars)
+		{"nex-226", false},  // lowercase project
+		{"NEX-", false},     // no digits after dash
+		{"-226", false},     // no project prefix
+		{"NEX226", false},   // no dash
+		{"", false},         // empty
+		{"NEX-abc", false},  // non-digit suffix
+		{"NE-226", true},    // short project prefix
+		{"NEX--226", false}, // double dash
+		{"NEX", false},      // no dash at all
 	}
 
 	for _, tt := range tests {

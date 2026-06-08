@@ -164,7 +164,7 @@ type TicketNoteAddPayload struct {
 
 ### 4.2 Files
 
-**Superseded by [`2026-05-04-files-subsystem-spec.md`](2026-05-04-files-subsystem-spec.md).** This earlier draft assumed Nexus stored bytes and used a signed-URL download pattern; harrow's files spec replaces that with a broker model — Nexus holds references only, files stay on the announcing aspect's filesystem (or a public URL like Google Drive), and `ws://aspect/file/path` URIs are resolved via a `file.fetch` frame routed to the owning aspect's funnel.
+**Superseded by [`2026-05-04-files-subsystem-spec.md`](../2026-05-04-files-subsystem-spec.md).** This earlier draft assumed Nexus stored bytes and used a signed-URL download pattern; harrow's files spec replaces that with a broker model — Nexus holds references only, files stay on the announcing aspect's filesystem (or a public URL like Google Drive), and `ws://aspect/file/path` URIs are resolved via a `file.fetch` frame routed to the owning aspect's funnel.
 
 That model is strictly better:
 - Single source of truth (no stale copies in Nexus)

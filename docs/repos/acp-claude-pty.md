@@ -26,7 +26,7 @@ Linux + macOS × amd64 + arm64. Windows is gated behind ConPTY v2 work.
 
 ## Key tech decisions
 
-- Driver writes `\r` (CR) to commit, not `\n`. claude-code's TUI runs raw mode and only recognizes CR as Enter. Verified by [plumb's probe-8](../2026-05-13-pi-extract-bridle-gaps.md): 3/3 wedge on LF, 3/3 land on CR.
+- Driver writes `\r` (CR) to commit, not `\n`. claude-code's TUI runs raw mode and only recognizes CR as Enter. Verified by [plumb's probe-8](../archive/2026-05-13-pi-extract-bridle-gaps.md): 3/3 wedge on LF, 3/3 land on CR.
 - Driver pre-sets `ICRNL=off` on the PTY slave's termios before child exec — closes a boot-window race where the driver could write before the child finished `MakeRaw`.
 - mockclaude test target with regression guards: `\n` alone doesn't commit, `\r\n` commits exactly once.
 

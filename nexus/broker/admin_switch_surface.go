@@ -23,9 +23,9 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/coder/websocket"
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
+	"github.com/coder/websocket"
 )
 
 // SwitchSurfaceRequest is the PUT body for the admin endpoint.

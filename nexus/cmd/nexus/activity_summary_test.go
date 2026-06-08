@@ -199,10 +199,10 @@ func TestJoinKVMap_EmptyShowsNone(t *testing.T) {
 // already rely on.
 func TestToActivitySummaryWSURL(t *testing.T) {
 	cases := map[string]string{
-		"https://broker.tail:7888":         "wss://broker.tail:7888/connect",
-		"http://localhost:7888":            "ws://localhost:7888/connect",
-		"wss://broker:7888/connect":        "wss://broker:7888/connect",
-		"wss://broker:7888/connect/":       "wss://broker:7888/connect",
+		"https://broker.tail:7888":   "wss://broker.tail:7888/connect",
+		"http://localhost:7888":      "ws://localhost:7888/connect",
+		"wss://broker:7888/connect":  "wss://broker:7888/connect",
+		"wss://broker:7888/connect/": "wss://broker:7888/connect",
 	}
 	for in, want := range cases {
 		if got := toActivitySummaryWSURL(in); got != want {

@@ -80,7 +80,7 @@ Bridle is a library imported by funnel. Aspects do not import bridle directly.
 
 A "hand" is a one-shot subprocess that inherits its parent aspect's persona + a task-specific specialization. The dispatcher aspect spawns a hand, the hand runs to completion, results return via chat. No peer interaction during the hand's lifetime — it's a pure compute pulse.
 
-See [hand-dispatch v0.1 spec](2026-04-30-hand-dispatch-v0_1.md).
+See [hand-dispatch v0.1 spec](archive/2026-04-30-hand-dispatch-v0_1.md).
 
 ### Interchange — frame-to-frame relay
 
@@ -112,7 +112,7 @@ Each chat message carries a `role_hint` (planner-dispatch / worker-execution / o
 
 ## Where to look next
 
-- The [aspect-funnel architecture spec](2026-05-02-aspect-funnel-architecture.md) is the longest-form internal architecture doc.
-- [Provider adapter spec](2026-04-24-provider-adapter-spec.md) covers bridle's interface contract.
-- [Storage abstraction spec](2026-05-05-storage-abstraction-spec.md) describes how nexus persists state.
-- [Hand dispatch v0.1](2026-04-30-hand-dispatch-v0_1.md) covers the workers-as-subprocesses model.
+- The [aspect-funnel architecture spec](archive/2026-05-02-aspect-funnel-architecture.md) is the longest-form internal architecture doc.
+- [Provider adapter spec](archive/2026-04-24-provider-adapter-spec.md) covers bridle's interface contract.
+- [Storage abstraction spec](archive/2026-05-05-storage-abstraction-spec.md) describes how nexus persists state.
+- [Hand dispatch v0.1](archive/2026-04-30-hand-dispatch-v0_1.md) covers the workers-as-subprocesses model.

@@ -10,8 +10,8 @@ import (
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
-	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // newAspectsAllTestRig spins up a broker with the aspects.Store wired

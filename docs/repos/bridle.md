@@ -47,6 +47,6 @@ go run ./stubfunnel/ -provider claudecode -prompt "what time is it?"
 
 ## Where to dig deeper
 
-- [Provider adapter spec](../2026-04-24-provider-adapter-spec.md)
-- [Funnel/bridle caching spec](../2026-05-03-funnel-bridle-caching-spec.md)
-- [Pi extract / bridle gaps](../2026-05-13-pi-extract-bridle-gaps.md) — design audit against Pi
+- [Provider adapter spec](../archive/2026-04-24-provider-adapter-spec.md)
+- [Funnel/bridle caching spec](../archive/2026-05-03-funnel-bridle-caching-spec.md)
+- [Pi extract / bridle gaps](../archive/2026-05-13-pi-extract-bridle-gaps.md) — design audit against Pi

@@ -55,6 +55,6 @@ Requires Go 1.23+. No CGO (`CGO_ENABLED=0`).
 ## Where to dig deeper
 
 - [Architecture overview](../architecture.md)
-- [Aspect-funnel architecture spec](../2026-05-02-aspect-funnel-architecture.md) — the foundational doc
-- [Frame role spec](../2026-04-28-frame-role-spec.md)
-- [Storage abstraction spec](../2026-05-05-storage-abstraction-spec.md)
+- [Aspect-funnel architecture spec](../archive/2026-05-02-aspect-funnel-architecture.md) — the foundational doc
+- [Frame role spec](../archive/2026-04-28-frame-role-spec.md)
+- [Storage abstraction spec](../archive/2026-05-05-storage-abstraction-spec.md)

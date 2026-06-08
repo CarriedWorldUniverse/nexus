@@ -23,23 +23,23 @@ import (
 // message so the receiving aspect's funnel parses it like any other
 // inbound work item:
 //
-//   @<assignee> [TICKET <key>] <summary>
+//	@<assignee> [TICKET <key>] <summary>
 //
-//   Type: <type>
-//   Priority: <priority>
-//   Status: <status>
-//   Parent: <parent>           (omitted when empty)
-//   Reporter: <reporter>       (omitted when empty)
+//	Type: <type>
+//	Priority: <priority>
+//	Status: <status>
+//	Parent: <parent>           (omitted when empty)
+//	Reporter: <reporter>       (omitted when empty)
 //
-//   Description:
-//   <description>              (whole section omitted when empty)
+//	Description:
+//	<description>              (whole section omitted when empty)
 //
-//   External:                  (omitted when no refs)
-//     [<tracker>] <key> — <url>
-//     ...
+//	External:                  (omitted when no refs)
+//	  [<tracker>] <key> — <url>
+//	  ...
 //
-//   Definition of Done:
-//   <dod>
+//	Definition of Done:
+//	<dod>
 //
 // Caller is responsible for filtering out tickets without an assignee
 // or DoD before invoking — this formatter assumes both are present.

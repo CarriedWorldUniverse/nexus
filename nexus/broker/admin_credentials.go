@@ -50,9 +50,9 @@ import (
 // (any kind + bundle). DisallowUnknownFields is off here because the
 // transitional shape needs both vocabularies tolerated.
 type adminCredUpsertReq struct {
-	Description    string         `json:"description"`
-	AllowedAspects []string       `json:"allowed_aspects"`
-	Mode           string         `json:"mode"`
+	Description    string   `json:"description"`
+	AllowedAspects []string `json:"allowed_aspects"`
+	Mode           string   `json:"mode"`
 
 	// Legacy provider-only fields. Used when Kind is empty / "provider".
 	APIShape     string `json:"api_shape,omitempty"`
