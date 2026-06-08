@@ -135,11 +135,13 @@ func (r *Runner) WatchLoop(ctx context.Context) error {
 func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 	r.mu.Lock()
 
+	slog.Info("runner: submit received", "agent", b.Agent, "ticket", b.Ticket, "repo", b.Repo)
 	// Idempotency: a run for this ticket already active → return its ID.
 	for _, run := range r.active {
 		if run.Brief.Ticket == b.Ticket {
 			id := run.ID
 			r.mu.Unlock()
+			slog.Info("runner: ticket already active — returning existing run, no new spawn", "ticket", b.Ticket, "run_id", id)
 			return id, nil
 		}
 	}
@@ -148,6 +150,7 @@ func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 	for _, q := range r.queue {
 		if q.Ticket == b.Ticket {
 			r.mu.Unlock()
+			slog.Info("runner: ticket already queued — no-op", "ticket", b.Ticket)
 			return "", nil
 		}
 	}
@@ -161,6 +164,7 @@ func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 	if !r.canRun(b.Agent) {
 		r.queue = append(r.queue, b)
 		thread := b.Thread
+		slog.Info("runner: agent busy or at cap — queued", "agent", b.Agent, "ticket", b.Ticket, "active", len(r.active), "max_conc", r.MaxConc)
 		r.mu.Unlock()
 		if ackMsg != "" {
 			r.post(thread, ackMsg)
@@ -171,6 +175,7 @@ func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 
 	run := r.reserve(b)
 	r.mu.Unlock()
+	slog.Info("runner: reserved — launching job", "agent", b.Agent, "ticket", b.Ticket, "run_id", run.ID)
 
 	if ackMsg != "" {
 		r.post(run.Brief.Thread, ackMsg)
@@ -320,6 +325,7 @@ func (r *Runner) launch(ctx context.Context, run *Run) error {
 	r.mu.Lock()
 	run.JobName = job.Name
 	r.mu.Unlock()
+	slog.Info("runner: builder job created", "agent", run.Brief.Agent, "ticket", run.Brief.Ticket, "job", job.Name)
 	r.post(run.Brief.Thread, "builder spawned as "+run.Brief.Agent+" ("+job.Name+")")
 	return nil
 }
