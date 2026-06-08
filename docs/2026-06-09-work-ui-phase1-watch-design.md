@@ -163,8 +163,12 @@ Evolve the existing Preact + htm SPA (`nexus/broker/static/dashboard/`, served v
 4. Phase 4 — Configure re-IA.
 5. Phase 5 — dedicated mobile experience.
 
-## Open questions / decisions to confirm
+## Resolved decisions (confirmed 2026-06-09)
 
-1. **Broker RBAC for env.health** — reading pods/PVCs/deployments needs read verbs on the `nexus-broker-dispatch` Role (it currently has pods get/list/watch + the PVC verbs added 2026-06-08; `deployments` get/list is the likely addition). Same manifest as the per-agent-home RBAC fix (`carriedworld-cloud/hosting/services/nexus-broker-dispatch-rbac.yaml`).
-2. **`runs.update` push vs poll** — proposed a lightweight push for active-run status; acceptable to poll `runs.list` on an interval in Phase 1 if the push adds risk.
-3. **Activity retention** — `activity.history` is bounded by JSONL retention/rotation; if long history matters, a retention/compaction policy is a separate follow-up (out of scope here).
+1. **Broker RBAC for env.health** — CONFIRMED include. Add `deployments` get/list (and confirm pods/pvc get/list) to the `nexus-broker-dispatch` Role in `carriedworld-cloud/hosting/services/nexus-broker-dispatch-rbac.yaml` (same manifest as the per-agent-home PVC RBAC fix). The plan includes this manifest change + apply.
+2. **Active-run updates** — CONFIRMED push. A lightweight `runs.update` push over the existing observability Hub broadcast pattern carries active-run status changes; the frontend updates the feed entry in place. (Not interval polling.)
+3. **Activity tagging** — CONFIRMED. `run_id`-tagging of emitted activity frames is the primary run↔activity association (agentfunnel observability emit path includes `run_id`); time-windowing remains the lossless fallback for untagged/historical frames.
+
+## Out of scope (noted)
+
+- **Activity retention** — `activity.history` is bounded by JSONL retention/rotation; a retention/compaction policy is a separate follow-up, not part of Phase 1.
