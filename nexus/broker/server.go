@@ -36,6 +36,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
+	"k8s.io/client-go/kubernetes"
 )
 
 // chatHTML is the operator-aspect smoke-test page (chat.html). Served
@@ -127,6 +128,12 @@ type Config struct {
 	// ActivityLogDir is the jsonlsink root used for persisted activity
 	// history reads. When empty, run timelines omit historical activity.
 	ActivityLogDir string
+
+	// K8sReader powers env.health. Nil outside in-cluster deployments.
+	K8sReader kubernetes.Interface
+
+	// K8sNamespace is the namespace read by env.health.
+	K8sNamespace string
 
 	// RecipientPolicy decides which aspects receive chat.deliver for
 	// each chat.send. When non-nil, HandleChatSend uses it to fan out
@@ -377,6 +384,8 @@ type Broker struct {
 	runner dispatch.Submitter
 
 	activityReader *jsonlsink.Reader
+	k8sReader      kubernetes.Interface
+	k8sNamespace   string
 }
 
 func New(cfg Config, r *roster.Roster) *Broker {
@@ -436,6 +445,8 @@ func New(cfg Config, r *roster.Roster) *Broker {
 	if cfg.ActivityLogDir != "" {
 		b.activityReader = jsonlsink.NewReader(cfg.ActivityLogDir)
 	}
+	b.k8sReader = cfg.K8sReader
+	b.k8sNamespace = cfg.K8sNamespace
 	if cfg.RunsStore != nil {
 		if err := cfg.RunsStore.Migrate(context.Background()); err != nil {
 			b.log.Warn("runs store migration failed", "err", err)
