@@ -1,6 +1,8 @@
 package dispatch
 
 import (
+	"strings"
+
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,6 +22,13 @@ type JobConfig struct {
 
 func int32p(v int32) *int32 { return &v }
 
+const (
+	builderJobTTLSeconds = 5 * 60
+	maxJobNameLength     = 63
+	runSuffixHexLength   = 20
+	maxRunSuffixLength   = 24
+)
+
 // BuildJob mirrors deploy/worker/job.yaml for one dispatch brief.
 func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.Job {
 	if cfg.BriefTimeout == "" {
@@ -32,10 +41,6 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	// The Job runs AS the named agent: keyfile = aspect-keyfile-<agent>, and
 	// the Job name + labels carry the agent + run id.
 	keyfileAspect := b.Agent
-	runShort := b.RunID
-	if len(runShort) > 8 {
-		runShort = runShort[:8]
-	}
 	labels := map[string]string{
 		"app":                   "nexus-builder",
 		"nexus.dispatch/agent":  b.Agent,
@@ -94,19 +99,14 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "builder-" + b.Agent + "-" + func() string {
-				if runShort != "" {
-					return runShort
-				}
-				return taskID
-			}(),
+			Name:        builderJobName(b.Agent, b.RunID, taskID),
 			Namespace:   cfg.Namespace,
 			Labels:      labels,
 			Annotations: annotations,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            int32p(0),
-			TTLSecondsAfterFinished: int32p(3600),
+			TTLSecondsAfterFinished: int32p(builderJobTTLSeconds),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: annotations},
 				Spec: corev1.PodSpec{
@@ -137,4 +137,63 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 			},
 		},
 	}
+}
+
+func builderJobName(agent, runID, taskID string) string {
+	suffix := runNameSuffix(runID, taskID)
+	prefix := "builder-"
+	separator := "-"
+	agentMax := maxJobNameLength - len(prefix) - len(separator) - len(suffix)
+	safeAgent := dnsLabelPart(agent)
+	if len(safeAgent) > agentMax {
+		safeAgent = strings.Trim(safeAgent[:agentMax], "-")
+	}
+	if safeAgent == "" {
+		safeAgent = "agent"
+	}
+	return prefix + safeAgent + separator + suffix
+}
+
+func runNameSuffix(runID, taskID string) string {
+	if strings.HasPrefix(runID, "run-") {
+		hex := strings.NewReplacer("-", "").Replace(strings.TrimPrefix(runID, "run-"))
+		if len(hex) > runSuffixHexLength {
+			hex = hex[:runSuffixHexLength]
+		}
+		if hex = dnsLabelPart(hex); hex != "" {
+			return "run-" + hex
+		}
+	}
+	if runID != "" {
+		if suffix := dnsLabelPart(runID, maxRunSuffixLength); suffix != "" {
+			return suffix
+		}
+	}
+	if suffix := dnsLabelPart(taskID, maxRunSuffixLength); suffix != "" {
+		return suffix
+	}
+	return "run"
+}
+
+func dnsLabelPart(s string, maxLen ...int) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	lastDash := false
+	for _, r := range s {
+		valid := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if valid {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(maxLen) > 0 && maxLen[0] > 0 && len(out) > maxLen[0] {
+		out = strings.Trim(out[:maxLen[0]], "-")
+	}
+	return out
 }

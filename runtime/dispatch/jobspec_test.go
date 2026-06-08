@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -179,5 +180,28 @@ func TestBuildJob_PassesRepoTicket(t *testing.T) {
 	}
 	if !argValueEquals(c.Args, "-ticket", "NEX-7") {
 		t.Errorf("args missing -ticket: %v", c.Args)
+	}
+}
+
+func TestBuildJob_TTLAndRunUUIDName(t *testing.T) {
+	cfg := JobConfig{Namespace: "nexus", Image: "img"}
+	runID := "run-550e8400-e29b-41d4-a716-446655440000"
+	job := BuildJob(Brief{
+		Agent:  "anvil.with.invalid.characters.and-a-very-long-name",
+		Ticket: "NEX-7",
+		RunID:  runID,
+	}, cfg, runID, "codex-cli")
+
+	if job.Spec.TTLSecondsAfterFinished == nil || *job.Spec.TTLSecondsAfterFinished != 300 {
+		t.Fatalf("ttlSecondsAfterFinished = %v, want 300", job.Spec.TTLSecondsAfterFinished)
+	}
+	if len(job.Name) > 63 {
+		t.Fatalf("job name length = %d, want <= 63: %q", len(job.Name), job.Name)
+	}
+	if !regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`).MatchString(job.Name) {
+		t.Fatalf("job name is not a DNS label: %q", job.Name)
+	}
+	if !strings.HasSuffix(job.Name, "-run-550e8400e29b41d4a716") {
+		t.Fatalf("job name should include a long UUID-derived suffix, got %q", job.Name)
 	}
 }
