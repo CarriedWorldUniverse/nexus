@@ -435,6 +435,7 @@ func main() {
 		runner = dispatchRunner
 	}
 
+	activityLogDir := filepath.Join(*dataDir, "activity")
 	b := broker.New(broker.Config{
 		Addr:               *addr,
 		AuthToken:          token,
@@ -450,6 +451,7 @@ func main() {
 		Replayer:           replayer,
 		ChatStore:          chatStore,
 		RunsStore:          runsStore,
+		ActivityLogDir:     activityLogDir,
 		RecipientPolicy:    recipientPolicy,
 		AspectHomes:        aspectHomes,
 		TLSCertFile:        *tlsCert,
@@ -532,7 +534,6 @@ func main() {
 	// Writes happen on background goroutines per aspect; channel-full
 	// drops with logged warning rather than blocking emit. Closed by
 	// the cleanup goroutine on shutdown.
-	activityLogDir := filepath.Join(*dataDir, "activity")
 	activitySink, err := jsonlsink.New(activityLogDir, logger)
 	if err != nil {
 		logger.Warn("activity-log sink disabled", "err", err)

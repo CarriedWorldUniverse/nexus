@@ -30,6 +30,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
+	"github.com/CarriedWorldUniverse/nexus/nexus/observability/jsonlsink"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
@@ -122,6 +123,10 @@ type Config struct {
 	// RunsStore powers the persisted dispatch run spine. When configured,
 	// New migrates it and adapts it into dispatch.Runner.Recorder.
 	RunsStore runs.Store
+
+	// ActivityLogDir is the jsonlsink root used for persisted activity
+	// history reads. When empty, run timelines omit historical activity.
+	ActivityLogDir string
 
 	// RecipientPolicy decides which aspects receive chat.deliver for
 	// each chat.send. When non-nil, HandleChatSend uses it to fan out
@@ -370,6 +375,8 @@ type Broker struct {
 	// runner intercepts !dispatch chat messages before ChatStore.
 	// nil unless cfg.Runner is set.
 	runner dispatch.Submitter
+
+	activityReader *jsonlsink.Reader
 }
 
 func New(cfg Config, r *roster.Roster) *Broker {
@@ -426,6 +433,9 @@ func New(cfg Config, r *roster.Roster) *Broker {
 		b.custodian = custodian.New(cfg.HeraldEdge)
 	}
 	b.runner = cfg.Runner
+	if cfg.ActivityLogDir != "" {
+		b.activityReader = jsonlsink.NewReader(cfg.ActivityLogDir)
+	}
 	if cfg.RunsStore != nil {
 		if err := cfg.RunsStore.Migrate(context.Background()); err != nil {
 			b.log.Warn("runs store migration failed", "err", err)
