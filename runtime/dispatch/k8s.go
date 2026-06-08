@@ -10,6 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -210,6 +211,10 @@ func (k *K8s) WatchJobs(ctx context.Context, onDone func(JobDone)) error {
 				if !ok {
 					continue
 				}
+				if ev.Type == watch.Deleted {
+					emitJobDeleted(j, seen, onDone)
+					continue
+				}
 				emitJobDone(j, seen, onDone)
 			}
 		}
@@ -263,6 +268,41 @@ func emitJobDone(j *batchv1.Job, seen map[string]bool, onDone func(JobDone)) {
 	if j.Status.CompletionTime != nil {
 		done.CompletedAt = j.Status.CompletionTime.Time
 	}
+	onDone(done)
+}
+
+// emitJobDeleted emits a terminal (failed) JobDone for a builder Job deleted
+// while still non-terminal — a manual `kubectl delete` of a stuck/looping run.
+// Without this the watch never reports the run done (it only fires on
+// Complete/Failed), so the runner's agentBusy/active stay stuck until a broker
+// restart (NEX-528). No-op if the Job was already reported terminal.
+func emitJobDeleted(j *batchv1.Job, seen map[string]bool, onDone func(JobDone)) {
+	seenKey := string(j.UID)
+	if seenKey == "" {
+		seenKey = j.Namespace + "/" + j.Name
+	}
+	if seen[seenKey] {
+		return
+	}
+	ticket := j.Labels["nexus.dispatch/ticket"]
+	if ticket == "" {
+		return
+	}
+	seen[seenKey] = true
+	thread := j.Annotations["nexus.dispatch/thread"]
+	if thread == "" {
+		thread = ticket
+	}
+	done := JobDone{
+		Ticket: ticket,
+		Thread: thread,
+		Agent:  j.Labels["nexus.dispatch/agent"],
+		OK:     false,
+	}
+	if j.Status.StartTime != nil {
+		done.StartedAt = j.Status.StartTime.Time
+	}
+	done.CompletedAt = time.Now()
 	onDone(done)
 }
 

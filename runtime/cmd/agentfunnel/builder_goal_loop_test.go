@@ -2,11 +2,38 @@ package main
 
 import (
 	"errors"
+	"io"
 	"log/slog"
 	"testing"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 )
+
+// TestHarnessOpenPR covers NEX-528: the harness opens the PR when the agent
+// pushed its work but never ran `gh pr create`; it does NOT open when nothing
+// is pushed (the agent still has work) and reports failure on a create error.
+func TestHarnessOpenPR(t *testing.T) {
+	origPushed, origCreate := branchPushedFn, prCreateFn
+	t.Cleanup(func() { branchPushedFn = origPushed; prCreateFn = origCreate })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	branchPushedFn = func(string) (bool, error) { return true, nil }
+	prCreateFn = func(repo, branch string) (string, error) { return "https://pr/1", nil }
+	if url, ok := harnessOpenPR(log, "o/r", "builder/NEX-1"); !ok || url != "https://pr/1" {
+		t.Fatalf("pushed+create-ok: url=%q ok=%v, want https://pr/1 true", url, ok)
+	}
+
+	branchPushedFn = func(string) (bool, error) { return false, nil }
+	if url, ok := harnessOpenPR(log, "o/r", "builder/NEX-1"); ok || url != "" {
+		t.Fatalf("not-pushed must not open (re-prompt instead): url=%q ok=%v", url, ok)
+	}
+
+	branchPushedFn = func(string) (bool, error) { return true, nil }
+	prCreateFn = func(string, string) (string, error) { return "", errors.New("boom") }
+	if _, ok := harnessOpenPR(log, "o/r", "builder/NEX-1"); ok {
+		t.Fatal("create error must not report success")
+	}
+}
 
 // TestBuilderDecide covers the NEX-477 builder goal-loop decision matrix: when
 // to keep pursuing, when to push back for a missing PR, and when to exit.
