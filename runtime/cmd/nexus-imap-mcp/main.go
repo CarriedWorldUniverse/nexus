@@ -194,21 +194,20 @@ func main() {
 		stop()
 		return
 	}
-	select {
-	case err := <-mcpErrCh:
-		if err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "EOF") {
-			log.Error("MCP stdio loop ended", "err", err)
+	// The broker WS is only needed for the one-time credential.fetch above;
+	// from here imap calls are direct to the mail server with cached creds.
+	// So a broker WS drop must NOT take the MCP down (NEX-482, same as
+	// nexus-jira-mcp). Tie the process lifetime to the MCP stdio loop alone;
+	// a WS drop is logged in the background and serving continues.
+	go func() {
+		if err := <-wsErrCh; err != nil && !errors.Is(err, context.Canceled) {
+			log.Warn("broker ws exited — non-fatal; imap creds cached, MCP keeps serving", "err", err)
 		}
-	case err := <-wsErrCh:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			log.Warn("ws client exited", "err", err)
-		}
+	}()
+	if err := <-mcpErrCh; err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "EOF") {
+		log.Error("MCP stdio loop ended", "err", err)
 	}
 	stop()
-	select {
-	case <-wsErrCh:
-	default:
-	}
 }
 
 // authInfo mirrors the jira-mcp shape — local type so the two MCPs
