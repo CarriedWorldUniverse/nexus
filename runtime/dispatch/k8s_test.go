@@ -54,6 +54,35 @@ func TestSetBriefOwner(t *testing.T) {
 	}
 }
 
+func TestEnsureHomeRepoCreatesRWOClaimIdempotently(t *testing.T) {
+	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}
+	ctx := context.Background()
+
+	if err := k.EnsureHomeRepo(ctx, "anvil"); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.EnsureHomeRepo(ctx, "anvil"); err != nil {
+		t.Fatal(err)
+	}
+	pvcs, err := k.Client.CoreV1().PersistentVolumeClaims("nexus").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pvcs.Items) != 1 {
+		t.Fatalf("PVC count = %d, want 1", len(pvcs.Items))
+	}
+	pvc := pvcs.Items[0]
+	if pvc.Name != "aspect-home-anvil" {
+		t.Fatalf("PVC name = %q, want aspect-home-anvil", pvc.Name)
+	}
+	if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteOnce {
+		t.Fatalf("PVC access modes = %v, want RWO", pvc.Spec.AccessModes)
+	}
+	if pvc.Labels["nexus.dispatch/agent"] != "anvil" || pvc.Labels["nexus.dispatch/home"] != "true" {
+		t.Fatalf("PVC labels missing agent/home: %v", pvc.Labels)
+	}
+}
+
 func TestWatchJobsDoneCompleteAndFailed(t *testing.T) {
 	fw := watch.NewFake()
 	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}

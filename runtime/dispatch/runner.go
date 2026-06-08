@@ -57,6 +57,7 @@ func (p wsPoster) Post(thread, text string) error {
 // K8sIface is the subset of K8s used by Runner, extracted for testing.
 type K8sIface interface {
 	EnsureKeyfileSecret(ctx context.Context, aspect string) error
+	EnsureHomeRepo(ctx context.Context, agent string) error
 	PutBriefConfigMap(ctx context.Context, taskID, brief string) error
 	CreateJob(ctx context.Context, job *batchv1.Job) (*batchv1.Job, error)
 	SetBriefOwner(ctx context.Context, taskID string, job *batchv1.Job) error
@@ -487,6 +488,9 @@ func (r *Runner) post(thread, text string) {
 func provisionRun(ctx context.Context, k K8sIface, cfg JobConfig, b Brief, taskID string) error {
 	if err := k.EnsureKeyfileSecret(ctx, b.Agent); err != nil {
 		return fmt.Errorf("ensure keyfile for %s: %w", b.Agent, err)
+	}
+	if err := k.EnsureHomeRepo(ctx, b.Agent); err != nil {
+		return fmt.Errorf("ensure home repo for %s: %w", b.Agent, err)
 	}
 	if cfg.GitCredName != "" && b.Repo != "" {
 		cmd := execCommandContext(ctx, "cw", "credential", "issue-git-permission",

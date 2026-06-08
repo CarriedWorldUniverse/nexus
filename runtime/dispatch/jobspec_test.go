@@ -87,6 +87,9 @@ func TestBuildJob_ProviderCodexBits(t *testing.T) {
 			if !envValueEquals(c.Env, "CW_SEAM_URL", "https://broker.example:7888") {
 				t.Fatalf("CW_SEAM_URL missing or wrong: %v", c.Env)
 			}
+			if !envValueEquals(c.Env, "CW_AGENT_HOME_REPO", "/var/lib/nexus/home.git") || !envValueEquals(c.Env, "CW_AGENT_HOME_WORKDIR", "/agent-home") {
+				t.Fatalf("home env missing: %v", c.Env)
+			}
 			if !envValueEquals(c.Env, "LYNXAI_BASE_URL", "https://lynx.example") || !envValueEquals(c.Env, "LYNXAI_KEY", "lynx-key") {
 				t.Fatalf("LYNXAI env missing: %v", c.Env)
 			}
@@ -166,6 +169,16 @@ func TestBuildJob_WorkspaceCleanPerJob(t *testing.T) {
 	}
 	if vols["cache"].PersistentVolumeClaim == nil {
 		t.Error("cache volume should stay a PVC for the Go build cache")
+	}
+	if vols["home-work"].EmptyDir == nil {
+		t.Errorf("home-work volume must be EmptyDir (per-run expressed home), got %+v", vols["home-work"].VolumeSource)
+	}
+	if vols["home-repo"].PersistentVolumeClaim == nil || vols["home-repo"].PersistentVolumeClaim.ClaimName != "aspect-home-anvil" {
+		t.Errorf("home-repo must mount the per-agent PVC, got %+v", vols["home-repo"].VolumeSource)
+	}
+	c := job.Spec.Template.Spec.Containers[0]
+	if !volumeMountExists(c.VolumeMounts, "home-repo") || !volumeMountExists(c.VolumeMounts, "home-work") {
+		t.Fatalf("home mounts missing: %v", c.VolumeMounts)
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 type fakeK8s struct {
 	jobs    []string
 	secrets map[string]bool
+	homes   map[string]bool
 	owners  []briefOwnerCall
 
 	// createErr, when set, fails CreateJob — used to exercise the
@@ -40,6 +41,14 @@ func (f *fakeK8s) EnsureKeyfileSecret(_ context.Context, aspect string) error {
 		f.secrets = map[string]bool{}
 	}
 	f.secrets[aspect] = true
+	return nil
+}
+
+func (f *fakeK8s) EnsureHomeRepo(_ context.Context, agent string) error {
+	if f.homes == nil {
+		f.homes = map[string]bool{}
+	}
+	f.homes[agent] = true
 	return nil
 }
 
@@ -96,6 +105,9 @@ func TestRunnerRunsAsNamedAgent(t *testing.T) {
 	}
 	if !fk.secrets["anvil"] {
 		t.Error("worker must mount the named agent's keyfile (aspect-keyfile-anvil)")
+	}
+	if !fk.homes["anvil"] {
+		t.Error("worker must provision the named agent's home repo PVC")
 	}
 	if len(fk.jobs) != 1 || !strings.HasPrefix(fk.jobs[0], "builder-anvil-") {
 		t.Errorf("job should be named builder-anvil-*, got %v", fk.jobs)
