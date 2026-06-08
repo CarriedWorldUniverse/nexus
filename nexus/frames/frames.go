@@ -163,7 +163,7 @@ const (
 	// list for the affected msg so the SPA can replace in-place — same
 	// per-id shape as chat.reactions.fetch.result so the existing
 	// rendering path works for both load and live-update.
-	KindChatReactionUpdate Kind = "chat.reaction.update"
+	KindChatReactionUpdate   Kind = "chat.reaction.update"
 	KindKnowledgeList        Kind = "knowledge.list"
 	KindKnowledgeListResult  Kind = "knowledge.list.result"
 	KindKnowledgeStoreResult Kind = "knowledge.store.result"
@@ -188,6 +188,7 @@ const (
 	KindRosterUpdate      Kind = "roster.update"
 	KindAspectStatusPulse Kind = "aspect.status_pulse"
 	KindObserveFrame      Kind = "observe.frame"
+	KindRunsUpdate        Kind = "runs.update"
 
 	// Upstream observability frames — sent from aspect/agentfunnel TO
 	// broker so remote funnels (running in a different process from the

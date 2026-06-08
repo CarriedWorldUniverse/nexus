@@ -192,6 +192,23 @@ type DispatchErrorPayload struct {
 	Limit      int    `json:"limit,omitempty"`
 }
 
+// RunPayload is the operator-facing shape of a persisted dispatch run.
+type RunPayload struct {
+	RunID         string `json:"run_id"`
+	Ticket        string `json:"ticket"`
+	Agent         string `json:"agent"`
+	Thread        string `json:"thread"`
+	DispatchMsgID int64  `json:"dispatch_msg_id,omitempty"`
+	Command       string `json:"command,omitempty"`
+	Repo          string `json:"repo,omitempty"`
+	Status        string `json:"status"`
+	StartedAt     int64  `json:"started_at"`
+	CompletedAt   int64  `json:"completed_at,omitempty"`
+	PRURL         string `json:"pr_url,omitempty"`
+	DurationSecs  int    `json:"duration_secs,omitempty"`
+	ParentRunID   string `json:"parent_run_id,omitempty"`
+}
+
 // -------------------------------------------------------------------
 // CWB data-plane relay
 // -------------------------------------------------------------------
@@ -387,10 +404,10 @@ type KnowledgeHit struct {
 //
 // Kind is required (e.g. "jira", "imap", "provider"). Name is optional:
 //   - Name unset  → broker resolves via the aspect's default for that
-//                   kind (aspects.default_<kind>_credential). Returns
-//                   credentials.ErrNoDefault if no default configured.
+//     kind (aspects.default_<kind>_credential). Returns
+//     credentials.ErrNoDefault if no default configured.
 //   - Name set    → broker fetches that named credential, checks the
-//                   aspect is on its allowed_aspects list, audits.
+//     aspect is on its allowed_aspects list, audits.
 //
 // The fetched bundle's shape is kind-specific (see credentials package
 // docs). Caller (the MCP) unmarshals based on Kind.
@@ -408,9 +425,9 @@ type CredentialFetchPayload struct {
 // atlassian_token, atlassian_subdomain}. For kind='imap' it's
 // {host, port, user, password, ssl}.
 type CredentialFetchResultPayload struct {
-	Name   string                 `json:"name"`
-	Kind   string                 `json:"kind"`
-	Bundle map[string]any         `json:"bundle"`
+	Name   string         `json:"name"`
+	Kind   string         `json:"kind"`
+	Bundle map[string]any `json:"bundle"`
 	// ExpiresAt is reserved for future server-side TTL — v1 always
 	// emits empty string (no TTL). MCPs should cache the bundle for
 	// the duration of their process and re-fetch on restart.

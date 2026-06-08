@@ -12,7 +12,7 @@ import (
 // stored by the caller (HandleChatSend) as the audit-thread root; this routes
 // the parsed brief to the Runner, threading the worker's replies under that
 // post via `thread`. The Runner runs the work as the named agent.
-func (b *Broker) submitDispatch(ctx context.Context, from, content, thread string) error {
+func (b *Broker) submitDispatch(ctx context.Context, from, content, thread string, dispatchMsgID int64) error {
 	if b.runner == nil {
 		return errors.New("broker: no runner configured for dispatch")
 	}
@@ -24,6 +24,7 @@ func (b *Broker) submitDispatch(ctx context.Context, from, content, thread strin
 	if thread != "" {
 		brief.Thread = thread
 	}
+	brief.DispatchMsgID = dispatchMsgID
 	b.log.Info("dispatch: submitting brief to runner",
 		"agent", brief.Agent, "ticket", brief.Ticket, "repo", brief.Repo,
 		"provider", brief.Provider, "thread", brief.Thread)

@@ -33,6 +33,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability/jsonlsink"
 	"github.com/CarriedWorldUniverse/nexus/nexus/operator"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
@@ -234,6 +235,7 @@ func main() {
 		logger.Info("token reconcile (aspects)", "count", len(aspectIDs))
 	}
 	chatStore := chat.NewSQLStore(db)
+	runsStore := runs.NewSQLStore(db)
 	knowledgeStore := knowledge.New(db, logger)
 	obsHub := observability.NewHub(500, nil)
 
@@ -447,6 +449,7 @@ func main() {
 		Admin:              adminCallbacks,
 		Replayer:           replayer,
 		ChatStore:          chatStore,
+		RunsStore:          runsStore,
 		RecipientPolicy:    recipientPolicy,
 		AspectHomes:        aspectHomes,
 		TLSCertFile:        *tlsCert,

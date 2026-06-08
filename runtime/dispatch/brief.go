@@ -16,6 +16,8 @@ type Brief struct {
 	Ticket   string `json:"ticket"`
 	Branch   string `json:"branch"`
 	Thread   string `json:"thread"`
+	// DispatchMsgID is the persisted chat message id of the !dispatch command.
+	DispatchMsgID int64 `json:"dispatch_msg_id,omitempty"`
 	// RunID is set by the broker's Runner at dispatch time — a unique run
 	// identity per dispatched job, used for the job/run labels and (later)
 	// cost-trace correlation.
