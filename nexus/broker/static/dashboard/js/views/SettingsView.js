@@ -10,10 +10,9 @@
 // content; chosen because the model picker is the headline operator
 // affordance driving NEX-219).
 //
-// Admin gate: the BottomBar already conditions the Settings tab on the
-// isAdmin signal, so a non-admin shouldn't ordinarily land here. The
-// gate below handles the manual-URL-typed case — non-admin sees an
-// explanatory placeholder, no crash, no leak of sub-page chrome.
+// Admin gate: Configure is visible as a primary area, but settings
+// content remains operator-only. Non-admin sessions see an explanatory
+// placeholder, no crash, no leak of sub-page chrome.
 
 const { html, useState, useEffect } = window.__preact;
 import { isAdmin } from '../state.js';

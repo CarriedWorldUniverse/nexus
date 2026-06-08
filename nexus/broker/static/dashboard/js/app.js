@@ -9,25 +9,30 @@ import { initNotifications } from './notifications.js';
 import { FeedView } from './views/FeedView.js';
 import { Chat } from './views/Chat.js';
 import { ObserveView } from './views/ObserveView.js';
+import { WatchView } from './views/WatchView.js';
 import { FilesView } from './views/FilesView.js';
 import { Tickets } from './views/Tickets.js';
 import { Status } from './views/Status.js';
 import { DocsView } from './views/DocsView.js';
 import { SplitView } from './views/SplitView.js';
 import { SettingsView } from './views/SettingsView.js';
+import { Placeholder } from './views/Placeholder.js';
 
 function getRoute() {
   const hash = window.location.hash;
+  if (hash.startsWith('#/watch')) return 'watch';
+  if (hash.startsWith('#/converse')) return 'converse';
+  if (hash.startsWith('#/configure')) return 'configure';
   if (hash.startsWith('#/chat')) return 'chat';
-  if (hash === '#/' || hash === '' || hash.startsWith('#/feed')) return 'feed';
   if (hash.startsWith('#/agents')) return 'agents';
+  if (hash.startsWith('#/settings')) return 'settings';
+  if (hash === '#/' || hash === '' || hash.startsWith('#/feed')) return 'watch';
   if (hash === '#/files') return 'files';
   if (hash === '#/tickets') return 'tickets';
   if (hash === '#/status') return 'status';
   if (hash === '#/docs') return 'docs';
   if (hash === '#/split') return 'split';
-  if (hash.startsWith('#/settings')) return 'settings';
-  return 'feed';
+  return 'watch';
 }
 
 function getAgentFromHash() {
@@ -38,6 +43,9 @@ function getAgentFromHash() {
 
 function RouteView({ route }) {
   switch (route) {
+    case 'watch':    return html`<${WatchView} />`;
+    case 'converse': return html`<${Placeholder} title="Converse" note="Coming in Phase 3" />`;
+    case 'configure': return html`<${SettingsView} />`;
     case 'feed':     return html`<${FeedView} />`;
     case 'chat':     return html`<${Chat} />`;
     case 'agents':   return html`<${ObserveView} />`;
@@ -47,7 +55,7 @@ function RouteView({ route }) {
     case 'docs':     return html`<${DocsView} />`;
     case 'split':    return html`<${SplitView} />`;
     case 'settings': return html`<${SettingsView} />`;
-    default:         return html`<${FeedView} />`;
+    default:         return html`<${WatchView} />`;
   }
 }
 

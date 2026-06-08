@@ -1,54 +1,14 @@
 const { html } = window.__preact;
-import { IconChat, IconFiles, IconTickets, IconStatus, IconAgents, IconDocs, IconSplit, IconSettings } from '../icons.js';
-import { usageData, isAdmin } from '../state.js';
+import { IconChat, IconStatus, IconSettings } from '../icons.js';
 
-// "Activity" rather than the old "Agents" label — the tab now points
-// at ObserveView (per-aspect observability stream), not the dead DM
-// list. URL stays #/agents to preserve operator muscle memory and
-// existing bookmarks.
 const TABS = [
-  { id: 'feed',     label: 'Feed',     Icon: IconChat     },
-  { id: 'agents',   label: 'Activity', Icon: IconAgents   },
-  { id: 'files',    label: 'Files',    Icon: IconFiles    },
-  { id: 'tickets',  label: 'Tickets',  Icon: IconTickets  },
-  { id: 'docs',     label: 'Docs',     Icon: IconDocs     },
-  { id: 'status',   label: 'Status',   Icon: IconStatus   },
+  { id: 'converse',  label: 'Converse',  href: '#/converse',  Icon: IconChat     },
+  { id: 'watch',     label: 'Watch',     href: '#/watch',     Icon: IconStatus   },
+  { id: 'configure', label: 'Configure', href: '#/configure', Icon: IconSettings },
 ];
-
-// NEX-264: Settings tab appears only when the session is admin
-// (operator role). Kept separate from TABS so the conditional gate
-// stays explicit at the render site.
-const ADMIN_TABS = [
-  { id: 'settings', label: 'Settings', Icon: IconSettings },
-];
-
-function fmtTokens(n) {
-  if (!n || n === 0) return '0';
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-  if (n >= 1_000)     return (n / 1_000).toFixed(0) + 'k';
-  return String(n);
-}
 
 export function BottomBar({ activeRoute }) {
-  // Chat (single-thread drill-through) is a sub-view of Feed — highlight
-  // the Feed tab while the operator is reading a thread so the nav
-  // reflects "where you came from".
-  const highlightRoute = activeRoute === 'chat' ? 'feed' : activeRoute;
-  const usage = usageData.value;
-  const totalOutput = usage?.totals?.output || 0;
-  const totalCacheRead = usage?.totals?.cache_read || 0;
-  const period = usage?.period || '7d';
-
-  function toggleSplit(e) {
-    e.preventDefault();
-    if (activeRoute === 'split') {
-      // Exit split: go to the left pane's last view, or feed.
-      const back = localStorage.getItem('split.left.view') || 'feed';
-      window.location.hash = '#/' + back;
-    } else {
-      window.location.hash = '#/split';
-    }
-  }
+  const highlightRoute = activeRoute === 'settings' ? 'configure' : activeRoute;
 
   return html`
     <nav class="bottom-bar">
@@ -65,37 +25,13 @@ export function BottomBar({ activeRoute }) {
       ${TABS.map(tab => html`
         <a
           key=${tab.id}
-          href=${'#/' + tab.id}
+          href=${tab.href}
           class=${'bottom-bar-tab' + (highlightRoute === tab.id ? ' active' : '')}
         >
-          <span class="bottom-bar-icon">${tab.Icon ? html`<${tab.Icon} />` : '🤖'}</span>
+          <span class="bottom-bar-icon"><${tab.Icon} /></span>
           <span class="bottom-bar-label">${tab.label}</span>
         </a>
       `)}
-      ${isAdmin.value && ADMIN_TABS.map(tab => html`
-        <a
-          key=${tab.id}
-          href=${'#/' + tab.id}
-          class=${'bottom-bar-tab' + (highlightRoute === tab.id ? ' active' : '')}
-        >
-          <span class="bottom-bar-icon">${tab.Icon ? html`<${tab.Icon} />` : '🤖'}</span>
-          <span class="bottom-bar-label">${tab.label}</span>
-        </a>
-      `)}
-      <button
-        class=${'bottom-bar-split-toggle' + (activeRoute === 'split' ? ' active' : '')}
-        onClick=${toggleSplit}
-        title=${activeRoute === 'split' ? 'Exit split view' : 'Enter split view'}
-        aria-label=${activeRoute === 'split' ? 'Exit split view' : 'Enter split view'}
-      >
-        <${IconSplit} />
-      </button>
-      ${totalOutput > 0 && html`
-        <div class="bottom-bar-usage" title=${`Token usage (${period}) — output: ${totalOutput.toLocaleString()}, cache read: ${totalCacheRead.toLocaleString()}`}>
-          <span class="bottom-bar-usage-value">${fmtTokens(totalOutput)}</span>
-          <span class="bottom-bar-usage-label">out · ${period}</span>
-        </div>
-      `}
     </nav>
   `;
 }
