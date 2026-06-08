@@ -120,14 +120,15 @@ func (c *wsConn) handleOperatorRosterList(env frames.Envelope) {
 			lastSeen = r.LastHeartbeat.UTC().Format(time.RFC3339)
 		}
 		out = append(out, frames.RosterAspect{
-			Name:         r.Name,
-			Status:       r.Status,
-			LastSeen:     lastSeen,
-			Capabilities: r.Capabilities,
-			Model:        r.Model,
-			Provider:     r.Provider,
-			ContextMode:  string(r.ContextMode),
-			Role:         "", // schema.AspectState doesn't carry role today
+			Name:            r.Name,
+			Status:          r.Status,
+			LastSeen:        lastSeen,
+			Capabilities:    r.Capabilities,
+			Model:           r.Model,
+			Provider:        r.Provider,
+			ContextMode:     string(r.ContextMode),
+			Role:            "", // schema.AspectState doesn't carry role today
+			DispatchEnabled: c.broker.aspectDispatchEnabled(r.Name),
 		})
 	}
 	resp, _ := frames.NewResponse(frames.KindRosterListResult, env.ID, frames.RosterListResultPayload{Aspects: out})

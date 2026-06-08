@@ -295,6 +295,7 @@ CREATE TABLE IF NOT EXISTS aspects (
   aspect_pubkey           BLOB NOT NULL,
   provider                TEXT NOT NULL,
   model                   TEXT NOT NULL,
+  dispatch_enabled        INTEGER NOT NULL DEFAULT 1,
   capabilities            TEXT,
   metadata                TEXT,
   created_at              TEXT NOT NULL DEFAULT (datetime('now')),

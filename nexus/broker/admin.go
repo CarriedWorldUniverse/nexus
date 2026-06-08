@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // AdminCallbacks injects the broker's admin-action implementations.
@@ -175,6 +177,10 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 	if b.cfg.KeyfileValidator != nil && b.cfg.KeyfileValidator.Store != nil {
 		mux.Handle("GET /api/admin/aspects/all",
 			b.requireAdmin(http.HandlerFunc(b.handleAdminAspectsAll)))
+		mux.Handle("GET /api/admin/aspects/{name}/dispatch-enabled",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminDispatchEnabledGet)))
+		mux.Handle("PUT /api/admin/aspects/{name}/dispatch-enabled",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminDispatchEnabledSet)))
 	}
 	// NEX-134: online-safe aspect minting. CLI generates the keypair
 	// locally, posts the pubkey, broker is the single DB writer.
@@ -369,9 +375,22 @@ func (b *Broker) handleAdminDispatchStatus(w http.ResponseWriter, r *http.Reques
 // metadata. v1 just returns the standard roster list — extension fields
 // land when there's a concrete need.
 func (b *Broker) handleAdminRoster(w http.ResponseWriter, r *http.Request) {
+	rows := b.roster.List()
+	out := make([]adminRosterAspect, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, adminRosterAspect{
+			AspectState:     a,
+			DispatchEnabled: b.aspectDispatchEnabled(a.Name),
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"aspects": b.roster.List(),
+		"aspects": out,
 	})
+}
+
+type adminRosterAspect struct {
+	schemas.AspectState
+	DispatchEnabled bool `json:"dispatch_enabled"`
 }
 
 // adminAspectAll is one row in the /api/admin/aspects/all response.
@@ -379,11 +398,12 @@ func (b *Broker) handleAdminRoster(w http.ResponseWriter, r *http.Request) {
 // a `live` flag derived from the roster — true when an aspect's WS
 // is currently registered.
 type adminAspectAll struct {
-	Name     string `json:"name"`
-	Status   string `json:"status"`
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	Live     bool   `json:"live"`
+	Name            string `json:"name"`
+	Status          string `json:"status"`
+	Provider        string `json:"provider"`
+	Model           string `json:"model"`
+	Live            bool   `json:"live"`
+	DispatchEnabled bool   `json:"dispatch_enabled"`
 }
 
 // handleAdminAspectsAll lists every aspect known to the broker —
@@ -410,11 +430,12 @@ func (b *Broker) handleAdminAspectsAll(w http.ResponseWriter, r *http.Request) {
 	for _, a := range rows {
 		_, live := b.roster.Get(a.Name)
 		out = append(out, adminAspectAll{
-			Name:     a.Name,
-			Status:   string(a.Status),
-			Provider: a.Provider,
-			Model:    a.Model,
-			Live:     live,
+			Name:            a.Name,
+			Status:          string(a.Status),
+			Provider:        a.Provider,
+			Model:           a.Model,
+			Live:            live,
+			DispatchEnabled: a.DispatchEnabled,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"aspects": out})

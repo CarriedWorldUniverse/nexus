@@ -126,6 +126,53 @@ export function runCancel(runId, force = false) {
   return rpc('run.cancel', { run_id: runId, force }).then((p) => p || { ok: false });
 }
 
+async function adminFetch(path, init) {
+  const res = await fetch(path, {
+    ...init,
+    headers: {
+      'Authorization': 'Bearer ' + (getAuthToken() || ''),
+      ...((init && init.headers) || {}),
+    },
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    let msg = res.statusText;
+    try {
+      const body = await res.text();
+      if (body) msg = body;
+    } catch (_) { /* fall through */ }
+    const err = new Error('admin: ' + res.status + ' ' + msg);
+    err.status = res.status;
+    throw err;
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+export function getAgentModelConfig(name) {
+  return adminFetch('/api/admin/aspects/' + encodeURIComponent(name) + '/model-config');
+}
+
+export function putAgentModelConfig(name, body) {
+  return adminFetch('/api/admin/aspects/' + encodeURIComponent(name) + '/model-config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+}
+
+export function getDispatchEnabled(name) {
+  return adminFetch('/api/admin/aspects/' + encodeURIComponent(name) + '/dispatch-enabled');
+}
+
+export function setDispatchEnabled(name, enabled) {
+  return adminFetch('/api/admin/aspects/' + encodeURIComponent(name) + '/dispatch-enabled', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: !!enabled }),
+  });
+}
+
 export function buildDispatchLine({ agent, provider = '', repo = '', ticket = '', branch = '', task = '' }) {
   const cleanAgent = String(agent || '').trim();
   const cleanProvider = String(provider || '').trim();

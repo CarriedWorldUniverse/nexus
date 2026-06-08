@@ -564,14 +564,15 @@ type RosterListPayload struct{}
 // internal roster + extra metadata the dashboard's Status/Agents
 // views render.
 type RosterAspect struct {
-	Name         string   `json:"name"`
-	Status       string   `json:"status"`
-	LastSeen     string   `json:"last_seen,omitempty"`
-	Capabilities []string `json:"capabilities,omitempty"`
-	Model        string   `json:"model,omitempty"`
-	Provider     string   `json:"provider,omitempty"`
-	ContextMode  string   `json:"context_mode,omitempty"`
-	Role         string   `json:"role,omitempty"`
+	Name            string   `json:"name"`
+	Status          string   `json:"status"`
+	LastSeen        string   `json:"last_seen,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+	Model           string   `json:"model,omitempty"`
+	Provider        string   `json:"provider,omitempty"`
+	ContextMode     string   `json:"context_mode,omitempty"`
+	Role            string   `json:"role,omitempty"`
+	DispatchEnabled bool     `json:"dispatch_enabled"`
 }
 
 // RosterListResultPayload — newest first, all aspects, with status

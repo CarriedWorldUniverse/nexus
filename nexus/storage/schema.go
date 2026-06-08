@@ -361,6 +361,14 @@ var columnsToAdd = []columnAddition{
 		column: "compact_credential",
 		ddl:    "ALTER TABLE aspects ADD COLUMN compact_credential TEXT",
 	},
+	// NEX-531 — per-aspect broker-side !dispatch gate. Default enabled
+	// preserves current behavior for existing deployments; operators can
+	// disable individual agents from the Team panel/admin REST surface.
+	{
+		table:  "aspects",
+		column: "dispatch_enabled",
+		ddl:    "ALTER TABLE aspects ADD COLUMN dispatch_enabled INTEGER NOT NULL DEFAULT 1",
+	},
 	// Task #226 — linked-list thread model. parent_msg_id is the chain
 	// parent (NULL for thread roots). thread_root_msg_id is the
 	// canonical thread identity used by aspects for per-thread session
