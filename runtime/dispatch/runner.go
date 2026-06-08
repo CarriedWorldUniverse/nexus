@@ -58,6 +58,7 @@ func (p wsPoster) Post(thread, text string) error {
 type K8sIface interface {
 	EnsureKeyfileSecret(ctx context.Context, aspect string) error
 	EnsureHomeRepo(ctx context.Context, agent string) error
+	EnsureSharedReposPVC(ctx context.Context) error
 	PutBriefConfigMap(ctx context.Context, taskID, brief string) error
 	CreateJob(ctx context.Context, job *batchv1.Job) (*batchv1.Job, error)
 	SetBriefOwner(ctx context.Context, taskID string, job *batchv1.Job) error
@@ -491,6 +492,9 @@ func provisionRun(ctx context.Context, k K8sIface, cfg JobConfig, b Brief, taskI
 	}
 	if err := k.EnsureHomeRepo(ctx, b.Agent); err != nil {
 		return fmt.Errorf("ensure home repo for %s: %w", b.Agent, err)
+	}
+	if err := k.EnsureSharedReposPVC(ctx); err != nil {
+		return fmt.Errorf("ensure shared repos PVC: %w", err)
 	}
 	if cfg.GitCredName != "" && b.Repo != "" {
 		cmd := execCommandContext(ctx, "cw", "credential", "issue-git-permission",

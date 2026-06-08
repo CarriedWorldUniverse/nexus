@@ -83,6 +83,35 @@ func TestEnsureHomeRepoCreatesRWOClaimIdempotently(t *testing.T) {
 	}
 }
 
+func TestEnsureSharedReposPVCCreatesRWXClaimIdempotently(t *testing.T) {
+	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}
+	ctx := context.Background()
+
+	if err := k.EnsureSharedReposPVC(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.EnsureSharedReposPVC(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pvcs, err := k.Client.CoreV1().PersistentVolumeClaims("nexus").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pvcs.Items) != 1 {
+		t.Fatalf("PVC count = %d, want 1", len(pvcs.Items))
+	}
+	pvc := pvcs.Items[0]
+	if pvc.Name != SharedReposPVCName() {
+		t.Fatalf("PVC name = %q, want %s", pvc.Name, SharedReposPVCName())
+	}
+	if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteMany {
+		t.Fatalf("PVC access modes = %v, want RWX", pvc.Spec.AccessModes)
+	}
+	if pvc.Labels["nexus.dispatch/repos"] != "true" {
+		t.Fatalf("PVC labels missing repos marker: %v", pvc.Labels)
+	}
+}
+
 func TestWatchJobsDoneCompleteAndFailed(t *testing.T) {
 	fw := watch.NewFake()
 	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}

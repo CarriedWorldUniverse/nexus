@@ -90,6 +90,9 @@ func TestBuildJob_ProviderCodexBits(t *testing.T) {
 			if !envValueEquals(c.Env, "CW_AGENT_HOME_REPO", "/var/lib/nexus/home.git") || !envValueEquals(c.Env, "CW_AGENT_HOME_WORKDIR", "/agent-home") {
 				t.Fatalf("home env missing: %v", c.Env)
 			}
+			if !envValueEquals(c.Env, "CW_SHARED_REPOS_DIR", "/src") {
+				t.Fatalf("shared repos env missing: %v", c.Env)
+			}
 			if !envValueEquals(c.Env, "LYNXAI_BASE_URL", "https://lynx.example") || !envValueEquals(c.Env, "LYNXAI_KEY", "lynx-key") {
 				t.Fatalf("LYNXAI env missing: %v", c.Env)
 			}
@@ -176,9 +179,12 @@ func TestBuildJob_WorkspaceCleanPerJob(t *testing.T) {
 	if vols["home-repo"].PersistentVolumeClaim == nil || vols["home-repo"].PersistentVolumeClaim.ClaimName != "aspect-home-anvil" {
 		t.Errorf("home-repo must mount the per-agent PVC, got %+v", vols["home-repo"].VolumeSource)
 	}
+	if vols["shared-repos"].PersistentVolumeClaim == nil || vols["shared-repos"].PersistentVolumeClaim.ClaimName != SharedReposPVCName() {
+		t.Errorf("shared-repos must mount the global repos PVC, got %+v", vols["shared-repos"].VolumeSource)
+	}
 	c := job.Spec.Template.Spec.Containers[0]
-	if !volumeMountExists(c.VolumeMounts, "home-repo") || !volumeMountExists(c.VolumeMounts, "home-work") {
-		t.Fatalf("home mounts missing: %v", c.VolumeMounts)
+	if !volumeMountExists(c.VolumeMounts, "home-repo") || !volumeMountExists(c.VolumeMounts, "home-work") || !volumeMountExists(c.VolumeMounts, "shared-repos") {
+		t.Fatalf("home/shared repo mounts missing: %v", c.VolumeMounts)
 	}
 }
 
@@ -193,6 +199,9 @@ func TestBuildJob_PassesRepoTicket(t *testing.T) {
 	}
 	if !argValueEquals(c.Args, "-ticket", "NEX-7") {
 		t.Errorf("args missing -ticket: %v", c.Args)
+	}
+	if !argValueEquals(c.Args, "-branch", "") {
+		t.Errorf("args missing empty -branch: %v", c.Args)
 	}
 }
 

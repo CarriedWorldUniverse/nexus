@@ -77,6 +77,40 @@ func (k *K8s) EnsureHomeRepo(ctx context.Context, agent string) error {
 	return err
 }
 
+func (k *K8s) EnsureSharedReposPVC(ctx context.Context) error {
+	name := SharedReposPVCName()
+	_, err := k.Client.CoreV1().PersistentVolumeClaims(k.Namespace).Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: k.Namespace,
+			Labels: map[string]string{
+				"app":                  "nexus-builder",
+				"nexus.dispatch/repos": "true",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("50Gi"),
+				},
+			},
+		},
+	}
+	_, err = k.Client.CoreV1().PersistentVolumeClaims(k.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
 func (k *K8s) PutBriefConfigMap(ctx context.Context, taskID, brief string) error {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{

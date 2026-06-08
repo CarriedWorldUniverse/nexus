@@ -54,9 +54,26 @@ func TestBuilderPRVerifier(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			prExistsFn = tc.fn
-			if got := builderPRVerifier(log, "plumb", "org/repo", "NEX-1")(); got != tc.want {
+			if got := builderPRVerifier(log, "plumb", "org/repo", "NEX-1", "")(); got != tc.want {
 				t.Errorf("got %v want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestBuilderPRVerifierUsesCustomBranch(t *testing.T) {
+	orig := prExistsFn
+	defer func() { prExistsFn = orig }()
+	var gotRepo, gotBranch string
+	prExistsFn = func(repo, branch string) (bool, error) {
+		gotRepo = repo
+		gotBranch = branch
+		return true, nil
+	}
+	if ok := builderPRVerifier(slog.Default(), "plumb", "org/repo", "NEX-1", "feature/custom")(); !ok {
+		t.Fatal("verifier returned false")
+	}
+	if gotRepo != "org/repo" || gotBranch != "feature/custom" {
+		t.Fatalf("prExists args repo=%q branch=%q", gotRepo, gotBranch)
 	}
 }

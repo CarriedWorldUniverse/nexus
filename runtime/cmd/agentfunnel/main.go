@@ -85,6 +85,7 @@ func main() {
 	replyTopic := flag.String("reply-topic", "", "builder mode: attach this topic to natural reply posts")
 	repoFlag := flag.String("repo", "", "builder mode: dispatched repo (owner/name) for PR-existence verification")
 	ticketFlag := flag.String("ticket", "", "builder mode: dispatched ticket, for the builder/<ticket> branch")
+	branchFlag := flag.String("branch", "", "builder mode: dispatched branch (defaults to builder/<ticket>)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -172,12 +173,38 @@ func main() {
 	}
 
 	var builderHome *agentHomeSession
+	var builderRepo *builderRepoSession
 	if *builderMode {
 		builderHome, err = setupBuilderHome(context.Background(), res.AspectName, os.Getenv("CW_DISPATCH_RUN_ID"))
 		if err != nil {
 			fail(log, "setup builder home", err)
 		}
 		log.Info("agentfunnel: builder home ready", "aspect", res.AspectName, "home", os.Getenv("HOME"))
+		// Export the session JWT so cw — git's credential helper in the
+		// worker image — can authenticate to the M1 custodian seam for
+		// git clone/fetch/push during the build (NEX-437). cw's git-helper reads
+		// CW_TOKEN; CW_SEAM_URL is supplied via the Job env. The codex/git
+		// subprocess inherits this process's environment.
+		if err := os.Setenv("CW_TOKEN", res.SessionJWT); err != nil {
+			log.Warn("agentfunnel: failed to export CW_TOKEN for builder git auth", "err", err)
+		}
+		// Bridge the external git/gh tooling into our auth ecosystem before
+		// touching the shared repo mirror. A failure remains non-fatal because
+		// already-wired images can still have a working git credential helper,
+		// but it is logged loudly because PR ops may fail later.
+		if out, err := exec.CommandContext(context.Background(), "cw", "setup-git", "github").CombinedOutput(); err != nil {
+			log.Error("agentfunnel: cw setup-git github failed — gh not bridged; PR ops may fail",
+				"err", err, "out", strings.TrimSpace(string(out)))
+		} else {
+			log.Info("agentfunnel: cw setup-git github ok — gh/git bridged for builder")
+		}
+		builderRepo, err = setupBuilderRepo(context.Background(), res.AspectName, os.Getenv("CW_DISPATCH_RUN_ID"), *repoFlag, builderBranch(*branchFlag, *ticketFlag))
+		if err != nil {
+			fail(log, "setup builder repo", err)
+		}
+		if builderRepo != nil {
+			log.Info("agentfunnel: builder repo ready", "aspect", res.AspectName, "repo", *repoFlag, "worktree", builderRepo.worktree)
+		}
 	}
 
 	// 2.5 Materialise MCP profile (NEX-170). Must happen before
@@ -394,28 +421,6 @@ func main() {
 	if *builderMode {
 		onTaskDone = builderOnTaskDone(stop, log, res.AspectName)
 		doneSentinel = builderDoneSentinel
-		// Export the session JWT so cw — git's credential helper in the
-		// worker image — can authenticate to the M1 custodian seam for
-		// git clone/push during the build (NEX-437). cw's git-helper reads
-		// CW_TOKEN; CW_SEAM_URL is supplied via the Job env. The codex/git
-		// subprocess inherits this process's environment.
-		if err := os.Setenv("CW_TOKEN", res.SessionJWT); err != nil {
-			log.Warn("agentfunnel: failed to export CW_TOKEN for builder git auth", "err", err)
-		}
-		// Bridge the external git/gh tooling into our auth ecosystem. The gh
-		// CLI is unauthenticated in the worker image, so PR verification and
-		// creation would fail; `cw setup-git github` wires gh auth + the git
-		// identity from the brokered credential. Runs here — after CW_TOKEN is
-		// exported — because cw needs it to reach the custodian seam. git
-		// clone/push already work via the pre-wired credential helper, so a
-		// failure here is logged loudly but is non-fatal (the PR-verify already
-		// tolerates a not-yet-open PR); it must never run silently.
-		if out, err := exec.CommandContext(ctx, "cw", "setup-git", "github").CombinedOutput(); err != nil {
-			log.Error("agentfunnel: cw setup-git github failed — gh not bridged; PR ops may fail",
-				"err", err, "out", strings.TrimSpace(string(out)))
-		} else {
-			log.Info("agentfunnel: cw setup-git github ok — gh/git bridged for builder")
-		}
 	}
 	commsRunner := funnel.CommsRunner{
 		Gateway:    gateway,
@@ -664,12 +669,12 @@ func main() {
 			MaxTurns:   *builderMaxTurns,
 			ThreadRoot: seedBrief.ThreadRoot,
 		}
-		verifyPR := builderPRVerifier(log, res.AspectName, *repoFlag, *ticketFlag)
+		verifyPR := builderPRVerifier(log, res.AspectName, *repoFlag, *ticketFlag, *branchFlag)
 		go builderGoalLoop(ctx, f, log, goalCfg, verifyPR, stop)
 	} else {
 		var onComplete func() bool
 		if *builderMode {
-			onComplete = builderCompleteCheck(stop, log, res.AspectName, *repoFlag, *ticketFlag)
+			onComplete = builderCompleteCheck(stop, log, res.AspectName, *repoFlag, *ticketFlag, *branchFlag)
 		}
 		go deliberateLoop(ctx, f, log, onComplete)
 	}
@@ -688,6 +693,16 @@ func main() {
 	if err := wsClient.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("agentfunnel: wsClient.Run", "err", err)
 		os.Exit(1)
+	}
+	if builderRepo != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := builderRepo.cleanDespawn(cleanupCtx); err != nil {
+			cancel()
+			log.Error("agentfunnel: builder repo worktree cleanup failed", "err", err)
+			os.Exit(1)
+		}
+		cancel()
+		log.Info("agentfunnel: builder repo worktree removed", "aspect", res.AspectName, "worktree", builderRepo.worktree)
 	}
 	if builderHome != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -761,19 +776,20 @@ func builderOnTaskDone(stop context.CancelFunc, log *slog.Logger, aspect string)
 	}
 }
 
-// builderPRVerifier returns a pure check: does a PR exist for builder/<ticket>?
+// builderPRVerifier returns a pure check: does a PR exist for the builder branch?
 // It logs the miss/error but has NO side effects (no stop), so a goal-loop can
 // decide for itself what to do next. Fail-closed: a gh error reports false
 // (NEX-468 — never declare completion we cannot verify).
-func builderPRVerifier(log *slog.Logger, aspect, repo, ticket string) func() bool {
+func builderPRVerifier(log *slog.Logger, aspect, repo, ticket, branch string) func() bool {
+	head := builderBranch(branch, ticket)
 	return func() bool {
-		ok, err := prExists(repo, ticket)
+		ok, err := prExists(repo, head)
 		if err != nil {
 			log.Warn("agentfunnel: PR check errored — treating as not-yet-open", "aspect", aspect, "err", err)
 			return false
 		}
 		if !ok {
-			log.Info("agentfunnel: no PR found for builder branch", "aspect", aspect, "repo", repo, "ticket", ticket)
+			log.Info("agentfunnel: no PR found for builder branch", "aspect", aspect, "repo", repo, "branch", head)
 		}
 		return ok
 	}
@@ -783,8 +799,8 @@ func builderPRVerifier(log *slog.Logger, aspect, repo, ticket string) func() boo
 // loop (broker-inbox builders without a captured DoD). When the judge rules a
 // turn complete (NEX-471) it verifies the PR exists (NEX-468) and only then
 // stops the builder. Returns true when it stopped.
-func builderCompleteCheck(stop context.CancelFunc, log *slog.Logger, aspect, repo, ticket string) func() bool {
-	verify := builderPRVerifier(log, aspect, repo, ticket)
+func builderCompleteCheck(stop context.CancelFunc, log *slog.Logger, aspect, repo, ticket, branch string) func() bool {
+	verify := builderPRVerifier(log, aspect, repo, ticket, branch)
 	return func() bool {
 		if !verify() {
 			return false
@@ -795,23 +811,23 @@ func builderCompleteCheck(stop context.CancelFunc, log *slog.Logger, aspect, rep
 	}
 }
 
-// prExistsFn is the gh-backed PR lookup for builder/<ticket>, swappable in tests.
-var prExistsFn = func(repo, ticket string) (bool, error) {
-	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--head", "builder/"+ticket, "--json", "url", "-q", ".[0].url").CombinedOutput()
+// prExistsFn is the gh-backed PR lookup for a branch head, swappable in tests.
+var prExistsFn = func(repo, branch string) (bool, error) {
+	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--head", branch, "--json", "url", "-q", ".[0].url").CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("gh pr list: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
-// prExists reports whether a PR exists for builder/<ticket> in repo. Missing
-// repo/ticket returns an error so the builder does not exit on an unverifiable
+// prExists reports whether a PR exists for branch in repo. Missing repo/branch
+// returns an error so the builder does not exit on an unverifiable
 // "complete" (fail-closed toward NEX-468).
-func prExists(repo, ticket string) (bool, error) {
-	if repo == "" || ticket == "" {
-		return false, fmt.Errorf("prExists: repo/ticket not set (repo=%q ticket=%q)", repo, ticket)
+func prExists(repo, branch string) (bool, error) {
+	if repo == "" || branch == "" {
+		return false, fmt.Errorf("prExists: repo/branch not set (repo=%q branch=%q)", repo, branch)
 	}
-	return prExistsFn(repo, ticket)
+	return prExistsFn(repo, branch)
 }
 
 func builderReplyTopic(builderMode bool, topic string) string {
