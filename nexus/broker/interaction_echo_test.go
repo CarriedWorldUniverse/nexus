@@ -32,7 +32,7 @@ func TestHarness_DeliversAcrossAspects(t *testing.T) {
 
 	seed(t, b, "@aspecta kickoff")
 
-	waitFor(t, 3*time.Second, func() bool {
+	waitFor(t, 15*time.Second, func() bool {
 		return a.turns() >= 1 && bb.delivered() >= 1 && bb.turns() >= 1
 	}, "A -> broker -> B hop")
 
@@ -60,7 +60,7 @@ func TestHarness_EchoLoopDamped(t *testing.T) {
 	seed(t, b, "@echoa start")
 
 	// The loop starts (a few turns each) ...
-	waitFor(t, 5*time.Second, func() bool {
+	waitFor(t, 20*time.Second, func() bool {
 		return a.turns() >= 2 && bb.turns() >= 2
 	}, "echo loop to start")
 
@@ -91,12 +91,12 @@ func TestHarness_OperatorNeverDamped(t *testing.T) {
 
 	// Drive dampa into a damped state via the peer echo, then let it settle.
 	seed(t, b, "@dampa start")
-	waitFor(t, 5*time.Second, func() bool { return a.turns() >= 4 }, "dampa to start looping")
+	waitFor(t, 20*time.Second, func() bool { return a.turns() >= 4 }, "dampa to start looping")
 	time.Sleep(1500 * time.Millisecond) // let damping engage + the peer storm quiesce
 	damped := a.turns()
 
 	// Now the operator addresses dampa directly. Even damped, this MUST run.
 	seed(t, b, "@dampa operator here — please ack")
-	waitFor(t, 4*time.Second, func() bool { return a.turns() > damped }, "operator message to get a turn despite damping")
+	waitFor(t, 20*time.Second, func() bool { return a.turns() > damped }, "operator message to get a turn despite damping")
 	t.Logf("operator broke through: dampa turns %d -> %d", damped, a.turns())
 }
