@@ -134,10 +134,10 @@ func TestTruncatePreview(t *testing.T) {
 // time column rather than crashing.
 func TestParseChatTimestamp(t *testing.T) {
 	cases := map[string]bool{
-		"2026-05-25 14:23:00":       true,
-		"2026-05-25T14:23:00Z":      true,
-		"2026-05-25T14:23:00.123Z":  true,
-		"not a timestamp":           false,
+		"2026-05-25 14:23:00":      true,
+		"2026-05-25T14:23:00Z":     true,
+		"2026-05-25T14:23:00.123Z": true,
+		"not a timestamp":          false,
 	}
 	for in, ok := range cases {
 		parsed := parseChatTimestamp(in)

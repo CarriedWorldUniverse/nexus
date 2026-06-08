@@ -79,18 +79,18 @@ nav:
     - Git workflow: policies/git-workflow.md
   - Specs:
     - specs/index.md
-    - Frame role: 2026-04-28-frame-role-spec.md
-    - Aspect-funnel architecture: 2026-05-02-aspect-funnel-architecture.md
-    - Funnel compaction: 2026-05-01-funnel-compaction-design.md
-    - Funnel/bridle caching: 2026-05-03-funnel-bridle-caching-spec.md
+    - Frame role: archive/2026-04-28-frame-role-spec.md
+    - Aspect-funnel architecture: archive/2026-05-02-aspect-funnel-architecture.md
+    - Funnel compaction: archive/2026-05-01-funnel-compaction-design.md
+    - Funnel/bridle caching: archive/2026-05-03-funnel-bridle-caching-spec.md
     - Commonplace build graphs + Graphify: 2026-06-07-commonplace-build-graphs-and-graphify-recommendation.md
-    - Storage abstraction: 2026-05-05-storage-abstraction-spec.md
-    - Credential custodian: 2026-06-04-credential-custodian-design.md
-    - Nexus token custodian: 2026-06-03-nexus-token-custodian-design.md
-    - Hand dispatch v0.1: 2026-04-30-hand-dispatch-v0_1.md
-    - Provider adapter: 2026-04-24-provider-adapter-spec.md
-    - Skill delivery: 2026-05-15-skill-delivery-design.md
-    - Pi extract / bridle gaps: 2026-05-13-pi-extract-bridle-gaps.md
-    - Observability runbook: 2026-05-12-observability-operator-runbook.md
-    - JSONL rewriter: 2026-05-10-jsonl-rewriter-spec.md
-    - Dashboard WS port: 2026-05-09-dashboard-ws-port-spec.md
+    - Storage abstraction: archive/2026-05-05-storage-abstraction-spec.md
+    - Credential custodian: archive/2026-06-04-credential-custodian-design.md
+    - Nexus token custodian: archive/2026-06-03-nexus-token-custodian-design.md
+    - Hand dispatch v0.1: archive/2026-04-30-hand-dispatch-v0_1.md
+    - Provider adapter: archive/2026-04-24-provider-adapter-spec.md
+    - Skill delivery: archive/2026-05-15-skill-delivery-design.md
+    - Pi extract / bridle gaps: archive/2026-05-13-pi-extract-bridle-gaps.md
+    - Observability runbook: archive/2026-05-12-observability-operator-runbook.md
+    - JSONL rewriter: archive/2026-05-10-jsonl-rewriter-spec.md
+    - Dashboard WS port: archive/2026-05-09-dashboard-ws-port-spec.md

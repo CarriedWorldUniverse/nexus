@@ -1,8 +1,10 @@
 // Test-provider subcommand for nexus.
 //
 // `nexus test-provider --credential NAME --provider {claude-api|openai}
-//                      [--base-url URL] --model MODEL --prompt TEXT
-//                      [--tools] [--stream] [--steps N]` exercises a
+//
+//	[--base-url URL] --model MODEL --prompt TEXT
+//	[--tools] [--stream] [--steps N]` exercises a
+//
 // real bridle provider end-to-end against the real endpoint, using a
 // credential from the local credentials store. Prints structured
 // result: provider, endpoint, model, duration, usage, response,

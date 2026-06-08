@@ -134,9 +134,9 @@ func runActivitySummarySubcommand(args []string) int {
 // runtime/operatorws/" and we are that third client; the extraction
 // is a follow-up.
 type activitySummaryAuth struct {
-	jwt    string
-	wsURL  string
-	tls    *tls.Config
+	jwt   string
+	wsURL string
+	tls   *tls.Config
 }
 
 func resolveActivitySummaryAuth(opToken, opTokenFile, urlOverride string, insecure bool) (*activitySummaryAuth, error) {

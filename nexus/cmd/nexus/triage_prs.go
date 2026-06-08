@@ -316,4 +316,3 @@ func postPRComment(ctx context.Context, ghPath, repo string, number int, body st
 	}
 	return nil
 }
-

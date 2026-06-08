@@ -50,4 +50,4 @@ make build
 ## Where to dig deeper
 
 - [Architecture overview](../architecture.md) — how agora fits as an operator-as-aspect
-- [Operator as aspect (WS extension)](../2026-05-04-operator-as-aspect-ws-extension.md)
+- [Operator as aspect (WS extension)](../archive/2026-05-04-operator-as-aspect-ws-extension.md)
