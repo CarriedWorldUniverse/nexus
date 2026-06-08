@@ -36,6 +36,7 @@ type Grouper struct {
 	emit   func(Frame)
 	clock  func() time.Time
 	seq    int64
+	runID  string
 
 	// in-flight turn state — nil between turns.
 	turn       *TurnFrame
@@ -56,6 +57,15 @@ func NewGrouper(aspect string, emit func(Frame)) *Grouper {
 // should use NewGrouper.
 func NewGrouperWithClock(aspect string, emit func(Frame), clock func() time.Time) *Grouper {
 	return &Grouper{aspect: aspect, emit: emit, clock: clock}
+}
+
+// SetRunID tags subsequently emitted frames with the dispatch run that
+// owns this aspect process. Passing "" clears the tag for non-dispatch
+// sessions.
+func (g *Grouper) SetRunID(runID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.runID = runID
 }
 
 // BeginTurn opens a new in-flight turn and emits the initial
@@ -367,5 +377,8 @@ func (g *Grouper) emitTurnSnapshot() {
 func (g *Grouper) emitFrame(f Frame) {
 	g.seq++
 	f.Sequence = g.seq
+	if f.RunID == "" {
+		f.RunID = g.runID
+	}
 	g.emit(f)
 }

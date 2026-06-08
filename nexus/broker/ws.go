@@ -1047,7 +1047,9 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 	// Phase E: emit a PresenceFrame on the observability stream so
 	// dashboards see the aspect come online.
 	if c.broker.observability != nil {
-		c.broker.observability.GrouperFor(state.Name).OnPresence(true, "registered")
+		g := c.broker.observability.GrouperFor(state.Name)
+		g.SetRunID(metadataString(state.Metadata, "run_id"))
+		g.OnPresence(true, "registered")
 	}
 
 	ack, _ := frames.NewResponse(frames.KindRegisterAck, env.ID, frames.RegisterAckPayload{
@@ -1071,6 +1073,18 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 	if payload.RequestReplay && payload.SinceMsgID > 0 && c.broker.cfg.Replayer != nil {
 		go c.replayAddressedSince(state.Name, int64(payload.SinceMsgID))
 	}
+}
+
+func metadataString(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	v, ok := metadata[key]
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
 }
 
 // replayAddressedSince walks the chat history forward from the

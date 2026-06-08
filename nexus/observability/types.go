@@ -9,10 +9,10 @@ import (
 type FrameKind string
 
 const (
-	FrameTurn            FrameKind = "turn"
-	FrameChat            FrameKind = "chat"
-	FramePresence        FrameKind = "presence"
-	FrameFilterDecision  FrameKind = "filter_decision"
+	FrameTurn           FrameKind = "turn"
+	FrameChat           FrameKind = "chat"
+	FramePresence       FrameKind = "presence"
+	FrameFilterDecision FrameKind = "filter_decision"
 )
 
 // Frame is the wire-format unit consumed by clients. Sequence is
@@ -24,6 +24,7 @@ type Frame struct {
 	Aspect   string          `json:"aspect"`
 	Sequence int64           `json:"seq"`
 	TS       time.Time       `json:"ts"`
+	RunID    string          `json:"run_id,omitempty"` // dispatch run that emitted this frame
 	Payload  json.RawMessage `json:"payload"`
 }
 
@@ -40,7 +41,7 @@ const (
 // deliberation turn. Each emission carries the full event list so
 // renderers can replace-by-turn_id rather than reconcile deltas.
 type TurnFrame struct {
-	TurnID     string      `json:"turn_id"`
+	TurnID string `json:"turn_id"`
 	// Label distinguishes which kind of bridle turn this is. Documented
 	// values: "main" (the operator-addressed deliberation turn),
 	// "compact" (mid-deliberation context summarization), "filter-judge"

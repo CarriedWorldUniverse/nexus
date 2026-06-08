@@ -303,6 +303,10 @@ func main() {
 	if !strings.HasSuffix(wsURL, "/connect") && !strings.HasSuffix(wsURL, "/connect/") {
 		wsURL = strings.TrimRight(wsURL, "/") + "/connect"
 	}
+	registerMetadata := map[string]any(nil)
+	if runID := os.Getenv("CW_DISPATCH_RUN_ID"); runID != "" {
+		registerMetadata = map[string]any{"run_id": runID}
+	}
 
 	// sessionState holds the current JWT + expiry. Refreshed in-band
 	// by sessionRefreshLoop via session.refresh frames; consulted by
@@ -389,6 +393,7 @@ func main() {
 			Model:          res.Model,
 			SessionID:      sessionID,
 			PrimarySurface: schemas.SurfaceFunnel,
+			Metadata:       registerMetadata,
 		},
 	}
 	wsClient, err := wsasp.NewClient(wsCfg)
