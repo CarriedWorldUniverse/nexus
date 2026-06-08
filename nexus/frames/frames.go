@@ -163,12 +163,20 @@ const (
 	// list for the affected msg so the SPA can replace in-place — same
 	// per-id shape as chat.reactions.fetch.result so the existing
 	// rendering path works for both load and live-update.
-	KindChatReactionUpdate   Kind = "chat.reaction.update"
-	KindKnowledgeList        Kind = "knowledge.list"
-	KindKnowledgeListResult  Kind = "knowledge.list.result"
-	KindKnowledgeStoreResult Kind = "knowledge.store.result"
-	KindAspectSay            Kind = "aspect.say"
-	KindAspectSayResult      Kind = "aspect.say.result"
+	KindChatReactionUpdate    Kind = "chat.reaction.update"
+	KindKnowledgeList         Kind = "knowledge.list"
+	KindKnowledgeListResult   Kind = "knowledge.list.result"
+	KindKnowledgeStoreResult  Kind = "knowledge.store.result"
+	KindAspectSay             Kind = "aspect.say"
+	KindAspectSayResult       Kind = "aspect.say.result"
+	KindRunsList              Kind = "runs.list"
+	KindRunsListResult        Kind = "runs.list.result"
+	KindRunGet                Kind = "run.get"
+	KindRunGetResult          Kind = "run.get.result"
+	KindActivityHistory       Kind = "activity.history"
+	KindActivityHistoryResult Kind = "activity.history.result"
+	KindEnvHealth             Kind = "env.health"
+	KindEnvHealthResult       Kind = "env.health.result"
 
 	// Subscription frames (5d). Each "subscribe.X" enrolls the
 	// operator's connection in the corresponding push stream; the
@@ -340,6 +348,10 @@ func IsKnown(k Kind) bool {
 		KindKnowledgeList, KindKnowledgeListResult,
 		KindKnowledgeStoreResult,
 		KindAspectSay, KindAspectSayResult,
+		KindRunsList, KindRunsListResult,
+		KindRunGet, KindRunGetResult,
+		KindActivityHistory, KindActivityHistoryResult,
+		KindEnvHealth, KindEnvHealthResult,
 		// Subscription frames (5d)
 		KindSubscribeRoster, KindSubscribeChat, KindSubscribeAspectStatus,
 		KindSubscribeObserve,

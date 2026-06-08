@@ -209,6 +209,75 @@ type RunPayload struct {
 	ParentRunID   string `json:"parent_run_id,omitempty"`
 }
 
+type RunsListPayload struct {
+	Limit int `json:"limit,omitempty"`
+}
+
+type RunsListResultPayload struct {
+	Runs []RunPayload `json:"runs"`
+}
+
+type RunGetPayload struct {
+	RunID string `json:"run_id"`
+}
+
+type ChatItemPayload struct {
+	MsgID   int64  `json:"msg_id"`
+	From    string `json:"from"`
+	Content string `json:"content"`
+	ReplyTo int64  `json:"reply_to,omitempty"`
+}
+
+type ActivityItemPayload struct {
+	Type  string `json:"type"`
+	Text  string `json:"text,omitempty"`
+	Tool  string `json:"tool,omitempty"`
+	State string `json:"state,omitempty"`
+}
+
+type TimelineItemPayload struct {
+	Kind     string               `json:"kind"`
+	At       int64                `json:"at"`
+	Chat     *ChatItemPayload     `json:"chat,omitempty"`
+	Activity *ActivityItemPayload `json:"activity,omitempty"`
+}
+
+type RunGetResultPayload struct {
+	Run      RunPayload            `json:"run"`
+	Timeline []TimelineItemPayload `json:"timeline"`
+	Partial  bool                  `json:"partial,omitempty"`
+}
+
+type ActivityHistoryPayload struct {
+	RunID string `json:"run_id"`
+	Limit int    `json:"limit,omitempty"`
+}
+
+type ActivityHistoryResultPayload struct {
+	Items   []ActivityItemPayload `json:"items"`
+	Partial bool                  `json:"partial,omitempty"`
+}
+
+type EnvComponentPayload struct {
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	Healthy bool   `json:"healthy"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+type EnvPVCPayload struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+type EnvHealthResultPayload struct {
+	Components  []EnvComponentPayload `json:"components"`
+	PodsRunning int                   `json:"pods_running"`
+	PodsTotal   int                   `json:"pods_total"`
+	PVCs        []EnvPVCPayload       `json:"pvcs"`
+	LastDeploy  string                `json:"last_deploy,omitempty"`
+}
+
 // -------------------------------------------------------------------
 // CWB data-plane relay
 // -------------------------------------------------------------------
