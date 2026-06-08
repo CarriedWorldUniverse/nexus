@@ -57,6 +57,23 @@ func TestInsertThenMarkDone(t *testing.T) {
 	}
 }
 
+func TestMarkDoneDoesNotOverwriteTerminal(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	_ = s.Insert(ctx, Run{RunID: "run-c", Ticket: "NEX-1", Agent: "anvil", Status: StatusRunning, StartedAt: time.UnixMilli(1)})
+	if err := s.MarkDone(ctx, "run-c", StatusCancelled, time.UnixMilli(2), "", 0); err != nil {
+		t.Fatal(err)
+	}
+	// a later failed-mark (from emitJobDeleted) must NOT overwrite cancelled
+	if err := s.MarkDone(ctx, "run-c", StatusFailed, time.UnixMilli(3), "", 0); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Get(ctx, "run-c")
+	if got.Status != StatusCancelled {
+		t.Fatalf("status = %q, want cancelled (terminal not overwritten)", got.Status)
+	}
+}
+
 func TestListReturnsNewestFirst(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
