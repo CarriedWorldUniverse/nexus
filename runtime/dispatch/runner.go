@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
+	"github.com/google/uuid"
 	batchv1 "k8s.io/api/batch/v1"
 )
 
@@ -92,7 +93,6 @@ type Runner struct {
 	active    map[string]*Run   // runID → Run
 	queue     []Brief
 	acked     map[string]bool
-	seq       int
 }
 
 // Init initializes Runner maps and optionally recovers active jobs from K8s.
@@ -403,8 +403,7 @@ func (r *Runner) nextID() string {
 	if r.NewID != nil {
 		return r.NewID()
 	}
-	r.seq++
-	return fmt.Sprintf("run-%d", r.seq)
+	return "run-" + uuid.NewString()
 }
 
 // reserveQueued pulls queued briefs whose agent is now free (and within the

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -20,12 +21,18 @@ import (
 type fakeK8s struct {
 	jobs    []string
 	secrets map[string]bool
+	owners  []briefOwnerCall
 
 	// createErr, when set, fails CreateJob — used to exercise the
 	// launch-failure / re-enqueue path.
 	createErr func(jobName string) error
 	// active is returned by ListActiveJobs — used to exercise recovery.
 	active map[string]dispatch.ActiveJob
+}
+
+type briefOwnerCall struct {
+	taskID string
+	job    string
 }
 
 func (f *fakeK8s) EnsureKeyfileSecret(_ context.Context, aspect string) error {
@@ -48,7 +55,10 @@ func (f *fakeK8s) CreateJob(_ context.Context, job *batchv1.Job) (*batchv1.Job, 
 	return job, nil
 }
 
-func (f *fakeK8s) SetBriefOwner(_ context.Context, _ string, _ *batchv1.Job) error { return nil }
+func (f *fakeK8s) SetBriefOwner(_ context.Context, taskID string, job *batchv1.Job) error {
+	f.owners = append(f.owners, briefOwnerCall{taskID: taskID, job: job.Name})
+	return nil
+}
 
 func (f *fakeK8s) ListActiveJobs(_ context.Context) (map[string]dispatch.ActiveJob, error) {
 	return f.active, nil
@@ -89,6 +99,52 @@ func TestRunnerRunsAsNamedAgent(t *testing.T) {
 	}
 	if len(fk.jobs) != 1 || !strings.HasPrefix(fk.jobs[0], "builder-anvil-") {
 		t.Errorf("job should be named builder-anvil-*, got %v", fk.jobs)
+	}
+}
+
+func TestRunnerDefaultRunIDsAreUUIDBackedAndDistinct(t *testing.T) {
+	fk := &fakeK8s{}
+	r := newRunner(fk)
+	if err := r.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	id1, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "t", Task: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := r.Submit(context.Background(), dispatch.Brief{Agent: "plumb", Ticket: "NEX-2", Thread: "t", Task: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 == id2 {
+		t.Fatalf("run IDs should be distinct, both were %q", id1)
+	}
+	re := regexp.MustCompile(`^run-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	if !re.MatchString(id1) || !re.MatchString(id2) {
+		t.Fatalf("run IDs should be run-<uuid>, got %q and %q", id1, id2)
+	}
+}
+
+func TestRunnerSetsBriefOwnerToCreatedJob(t *testing.T) {
+	fk := &fakeK8s{}
+	r := newRunner(fk)
+	if err := r.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	runID, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "t", Task: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fk.owners) != 1 {
+		t.Fatalf("SetBriefOwner calls = %d, want 1", len(fk.owners))
+	}
+	if fk.owners[0].taskID != runID {
+		t.Fatalf("brief owner taskID = %q, want run ID %q", fk.owners[0].taskID, runID)
+	}
+	if fk.owners[0].job != fk.jobs[0] {
+		t.Fatalf("brief owner job = %q, want created job %q", fk.owners[0].job, fk.jobs[0])
 	}
 }
 
