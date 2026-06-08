@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"testing"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -53,38 +54,88 @@ func TestSetBriefOwner(t *testing.T) {
 	}
 }
 
-func TestWatchJobsDone(t *testing.T) {
+func TestWatchJobsDoneCompleteAndFailed(t *testing.T) {
 	fw := watch.NewFake()
 	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}
 	k.Client.(*fake.Clientset).PrependWatchReactor("jobs", ktesting.DefaultWatchReactor(fw, nil))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan bool, 1)
+	done := make(chan watchedJob, 2)
 	go func() {
 		_ = k.WatchJobs(ctx, func(jd JobDone) {
-			if jd.Ticket == "NEX-1" && jd.Thread == "THREAD-1" && jd.Agent == "anvil" {
-				done <- jd.OK
-			}
+			done <- watchedJob{ticket: jd.Ticket, thread: jd.Thread, ok: jd.OK}
 		})
 	}()
-	fw.Modify(&batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "builder-anvil-t1",
-			Labels: map[string]string{
-				"app":                   "nexus-builder",
-				"nexus.dispatch/ticket": "NEX-1",
-				"nexus.dispatch/agent":  "anvil",
-			},
-			Annotations: map[string]string{"nexus.dispatch/thread": "THREAD-1"},
-		},
-		Status: batchv1.JobStatus{Succeeded: 1},
-	})
-	if ok := <-done; !ok {
-		t.Fatal("watch callback reported failure")
+
+	fw.Modify(terminalJob("builder-anvil-t1", "NEX-1", "THREAD-1", batchv1.JobComplete))
+	assertWatchedJob(t, done, watchedJob{ticket: "NEX-1", thread: "THREAD-1", ok: true})
+
+	fw.Modify(terminalJob("builder-anvil-t2", "NEX-2", "THREAD-2", batchv1.JobFailed))
+	assertWatchedJob(t, done, watchedJob{ticket: "NEX-2", thread: "THREAD-2", ok: false})
+}
+
+func TestWatchJobsReconcilesExistingTerminalJobs(t *testing.T) {
+	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}
+	_, err := k.Client.BatchV1().Jobs("nexus").Create(
+		context.Background(),
+		terminalJob("builder-anvil-t1", "NEX-1", "THREAD-1", batchv1.JobComplete),
+		metav1.CreateOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan watchedJob, 1)
+	go func() {
+		_ = k.WatchJobs(ctx, func(jd JobDone) {
+			done <- watchedJob{ticket: jd.Ticket, thread: jd.Thread, ok: jd.OK}
+		})
+	}()
+
+	assertWatchedJob(t, done, watchedJob{ticket: "NEX-1", thread: "THREAD-1", ok: true})
 }
 
 func keyfileSecret(agent string) *corev1.Secret {
 	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "aspect-keyfile-" + agent, Namespace: "nexus"}}
+}
+
+type watchedJob struct {
+	ticket string
+	thread string
+	ok     bool
+}
+
+func assertWatchedJob(t *testing.T, ch <-chan watchedJob, want watchedJob) {
+	t.Helper()
+	select {
+	case got := <-ch:
+		if got != want {
+			t.Fatalf("done = %+v, want %+v", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for job done callback")
+	}
+}
+
+func terminalJob(name, ticket, thread string, condition batchv1.JobConditionType) *batchv1.Job {
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "nexus",
+			Labels: map[string]string{
+				"app":                   "nexus-builder",
+				"nexus.dispatch/ticket": ticket,
+			},
+			Annotations: map[string]string{"nexus.dispatch/thread": thread},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{
+				Type:   condition,
+				Status: corev1.ConditionTrue,
+			}},
+		},
+	}
 }
