@@ -301,7 +301,7 @@ export function SettingsAspects() {
       }
       setAspects(namedAgents);
       setOverrides(overridesByName);
-      setCredentials(creds || []);
+      setCredentials((creds && creds.credentials) || []);
       setNetworkDefaults(nd);
     } catch (e) {
       setError(e.message || 'load failed');
