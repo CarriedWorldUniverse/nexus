@@ -3,6 +3,7 @@ package funnel
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"unicode/utf8"
 )
@@ -113,7 +114,11 @@ type AutoRecallConfig struct {
 // errors. Fail-open is the contract: recall must NEVER block or fail a turn,
 // so every error path returns "" and the turn proceeds as if recall were off.
 func (f *Funnel) recallForTurn(ctx context.Context, userMessage string) string {
-	ar := f.cfg.AutoRecall
+	return recallForTurnConfig(ctx, f.cfg, userMessage)
+}
+
+func recallForTurnConfig(ctx context.Context, cfg Config, userMessage string) string {
+	ar := cfg.AutoRecall
 	if !ar.Enabled || ar.Gateway == nil {
 		return ""
 	}
@@ -127,7 +132,7 @@ func (f *Funnel) recallForTurn(ctx context.Context, userMessage string) string {
 	}
 	hits, err := ar.Gateway.SearchKnowledge(ctx, KnowledgeQuery{
 		Text:     text,
-		Agent:    f.cfg.AspectID,
+		Agent:    cfg.AspectID,
 		OwnAgent: true,
 		Shared:   true,
 		TopK:     topK,
@@ -136,8 +141,12 @@ func (f *Funnel) recallForTurn(ctx context.Context, userMessage string) string {
 		// matches almost nothing).
 		Keyword: true,
 	})
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	if err != nil {
-		f.cfg.Logger.Warn("auto-recall: search failed; proceeding without recall", "err", err)
+		logger.Warn("auto-recall: search failed; proceeding without recall", "err", err)
 		return ""
 	}
 	// Relevance gate: only matches stronger than MaxRank earn context space.
@@ -157,8 +166,8 @@ func (f *Funnel) recallForTurn(ctx context.Context, userMessage string) string {
 	block := RenderRecalledKnowledge(kept, maxChars)
 	// Telemetry: did recall fire, find anything, and inject? Lets us see the
 	// lever working (or not) on dMon without guessing.
-	f.cfg.Logger.Info("knowledge.recall",
-		"agent", f.cfg.AspectID, "matched", len(hits),
+	logger.Info("knowledge.recall",
+		"agent", cfg.AspectID, "matched", len(hits),
 		"injected", len(kept), "suppressed", len(hits)-len(kept), "chars", len(block))
 	return block
 }
