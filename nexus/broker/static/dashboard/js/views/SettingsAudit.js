@@ -7,7 +7,7 @@
 //
 // Picker is driven both by user interaction AND by URL hash (so the
 // Credentials page can deep-link to a credential's audit row via
-// #/settings/audit?cred=<name>). The hash listener stays narrow:
+// #/configure/audit?cred=<name>). The hash listener stays narrow:
 // only the cred= query string of the audit sub-route is observed.
 
 const { html, useState, useEffect } = window.__preact;
@@ -20,7 +20,7 @@ const DEFAULT_LIMIT = 100;
 // #/path[?qs]; we parse the qs after the first '?'.
 function getCredFromHash() {
   const hash = window.location.hash;
-  if (!hash.startsWith('#/settings/audit')) return '';
+  if (!hash.startsWith('#/configure/audit')) return '';
   const q = hash.indexOf('?');
   if (q < 0) return '';
   const params = new URLSearchParams(hash.slice(q + 1));
@@ -131,7 +131,7 @@ export function SettingsAudit() {
     const name = e.target.value;
     setSelected(name);
     // Reflect in URL so refresh / deep-link round-trip works.
-    const base = '#/settings/audit';
+    const base = '#/configure/audit';
     window.history.replaceState(null, '', name ? base + '?cred=' + encodeURIComponent(name) : base);
   }
 

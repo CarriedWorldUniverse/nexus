@@ -1,12 +1,12 @@
 // SettingsView (NEX-264) — admin surface for nexus dashboard.
 //
 // Hosts four sub-pages, each landing in its own follow-up story:
-//   #/settings/aspects      — per-aspect model picker (NEX-265)
-//   #/settings/credentials  — credentials CRUD (NEX-266)
-//   #/settings/defaults     — per-aspect credential defaults (NEX-267)
-//   #/settings/audit        — credential audit trail viewer (NEX-268)
+//   #/configure/aspects      — per-aspect model picker (NEX-265)
+//   #/configure/credentials  — credentials CRUD (NEX-266)
+//   #/configure/defaults     — per-aspect credential defaults (NEX-267)
+//   #/configure/audit        — credential audit trail viewer (NEX-268)
 //
-// Bare #/settings defaults to aspects (the first feature shipping with
+// Bare #/configure defaults to aspects (the first feature shipping with
 // content; chosen because the model picker is the headline operator
 // affordance driving NEX-219).
 //
@@ -31,14 +31,14 @@ const TABS = [
 
 const DEFAULT_TAB = 'aspects';
 
-// Sub-route lives in the hash after '#/settings/'. Returns one of the
+// Sub-route lives in the hash after '#/configure/'. Returns one of the
 // TABS ids, or DEFAULT_TAB when the hash is bare or unrecognised.
-function getSubRoute() {
+function parseTab() {
   const hash = window.location.hash;
-  if (!hash.startsWith('#/settings')) return DEFAULT_TAB;
-  const after = hash.slice('#/settings'.length).replace(/^\/+/, '');
+  if (!hash.startsWith('#/configure')) return DEFAULT_TAB;
+  const after = hash.slice('#/configure'.length).replace(/^\/+/, '');
   if (!after) return DEFAULT_TAB;
-  const segment = after.split('/')[0];
+  const segment = after.split('/')[0].split('?')[0];
   if (TABS.some((t) => t.id === segment)) return segment;
   return DEFAULT_TAB;
 }
@@ -49,7 +49,7 @@ function SettingsTabBar({ activeTab }) {
       ${TABS.map((tab) => html`
         <a
           key=${tab.id}
-          href=${'#/settings/' + tab.id}
+          href=${'#/configure/' + tab.id}
           role="tab"
           aria-selected=${tab.id === activeTab}
           class=${'settings-tab' + (tab.id === activeTab ? ' active' : '')}
@@ -79,13 +79,13 @@ function AdminGate() {
 }
 
 export function SettingsView() {
-  const [subRoute, setSubRoute] = useState(getSubRoute());
+  const [subRoute, setSubRoute] = useState(parseTab());
 
   // Track sub-route from URL hash so back/forward + direct nav both work.
   // Settings page is the only place editing the hash to a sub-route, but
   // listen broadly so any other navigator (BottomBar, manual edit) syncs.
   useEffect(() => {
-    function onHash() { setSubRoute(getSubRoute()); }
+    function onHash() { setSubRoute(parseTab()); }
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
