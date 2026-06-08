@@ -346,6 +346,11 @@
   width: 300px;
 }
 
+.agent-config-panel {
+  flex-basis: 320px;
+  width: 320px;
+}
+
 .dispatch-form {
   display: flex;
   flex-direction: column;
@@ -463,6 +468,10 @@
   border-bottom: 1px solid var(--border-subtle);
 }
 
+.team-row-active {
+  background: var(--bg-surface);
+}
+
 .team-state {
   flex: 0 0 auto;
   width: 8px;
@@ -498,6 +507,85 @@
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-muted);
+}
+
+.team-dispatch {
+  flex: 0 0 auto;
+  min-width: 54px;
+  font: 10px var(--font-mono);
+  color: var(--text-muted);
+}
+
+.team-dispatch.on {
+  color: var(--color-moss);
+}
+
+.team-dispatch.off {
+  color: #ffb3b3;
+}
+
+.team-config-btn {
+  flex: 0 0 auto;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font: 11px var(--font-mono);
+  cursor: pointer;
+}
+
+.team-config-btn:hover {
+  border-color: var(--view-accent);
+  color: var(--text-primary);
+}
+
+.agent-config-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+}
+
+.agent-config-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-abyss);
+  color: var(--text-muted);
+  font: 11px var(--font-mono);
+}
+
+.agent-config-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-secondary);
+  font: 12px var(--font-mono);
+}
+
+.agent-config-toggle input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--view-accent);
+}
+
+.agent-config-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.agent-config-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .env-components {

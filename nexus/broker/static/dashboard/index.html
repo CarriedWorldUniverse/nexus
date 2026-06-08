@@ -44,14 +44,14 @@
   <div id="app"></div>
 
   <script type="module">
-    import { h, render } from '/js/vendor/preact.js';
+    import { h, render, Fragment } from '/js/vendor/preact.js';
     import { useEffect, useState, useRef, useMemo, useCallback } from '/js/vendor/preact-hooks.js';
     import { signal } from '/js/vendor/preact-signals.js';
     import htm from '/js/vendor/htm.js';
 
     const html = htm.bind(h);
 
-    window.__preact = { h, render, signal, html, useEffect, useState, useRef, useMemo, useCallback };
+    window.__preact = { h, render, Fragment, signal, html, useEffect, useState, useRef, useMemo, useCallback };
 
     const { App } = await import('./js/app.js');
     render(h(App, null), document.getElementById('app'));

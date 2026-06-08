@@ -2,12 +2,15 @@ package broker
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 )
 
@@ -184,5 +187,47 @@ func TestDispatchWithoutRunner(t *testing.T) {
 
 	if got := store.insertCount(); got != 1 {
 		t.Errorf("ChatStore.Insert called %d times, want 1 (the !dispatch post is stored as the thread root)", got)
+	}
+}
+
+func TestSubmitDispatchRejectsDisabledAgent(t *testing.T) {
+	dir := t.TempDir()
+	db, err := storage.Open(context.Background(), dir, nil)
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	astore := aspects.NewSQLStore(db)
+	if err := astore.Insert(context.Background(), aspects.Aspect{
+		Name: "anvil", AspectPubkey: fakePubkeyBytes(),
+		Provider: "claude-api", Model: "claude-opus-4-7",
+	}); err != nil {
+		t.Fatalf("seed aspect: %v", err)
+	}
+	if err := astore.SetDispatchEnabled(context.Background(), "anvil", false); err != nil {
+		t.Fatalf("disable dispatch: %v", err)
+	}
+
+	b := New(Config{
+		AuthToken:         "testtoken",
+		AllowLegacyMaster: true,
+		Runner:            &fakeSubmitter{},
+		KeyfileValidator: &KeyfileValidator{
+			Store: astore,
+		},
+	}, roster.New())
+	b.ctx, b.ctxCancel = context.WithCancel(context.Background())
+	t.Cleanup(b.ctxCancel)
+
+	err = b.submitDispatch(context.Background(), "shadow",
+		"!dispatch anvil repo=o/r ticket=NEX-1 do it", "dispatch-1", 1)
+	if err == nil {
+		t.Fatal("disabled agent should be rejected")
+	}
+	if !strings.Contains(err.Error(), "agent anvil is dispatch-disabled") {
+		t.Fatalf("err = %v, want dispatch-disabled rejection", err)
+	}
+	if got := b.runner.(*fakeSubmitter).submitCount(); got != 0 {
+		t.Fatalf("Submit called %d times, want 0", got)
 	}
 }

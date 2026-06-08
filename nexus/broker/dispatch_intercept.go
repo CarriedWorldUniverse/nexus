@@ -25,6 +25,10 @@ func (b *Broker) submitDispatch(ctx context.Context, from, content, thread strin
 		brief.Thread = thread
 	}
 	brief.DispatchMsgID = dispatchMsgID
+	if !b.aspectDispatchEnabled(brief.Agent) {
+		b.log.Info("dispatch: agent dispatch-disabled; rejecting", "agent", brief.Agent, "ticket", brief.Ticket)
+		return fmt.Errorf("agent %s is dispatch-disabled", brief.Agent)
+	}
 	b.log.Info("dispatch: submitting brief to runner",
 		"agent", brief.Agent, "ticket", brief.Ticket, "repo", brief.Repo,
 		"provider", brief.Provider, "thread", brief.Thread)

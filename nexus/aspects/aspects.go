@@ -57,6 +57,7 @@ type Aspect struct {
 	AspectPubkey          []byte // 32-byte Ed25519 public key
 	Provider              string
 	Model                 string
+	DispatchEnabled       bool
 	Capabilities          string // JSON array, opaque
 	Metadata              string // JSON object, opaque
 	CreatedAt             string // ISO 8601 from datetime('now')
@@ -112,6 +113,13 @@ type Store interface {
 	// SetStatus atomically updates status. Used by retire.
 	SetStatus(ctx context.Context, name string, status Status) error
 
+	// DispatchEnabled returns whether broker-side !dispatch is allowed
+	// for this aspect. Missing rows default to true at the broker layer.
+	DispatchEnabled(ctx context.Context, name string) (bool, error)
+
+	// SetDispatchEnabled atomically flips broker-side !dispatch access.
+	SetDispatchEnabled(ctx context.Context, name string, enabled bool) error
+
 	// Resurrect atomically transitions status retired→active AND bumps
 	// current_keyfile_version with a fresh placeholder pubkey. Single
 	// transaction so an old keyfile can never momentarily re-validate
@@ -160,14 +168,16 @@ func (s *SQLStore) DBForTest() *sql.DB {
 func scanAspect(scan func(...any) error) (*Aspect, error) {
 	var a Aspect
 	var status string
+	var dispatchEnabled bool
 	var caps, meta sql.NullString
 	if err := scan(
 		&a.Name, &status, &a.CurrentKeyfileVersion, &a.AspectPubkey,
-		&a.Provider, &a.Model, &caps, &meta, &a.CreatedAt, &a.UpdatedAt,
+		&a.Provider, &a.Model, &dispatchEnabled, &caps, &meta, &a.CreatedAt, &a.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
 	a.Status = Status(status)
+	a.DispatchEnabled = dispatchEnabled
 	if caps.Valid {
 		a.Capabilities = caps.String
 	}
@@ -178,7 +188,7 @@ func scanAspect(scan func(...any) error) (*Aspect, error) {
 }
 
 const aspectColumns = `name, status, current_keyfile_version, aspect_pubkey,
-		provider, model, capabilities, metadata, created_at, updated_at`
+		provider, model, dispatch_enabled, capabilities, metadata, created_at, updated_at`
 
 // Get implements Store.
 func (s *SQLStore) Get(ctx context.Context, name string) (*Aspect, error) {
@@ -227,13 +237,16 @@ func (s *SQLStore) Insert(ctx context.Context, a Aspect) error {
 	if a.CurrentKeyfileVersion == 0 {
 		a.CurrentKeyfileVersion = 1
 	}
+	// New aspects are dispatchable by default; callers disable via
+	// SetDispatchEnabled after creation.
+	a.DispatchEnabled = true
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO aspects
 			(name, status, current_keyfile_version, aspect_pubkey,
-			 provider, model, capabilities, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			 provider, model, dispatch_enabled, capabilities, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, a.Name, string(a.Status), a.CurrentKeyfileVersion, a.AspectPubkey,
-		a.Provider, a.Model, nullIfEmpty(a.Capabilities), nullIfEmpty(a.Metadata))
+		a.Provider, a.Model, boolInt(a.DispatchEnabled), nullIfEmpty(a.Capabilities), nullIfEmpty(a.Metadata))
 	if err != nil {
 		return fmt.Errorf("aspects.Insert(%q): %w", a.Name, err)
 	}
@@ -245,11 +258,11 @@ func (s *SQLStore) Update(ctx context.Context, a Aspect) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE aspects SET
 			status = ?, current_keyfile_version = ?, aspect_pubkey = ?,
-			provider = ?, model = ?, capabilities = ?, metadata = ?,
+			provider = ?, model = ?, dispatch_enabled = ?, capabilities = ?, metadata = ?,
 			updated_at = datetime('now')
 		WHERE name = ?
 	`, string(a.Status), a.CurrentKeyfileVersion, a.AspectPubkey,
-		a.Provider, a.Model, nullIfEmpty(a.Capabilities), nullIfEmpty(a.Metadata),
+		a.Provider, a.Model, boolInt(a.DispatchEnabled), nullIfEmpty(a.Capabilities), nullIfEmpty(a.Metadata),
 		a.Name)
 	if err != nil {
 		return fmt.Errorf("aspects.Update(%q): %w", a.Name, err)
@@ -345,6 +358,40 @@ func (s *SQLStore) SetStatus(ctx context.Context, name string, status Status) er
 	n, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("aspects.SetStatus(%q) rows affected: %w", name, err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DispatchEnabled implements Store.
+func (s *SQLStore) DispatchEnabled(ctx context.Context, name string) (bool, error) {
+	var enabled bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT dispatch_enabled FROM aspects WHERE name = ?
+	`, name).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, ErrNotFound
+	}
+	if err != nil {
+		return true, fmt.Errorf("aspects.DispatchEnabled(%q): %w", name, err)
+	}
+	return enabled, nil
+}
+
+// SetDispatchEnabled implements Store.
+func (s *SQLStore) SetDispatchEnabled(ctx context.Context, name string, enabled bool) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE aspects SET dispatch_enabled = ?, updated_at = datetime('now')
+		WHERE name = ?
+	`, boolInt(enabled), name)
+	if err != nil {
+		return fmt.Errorf("aspects.SetDispatchEnabled(%q): %w", name, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("aspects.SetDispatchEnabled(%q) rows affected: %w", name, err)
 	}
 	if n == 0 {
 		return ErrNotFound
@@ -480,4 +527,11 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
