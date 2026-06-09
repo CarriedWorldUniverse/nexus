@@ -34,14 +34,17 @@ import (
 // supportedProviders mirrors the buildProvider switch in
 // runtime/cmd/agentfunnel/main.go. Update both when adding a backend.
 var supportedProviders = map[string]bool{
-	"claude":      true, // alias for claude-api
-	"claude-api":  true,
-	"claudecode":  true, // alias for claude-code
-	"claude-code": true,
-	"openai":      true,
-	"codex":       true, // alias for codex-cli
-	"codex-cli":   true,
-	"codexcli":    true, // alias for codex-cli
+	"claude":          true, // alias for claude-api
+	"claude-api":      true,
+	"claudecode":      true, // alias for claude-code
+	"claude-code":     true,
+	"openai":          true,
+	"codex":           true, // alias for codex-cli
+	"codex-cli":       true,
+	"codexcli":        true, // alias for codex-cli
+	"antigravity-cli": true,
+	"antigravity":     true, // alias for antigravity-cli
+	"agy":             true, // alias for antigravity-cli
 }
 
 type providerBindingResponse struct {
