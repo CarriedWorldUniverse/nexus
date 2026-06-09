@@ -330,6 +330,10 @@ type Broker struct {
 	srv    *http.Server
 	log    *slog.Logger
 
+	// images backs the chat image-attach feature (in-memory, capped — see
+	// images.go). Always non-nil after New.
+	images *imageStore
+
 	// Connection accounting for #25. connMu guards both fields.
 	// connTotal is the current count of accepted /connect upgrades;
 	// connPerIP[host] is the per-source-IP count (host:port stripped
@@ -435,6 +439,7 @@ func New(cfg Config, r *roster.Roster) *Broker {
 		roster:               r,
 		log:                  cfg.Logger,
 		dispatcher:           newDispatcher(),
+		images:               newImageStore(),
 		connPerIP:            make(map[string]int),
 		operators:            make(map[*wsConn]struct{}),
 		lastSessionRefreshAt: make(map[string]time.Time),
@@ -535,6 +540,9 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	// HTTP surface that stays per spec §10: dashboard convenience +
 	// external monitoring.
 	mux.Handle("GET /api/aspects", b.auth(http.HandlerFunc(b.handleList)))
+	// Image attach (NEX-538): operator-gated upload, capability-URL serve.
+	mux.Handle("POST /api/images", b.auth(http.HandlerFunc(b.handleImageUpload)))
+	mux.HandleFunc("GET /api/images/{id}", b.handleImageGet)
 	mux.HandleFunc("GET /health", b.handleHealth)
 	// Auth mode probe — SPA reads this on load to decide whether to
 	// run the WebAuthn ceremony or skip straight to the WS open. When

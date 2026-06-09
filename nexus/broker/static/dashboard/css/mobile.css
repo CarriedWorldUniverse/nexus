@@ -281,9 +281,20 @@
 
 .m-compose-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 72px;
+  grid-template-columns: 44px minmax(0, 1fr) 72px;
   gap: 8px;
   align-items: end;
+}
+
+/* Attach (📎) is a fixed-size icon button, not the accent Send button — it must
+   not grow or it squeezes the textarea off-screen (NEX-538). */
+.m-compose-row .m-attach {
+  width: 44px;
+  padding: 0;
+  font-size: 18px;
+  background: var(--bg-elevated);
+  border-color: var(--border-default);
+  color: var(--text-primary);
 }
 
 .m-compose-row textarea {
