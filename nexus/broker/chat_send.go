@@ -107,6 +107,7 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 		From:    from,
 		Content: content,
 		ReplyTo: int(replyTo),
+		Topic:   msg.Topic,
 		// RFC3339Nano matches replay (ws.go replayAddressedSince) and
 		// chat.read so cursor-equality comparisons across the three
 		// surfaces don't break on sub-second precision.

@@ -342,6 +342,7 @@ type ChatDeliverPayload struct {
 	Content    string `json:"content"`
 	ReplyTo    int    `json:"reply_to,omitempty"`
 	Thread     string `json:"thread,omitempty"`
+	Topic      string `json:"topic,omitempty"`  // conversation topic (e.g. dm:<agent>); the SPA groups DMs/channels by this — must be present on reads or DM history filters to empty (NEX-539)
 	ReceivedAt string `json:"received_at"`      // RFC 3339 UTC; server-stamped at Nexus DB insert
 	Reason     string `json:"reason"`           // mention | reply | thread | all
 	Replay     bool   `json:"replay,omitempty"` // true iff this frame was emitted as part of a since_msg_id replay
