@@ -6,6 +6,7 @@ import { Shell } from './components/Shell.js';
 import { Login } from './Login.js';
 import { open as commsOpen } from './comms.js';
 import { initNotifications } from './notifications.js';
+import { isMobile } from './state-mobile.js';
 import { ConverseView } from './views/ConverseView.js';
 import { ObserveView } from './views/ObserveView.js';
 import { WatchView } from './views/WatchView.js';
@@ -15,6 +16,7 @@ import { Status } from './views/Status.js';
 import { DocsView } from './views/DocsView.js';
 import { SplitView } from './views/SplitView.js';
 import { SettingsView } from './views/SettingsView.js';
+import { MobileApp } from './views/mobile/MobileApp.js';
 
 function getRoute() {
   const hash = window.location.hash;
@@ -224,5 +226,6 @@ export function App() {
 
   if (!authed) return html`<${Login} onComplete=${() => setAuthed(true)} />`;
 
+  if (isMobile.value) return html`<${MobileApp} />`;
   return html`<${Shell} activeRoute=${route.value}><${RouteView} route=${route.value} /></${Shell}>`;
 }
