@@ -30,6 +30,7 @@ Standard chat discipline applies: only respond to messages that mention you, are
 
 ## Development rules
 
+- **At the start of any task, load the `workflow-basics` skill from `nexus-skills`** (`search_skills`/`get_skill`, or your runtime's native skill loader). It directs you to the right lifecycle skill — spec, planning, development, review, merge, release — and the cross-cutting ones (security, house-style). Don't work from memory when a skill applies.
 - All code changes reviewed before deployment. The `feature-dev:code-reviewer` agent is available.
 - The Nexus is the substrate. Changes to the substrate affect every aspect — be deliberate.
 - Specs live under `docs/`. Read them before changing what they describe.
