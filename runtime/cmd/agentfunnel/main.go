@@ -53,6 +53,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/bridle"
+	antigravitycliprovider "github.com/CarriedWorldUniverse/bridle/provider/antigravitycli"
 	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
 	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
 	codexcliprovider "github.com/CarriedWorldUniverse/bridle/provider/codexcli"
@@ -180,6 +181,9 @@ func main() {
 			fail(log, "setup builder home", err)
 		}
 		log.Info("agentfunnel: builder home ready", "aspect", res.AspectName, "home", os.Getenv("HOME"))
+		// Stage Antigravity OAuth creds into the (now-moved) $HOME/.gemini so
+		// agy finds them. No-op when the antigravity-auth secret isn't mounted.
+		stageAntigravityCreds(log)
 		// Export the session JWT so cw — git's credential helper in the
 		// worker image — can authenticate to the M1 custodian seam for
 		// git clone/fetch/push during the build (NEX-437). cw's git-helper reads
@@ -1114,9 +1118,41 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 		// funnel SessionTail path. Uses the operator's codex login; the
 		// model comes from the validate binding (or the codex config default).
 		return codexcliprovider.New(), nil
+	case "antigravity-cli", "antigravity", "agy":
+		// Headless Antigravity CLI (agy, plain-text subprocess): runs its own
+		// agentic loop internally and prints the final response — no tool-call
+		// streaming. OAuth creds are staged into $HOME/.gemini by the builder
+		// (stageAntigravityCreds), since agy reads $HOME/.gemini with no
+		// CODEX_HOME-style override and the builder moves HOME to the worktree.
+		return antigravitycliprovider.New(), nil
 	default:
-		return nil, fmt.Errorf("unsupported provider %q (claude-api, claude-code, openai, codex-cli supported)", provider)
+		return nil, fmt.Errorf("unsupported provider %q (claude-api, claude-code, openai, codex-cli, antigravity-cli supported)", provider)
 	}
+}
+
+// stageAntigravityCreds copies the mounted Antigravity OAuth creds into the
+// builder's $HOME/.gemini so agy (which reads $HOME/.gemini, HOME-dependent
+// with no CODEX_HOME-style override) finds them after setupBuilderHome moves
+// HOME to the per-agent worktree. The dest is writable so agy can refresh the
+// access token via the refresh token. No-op when the secret isn't mounted
+// (i.e. non-antigravity builders).
+func stageAntigravityCreds(log *slog.Logger) {
+	const src = "/antigravity-secret/oauth_creds.json"
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return // secret not mounted — not an antigravity builder
+	}
+	dir := filepath.Join(os.Getenv("HOME"), ".gemini")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Warn("agentfunnel: mkdir .gemini for antigravity creds", "err", err)
+		return
+	}
+	dst := filepath.Join(dir, "oauth_creds.json")
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		log.Warn("agentfunnel: stage antigravity creds", "err", err)
+		return
+	}
+	log.Info("agentfunnel: staged antigravity OAuth creds", "dst", dst)
 }
 
 // newBindingHarness builds the *bridle.Harness the funnel runs turns

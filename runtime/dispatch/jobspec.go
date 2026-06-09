@@ -43,6 +43,7 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		provider = "codex-cli"
 	}
 	codexProvider := provider == "codex-cli"
+	antigravityProvider := provider == "antigravity-cli"
 	// The Job runs AS the named agent: keyfile = aspect-keyfile-<agent>, and
 	// the Job name + labels carry the agent + run id.
 	keyfileAspect := b.Agent
@@ -113,6 +114,14 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 			corev1.Volume{Name: "codex-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "codex-auth"}}},
 			corev1.Volume{Name: "codex-home", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		)
+	}
+	if antigravityProvider {
+		// agy reads OAuth creds from $HOME/.gemini. The builder moves HOME to
+		// the per-agent worktree at runtime, so we mount the secret read-only
+		// here and the agentfunnel copies it into $HOME/.gemini after the move
+		// (stageAntigravityCreds) — writable, so agy can refresh the token.
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: "antigravity-secret", MountPath: "/antigravity-secret", ReadOnly: true})
+		volumes = append(volumes, corev1.Volume{Name: "antigravity-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "antigravity-auth"}}})
 	}
 
 	return &batchv1.Job{
