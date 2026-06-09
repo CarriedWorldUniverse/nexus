@@ -24,14 +24,15 @@ Give every nexus agent a single, canonical, load-on-demand skill set encoding ho
 
 **Empirical basis (don't assume — tested):** the deployed gemma is **Gemma 4 12B** (ollama). A live tool-calling probe returned a clean `search_skills({"query":"software testing"})` — so gemma uses the MCP path like deepseek; **no injection fallback is needed.** Codex CLI *can* drive custom providers but DeepSeek needs a Responses↔Chat gateway and small models are excluded from Codex's reliable-tool-calling list — so we do **not** run gemma/deepseek through a CLI; they stay API-via-funnel and get skills over MCP.
 
-**Relationship to superpowers:** the 8 skills are the **canonical platform set**. We port superpowers' proven content (brainstorm-before-build, TDD, verify-before-complete, systematic-debugging) into them and add the platform specifics. superpowers is the upstream we mine, not a runtime dependency.
+**Relationship to superpowers:** the 9 skills are the **canonical platform set**. We port superpowers' proven content (brainstorm-before-build, TDD, verify-before-complete, systematic-debugging) into them and add the platform specifics. superpowers is the upstream we mine, not a runtime dependency.
 
-## The skill set (8 for v1)
+## The skill set (9 for v1)
 
-Each skill = ported superpowers principle(s) + platform-specific protocol. Cross-cutting skills are referenced by the phase skills (e.g. `development` and `review` both say "load `security`").
+Each skill = ported superpowers principle(s) + platform-specific protocol. Cross-cutting skills are referenced by the phase skills (e.g. `development` and `review` both say "load `security`"). `workflow-basics` is the entry/meta skill — loaded first; it's what the always-on pointer points at and it directs to the rest. It encodes the how-to-operate baseline that Claude Code/superpowers assume but the codex builders and gemma/deepseek aspects don't otherwise have.
 
 | # | Skill | Ported from superpowers | Platform-specific |
 |---|---|---|---|
+| ★ | **workflow-basics** (entry/meta) | using-superpowers (skill-discovery discipline) + the operating loop | **load first.** How to find + use `nexus-skills` (search → load the phase skill, progressive disclosure); understand → plan → act → verify; decompose + track work, one thing at a time; read-before-edit, prefer the dedicated tool, don't act on grep alone (read the file:line); the grounding discipline — verify before claiming, **test don't assume**, no manufactured narrative, ground time/state; operator-as-peer, ask only when genuinely blocked |
 | 1 | **spec** | brainstorming (design-before-build, clarify one-at-a-time, 2–3 approaches, write the doc) | operator-as-peer; spec doc location/format (`docs/`); skip the visual companion (CLI-first) |
 | 2 | **planning** | writing-plans (bite-sized TDD tasks, exact paths, no placeholders, self-review) | decomposition into NEX tickets; plan doc location |
 | 3 | **development** | TDD + systematic-debugging (test-first; test *design*; the flake rule — generous timeouts, NEX-519/537) | dispatch model; per-agent home; `cw setup-git`; single-ticket, branch-off-main, no dead code, rebase; **frontend → Playwright-verify; `go build`/`go test` green**; live-provider/L2 tests |
@@ -41,7 +42,7 @@ Each skill = ported superpowers principle(s) + platform-specific protocol. Cross
 | 7 | **house-style** (cross-cutting) | elements-of-style writing-clearly-and-concisely | Go idioms; **no-build Preact+htm** dashboard (`window.__preact`); match surrounding comment density/naming; commit `Co-Authored-By` trailer; **prose/grammar pillar** (clear, correct, "don't call out removed things", no decorative filler) across specs/PRs/commits/comments/chat |
 | 8 | **security** (cross-cutting) | (new — adversarial-verify lens) | **never print/commit secrets** (keyfile sealing, stdin); **brokered-not-raw creds** (herald/CWB, identity-derived authz, `mcp_profile` lazy); **escape LLM inputs** (`jira.go` `url.PathEscape`); capability-URL pattern; dual-use posture. **Scanning toolchain (gated at review + merge):** `govulncheck` (deps/reachable CVEs), `gosec` (SAST), `gitleaks`/`trufflehog` (secret-scan on diff), `osv-scanner` (deps); DOMPurify/XSS note for the dashboard; how to triage (reachable vs not, suppress-with-justification vs fix) |
 
-**Deferred to v1.1:** `coordination` (comms/dispatch craft — thread discipline, `reply_to`, dispatch boilerplate, no-cancel). More orchestration than build; add once the 8 are proven.
+**Deferred to v1.1:** `coordination` (comms/dispatch craft — thread discipline, `reply_to`, dispatch boilerplate, no-cancel). More orchestration than build; add once the 9 are proven.
 
 ## Components
 
@@ -58,7 +59,7 @@ Each skill = ported superpowers principle(s) + platform-specific protocol. Cross
 - codex builders + claude-code shadow load `skills/` natively. For codex, this is the codex-cli skills mechanism; for shadow, the same dir (or a plugin) it already uses for superpowers.
 
 ### 4. Discovery pointer (the only always-on cost)
-- One line in the **central NEXUS.md** (assembled into every aspect's boot prompt): *"Before any dev work, search `nexus-skills` for the lifecycle phase you're in and load the skill."* The equivalent of `using-superpowers`. Bodies stay load-on-demand.
+- One line in the **central NEXUS.md** (assembled into every aspect's boot prompt): *"At the start of any task, load the `workflow-basics` skill from `nexus-skills`; it tells you how to find and use the rest."* The pointer names the entry skill, not each phase — `workflow-basics` carries the discovery discipline. Bodies stay load-on-demand.
 
 ### 5. Wiring + retirement
 - Add `nexus-skills` to the aspects' `mcp_profile` (the API aspects) — `nexus/credentials/mcp_profile.go` + the admin endpoint pattern.
@@ -80,7 +81,7 @@ Each skill = ported superpowers principle(s) + platform-specific protocol. Cross
 ## Decomposition (sub-projects, each its own plan)
 
 1. **`nexus-skills-mcp` server + the SKILL.md format/store** (the runtime + 1–2 stub skills to prove the loop end-to-end across a CLI agent + an MCP tool-call).
-2. **Author the 8 SKILL.md skills** (port superpowers + platform specifics; plain enough for gemma).
+2. **Author the 9 SKILL.md skills** (`workflow-basics` + 6 lifecycle + house-style + security; port superpowers + platform specifics; plain enough for gemma).
 3. **Wire-in + retire:** `mcp_profile` add, the central NEXUS.md pointer, retire the pasted dev-standards, point dispatch briefs at the skill.
 4. **(If not already present) the security scan toolchain in CI** — verify whether `govulncheck`/`gosec`/secret-scan run in nexus CI; if not, add them so the `merge` gate is real.
 
@@ -90,7 +91,7 @@ Each skill = ported superpowers principle(s) + platform-specific protocol. Cross
 2. **One SKILL.md source; two delivery paths** — native for CLI agents, skills-MCP for API agents. No gemma-injection path (gemma 4 tool-calls — tested).
 3. **Don't run gemma/deepseek through a CLI** — heavier, deepseek needs a gateway, no benefit over MCP.
 4. **Canonical set** — port superpowers' proven content; superpowers is upstream, not a runtime dep.
-5. **8 skills v1** (6 lifecycle + house-style + security); vuln/SAST/secret scanning is the `security` toolchain enforced at review+merge; grammar/writing is an explicit `house-style` pillar; `coordination` deferred to v1.1.
+5. **9 skills v1** (`workflow-basics` entry/meta + 6 lifecycle + house-style + security); `workflow-basics` is the entry point the always-on pointer names (how-to-operate baseline + the grounding discipline, ported from Claude Code/superpowers); vuln/SAST/secret scanning is the `security` toolchain enforced at review+merge; grammar/writing is an explicit `house-style` pillar; `coordination` deferred to v1.1.
 6. **MCP built on mark3labs/mcp-go** following the in-repo `nexus-*-mcp` pattern.
 
 ## Open items to confirm at plan time (not blocking the spec)
