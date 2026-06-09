@@ -154,6 +154,28 @@ func envValueEquals(env []corev1.EnvVar, name, want string) bool {
 	return false
 }
 
+func TestBuildJob_ProviderAntigravityBits(t *testing.T) {
+	cfg := JobConfig{Image: "img", Namespace: "nexus", BrokerHost: "broker.example"}
+
+	// antigravity-cli mounts the antigravity-auth secret read-only; the
+	// agentfunnel stages it into $HOME/.gemini at runtime (no init-container).
+	job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t1", "antigravity-cli")
+	pod := job.Spec.Template.Spec
+	c := pod.Containers[0]
+	if !volumeExists(pod.Volumes, "antigravity-secret") || !volumeMountExists(c.VolumeMounts, "antigravity-secret") {
+		t.Fatalf("antigravity-cli: antigravity-secret volume/mount missing")
+	}
+	if containerExists(pod.InitContainers, "codex-auth") {
+		t.Fatalf("antigravity-cli should not get the codex-auth init container")
+	}
+
+	// Other providers must not get the antigravity secret.
+	pod2 := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t2", "codex-cli").Spec.Template.Spec
+	if volumeExists(pod2.Volumes, "antigravity-secret") {
+		t.Fatalf("codex-cli should not get the antigravity-secret volume")
+	}
+}
+
 func TestBuildJob_WorkspaceCleanPerJob(t *testing.T) {
 	// NEX-465: /work must be a per-job emptyDir so a fresh clone never sees a
 	// leftover clone from a prior run on the shared PVC (which caused a builder
