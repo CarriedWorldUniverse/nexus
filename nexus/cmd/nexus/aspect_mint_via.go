@@ -56,7 +56,9 @@ func runAspectMintViaBroker(name, outPath, nexusURL, brokerURL, adminToken, prov
 		return 1
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+adminToken)
+	if adminToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+adminToken)
+	}
 
 	// 30s wall-clock cap. The mint itself is cheap; this covers the
 	// TLS handshake + admin auth + a single DB write. Self-signed

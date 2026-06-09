@@ -118,10 +118,10 @@ func runAspectMint(args []string) int {
 		if tok == "" {
 			tok = os.Getenv("NEXUS_ADMIN_TOKEN")
 		}
-		if tok == "" {
-			fmt.Fprintln(os.Stderr, "aspect mint: --via set but no admin token (use --admin-token or NEXUS_ADMIN_TOKEN env)")
-			return 2
-		}
+		// Empty token is allowed: the request goes out without an
+		// Authorization header so the broker's no-token admin bypass can
+		// grant access. (Stopgap — tools/endpoints move to herald-issued
+		// admin tokens later; an invalid token still 401s, only absence bypasses.)
 		return runAspectMintViaBroker(name, *out, *nexusURL, *via, tok, *provider, *model, *force)
 	}
 

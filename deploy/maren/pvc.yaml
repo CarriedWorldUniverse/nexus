@@ -1,0 +1,12 @@
+# PVC backing maren's gnome-keyring store, so agy's one-time OAuth login
+# survives pod restarts. Mounted at $HOME/.local/share/keyrings in the pod.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maren-keyring
+  namespace: nexus
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 64Mi
