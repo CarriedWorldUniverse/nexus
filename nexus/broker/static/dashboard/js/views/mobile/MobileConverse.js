@@ -104,10 +104,20 @@ function MobilePane({ channel, onBack }) {
     setUploading(true);
     try {
       const url = await uploadImage(file);
-      setText((t) => (t ? `${t} ` : '') + `[image:${url}]`);
+      // Auto-send the image immediately — no second tap / race (the manual
+      // attach-then-Send flow was silently dropping images). Same send path as
+      // text messages, which is proven to deliver. NEX-538.
+      const content = `[image:${url}]`;
+      const replyToId = replyTargetId();
+      if (isDM(channel)) {
+        await sendDM(channel, content, replyToId);
+      } else {
+        await sendMessage({ from: 'operator', content, replyTo: replyToId, topic: channel === TEAM ? '' : channel });
+      }
+      replyTo.value = null;
     } catch (err) {
-      console.error('[MobileConverse] image upload failed', err);
-      alert('Image upload failed: ' + (err && err.message ? err.message : err));
+      console.error('[MobileConverse] image attach failed', err);
+      alert('Image attach failed: ' + (err && err.message ? err.message : err));
     } finally {
       setUploading(false);
     }
