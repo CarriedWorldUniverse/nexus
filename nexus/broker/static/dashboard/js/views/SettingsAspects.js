@@ -73,7 +73,7 @@ function focusedAgent() {
   return m ? decodeURIComponent(m[1]) : null;
 }
 
-function KindRow({ aspect, kind, vm, credentials, onSave, onClear, busy }) {
+function KindRow({ aspect, kind, vm, credentials, onSave, onClear, busy, inert }) {
   const [editing, setEditing] = useState(false);
   const [model, setModel] = useState(vm.model || vm.keyfileModel || '');
   const [credential, setCredential] = useState(vm.credential);
@@ -128,9 +128,9 @@ function KindRow({ aspect, kind, vm, credentials, onSave, onClear, busy }) {
           <span class="settings-kind-model">${displayModel}</span>
           <span class="settings-kind-credential">| ${displayCredential}</span>
           <${SourceBadge} source=${vm.source} />
-          <button class="settings-btn" onClick=${() => setEditing(true)} disabled=${busy}>Edit</button>
+          <button class="settings-btn" onClick=${() => setEditing(true)} disabled=${busy || inert}>Edit</button>
           ${vm.hasOverride && html`
-            <button class="settings-btn settings-btn-secondary" onClick=${clear} disabled=${busy}>Clear</button>
+            <button class="settings-btn settings-btn-secondary" onClick=${clear} disabled=${busy || inert}>Clear</button>
           `}
         </div>
       `}
@@ -142,20 +142,20 @@ function KindRow({ aspect, kind, vm, credentials, onSave, onClear, busy }) {
             placeholder="model id (e.g. claude-opus-4-7)"
             value=${model}
             onInput=${(e) => setModel(e.target.value)}
-            disabled=${busy}
+            disabled=${busy || inert}
           />
           <select
             class="settings-select"
             value=${credential}
             onChange=${(e) => setCredential(e.target.value)}
-            disabled=${busy}
+            disabled=${busy || inert}
           >
             <option value="">(no credential override)</option>
             ${credentials.map((c) => html`
               <option key=${c.name} value=${c.name}>${c.name} · ${c.kind || 'provider'}</option>
             `)}
           </select>
-          <button class="settings-btn settings-btn-primary" onClick=${submit} disabled=${busy}>Save</button>
+          <button class="settings-btn settings-btn-primary" onClick=${submit} disabled=${busy || inert}>Save</button>
           <button class="settings-btn" onClick=${() => { setEditing(false); setError(''); }} disabled=${busy}>Cancel</button>
           ${error && html`<span class="settings-error">${error}</span>`}
         </div>
@@ -171,6 +171,7 @@ function AspectCard({ aspect, override, rosterRow, credentials, networkDefaults,
     rosterRow && rosterRow.dispatch_enabled === false ? false : true,
   );
   const [needsReload, setNeedsReload] = useState(false);
+  const retired = !!(rosterRow && rosterRow.status === 'retired');
 
   useEffect(() => {
     let cancelled = false;
@@ -228,14 +229,14 @@ function AspectCard({ aspect, override, rosterRow, credentials, networkDefaults,
   }
 
   return html`
-    <div class=${'settings-aspect-card' + (focused ? ' settings-aspect-focused' : '')} data-aspect=${aspect}>
+    <div class=${'settings-aspect-card' + (retired ? ' settings-aspect-card-retired' : '') + (focused ? ' settings-aspect-focused' : '')} data-aspect=${aspect}>
       <div class="settings-aspect-header">
         <span class="settings-aspect-name">${aspect}</span>
         ${rosterRow && rosterRow.provider && html`<span class="settings-aspect-meta">provider: ${rosterRow.provider}</span>`}
         ${rosterRow && rosterRow.live === false && html`<span class="settings-aspect-offline">offline</span>`}
         ${rosterRow && rosterRow.status === 'retired' && html`<span class="settings-aspect-retired">retired</span>`}
-        <label class="settings-dispatch">
-          <input type="checkbox" checked=${dispatchEnabled} onChange=${toggleDispatch} disabled=${dispatchBusy} />
+        <label class=${'settings-dispatch' + (retired ? ' settings-dispatch-disabled' : '')}>
+          <input type="checkbox" checked=${retired ? false : dispatchEnabled} onChange=${toggleDispatch} disabled=${dispatchBusy || retired} />
           Dispatchable
         </label>
         ${needsReload && html`<span class="settings-reload-banner">Saved. Restart ${aspect} to apply.</span>`}
@@ -250,6 +251,7 @@ function AspectCard({ aspect, override, rosterRow, credentials, networkDefaults,
           onSave=${onSave}
           onClear=${onClear}
           busy=${busy}
+          inert=${retired}
         />
       `)}
     </div>
