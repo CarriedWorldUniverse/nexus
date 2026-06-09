@@ -60,7 +60,9 @@ func runAspectSetViaBroker(name, brokerURL, adminToken string, provider, model *
 		return 1
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+adminToken)
+	if adminToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+adminToken)
+	}
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -92,7 +94,9 @@ func getAspectBindingFromBroker(client *http.Client, endpoint, adminToken string
 		fmt.Fprintf(os.Stderr, "aspect set: build readback request: %v\n", err)
 		return aspectProviderBindingResponse{}, false
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+adminToken)
+	if adminToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+adminToken)
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "aspect set: GET %s: %v\n", endpoint, err)

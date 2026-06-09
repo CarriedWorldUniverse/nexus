@@ -83,10 +83,9 @@ func runAspectSet(args []string) int {
 		if tok == "" {
 			tok = os.Getenv("NEXUS_ADMIN_TOKEN")
 		}
-		if tok == "" {
-			fmt.Fprintln(os.Stderr, "aspect set: --via set but no admin token (use --admin-token or NEXUS_ADMIN_TOKEN env)")
-			return 2
-		}
+		// Empty token is allowed: the request goes out without an
+		// Authorization header so the broker's no-token admin bypass can
+		// grant access. (Stopgap — herald-issued admin tokens later.)
 		return runAspectSetViaBroker(name, *via, tok, providerValue, modelValue)
 	}
 
