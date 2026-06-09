@@ -53,6 +53,11 @@ COPY agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp cw /usr/local/bi
 # (npm i -g @anthropic-ai/claude-code) when claude-backed builders are wanted.
 RUN npm config set prefix /root/.npm-global && npm i -g @openai/codex && codex --version
 
+# Provider CLI: Antigravity (agy) — a dependency-free Go binary; the installer
+# drops it into /root/.local/bin. The binary install is auth-free; agy's runtime
+# auth (a Gemini credential) is mounted at dispatch, separate from this image.
+RUN curl -fsSL https://antigravity.google/cli/install.sh | bash && /root/.local/bin/agy --version
+
 # The agent (codex) spawns login shells (sh -lc), which re-source /etc/profile
 # and RESET PATH to the distro default — dropping /usr/local/go/bin and
 # /root/.npm-global/bin, so `go` and `codex` aren't found and the agent searches.
@@ -61,8 +66,9 @@ RUN npm config set prefix /root/.npm-global && npm i -g @openai/codex && codex -
 RUN ln -sf /usr/local/go/bin/go /usr/local/bin/go \
  && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
  && ln -sf /root/.npm-global/bin/codex /usr/local/bin/codex \
+ && ln -sf /root/.local/bin/agy /usr/local/bin/agy \
  && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
- && printf 'export PATH=/usr/local/go/bin:/root/.npm-global/bin:/root/go/bin:$PATH\n' > /etc/profile.d/cwb-path.sh \
+ && printf 'export PATH=/usr/local/go/bin:/root/.npm-global/bin:/root/.local/bin:/root/go/bin:$PATH\n' > /etc/profile.d/cwb-path.sh \
  && chmod 0644 /etc/profile.d/cwb-path.sh
 
 # cw is git's credential helper: clone/push auth flows through the M1 custodian
