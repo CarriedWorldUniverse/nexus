@@ -32,6 +32,12 @@
   backdrop-filter: blur(12px);
 }
 
+/* Keyboard open (visualViewport-driven height set in MobileApp): the app
+   already shrank to the visible area, so hide the tab bar and drop the bottom
+   padding to keep the composer right above the keyboard (iOS Safari). */
+.m-app.keyboard-open .m-tabbar { display: none; }
+.m-app.keyboard-open .m-main { padding-bottom: 0; }
+
 .m-tab {
   position: relative;
   min-width: 0;
