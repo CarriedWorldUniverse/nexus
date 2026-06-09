@@ -1,7 +1,13 @@
-package skills
+// Package agentskills is the canonical store of nexus dev-lifecycle skills.
+// The SKILL.md files live under .agents/skills/ - the cross-platform Agent
+// Skills location that codex-cli and claude-code discover natively. This
+// package (at the repo root, the only place a go:embed can reach the dot-dir)
+// embeds them for the nexus-skills-mcp server, which serves the API aspects.
+package agentskills
 
 import (
 	"bytes"
+	"embed"
 	"fmt"
 	"io/fs"
 	"path"
@@ -10,6 +16,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+//go:embed all:.agents/skills
+var files embed.FS
 
 // Skill is one parsed SKILL.md: frontmatter fields plus the markdown body.
 type Skill struct {
@@ -22,7 +31,7 @@ type Skill struct {
 // parse splits leading "---"-fenced YAML frontmatter from the markdown body.
 func parse(raw []byte) (Skill, error) {
 	var s Skill
-	// Normalize CRLF → LF so SKILL.md files checked out with Windows line
+	// Normalize CRLF to LF so SKILL.md files checked out with Windows line
 	// endings still parse (the fence checks are LF-based).
 	raw = bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
 	if !bytes.HasPrefix(raw, []byte("---\n")) {

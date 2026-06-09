@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 
-	"github.com/CarriedWorldUniverse/nexus/skills"
+	agentskills "github.com/CarriedWorldUniverse/nexus"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
@@ -15,7 +15,7 @@ func registerTools(srv *mcpserver.MCPServer, log *slog.Logger) {
 		mcpgo.WithDescription("Search the nexus dev-lifecycle skill library. Returns matching skills as [{name, description}]. Call get_skill with a name to load the full skill."),
 		mcpgo.WithString("query", mcpgo.Required(), mcpgo.Description("Topic or phase, e.g. 'review', 'security', 'merge'. Empty lists all.")),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-		hits := skills.Search(req.GetString("query", ""))
+		hits := agentskills.Search(req.GetString("query", ""))
 		out := make([]map[string]string, 0, len(hits))
 		for _, s := range hits {
 			out = append(out, map[string]string{"name": s.Name, "description": s.Description})
@@ -28,7 +28,7 @@ func registerTools(srv *mcpserver.MCPServer, log *slog.Logger) {
 		mcpgo.WithString("name", mcpgo.Required()),
 	), func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		name := req.GetString("name", "")
-		body, ok := skills.Get(name)
+		body, ok := agentskills.Get(name)
 		if !ok {
 			return mcpErr("no such skill: " + name), nil
 		}
