@@ -1,4 +1,4 @@
-const { html, useState } = window.__preact;
+const { html, useState, useEffect, useRef } = window.__preact;
 
 import { MobileConverse } from './MobileConverse.js';
 import { MobileRuns } from './MobileRuns.js';
@@ -12,6 +12,28 @@ const TABS = [
 export function MobileApp() {
   const [tab, setTab] = useState('converse');
   const [unread, setUnread] = useState(0);
+  const appRef = useRef(null);
+
+  // iOS Safari doesn't shrink the layout viewport when the keyboard opens, so a
+  // 100dvh app leaves the composer/messages hidden behind the keyboard. Drive
+  // the app height from window.visualViewport (which DOES track the keyboard),
+  // and flag keyboard-open so the tab bar gets out of the way (NEX-535 follow-up).
+  useEffect(() => {
+    const vv = window.visualViewport;
+    const el = appRef.current;
+    if (!vv || !el) return undefined;
+    const apply = () => {
+      el.style.height = `${vv.height}px`;
+      el.classList.toggle('keyboard-open', window.innerHeight - vv.height > 120);
+    };
+    apply();
+    vv.addEventListener('resize', apply);
+    vv.addEventListener('scroll', apply);
+    return () => {
+      vv.removeEventListener('resize', apply);
+      vv.removeEventListener('scroll', apply);
+    };
+  }, []);
 
   function selectTab(id) {
     if (id === 'converse') setUnread(0);
@@ -19,7 +41,7 @@ export function MobileApp() {
   }
 
   return html`
-    <div class="m-app">
+    <div class="m-app" ref=${appRef}>
       <main class="m-main">
         ${tab === 'converse'
           ? html`<${MobileConverse} onActive=${() => setUnread(0)} />`
