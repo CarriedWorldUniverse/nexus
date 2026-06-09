@@ -204,6 +204,13 @@ func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 		delete(r.active, run.ID)
 		delete(r.agentBusy, run.Brief.Agent)
 		r.mu.Unlock()
+		if r.Recorder != nil {
+			doneCtx := ctx
+			if doneCtx == nil {
+				doneCtx = context.Background()
+			}
+			r.Recorder.RecordRunDone(doneCtx, run.ID, "failed", time.Now(), "", 0)
+		}
 		r.post(run.Brief.Thread, "dispatch failed: "+err.Error())
 		return "", err
 	}
@@ -453,6 +460,13 @@ func (r *Runner) launchPending(ctx context.Context, runs []*Run) {
 			delete(r.agentBusy, run.Brief.Agent)
 			r.queue = append([]Brief{run.Brief}, r.queue...)
 			r.mu.Unlock()
+			if r.Recorder != nil {
+				doneCtx := ctx
+				if doneCtx == nil {
+					doneCtx = context.Background()
+				}
+				r.Recorder.RecordRunDone(doneCtx, run.ID, "failed", time.Now(), "", 0)
+			}
 			r.post(run.Brief.Thread, "dispatch spawn failed, will retry on next agent-free: "+err.Error())
 			return
 		}

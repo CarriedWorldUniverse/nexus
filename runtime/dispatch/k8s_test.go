@@ -15,7 +15,7 @@ import (
 
 func TestCreateAndListJobs(t *testing.T) {
 	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}
-	job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, JobConfig{Namespace: "nexus"}, "t1", "codex-cli")
+	job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", RunID: "run-1"}, JobConfig{Namespace: "nexus"}, "run-1", "codex-cli")
 	if _, err := k.CreateJob(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
@@ -28,6 +28,9 @@ func TestCreateAndListJobs(t *testing.T) {
 	}
 	if active["NEX-1"].Agent != "anvil" {
 		t.Errorf("active NEX-1 agent = %q, want anvil", active["NEX-1"].Agent)
+	}
+	if active["NEX-1"].RunID != "run-1" {
+		t.Errorf("active NEX-1 run ID = %q, want run-1", active["NEX-1"].RunID)
 	}
 	_ = metav1.ObjectMeta{}
 }
