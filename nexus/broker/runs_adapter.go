@@ -47,6 +47,46 @@ func (a *runsAdapter) RecordRunDone(ctx context.Context, runID, status string, c
 	}
 }
 
+func (b *Broker) sweepOrphanedRunningRuns(ctx context.Context) {
+	if b.cfg.RunsStore == nil || b.dispatchK8s == nil {
+		return
+	}
+	active, err := b.dispatchK8s.ListActiveJobs(ctx)
+	if err != nil {
+		b.log.Warn("dispatch: running run sweep skipped; list active jobs failed", "err", err)
+		return
+	}
+	activeRunIDs := map[string]bool{}
+	for _, job := range active {
+		if job.RunID != "" {
+			activeRunIDs[job.RunID] = true
+		}
+	}
+	running, err := b.cfg.RunsStore.ListRunning(ctx)
+	if err != nil {
+		b.log.Warn("dispatch: running run sweep skipped; list running runs failed", "err", err)
+		return
+	}
+	now := time.Now()
+	for _, run := range running {
+		if activeRunIDs[run.RunID] {
+			continue
+		}
+		durationSecs := 0
+		if !run.StartedAt.IsZero() && now.After(run.StartedAt) {
+			durationSecs = int(now.Sub(run.StartedAt).Seconds())
+		}
+		if err := b.cfg.RunsStore.MarkDone(ctx, run.RunID, runs.StatusFailed, now, run.PRURL, durationSecs); err != nil {
+			b.log.Warn("dispatch: running run sweep mark failed", "run_id", run.RunID, "err", err)
+			continue
+		}
+		if updated, err := b.cfg.RunsStore.Get(ctx, run.RunID); err == nil {
+			b.broadcastRunsUpdate(updated)
+		}
+		b.log.Warn("dispatch: marked orphaned running run failed", "run_id", run.RunID, "ticket", run.Ticket)
+	}
+}
+
 func (b *Broker) broadcastRunsUpdate(r runs.Run) {
 	b.opMu.RLock()
 	targets := make([]*wsConn, 0, len(b.operators))

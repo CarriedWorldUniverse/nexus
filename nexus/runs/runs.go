@@ -39,6 +39,7 @@ type Store interface {
 	Migrate(ctx context.Context) error
 	Insert(ctx context.Context, r Run) error
 	MarkDone(ctx context.Context, runID string, status Status, completedAt time.Time, prURL string, durationSecs int) error
+	ListRunning(ctx context.Context) ([]Run, error)
 	List(ctx context.Context, limit int) ([]Run, error)
 	Get(ctx context.Context, runID string) (Run, error)
 }
@@ -94,6 +95,26 @@ func (s *SQLStore) MarkDone(ctx context.Context, runID string, status Status, co
 		return fmt.Errorf("runs.MarkDone: %w", err)
 	}
 	return nil
+}
+
+func (s *SQLStore) ListRunning(ctx context.Context) ([]Run, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT run_id, ticket, agent, thread, dispatch_msg_id, parent_run_id,
+		       command, repo, status, started_at, completed_at, pr_url, duration_secs
+		FROM runs WHERE status = ? ORDER BY started_at DESC`, string(StatusRunning))
+	if err != nil {
+		return nil, fmt.Errorf("runs.ListRunning: %w", err)
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func (s *SQLStore) List(ctx context.Context, limit int) ([]Run, error) {

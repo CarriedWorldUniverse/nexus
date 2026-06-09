@@ -167,6 +167,7 @@ func (k *K8s) SetBriefOwner(ctx context.Context, taskID string, job *batchv1.Job
 type ActiveJob struct {
 	Name  string
 	Agent string
+	RunID string
 }
 
 // ListActiveJobs returns ticket -> live builder Job for non-finished builder
@@ -187,6 +188,7 @@ func (k *K8s) ListActiveJobs(ctx context.Context) (map[string]ActiveJob, error) 
 			out[ticket] = ActiveJob{
 				Name:  j.Name,
 				Agent: j.Labels["nexus.dispatch/agent"],
+				RunID: j.Labels["nexus.dispatch/run-id"],
 			}
 		}
 	}
