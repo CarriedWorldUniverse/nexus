@@ -194,7 +194,7 @@ func (a *harnessAspect) deliberateLoop(ctx context.Context) {
 // (so seeded messages can be delivered), failing the test on timeout.
 func waitConnected(t *testing.T, b *Broker, names ...string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	for _, name := range names {
 		for b.dispatcher.connFor(name) == nil {
 			if time.Now().After(deadline) {

@@ -42,7 +42,7 @@ func TestEscalation_RoundTrip(t *testing.T) {
 	sendFrame(t, aspectC, req)
 
 	// The operator receives the request (skip any roster pushes etc).
-	opEnv := expectKindWithin(t, opC, frames.KindEscalationRequest, 2*time.Second)
+	opEnv := expectKindWithin(t, opC, frames.KindEscalationRequest, brokerAsyncWait)
 	if opEnv.ID != req.ID {
 		t.Fatalf("operator-side request ID = %q, want %q (correlation must survive relay)", opEnv.ID, req.ID)
 	}
@@ -64,7 +64,7 @@ func TestEscalation_RoundTrip(t *testing.T) {
 
 	// The aspect receives the decision correlated to its original
 	// request — this is what unblocks wsclient.Request.
-	decEnv := expectKindWithin(t, aspectC, frames.KindEscalationDecision, 2*time.Second)
+	decEnv := expectKindWithin(t, aspectC, frames.KindEscalationDecision, brokerAsyncWait)
 	if decEnv.InReplyTo != req.ID {
 		t.Fatalf("decision InReplyTo = %q, want %q (must resolve the aspect's pending Request)", decEnv.InReplyTo, req.ID)
 	}
@@ -91,14 +91,14 @@ func TestEscalation_DenyRoundTrip(t *testing.T) {
 		Aspect: "plumb", Tool: "bash", Args: []byte(`{"command":"rm -rf /"}`),
 	})
 	sendFrame(t, aspectC, req)
-	expectKindWithin(t, opC, frames.KindEscalationRequest, 2*time.Second)
+	expectKindWithin(t, opC, frames.KindEscalationRequest, brokerAsyncWait)
 
 	dec, _ := frames.New(frames.KindEscalationDecision, frames.EscalationDecisionPayload{
 		Aspect: "plumb", Decision: frames.EscalationDeny, Note: "too dangerous", RequestID: req.ID,
 	})
 	sendFrame(t, opC, dec)
 
-	decEnv := expectKindWithin(t, aspectC, frames.KindEscalationDecision, 2*time.Second)
+	decEnv := expectKindWithin(t, aspectC, frames.KindEscalationDecision, brokerAsyncWait)
 	if decEnv.InReplyTo != req.ID {
 		t.Fatalf("deny InReplyTo = %q, want %q", decEnv.InReplyTo, req.ID)
 	}
@@ -125,7 +125,7 @@ func TestEscalation_RequestIdentityMismatch(t *testing.T) {
 	sendFrame(t, aspectC, req)
 
 	// Aspect gets an identity-mismatch error correlated to its request.
-	errEnv := expectKindWithin(t, aspectC, frames.Kind(string(frames.KindEscalationRequest)+".error"), 2*time.Second)
+	errEnv := expectKindWithin(t, aspectC, frames.Kind(string(frames.KindEscalationRequest)+".error"), brokerAsyncWait)
 	if errEnv.InReplyTo != req.ID {
 		t.Errorf("error InReplyTo = %q, want %q", errEnv.InReplyTo, req.ID)
 	}
@@ -145,7 +145,7 @@ func TestEscalation_DecisionAspectNotConnected(t *testing.T) {
 	})
 	sendFrame(t, opC, dec)
 
-	errEnv := expectKindWithin(t, opC, frames.Kind(string(frames.KindEscalationDecision)+".error"), 2*time.Second)
+	errEnv := expectKindWithin(t, opC, frames.Kind(string(frames.KindEscalationDecision)+".error"), brokerAsyncWait)
 	if errEnv.Kind == "" {
 		t.Fatal("expected an error frame for decision to a disconnected aspect")
 	}
@@ -164,7 +164,7 @@ func TestEscalation_RequestFromOperatorRejected(t *testing.T) {
 		Aspect: "operator", Tool: "bash",
 	})
 	sendFrame(t, opC, req)
-	errEnv := expectKindWithin(t, opC, frames.Kind(string(frames.KindEscalationRequest)+".error"), 2*time.Second)
+	errEnv := expectKindWithin(t, opC, frames.Kind(string(frames.KindEscalationRequest)+".error"), brokerAsyncWait)
 	if errEnv.InReplyTo != req.ID {
 		t.Errorf("error InReplyTo = %q, want %q", errEnv.InReplyTo, req.ID)
 	}

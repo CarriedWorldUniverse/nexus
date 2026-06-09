@@ -35,7 +35,7 @@ func TestListenAndServe_RequiresTLS(t *testing.T) {
 		Addr:               freeAddr(t),
 		HeartbeatIntervalS: 15,
 	}, r)
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	err := b.ListenAndServe(ctx)
 	if err == nil {
@@ -71,7 +71,7 @@ func TestListenAndServe_TLSAcceptsHTTPSRejectsHTTP(t *testing.T) {
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 		Timeout:   500 * time.Millisecond,
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	var resp *http.Response
 	var dialErr error
 	for time.Now().Before(deadline) {
@@ -144,7 +144,7 @@ func TestListenAndServe_StartsWithoutEmbeddedFrame(t *testing.T) {
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 		Timeout:   500 * time.Millisecond,
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	var resp *http.Response
 	var err error
 	for time.Now().Before(deadline) {
