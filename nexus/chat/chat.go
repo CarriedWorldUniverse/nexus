@@ -319,6 +319,20 @@ func (s *SQLStore) Insert(ctx context.Context, from, content string, replyTo int
 			return Message{}, fmt.Errorf("chat.Insert: resolve thread_root: %w", err)
 		default:
 			threadRootArg = threadRoot.Int64
+			// Inherit the thread's topic so a reply stays in the same
+			// channel as the message it answers. The funnel's end-of-turn
+			// auto-post supplies no topic; without this a reply leaks into
+			// the untopic'd team stream while its parent sits in the topic
+			// thread, so the operator sees the answer but not the question.
+			var rootTopic sql.NullString
+			if err := tx.QueryRowContext(ctx,
+				`SELECT topic FROM chat_messages WHERE id = ?`, threadRoot.Int64,
+			).Scan(&rootTopic); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return Message{}, fmt.Errorf("chat.Insert: resolve thread topic: %w", err)
+			}
+			if rootTopic.Valid && rootTopic.String != "" {
+				topicArg = rootTopic.String
+			}
 			// Parent = latest msg already in this thread at INSERT
 			// time. Under serialized writes this is deterministic;
 			// concurrent replies-to-the-same-target chain rather than

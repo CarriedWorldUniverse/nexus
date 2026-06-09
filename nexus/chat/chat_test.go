@@ -97,6 +97,42 @@ func TestSQLStore_InsertWithReplyTo(t *testing.T) {
 	}
 }
 
+func TestSQLStore_ReplyInheritsParentTopic(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	// A topic'd question, then a reply with NO topic (the funnel's
+	// end-of-turn auto-post supplies none). The reply must inherit the
+	// thread's topic so it stays in the same channel as the question.
+	q, err := s.Insert(ctx, "shadow", "@maren proof?", 0, "maren-agy-proof")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := s.Insert(ctx, "maren", "here you go", q.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Topic != "maren-agy-proof" {
+		t.Fatalf("reply topic: got %q, want inherited %q", reply.Topic, "maren-agy-proof")
+	}
+	if reply.ThreadRootMsgID != q.ID {
+		t.Errorf("reply thread root: got %d, want %d", reply.ThreadRootMsgID, q.ID)
+	}
+
+	// A reply to a topic-less message stays topic-less (team stream).
+	plain, err := s.Insert(ctx, "operator", "hi team", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := s.Insert(ctx, "keel", "hi", plain.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r2.Topic != "" {
+		t.Fatalf("reply to topic-less msg should stay topic-less, got %q", r2.Topic)
+	}
+}
+
 func TestSQLStore_InsertSameTopicSharesThreadRoot(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
