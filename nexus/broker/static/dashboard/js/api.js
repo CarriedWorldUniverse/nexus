@@ -303,9 +303,24 @@ export function fetchStatusAll() {
   return fetchAgents();
 }
 
-// uploadImage: deferred. No image-upload frame today.
-export function uploadImage(_file) {
-  return Promise.reject(new Error('image upload not yet wired in nexus dashboard'));
+// uploadImage POSTs raw image bytes to the broker's in-memory store
+// (POST /api/images, operator-gated) and resolves to the served URL.
+// The caller drops that URL into a message as [image:URL], which
+// MessageBubble renders inline. NEX-538 MVP (durable store later).
+export function uploadImage(file) {
+  return fetch('/api/images', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + (getAuthToken() || ''),
+      'Content-Type': file.type || 'application/octet-stream',
+    },
+    body: file,
+  }).then((res) => {
+    if (!res.ok) {
+      return res.text().then((t) => { throw new Error(t || ('upload failed: ' + res.status)); });
+    }
+    return res.json();
+  }).then((d) => d.url);
 }
 
 // fetchKnowledge — Crossing Part 4 wired knowledge.list /

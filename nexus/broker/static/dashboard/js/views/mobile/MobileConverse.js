@@ -1,7 +1,7 @@
 const { html, useEffect, useRef, useState } = window.__preact;
 
 import { agents, agentColors, currentChannel, replyTo } from '../../state.js';
-import { fetchMessages, sendDM, sendMessage } from '../../api.js';
+import { fetchMessages, sendDM, sendMessage, uploadImage } from '../../api.js';
 import { subscribe } from '../../comms.js';
 import { MessageBubble } from '../../components/MessageBubble.js';
 
@@ -93,7 +93,25 @@ function MobilePane({ channel, onBack }) {
   const [msgs, setMsgs] = useState([]);
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
   const streamRef = useRef(null);
+  const fileRef = useRef(null);
+
+  async function onPickImage(e) {
+    const file = e.currentTarget.files && e.currentTarget.files[0];
+    e.currentTarget.value = '';
+    if (!file) return;
+    setUploading(true);
+    try {
+      const url = await uploadImage(file);
+      setText((t) => (t ? `${t} ` : '') + `[image:${url}]`);
+    } catch (err) {
+      console.error('[MobileConverse] image upload failed', err);
+      alert('Image upload failed: ' + (err && err.message ? err.message : err));
+    } finally {
+      setUploading(false);
+    }
+  }
 
   useEffect(() => {
     let alive = true;
@@ -165,6 +183,8 @@ function MobilePane({ channel, onBack }) {
           </div>
         ` : null}
         <div class="m-compose-row">
+          <input ref=${fileRef} type="file" accept="image/*" style="display:none" onChange=${onPickImage} />
+          <button type="button" class="m-attach" onClick=${() => fileRef.current && fileRef.current.click()} disabled=${uploading} aria-label="Attach image">${uploading ? '…' : '📎'}</button>
           <textarea
             rows="1"
             value=${text}
