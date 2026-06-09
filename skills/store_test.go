@@ -25,6 +25,19 @@ func TestParseNoFrontmatter(t *testing.T) {
 	}
 }
 
+// TestParseCRLF guards the Windows line-ending regression: a SKILL.md checked
+// out with CRLF must still parse.
+func TestParseCRLF(t *testing.T) {
+	raw := "---\r\nname: dev\r\ndescription: d\r\nwhen_to_use: w\r\n---\r\n# body\r\n"
+	s, err := parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("CRLF parse failed: %v", err)
+	}
+	if s.Name != "dev" || s.Description != "d" {
+		t.Fatalf("CRLF frontmatter: %+v", s)
+	}
+}
+
 func TestLoadSearchGet(t *testing.T) {
 	all, err := Load()
 	if err != nil {

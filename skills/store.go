@@ -22,6 +22,9 @@ type Skill struct {
 // parse splits leading "---"-fenced YAML frontmatter from the markdown body.
 func parse(raw []byte) (Skill, error) {
 	var s Skill
+	// Normalize CRLF → LF so SKILL.md files checked out with Windows line
+	// endings still parse (the fence checks are LF-based).
+	raw = bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
 	if !bytes.HasPrefix(raw, []byte("---\n")) {
 		return s, fmt.Errorf("missing frontmatter fence")
 	}
