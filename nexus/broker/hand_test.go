@@ -61,7 +61,7 @@ func TestDispatchEndToEnd(t *testing.T) {
 		Payload:    map[string]any{"text": "sample"},
 	})
 	raw, _ := frames.Encode(req)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	if err := c.Write(ctx, websocket.MessageText, raw); err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestDispatchWithNoQueueReturnsError(t *testing.T) {
 		Aspect: "wren",
 	})
 	raw, _ := frames.Encode(req)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	_ = c.Write(ctx, websocket.MessageText, raw)
 
@@ -132,7 +132,7 @@ func TestDispatchBadPayload(t *testing.T) {
 		// Missing Aspect
 	})
 	raw, _ := frames.Encode(req)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	_ = c.Write(ctx, websocket.MessageText, raw)
 
@@ -188,7 +188,7 @@ func TestDispatchIdentityMismatch(t *testing.T) {
 		Payload:    map[string]any{"text": "spoofed"},
 	})
 	raw, _ := frames.Encode(req)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	if err := c.Write(ctx, websocket.MessageText, raw); err != nil {
 		t.Fatal(err)
@@ -243,7 +243,7 @@ func TestDispatchIdentityMatch(t *testing.T) {
 		Aspect: "wren", DispatchID: "d-1", Payload: map[string]any{"text": "ok"},
 	})
 	raw, _ := frames.Encode(req)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	_ = c.Write(ctx, websocket.MessageText, raw)
 	_, data, _ := c.Read(ctx)
@@ -286,7 +286,7 @@ func TestDispatchAdminCanActAsAny(t *testing.T) {
 		Aspect: "wren", DispatchID: "d-2", Payload: map[string]any{"text": "ok"},
 	})
 	raw, _ := frames.Encode(req)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	_ = c.Write(ctx, websocket.MessageText, raw)
 	_, data, _ := c.Read(ctx)
@@ -312,7 +312,7 @@ func TestConnectRejectsUnknownPerAspectToken(t *testing.T) {
 	srv := httptestNewServer(t, &testHandler{b: b})
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/connect"
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	_, resp, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": {"Bearer not-a-real-token"}},
@@ -349,7 +349,7 @@ func httptestNewServer(t *testing.T, handler http.Handler) *httptest.Server {
 func dialWSURL(t *testing.T, srv *httptest.Server, token string) *websocket.Conn {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/connect"
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	c, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + token}},

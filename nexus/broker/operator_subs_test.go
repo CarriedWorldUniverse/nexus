@@ -81,7 +81,7 @@ func registerAspect(t *testing.T, c *websocket.Conn, name string) {
 	// register that loops back if the broker has subscribed
 	// operators... which it doesn't for an aspect WS, but be
 	// defensive.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	for time.Now().Before(deadline) {
 		env, ok := recvFrameWithTimeout(t, c, time.Until(deadline))
 		if !ok {
@@ -115,7 +115,7 @@ func TestOperatorSubs_ChatDeliverFanOut(t *testing.T) {
 	if _, err := b.HandleChatSend(context.Background(), "anvil", "broadcast me", 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	env := expectKindWithin(t, c, frames.KindChatDeliver, 2*time.Second)
+	env := expectKindWithin(t, c, frames.KindChatDeliver, brokerAsyncWait)
 	var p frames.ChatDeliverPayload
 	_ = json.Unmarshal(env.Payload, &p)
 	if p.From != "anvil" || p.Content != "broadcast me" {
@@ -142,7 +142,7 @@ func TestOperatorSubs_UnsubscribeStopsFanOut(t *testing.T) {
 	if _, err := b.HandleChatSend(context.Background(), "anvil", "first", 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	expectKindWithin(t, c, frames.KindChatDeliver, 2*time.Second)
+	expectKindWithin(t, c, frames.KindChatDeliver, brokerAsyncWait)
 
 	mustResponse(t, c, frames.KindUnsubscribeChat, nil)
 	if _, err := b.HandleChatSend(context.Background(), "anvil", "second", 0, ""); err != nil {
@@ -160,7 +160,7 @@ func TestOperatorSubs_RosterUpdateOnRegister(t *testing.T) {
 	aspectC := dialWS(t, srv, "aspect-token")
 	registerAspect(t, aspectC, "test-aspect")
 
-	env := expectKindWithin(t, c, frames.KindRosterUpdate, 2*time.Second)
+	env := expectKindWithin(t, c, frames.KindRosterUpdate, brokerAsyncWait)
 	p := payloadAs[frames.RosterUpdatePayload](t, env)
 	if p.Aspect != "test-aspect" || p.Reason != "connect" {
 		t.Errorf("unexpected push: %+v", p)
@@ -175,11 +175,11 @@ func TestOperatorSubs_RosterUpdateOnDisconnect(t *testing.T) {
 	b.cfg.Tokens.SetTokenForTest("test-aspect", "aspect-token", false)
 	aspectC := dialWS(t, srv, "aspect-token")
 	registerAspect(t, aspectC, "test-aspect")
-	expectKindWithin(t, c, frames.KindRosterUpdate, 2*time.Second) // drain connect
+	expectKindWithin(t, c, frames.KindRosterUpdate, brokerAsyncWait) // drain connect
 
 	_ = aspectC.Close(websocket.StatusNormalClosure, "test")
 
-	env := expectKindWithin(t, c, frames.KindRosterUpdate, 3*time.Second)
+	env := expectKindWithin(t, c, frames.KindRosterUpdate, brokerAsyncWait)
 	p := payloadAs[frames.RosterUpdatePayload](t, env)
 	if p.Reason != "disconnect" || p.Aspect != "test-aspect" {
 		t.Errorf("expected disconnect push, got: %+v", p)
@@ -198,7 +198,7 @@ func TestOperatorSubs_AspectStatusPulseFanOut(t *testing.T) {
 		TS:     time.Now().UTC().Format(time.RFC3339),
 	})
 
-	env := expectKindWithin(t, c, frames.KindAspectStatusPulse, 2*time.Second)
+	env := expectKindWithin(t, c, frames.KindAspectStatusPulse, brokerAsyncWait)
 	p := payloadAs[frames.AspectStatusPulsePayload](t, env)
 	if p.Aspect != "harrow" || p.Phase != "thinking" {
 		t.Errorf("unexpected pulse: %+v", p)
@@ -234,7 +234,7 @@ func TestOperatorSubs_DisconnectUnbinds(t *testing.T) {
 
 	_ = c.Close(websocket.StatusNormalClosure, "done")
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	for time.Now().Before(deadline) {
 		b.opMu.RLock()
 		n := len(b.operators)

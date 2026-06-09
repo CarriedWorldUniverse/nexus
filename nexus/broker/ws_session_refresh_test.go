@@ -129,7 +129,7 @@ func (r *sessionRefreshRig) insertAspect(t *testing.T, name string, kfv int64) {
 func dialAspectWS(t *testing.T, srv *httptest.Server, token string) *websocket.Conn {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/connect"
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	c, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: map[string][]string{"Authorization": {"Bearer " + token}},

@@ -186,13 +186,13 @@ func TestAdmin_Shutdown_KicksOffAndReturns202(t *testing.T) {
 	// Shutdown callback should fire async.
 	select {
 	case <-rig.shutdownCh:
-	case <-time.After(2 * time.Second):
+	case <-time.After(brokerAsyncWait):
 		t.Fatal("shutdown callback did not fire")
 	}
 
 	// Op should be queryable and report ok status.
 	opID := body["op_id"].(string)
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	for time.Now().Before(deadline) {
 		statusResp := rig.do(t, "GET", "/api/admin/op/"+opID, rig.adminToken, nil)
 		statusBody := bodyJSON(t, statusResp)
@@ -210,7 +210,7 @@ func TestAdmin_Compact_RoundTrip(t *testing.T) {
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("status=%d want 202 body=%v", resp.StatusCode, bodyJSON(t, resp))
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	for time.Now().Before(deadline) && rig.compactSeen.Load() == 0 {
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -370,7 +370,7 @@ func TestAdmin_Op_RecordsError(t *testing.T) {
 	opID := body["op_id"].(string)
 
 	// Poll until status flips off "running".
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	for time.Now().Before(deadline) {
 		st := rig.do(t, "GET", "/api/admin/op/"+opID, rig.adminToken, nil)
 		stBody := bodyJSON(t, st)
