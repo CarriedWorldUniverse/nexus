@@ -25,6 +25,7 @@ type fakeK8s struct {
 	repos   bool
 	owners  []briefOwnerCall
 
+	ensureKeyfileErr error
 	// createErr, when set, fails CreateJob — used to exercise the
 	// launch-failure / re-enqueue path.
 	createErr func(jobName string) error
@@ -37,7 +38,26 @@ type briefOwnerCall struct {
 	job    string
 }
 
+type recorderDoneCall struct {
+	runID  string
+	status string
+}
+
+type testRecorder struct {
+	done []recorderDoneCall
+}
+
+func (r *testRecorder) RecordRunStart(context.Context, string, string, string, string, string, string, string, int64) {
+}
+
+func (r *testRecorder) RecordRunDone(_ context.Context, runID, status string, _ time.Time, _ string, _ int) {
+	r.done = append(r.done, recorderDoneCall{runID: runID, status: status})
+}
+
 func (f *fakeK8s) EnsureKeyfileSecret(_ context.Context, aspect string) error {
+	if f.ensureKeyfileErr != nil {
+		return f.ensureKeyfileErr
+	}
 	if f.secrets == nil {
 		f.secrets = map[string]bool{}
 	}
@@ -120,6 +140,34 @@ func TestRunnerRunsAsNamedAgent(t *testing.T) {
 	}
 	if len(fk.jobs) != 1 || !strings.HasPrefix(fk.jobs[0], "builder-anvil-") {
 		t.Errorf("job should be named builder-anvil-*, got %v", fk.jobs)
+	}
+}
+
+func TestRunnerMarksRunFailedWhenSubmitLaunchFails(t *testing.T) {
+	fk := &fakeK8s{ensureKeyfileErr: errors.New("missing keyfile")}
+	rec := &testRecorder{}
+	r := newRunner(fk)
+	r.NewID = func() string { return "run-fail" }
+	r.Recorder = rec
+	if err := r.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	runID, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-545", Thread: "t", Task: "a"})
+	if err == nil {
+		t.Fatal("Submit should return the launch error")
+	}
+	if runID != "" {
+		t.Fatalf("runID = %q, want empty on launch error", runID)
+	}
+	if len(rec.done) != 1 {
+		t.Fatalf("RecordRunDone calls = %d, want 1", len(rec.done))
+	}
+	if rec.done[0].runID != "run-fail" || rec.done[0].status != "failed" {
+		t.Fatalf("RecordRunDone = %+v, want run-fail failed", rec.done[0])
+	}
+	if r.AgentBusy("anvil") {
+		t.Fatal("agent should be free after launch failure")
 	}
 }
 
@@ -275,6 +323,8 @@ func TestRunnerInitRecoversAgentBusy(t *testing.T) {
 func TestRunnerReEnqueuesOnLaunchError(t *testing.T) {
 	fk := &fakeK8s{}
 	r := newRunner(fk)
+	rec := &testRecorder{}
+	r.Recorder = rec
 	_ = r.Init(context.Background())
 
 	_, _ = r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "t", Task: "a"})
@@ -284,6 +334,9 @@ func TestRunnerReEnqueuesOnLaunchError(t *testing.T) {
 	r.OnJobDone(dispatch.JobDone{Ticket: "NEX-1", Thread: "t", OK: true})
 	if r.AgentBusy("anvil") {
 		t.Error("anvil should be free after the drained NEX-2 launch failed + rolled back")
+	}
+	if len(rec.done) != 2 || rec.done[1].status != "failed" {
+		t.Fatalf("drained launch failure should mark the reserved run failed, got %+v", rec.done)
 	}
 
 	fk.createErr = nil

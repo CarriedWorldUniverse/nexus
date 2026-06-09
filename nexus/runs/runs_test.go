@@ -74,6 +74,25 @@ func TestMarkDoneDoesNotOverwriteTerminal(t *testing.T) {
 	}
 }
 
+func TestListRunningReturnsOnlyRunning(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	_ = s.Insert(ctx, Run{RunID: "run-old", Ticket: "NEX-1", Agent: "anvil", Status: StatusRunning, StartedAt: time.UnixMilli(1)})
+	_ = s.Insert(ctx, Run{RunID: "run-done", Ticket: "NEX-2", Agent: "plumb", Status: StatusRunning, StartedAt: time.UnixMilli(2)})
+	if err := s.MarkDone(ctx, "run-done", StatusComplete, time.UnixMilli(3), "", 0); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Insert(ctx, Run{RunID: "run-new", Ticket: "NEX-3", Agent: "keel", Status: StatusRunning, StartedAt: time.UnixMilli(4)})
+
+	got, err := s.ListRunning(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].RunID != "run-new" || got[1].RunID != "run-old" {
+		t.Fatalf("running rows = %+v, want run-new then run-old", got)
+	}
+}
+
 func TestListReturnsNewestFirst(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

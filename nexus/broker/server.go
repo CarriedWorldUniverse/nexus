@@ -465,8 +465,11 @@ func New(cfg Config, r *roster.Roster) *Broker {
 	if cfg.RunsStore != nil {
 		if err := cfg.RunsStore.Migrate(context.Background()); err != nil {
 			b.log.Warn("runs store migration failed", "err", err)
-		} else if r, ok := cfg.Runner.(*dispatch.Runner); ok {
-			r.Recorder = newRunsAdapter(cfg.RunsStore, b.broadcastRunsUpdate)
+		} else {
+			if r, ok := cfg.Runner.(*dispatch.Runner); ok {
+				r.Recorder = newRunsAdapter(cfg.RunsStore, b.broadcastRunsUpdate)
+			}
+			b.sweepOrphanedRunningRuns(context.Background())
 		}
 	}
 	return b
