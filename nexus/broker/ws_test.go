@@ -67,7 +67,7 @@ func (t *testHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func dialWS(t *testing.T, srv *httptest.Server, token string) *websocket.Conn {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/connect"
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	c, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: map[string][]string{"Authorization": {"Bearer " + token}},
@@ -86,7 +86,7 @@ func sendFrame(t *testing.T, c *websocket.Conn, env frames.Envelope) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	if err := c.Write(ctx, websocket.MessageText, raw); err != nil {
 		t.Fatalf("write: %v", err)
@@ -96,7 +96,7 @@ func sendFrame(t *testing.T, c *websocket.Conn, env frames.Envelope) {
 // recvFrame reads one frame from the WS.
 func recvFrame(t *testing.T, c *websocket.Conn) frames.Envelope {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	_, data, err := c.Read(ctx)
 	if err != nil {
@@ -116,7 +116,7 @@ func recvFrame(t *testing.T, c *websocket.Conn) frames.Envelope {
 func TestConnectRejectsBadToken(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/connect"
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	_, resp, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: map[string][]string{"Authorization": {"Bearer wrong"}},
@@ -273,7 +273,7 @@ func TestOriginAllowlistRejectsUnlistedBrowserOrigin(t *testing.T) {
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/connect"
 
 	// Negative case: unlisted origin must be rejected.
-	ctx1, cancel1 := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx1, cancel1 := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel1()
 	_, _, err := websocket.Dial(ctx1, wsURL, &websocket.DialOptions{
 		HTTPHeader: map[string][]string{
@@ -288,7 +288,7 @@ func TestOriginAllowlistRejectsUnlistedBrowserOrigin(t *testing.T) {
 	// Positive case: an allowlisted origin connects. This pins that the
 	// allowlist is doing actual matching, not blanket-rejecting all
 	// Origin-bearing requests.
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel2()
 	c, _, err := websocket.Dial(ctx2, wsURL, &websocket.DialOptions{
 		HTTPHeader: map[string][]string{
@@ -324,7 +324,7 @@ func TestConnectionCapRejectsAfterLimit(t *testing.T) {
 
 	// Third connect must fail with 503.
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/connect"
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	_, resp, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: map[string][]string{"Authorization": {"Bearer testtoken"}},
@@ -345,7 +345,7 @@ func TestConnectionCapRejectsAfterLimit(t *testing.T) {
 	// not connPerIP (or vice versa) would leave the cap full and
 	// fail this retry.
 	_ = c1.Close(websocket.StatusNormalClosure, "freeing slot")
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	for time.Now().Before(deadline) {
 		retryCtx, retryCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		c3, _, dialErr := websocket.Dial(retryCtx, wsURL, &websocket.DialOptions{
@@ -381,7 +381,7 @@ func TestPerIPConnectionCapRejectsAfterLimit(t *testing.T) {
 	_ = dialWS(t, srv, "testtoken")
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/connect"
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	_, resp, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: map[string][]string{"Authorization": {"Bearer testtoken"}},
@@ -417,15 +417,15 @@ func TestBadFrameCapClosesConnection(t *testing.T) {
 	// Send 4 garbage frames. Per-frame writes until the server
 	// closes; the read after close returns an error.
 	for i := 0; i < 4; i++ {
-		writeCtx, writeCancel := context.WithTimeout(context.Background(), 1*time.Second)
+		writeCtx, writeCancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 		err := c.Write(writeCtx, websocket.MessageText, []byte("not-json-at-all"))
 		writeCancel()
 		if err != nil {
 			break // server already closed
 		}
 	}
-	// Read should observe the close. Allow up to 2s.
-	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Read should observe the close.
+	readCtx, readCancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer readCancel()
 	_, _, err := c.Read(readCtx)
 	if err == nil {
@@ -558,7 +558,7 @@ func TestDisconnectAutoDeregisters(t *testing.T) {
 	_ = c.Close(websocket.StatusGoingAway, "test abrupt close")
 
 	// Give the server goroutine a moment to process the close.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	for time.Now().Before(deadline) {
 		if len(r.List()) == 0 {
 			return
@@ -680,7 +680,7 @@ func TestReconnectAfterDropReplacesSession(t *testing.T) {
 	_ = c1.Close(websocket.StatusGoingAway, "drop")
 
 	// Wait for the auto-deregister on disconnect.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	for time.Now().Before(deadline) && len(r.List()) > 0 {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -718,7 +718,7 @@ func TestUnknownKindDropped(t *testing.T) {
 		"kind": "something.new",
 		"ts":   time.Now().UTC(),
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	if err := c.Write(ctx, websocket.MessageText, raw); err != nil {
 		t.Fatal(err)
@@ -887,7 +887,7 @@ func TestRegisterForgetOnClose(t *testing.T) {
 	registerWith(t, c, "fc", "sig")
 	_ = c.Close(websocket.StatusNormalClosure, "bye")
 	// cleanup runs async on the serve goroutine; poll briefly.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	for time.Now().Before(deadline) {
 		if len(fc.forgotten()) > 0 {
 			break

@@ -51,7 +51,7 @@ func TestListenAndServe_HTTPRegistrar(t *testing.T) {
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 		Timeout:   500 * time.Millisecond,
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	var resp *http.Response
 	var dialErr error
 	for time.Now().Before(deadline) {

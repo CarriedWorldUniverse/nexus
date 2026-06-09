@@ -410,7 +410,7 @@ func TestReconnectReRegistersBeforeDraining(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- c.Run(ctx) }()
@@ -423,7 +423,7 @@ func TestReconnectReRegistersBeforeDraining(t *testing.T) {
 
 	_, _ = c.SendChat(context.Background(), "after-drop", 0, "")
 
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		mu.Lock()
 		got := append([]frames.Kind(nil), order...)

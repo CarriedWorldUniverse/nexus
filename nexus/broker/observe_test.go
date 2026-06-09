@@ -75,7 +75,7 @@ func subscribeObserve(t *testing.T, c *websocket.Conn, aspect string, sinceSeq i
 	sendFrame(t, c, req)
 
 	var replay []frames.Envelope
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	for time.Now().Before(deadline) {
 		env, ok := recvFrameWithTimeout(t, c, time.Until(deadline))
 		if !ok {
@@ -142,7 +142,7 @@ func TestObserve_LiveOutboundFanOut(t *testing.T) {
 	if _, err := b.HandleChatSend(context.Background(), "plumb", "@operator hello", 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	env := expectKindWithin(t, c, frames.KindObserveFrame, 2*time.Second)
+	env := expectKindWithin(t, c, frames.KindObserveFrame, brokerAsyncWait)
 	op, f := decodeObserveFrame(t, env)
 	if op.Aspect != "plumb" {
 		t.Errorf("aspect: got %q want plumb", op.Aspect)
@@ -173,7 +173,7 @@ func TestObserve_LiveInboundFanOut(t *testing.T) {
 	// Two frames will fire: outbound on operator's stream (we're not
 	// subscribed), inbound on plumb's stream (we ARE subscribed). The
 	// only one we receive should be the inbound on plumb.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	var got observability.ChatFrame
 	for time.Now().Before(deadline) {
 		env, ok := recvFrameWithTimeout(t, c, time.Until(deadline))
@@ -218,7 +218,7 @@ func TestObserve_UnsubscribeStopsDelivery(t *testing.T) {
 	if _, err := b.HandleChatSend(context.Background(), "plumb", "first", 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	expectKindWithin(t, c, frames.KindObserveFrame, 2*time.Second)
+	expectKindWithin(t, c, frames.KindObserveFrame, brokerAsyncWait)
 
 	mustResponse(t, c, frames.KindUnsubscribeObserve, frames.UnsubscribeObservePayload{Aspect: "plumb"})
 
@@ -244,7 +244,7 @@ func TestObserve_MultiAspectSubscription(t *testing.T) {
 	}
 
 	seen := map[string]bool{}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	for len(seen) < 2 && time.Now().Before(deadline) {
 		env, ok := recvFrameWithTimeout(t, c, time.Until(deadline))
 		if !ok {
@@ -301,7 +301,7 @@ func TestObserve_TurnLifecycleEndToEnd(t *testing.T) {
 	// Grouper emits one snapshot per call (BeginTurn + each event +
 	// EndTurn = 5 emissions), so several arrive on the wire — the
 	// renderer cares about the final one.
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	var final observability.TurnFrame
 	gotFinal := false
 	for time.Now().Before(deadline) && !gotFinal {

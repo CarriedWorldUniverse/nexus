@@ -67,7 +67,7 @@ func TestSendTurnEndToEnd(t *testing.T) {
 	}()
 
 	// Drive the dispatch from the broker side.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	result, err := b.SendTurn(ctx, "smoketest", frames.TurnPayload{Prompt: "hi"})
 	if err != nil {
@@ -85,7 +85,7 @@ func TestSendTurnEndToEnd(t *testing.T) {
 
 	select {
 	case <-turnRespCh:
-	case <-time.After(1 * time.Second):
+	case <-time.After(brokerAsyncWait):
 		t.Error("fake aspect never received the turn frame")
 	}
 }
@@ -144,7 +144,7 @@ func TestSendTurnPropagatesTurnError(t *testing.T) {
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerAsyncWait)
 	defer cancel()
 	_, err := b.SendTurn(ctx, "brokenaspect", frames.TurnPayload{Prompt: "hi"})
 	if err == nil {
@@ -205,7 +205,7 @@ func TestDisconnectUnbindsDispatcher(t *testing.T) {
 	_ = c.Close(websocket.StatusGoingAway, "bye")
 
 	// Wait for the server-side cleanup to run.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(brokerAsyncWait)
 	for time.Now().Before(deadline) {
 		b.dispatcher.mu.Lock()
 		_, stillBound := b.dispatcher.connsByAspect["ghostaspect"]
