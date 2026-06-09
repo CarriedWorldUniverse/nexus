@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 COPY maren-entrypoint.sh /usr/local/bin/maren-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/maren-entrypoint.sh
+COPY maren-agy-login.sh /usr/local/bin/maren-agy-login
+RUN chmod 0755 /usr/local/bin/maren-entrypoint.sh /usr/local/bin/maren-agy-login
 
 ENTRYPOINT ["/usr/local/bin/maren-entrypoint.sh"]

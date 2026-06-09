@@ -1,0 +1,40 @@
+# Always-on maren artist aspect — keel's always-on shape (agentfunnel without
+# --builder), on the maren image (builder + headless Secret Service), with a
+# PVC-backed keyring so agy's one-time OAuth login persists. replicas:1 — the
+# keyring auth is per-pod and the PVC is ReadWriteOnce.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maren
+  namespace: nexus
+  labels: {app: maren}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: maren}
+  template:
+    metadata:
+      labels: {app: maren}
+    spec:
+      containers:
+        - name: maren
+          image: localhost/nexus-maren:dev
+          imagePullPolicy: Never
+          args: ["-k", "/etc/nexus/keyfile.json", "-context-mode", "global"]
+          env:
+            - {name: CW_SEAM_URL, value: "https://nexus.tail41686e.ts.net:7888"}
+            - {name: OPENAI_API_KEY, value: "ollama"}
+            - {name: OPENAI_BASE_URL, value: "http://gemma-ollama.nexus.svc.cluster.local:11434/v1"}
+            - name: KEYRING_PASS
+              valueFrom: {secretKeyRef: {name: maren-keyring-pass, key: KEYRING_PASS}}
+          volumeMounts:
+            - {name: keyfile, mountPath: /etc/nexus}
+            - {name: keyring, mountPath: /root/.local/share/keyrings}
+      volumes:
+        - name: keyfile
+          secret:
+            secretName: aspect-keyfile-maren
+            items: [{key: keyfile.json, path: keyfile.json}]
+        - name: keyring
+          persistentVolumeClaim: {claimName: maren-keyring}

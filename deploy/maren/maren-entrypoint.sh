@@ -11,9 +11,13 @@ set -e
 : "${HOME:=/root}"
 mkdir -p "$HOME/.local/share/keyrings"
 
-# Session bus (gnome-keyring's Secret Service is exposed over it).
-eval "$(dbus-launch --sh-syntax)"
-export DBUS_SESSION_BUS_ADDRESS DBUS_SESSION_BUS_PID
+# FIXED session-bus address so `kubectl exec` (the one-time agy login) reaches
+# the SAME gnome-keyring as this agentfunnel — a random dbus-launch address
+# would put the login token in a different, unreachable keyring.
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/maren-session-bus"
+rm -f /tmp/maren-session-bus
+dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --fork
+printf 'export DBUS_SESSION_BUS_ADDRESS=%s\n' "$DBUS_SESSION_BUS_ADDRESS" > /tmp/maren-dbus-env
 
 # Initialise/unlock the login keyring, then start the secrets component. The
 # password is fed on stdin; --login is idempotent (creates on first run,
@@ -22,5 +26,5 @@ printf '%s' "$KEYRING_PASS" | gnome-keyring-daemon --daemonize --login >/dev/nul
 eval "$(printf '%s' "$KEYRING_PASS" | gnome-keyring-daemon --start --components=secrets 2>/dev/null)" || true
 export GNOME_KEYRING_CONTROL
 
-echo "maren-entrypoint: Secret Service up (DBUS=$DBUS_SESSION_BUS_ADDRESS); starting agentfunnel" >&2
+echo "maren-entrypoint: Secret Service up ($DBUS_SESSION_BUS_ADDRESS); starting agentfunnel" >&2
 exec /usr/local/bin/agentfunnel "$@"
