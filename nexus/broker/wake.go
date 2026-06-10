@@ -5,9 +5,20 @@
 // to them wakes the pod. The controller owns exactly the scale-up half:
 // HandleChatSend calls MaybeWake for every computed recipient without a
 // live WS conn; if that aspect's policy is wake-on-mention, the
-// Deployment is scaled 0→1. The triggering message needs no special
-// handling — Lock 6 since_msg_id replay delivers it when the woken
-// aspect registers.
+// Deployment is scaled 0→1.
+//
+// Delivering the triggering message DOES need special handling. Lock 6
+// replay is opt-in (NEX-131: RequestReplay && SinceMsgID>0), and a
+// cold-started aspect's wsasp sendRegister sets neither — so a woken
+// aspect would register with an empty inbox and the message that woke it
+// would never arrive. To close that gap the controller records a
+// pending-wake watermark (pendingWake[aspect] = triggering msg id) on
+// every wake; on that aspect's next register the WS handler force-replays
+// addressed messages at-or-after the watermark, regardless of the
+// client's RequestReplay flag, then clears the watermark. This delivers
+// the triggering message (and anything else addressed during the brief
+// nap→wake gap) without changing the opt-in default for normal
+// reconnects.
 //
 // The scale-down half lives in the idle reaper; roster status flips to
 // napping there, not here — wake just scales.
@@ -60,6 +71,13 @@ type wakeController struct {
 
 	mu       sync.Mutex
 	lastWake map[string]time.Time // aspect → last successful scale-up issue
+	// pendingWake maps a woken aspect → the chat msg id that woke it.
+	// Set on wake (even on scale failure — the pod may already be coming
+	// up), read+cleared on that aspect's next register, where it forces a
+	// replay of addressed messages at-or-after the watermark so the
+	// triggering message is actually delivered. Guarded by mu alongside
+	// lastWake.
+	pendingWake map[string]int64
 }
 
 func newWakeController(scaler deploymentScaler, policies, deployments map[string]string, log *slog.Logger) *wakeController {
@@ -73,18 +91,38 @@ func newWakeController(scaler deploymentScaler, policies, deployments map[string
 		log:         log,
 		now:         time.Now,
 		lastWake:    make(map[string]time.Time),
+		pendingWake: make(map[string]int64),
 	}
 }
 
+// takePendingWake returns and clears the pending-wake watermark for
+// aspect, reporting whether one was set. The register path calls this to
+// decide whether to force a replay of the message(s) that woke the
+// aspect. Read-and-clear under mu so a single register consumes the
+// watermark exactly once.
+func (w *wakeController) takePendingWake(aspect string) (int64, bool) {
+	if w == nil {
+		return 0, false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	since, ok := w.pendingWake[aspect]
+	if ok {
+		delete(w.pendingWake, aspect)
+	}
+	return since, ok
+}
+
 // MaybeWake scales the aspect's Deployment to 1 if its policy is
-// wake-on-mention and no wake is already in flight (debounced). The
-// debounce stamp happens synchronously under the mutex so concurrent
-// mentions can't double-wake; the scale call itself runs in a goroutine
-// so the chat hot path (HandleChatSend) never blocks on the apiserver.
-// Failure is logged, never propagated — the message is already
-// persisted and replay delivers it on whatever register eventually
-// happens.
-func (w *wakeController) MaybeWake(ctx context.Context, aspect string) {
+// wake-on-mention and no wake is already in flight (debounced), and
+// records a pending-wake watermark so the triggering message msgID is
+// force-replayed to the aspect on its next register. The debounce stamp
+// happens synchronously under the mutex so concurrent mentions can't
+// double-wake; the scale call itself runs in a goroutine so the chat hot
+// path (HandleChatSend) never blocks on the apiserver. Scale failure is
+// logged, never propagated — the message is already persisted and the
+// recorded watermark delivers it on whatever register eventually happens.
+func (w *wakeController) MaybeWake(ctx context.Context, aspect string, msgID int64) {
 	if w == nil {
 		return
 	}
@@ -94,6 +132,18 @@ func (w *wakeController) MaybeWake(ctx context.Context, aspect string) {
 
 	now := w.now()
 	w.mu.Lock()
+	// Record the pending-wake watermark regardless of the debounce: a
+	// later mention that lands while the pod is still booting must not be
+	// skipped, but the watermark must stay at the OLDEST undelivered
+	// message so the replay catches everything since the nap. AddressedSince
+	// returns msg ids strictly greater than the cursor, so store msgID-1 to
+	// make the triggering message itself replayable. First-write wins; once
+	// a watermark is set it is only cleared by a register.
+	if msgID > 0 {
+		if _, pending := w.pendingWake[aspect]; !pending {
+			w.pendingWake[aspect] = msgID - 1
+		}
+	}
 	if last, ok := w.lastWake[aspect]; ok && now.Sub(last) < wakeDebounce {
 		w.mu.Unlock()
 		return
