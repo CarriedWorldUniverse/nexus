@@ -451,6 +451,17 @@ func main() {
 	// Unset = no wake behavior (pre-napping semantics).
 	wakePolicy := parseKVList(os.Getenv("NEXUS_ASPECT_WAKE_POLICY"))
 	aspectDeployment := parseKVList(os.Getenv("NEXUS_ASPECT_DEPLOYMENT"))
+	// NEXUS_IDLE_TIMEOUT: quiet window before the idle reaper scales a
+	// wake-on-mention aspect to zero ("15m" shapes). Unset/invalid →
+	// broker default.
+	var idleTimeout time.Duration
+	if v := os.Getenv("NEXUS_IDLE_TIMEOUT"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			idleTimeout = d
+		} else {
+			logger.Warn("NEXUS_IDLE_TIMEOUT invalid — using broker default", "value", v, "err", perr)
+		}
+	}
 
 	activityLogDir := filepath.Join(*dataDir, "activity")
 	b := broker.New(broker.Config{
@@ -501,10 +512,12 @@ func main() {
 		OperatorLogin: buildOperatorLogin(db, nexusIdentity.NexusID, nexusIdentity.SessionSigningSecret, *addr, logger),
 		Observability: obsHub,
 		Runner:        runner,
-		// Napping presence: who wakes on mention / never sleeps, and
-		// which Deployment each aspect scales (default: its own name).
+		// Napping presence: who wakes on mention / never sleeps, which
+		// Deployment each aspect scales (default: its own name), and how
+		// long quiet means before the idle reaper acts.
 		AspectWakePolicy: wakePolicy,
 		AspectDeployment: aspectDeployment,
+		IdleTimeout:      idleTimeout,
 		// NEX-144 Phase 0: mount ledger's healthz on the broker's TLS
 		// listener. The registrar runs inside ListenAndServe with the
 		// broker's internal mux, so /healthz/ledger lives alongside

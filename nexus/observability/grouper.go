@@ -181,6 +181,17 @@ func (g *Grouper) EndTurn() {
 	g.turn = nil
 }
 
+// TurnInFlight reports whether a turn is currently open — a BeginTurn
+// without its EndTurn yet. The Grouper already tracks this (g.turn) to
+// fold bridle events; exposing it gives the broker's idle reaper its
+// "never reap an aspect mid-turn" guard without separate bookkeeping in
+// the observe inbound path.
+func (g *Grouper) TurnInFlight() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.turn != nil
+}
+
 // OnChat emits a ChatFrame independent of turn state.
 func (g *Grouper) OnChat(msg chat.Message, direction Direction) {
 	g.mu.Lock()

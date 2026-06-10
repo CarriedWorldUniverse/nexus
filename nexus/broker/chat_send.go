@@ -91,6 +91,15 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 		recipients = b.cfg.RecipientPolicy.Compute(from, content, replyTo)
 	}
 
+	// Stamp last chat activity for the sender and every recipient — the
+	// idle reaper's quiet-window source. Inline here (the hot path
+	// already has the names) so the reaper never scans the ChatStore.
+	touchedAt := time.Now()
+	b.touchChatActivity(from, touchedAt)
+	for _, rec := range recipients {
+		b.touchChatActivity(rec, touchedAt)
+	}
+
 	// 3. Fan out chat.deliver to each recipient's live WS connection.
 	// Aspects not currently connected miss the live frame; they pick
 	// it up on next register via Lock 6 since_msg_id replay.

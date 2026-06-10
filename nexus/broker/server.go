@@ -327,6 +327,12 @@ type Config struct {
 	// scale operations. Aspects absent from the map default to their own
 	// name. cmd/nexus populates this from NEXUS_ASPECT_DEPLOYMENT.
 	AspectDeployment map[string]string
+
+	// IdleTimeout is how long a wake-on-mention aspect must be quiet (no
+	// chat to/from it, no active dispatch run, no in-flight turn) before
+	// the idle reaper scales it to zero. Zero → defaultIdleTimeout (15m).
+	// cmd/nexus populates this from NEXUS_IDLE_TIMEOUT.
+	IdleTimeout time.Duration
 }
 
 // Broker owns the HTTP server and its roster.
@@ -418,6 +424,13 @@ type Broker struct {
 	// a k8s client is available; MaybeWake is nil-safe so the chat hook
 	// doesn't gate.
 	wake *wakeController
+
+	// lastChatActivity records the most recent chat touch (as sender OR
+	// recipient) per aspect, stamped inline in HandleChatSend — the idle
+	// reaper's cheap last-activity source (no ChatStore scans). Guarded
+	// by lastChatMu; always non-nil after New.
+	lastChatMu       sync.Mutex
+	lastChatActivity map[string]time.Time
 }
 
 func New(cfg Config, r *roster.Roster) *Broker {
@@ -464,6 +477,7 @@ func New(cfg Config, r *roster.Roster) *Broker {
 		connPerIP:            make(map[string]int),
 		operators:            make(map[*wsConn]struct{}),
 		lastSessionRefreshAt: make(map[string]time.Time),
+		lastChatActivity:     make(map[string]time.Time),
 	}
 	if cfg.Observability != nil {
 		b.observability = cfg.Observability
@@ -563,6 +577,15 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	}
 	b.ctx, b.ctxCancel = context.WithCancel(ctx)
 	defer b.ctxCancel()
+
+	// Idle reaper — the scale-down half of napping presence. Gated on
+	// the wake controller: never scale anything to zero that chat can't
+	// scale back up. Ticker shape mirrors the stale-reap sweep.
+	if b.wake != nil {
+		reaper := newIdleReaper(b, b.dispatchK8s, b.cfg.IdleTimeout)
+		go reaper.run(b.ctx)
+		b.log.Info("idle reaper started", "idle_timeout", reaper.timeout)
+	}
 
 	mux := http.NewServeMux()
 	// WS surface per transport spec v0.1 — see ws.go. Auth is checked
