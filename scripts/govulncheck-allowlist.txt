@@ -1,0 +1,44 @@
+# govulncheck accepted findings — consumed by scripts/govulncheck-gate.sh.
+# Format: one OSV id per line; '#' starts a comment.
+#
+# ---------------------------------------------------------------------------
+# github.com/ollama/ollama v0.22.1 module advisories — accepted 2026-06-10.
+#
+# All entries below are "Fixed in: N/A" (module-level advisories with no
+# fixed release), so no version bump can clear them. The dependency is
+# indirect: bridle's provider/ollama (imported by agentfunnel) uses only the
+# ollama API client package.
+#
+# Platform context for acceptance: ollama runs as an in-cluster service
+# (gemma-ollama.nexus.svc) reached at a fixed cluster-DNS URL. The ollama
+# server is not internet-exposed, so the server-side missing-auth/DoS
+# advisories are bounded by the cluster boundary; there are no cross-domain
+# redirects and no auth tokens configured, so the client token-exposure
+# advisory has nothing to leak.
+#
+# Review trigger: remove these entries when ollama publishes fixed versions
+# for the advisories, or when the ollama dependency is dropped.
+# ---------------------------------------------------------------------------
+
+# Server-side missing authentication (model management operations):
+GO-2025-4251
+# Client cross-domain token exposure:
+GO-2025-3824
+# Server-side denial of service:
+GO-2025-3695
+
+# Additional ollama@v0.22.1 module advisories reported by the current vuln
+# DB — same acceptance rationale (server-side parsing/serving flaws in a
+# non-internet-exposed in-cluster service; all "Fixed in: N/A").
+# Accepted 2026-06-10; same review trigger as above.
+
+# Server divide-by-zero (model parsing):
+GO-2025-3689
+# Server DoS via null pointer dereference:
+GO-2025-3582
+# Server divide-by-zero:
+GO-2025-3559
+# Server out-of-bounds read:
+GO-2025-3558
+# Server resource allocation without limits or throttling:
+GO-2025-3557
