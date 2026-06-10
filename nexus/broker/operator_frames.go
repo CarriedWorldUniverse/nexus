@@ -121,6 +121,7 @@ func (c *wsConn) handleOperatorRosterList(env frames.Envelope) {
 		}
 		out = append(out, frames.RosterAspect{
 			Name:            r.Name,
+			Lineage:         r.Lineage,
 			Status:          r.Status,
 			LastSeen:        lastSeen,
 			Capabilities:    r.Capabilities,

@@ -565,8 +565,11 @@ type RosterListPayload struct{}
 // internal roster + extra metadata the dashboard's Status/Agents
 // views render.
 type RosterAspect struct {
-	Name            string   `json:"name"`
-	Status          string   `json:"status"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	// Lineage is the base aspect for a derived hand identity
+	// (`<base>.sub-N`, NEX-571); empty for first-class aspects.
+	Lineage         string   `json:"lineage,omitempty"`
 	LastSeen        string   `json:"last_seen,omitempty"`
 	Capabilities    []string `json:"capabilities,omitempty"`
 	Model           string   `json:"model,omitempty"`
@@ -722,6 +725,8 @@ type RosterUpdatePayload struct {
 	Model        string   `json:"model,omitempty"`
 	Provider     string   `json:"provider,omitempty"`
 	ContextMode  string   `json:"context_mode,omitempty"`
+	// Lineage mirrors RosterAspect.Lineage (NEX-571).
+	Lineage string `json:"lineage,omitempty"`
 	// Reason names the trigger ("connect" | "disconnect" |
 	// "status_change") so the SPA can render a brief notification
 	// without inferring from prior state.

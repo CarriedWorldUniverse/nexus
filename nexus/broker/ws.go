@@ -15,6 +15,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/CarriedWorldUniverse/cwb-client/client"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
@@ -972,7 +973,16 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 	// aspect name isn't in the discovery map, fall back to payload
 	// (legacy deployments without --aspect-dir) but warn.
 	if c.broker.cfg.AspectHomes != nil {
-		if discovered, ok := c.broker.cfg.AspectHomes[payload.Name]; ok {
+		discovered, ok := c.broker.cfg.AspectHomes[payload.Name]
+		if !ok && aspects.IsDerivedName(payload.Name) {
+			// Lineage-aware accept (NEX-571): a hand registers under a
+			// derived name that is never in the discovery map — that's
+			// expected, not a legacy deployment. Inherit the BASE
+			// aspect's discovered home when known; either way, no WARN.
+			discovered, ok = c.broker.cfg.AspectHomes[aspects.BaseName(payload.Name)]
+		}
+		switch {
+		case ok:
 			if payload.Home != "" && payload.Home != discovered {
 				c.log.Warn("register payload.home overridden by broker discovery",
 					"name", payload.Name,
@@ -980,7 +990,10 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 					"discovered_home", discovered)
 			}
 			payload.Home = discovered
-		} else {
+		case aspects.IsDerivedName(payload.Name):
+			// Derived name with no discovered base home: trust the
+			// payload silently — hands are broker-spawned, not legacy.
+		default:
 			c.log.Warn("register: aspect not in discovery map; trusting payload.home (legacy path)",
 				"name", payload.Name, "payload_home", payload.Home)
 		}
@@ -1035,6 +1048,7 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 		Model:        state.Model,
 		Provider:     state.Provider,
 		ContextMode:  string(state.ContextMode),
+		Lineage:      state.Lineage,
 		Reason:       "connect",
 	})
 

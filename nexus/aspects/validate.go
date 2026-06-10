@@ -288,8 +288,14 @@ func Validate(ctx context.Context, cfg ValidateConfig, encryptedPayloadB64 strin
 
 	// Step 7: personality. After JWT compose so the response can be
 	// assembled in one pass (the ValidatedSession ships both).
+	//
+	// Lineage (NEX-571): a derived hand identity (`<base>.sub-N`) is the
+	// same mind as its base aspect — the derived name is an audit tag,
+	// not a separate persona. Serve the BASE aspect's SOUL.md/nexus.md
+	// bundle; BaseName is the identity for non-derived names, so this is
+	// a no-op on the common path.
 	var personality *Personality
-	personality, err = cfg.Store.PersonalityGet(ctx, p.AspectName)
+	personality, err = cfg.Store.PersonalityGet(ctx, BaseName(p.AspectName))
 	if errors.Is(err, ErrNotFound) {
 		// Allowed: aspect exists but no personality row yet. Caller
 		// gets nil and renders an empty bundle.

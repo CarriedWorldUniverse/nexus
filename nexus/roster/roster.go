@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
@@ -71,8 +72,17 @@ func (r *Roster) Register(req *schemas.RegisterRequest) (state *schemas.AspectSt
 	if surface == "" {
 		surface = schemas.SurfaceFunnel
 	}
+	// Lineage marker (NEX-571): derived hand identities register
+	// freely under `<base>.sub-N` — one-session-per-name applies to the
+	// derived name itself — and carry their base so listings and
+	// wake/idle policies can tell hands from first-class aspects.
+	var lineage string
+	if aspects.IsDerivedName(req.Name) {
+		lineage = aspects.BaseName(req.Name)
+	}
 	state = &schemas.AspectState{
 		Name:           req.Name,
+		Lineage:        lineage,
 		ContextMode:    req.ContextMode,
 		Provider:       req.Provider,
 		Port:           req.Port,
