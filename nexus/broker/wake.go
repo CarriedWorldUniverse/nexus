@@ -77,9 +77,13 @@ func newWakeController(scaler deploymentScaler, policies, deployments map[string
 }
 
 // MaybeWake scales the aspect's Deployment to 1 if its policy is
-// wake-on-mention and no wake is already in flight (debounced). Failure
-// is logged, never propagated — the message is already persisted and
-// replay delivers it on whatever register eventually happens.
+// wake-on-mention and no wake is already in flight (debounced). The
+// debounce stamp happens synchronously under the mutex so concurrent
+// mentions can't double-wake; the scale call itself runs in a goroutine
+// so the chat hot path (HandleChatSend) never blocks on the apiserver.
+// Failure is logged, never propagated — the message is already
+// persisted and replay delivers it on whatever register eventually
+// happens.
 func (w *wakeController) MaybeWake(ctx context.Context, aspect string) {
 	if w == nil {
 		return
@@ -103,15 +107,27 @@ func (w *wakeController) MaybeWake(ctx context.Context, aspect string) {
 	if deployment == "" {
 		deployment = aspect
 	}
-	if err := w.scaler.ScaleDeployment(ctx, deployment, 1); err != nil {
-		// Disarm the debounce so the next mention retries — a failed
-		// wake must not wedge the aspect unreachable for a full window.
-		w.mu.Lock()
-		delete(w.lastWake, aspect)
-		w.mu.Unlock()
-		w.log.Warn("wake: scale-up failed — message persisted, replay delivers on register",
-			"aspect", aspect, "deployment", deployment, "err", err)
-		return
-	}
-	w.log.Info("wake: scaled deployment for napping aspect", "aspect", aspect, "deployment", deployment)
+	// ctx is the broker lifetime context (not per-request), so it is a
+	// sound parent: in-flight scales die with the broker, and the
+	// timeout bounds a single apiserver round-trip.
+	go func() {
+		sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := w.scaler.ScaleDeployment(sctx, deployment, 1); err != nil {
+			// Disarm the debounce so the next mention retries — a failed
+			// wake must not wedge the aspect unreachable for a full
+			// window. Compare-and-delete on our own stamp: if a newer
+			// wake restamped while this call was on the wire, that stamp
+			// must survive this failure.
+			w.mu.Lock()
+			if w.lastWake[aspect].Equal(now) {
+				delete(w.lastWake, aspect)
+			}
+			w.mu.Unlock()
+			w.log.Warn("wake: scale-up failed — message persisted, replay delivers on register",
+				"aspect", aspect, "deployment", deployment, "err", err)
+			return
+		}
+		w.log.Info("wake: scaled deployment for napping aspect", "aspect", aspect, "deployment", deployment)
+	}()
 }

@@ -192,6 +192,20 @@ func (g *Grouper) TurnInFlight() bool {
 	return g.turn != nil
 }
 
+// TurnInFlightFor reports whether a turn is currently open and, when it
+// is, how long it has been open per the Grouper's clock. The broker's
+// idle reaper uses the age to cap how long an open turn can hold its
+// "never reap mid-turn" guard — an EndTurn lost to a crashed pod would
+// otherwise pin the guard forever.
+func (g *Grouper) TurnInFlightFor() (time.Duration, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.turn == nil {
+		return 0, false
+	}
+	return g.clock().Sub(g.turnStart), true
+}
+
 // OnChat emits a ChatFrame independent of turn state.
 func (g *Grouper) OnChat(msg chat.Message, direction Direction) {
 	g.mu.Lock()

@@ -451,15 +451,15 @@ func main() {
 	// Unset = no wake behavior (pre-napping semantics).
 	wakePolicy := parseKVList(os.Getenv("NEXUS_ASPECT_WAKE_POLICY"))
 	aspectDeployment := parseKVList(os.Getenv("NEXUS_ASPECT_DEPLOYMENT"))
-	// NEXUS_IDLE_TIMEOUT: quiet window before the idle reaper scales a
-	// wake-on-mention aspect to zero ("15m" shapes). Unset/invalid →
-	// broker default.
+	// NEXUS_WAKE_IDLE_TIMEOUT: quiet window before the idle reaper
+	// scales a wake-on-mention aspect to zero ("15m" shapes).
+	// Unset/invalid → broker default.
 	var idleTimeout time.Duration
-	if v := os.Getenv("NEXUS_IDLE_TIMEOUT"); v != "" {
+	if v := os.Getenv("NEXUS_WAKE_IDLE_TIMEOUT"); v != "" {
 		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
 			idleTimeout = d
 		} else {
-			logger.Warn("NEXUS_IDLE_TIMEOUT invalid — using broker default", "value", v, "err", perr)
+			logger.Warn("NEXUS_WAKE_IDLE_TIMEOUT invalid — using broker default", "value", v, "err", perr)
 		}
 	}
 

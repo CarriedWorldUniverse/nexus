@@ -331,7 +331,7 @@ type Config struct {
 	// IdleTimeout is how long a wake-on-mention aspect must be quiet (no
 	// chat to/from it, no active dispatch run, no in-flight turn) before
 	// the idle reaper scales it to zero. Zero → defaultIdleTimeout (15m).
-	// cmd/nexus populates this from NEXUS_IDLE_TIMEOUT.
+	// cmd/nexus populates this from NEXUS_WAKE_IDLE_TIMEOUT.
 	IdleTimeout time.Duration
 }
 

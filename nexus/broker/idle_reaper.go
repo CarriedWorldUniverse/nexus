@@ -103,6 +103,12 @@ func (ir *idleReaper) sweep(ctx context.Context) {
 			continue
 		}
 
+		// TOCTOU note: a message can land between the guard checks above
+		// and the scale-0 below — it is delivered to the dying conn
+		// without triggering a wake (the conn was still live at fan-out).
+		// The message is persisted in the ChatStore and replays via
+		// since_msg_id on the next wake/register, so nothing is lost;
+		// accepted sweep-design semantics.
 		deployment := ir.b.cfg.AspectDeployment[aspect]
 		if deployment == "" {
 			deployment = aspect
@@ -111,7 +117,13 @@ func (ir *idleReaper) sweep(ctx context.Context) {
 			ir.log.Warn("idle reaper: scale-down failed", "aspect", aspect, "deployment", deployment, "err", err)
 			continue
 		}
-		ir.b.roster.SetNapping(aspect)
+		if !ir.b.roster.SetNapping(aspect) {
+			// Never registered this broker lifetime — no roster row to
+			// flip, so the already-napping guard above can't catch it.
+			// Re-stamp activity so the reaper issues at most one scale-0
+			// per idle window instead of one per sweep.
+			ir.b.touchChatActivity(aspect, now)
+		}
 		ir.log.Info("idle reaper: aspect napping", "aspect", aspect, "deployment", deployment,
 			"quiet_for", now.Sub(last).Round(time.Second))
 	}
@@ -138,9 +150,31 @@ func (b *Broker) lastChatTouch(aspect string) (time.Time, bool) {
 // turnInFlight reports whether the aspect has an open observe turn
 // (observe.begin without observe.end) — the Grouper tracks that state
 // already; GrouperFor lazily creates, and a fresh Grouper reports false.
+//
+// An open turn older than max(2h, 4×IdleTimeout) is treated as NOT in
+// flight: an EndTurn lost to a crashed pod or dropped conn would
+// otherwise hold the mid-turn guard forever and make the aspect
+// unreapable.
 func (b *Broker) turnInFlight(aspect string) bool {
 	if b.observability == nil {
 		return false
 	}
-	return b.observability.GrouperFor(aspect).TurnInFlight()
+	age, open := b.observability.GrouperFor(aspect).TurnInFlightFor()
+	if !open {
+		return false
+	}
+	idle := b.cfg.IdleTimeout
+	if idle <= 0 {
+		idle = defaultIdleTimeout
+	}
+	staleCap := 2 * time.Hour
+	if c := 4 * idle; c > staleCap {
+		staleCap = c
+	}
+	if age > staleCap {
+		b.log.Warn("idle reaper: open turn exceeds stale cap, treating as not in flight",
+			"aspect", aspect, "turn_age", age.Round(time.Second), "stale_cap", staleCap)
+		return false
+	}
+	return true
 }
