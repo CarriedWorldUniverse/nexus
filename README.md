@@ -5,53 +5,132 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/CarriedWorldUniverse/nexus.svg)](https://pkg.go.dev/github.com/CarriedWorldUniverse/nexus)
 [![License](https://img.shields.io/github/license/CarriedWorldUniverse/nexus)](LICENSE)
 
-A coordination layer for running multiple AI agents as a coherent team.
+A coordination layer for running multiple AI agents as a named team.
 
-Nexus is a single central process (broker + orchestrator) plus a lightweight per-agent runtime. Agents register on boot, communicate through a shared message bus, and can invoke each other's stateless capabilities ("Hands") over that same bus. All context is owned by Nexus, not by the underlying AI provider — sessions live as tree-structured JSONL files, compaction is proactive, and rewind is a non-destructive tree operation.
+Nexus turns one developer into the manager of a team. The team members
+("aspects") are named, lore-rooted minds — each with its own scope, persona,
+and signing identity. The operator addresses an aspect by name; the aspect does
+the work *in its scope*, *under its identity*, and reports back into an audited
+chat thread. A central **broker** carries all the chat, observability, and
+admin; the work itself runs as on-demand Kubernetes Jobs that boot **as** the
+addressed agent.
+
+This is a single-operator R&D system, run for real on a small k3s cluster. It
+is operational and moves fast — it is not a product, and this README tracks the
+live shape rather than a finished spec.
 
 ## Status
 
-Under active development. The original design is drafted in [`docs/2026-04-22-nexus-registration-spec.md`](docs/2026-04-22-nexus-registration-spec.md) (v0.4). The broker, runtime, and provider layers are implemented in Go. See [`BUILD.md`](BUILD.md) for the build plan and current step.
+In active use. The broker, the aspect runtime (funnel + bridle harness), and
+the dispatch fabric are deployed on k3s and carrying real work. What is built
+versus still in flight is called out per-section below; the design record lives
+under [`docs/`](docs/) (the dated files are the decision trail).
 
 ## Shape
 
-- **Nexus process** — central broker (messaging + REST), orchestrator (polling, watches, alarms), and an embedded frame-agent. Single long-running process.
-- **Agent runtime** — executables (`aspect` and `agentfunnel`) that read an agent's home folder and run it. Comms-first; no terminal attach, no direct user-to-agent bypass.
-- **Three context modes** per agent: `global` (one long-running session), `thread` (one session per chat thread), `stateless` (no persistence; the mode Hands live in).
-- **Provider layer** — the runtime is AI-agnostic. A provider module implements `invoke / tokenCount / compact` against a specific backend. Provider modules live under `runtime/providers/` (`claude-api`, `claude-code`, `openai-api`); others are module-drops.
-- **Hands** — stateless, single-turn capabilities invoked via comms messages. An agent can call its own Hands to offload noisy subtasks, or another agent's Hands for cross-domain work. Audit trail is automatic because invocations flow through the same message bus as chat.
+### Broker
+
+A single long-running process (`nexus`) that is the cluster's nervous system:
+
+- **Chat over WebSocket** — every interaction is a message on the bus. Aspects,
+  the dashboard, and operator clients (`agora`) all connect over the same
+  socket; nothing is reachable off the bus, so every exchange is auditable.
+- **Dashboard + admin** — roster, per-aspect config (persona, model/provider
+  binding, MCP profile, credential grants), and operator surfaces.
+- **Observability** — aspect turns stream as `TurnFrame`s through an observe
+  hub. Each frame now carries per-turn `Timing` (round- and tool-level wall
+  clock, forwarded from the bridle harness), so a turn's time can be read back
+  rather than guessed at.
+- **Credentials (custodian)** — brokered, identity-scoped access to our own
+  services (jira / ledger / cairn) resolved lazily on first use; no raw secrets
+  handed to aspects.
+
+### Aspect runtime — funnel + bridle
+
+An aspect runs as `agentfunnel`. The **funnel** owns the agent's session JSONL,
+comms dispatch, and context lifecycle; it imports **[bridle](https://github.com/CarriedWorldUniverse/bridle)**,
+the provider-agnostic harness that drives one model turn with one tool surface.
+Aspects are comms-first: no terminal attach, no direct user-to-agent bypass.
+
+Providers live under `runtime/providers/` — `claude-api`, `claude-code`,
+`openai-api`, and a native `ollama-local` lane for cheap local models on the
+cluster GPU. (Bridle carries the broader provider set the funnel can select.)
+
+### Dispatch fabric
+
+The heart of the platform. Work is handed to a **named agent**, not a faceless
+worker:
+
+- **Address-and-report.** `@plumb …` (natural) and `!dispatch plumb …`
+  (explicit) are the same primitive. The post is stored as the thread root
+  (the audit anchor); the broker resolves the label `plumb` to its profile and
+  spawns a worker.
+- **Run-as the named agent.** The spawned Job mounts `aspect-keyfile-<agent>`,
+  so the worker validates **as** that agent → loads its persona (scope/lens) and
+  signs commits and reviews under the agent's identity. Attribution is real, not
+  cosmetic; the persona is a load-bearing attention prior, so the same diff
+  surfaces different concerns under different named reviewers.
+- **Identity is herald-rooted.** Agent keys derive from an owner seed via
+  `DeriveAgentKey(seed, slug)`; the worker registers over the WS with a signed
+  herald register-handshake assertion — boot-by-name when the owner is
+  authorized.
+- **Audited threads.** The worker posts results back into the originating
+  thread and exits. It can `@`/`!dispatch` onward; the parent is inferred from
+  the sender, so the recursion tree and audit chain stay linked.
+- **Per-agent serialism, cross-agent parallelism.** One run per agent name at a
+  time (one-session-per-name, NEX-464); different agents run concurrently; a
+  second task for a busy agent queues and drains when it frees.
+
+### Napping presence
+
+Aspects are **addressable-but-napping**: identity and inbox persist while the
+pod is scaled to zero. A wake-on-mention controller scales the Deployment 0→1
+on a chat delivery addressed to a napping aspect, and an idle reaper scales it
+back to zero after a quiet window. Presence is the name answering, not a pod
+burning watts. *(Built: NEX-568 P1. The mediated multi-aspect roundtable,
+non-blocking turns, and aspect-owned audited fan-out — workers carrying the
+parent aspect's persona under derived kindred-word identities, e.g.
+`shadow.umbra` — extend the [named-agent dispatch model](docs/2026-06-08-named-agent-dispatch-model.md)
+and are in flight.)*
 
 ## Design principles
 
-- **Comms-first.** Every interaction is a message on the bus. No agent is reachable outside the bus, which means every exchange is auditable, broker-logged, and visible to operators.
-- **Context is Nexus's responsibility.** The runtime owns session JSONL, not the provider. This keeps providers swappable and makes rewind, fork, branch-summary, and proactive compaction first-class operations rather than provider-specific features.
-- **Registration is dynamic.** Nexus doesn't know what agents exist at startup. Agents register over the bus with a register frame and announce their capabilities; the roster is a live runtime construct, not a config artifact. This is the honest prototype of federation: cross-Nexus is the same protocol over the wire.
-- **Proactive over reactive.** Compaction fires before the model degrades (`tokens > window - reserve`), not after. Rewind preserves history in-tree rather than truncating.
+- **Comms-first.** Every interaction is a message on the bus — auditable,
+  broker-logged, operator-visible. No agent is reachable outside it.
+- **The label is the contract.** An agent's name is the single routing key; it
+  resolves to one profile (identity + credentials + pod image). One lookup →
+  scope, access, and toolchain.
+- **Context is Nexus's responsibility.** The funnel owns session JSONL, not the
+  provider, which keeps providers swappable and makes compaction, rewind, and
+  branch-summary first-class.
+- **Dispatch-backed async over held sessions.** Spawn → post the brief → agent
+  reports back → exit is deterministic and needs no fragile always-on session.
+  The audit thread doubles as the result inbox.
 
 ## Cross-platform
 
-Windows, Linux, and macOS. The runtime and Nexus process are built as Go single-static-binary executables — `nexus`, `aspect`, and `agentfunnel`.
+Windows, Linux, and macOS. Nexus and the runtime build as Go single-static
+binaries — `nexus`, `aspect`, and `agentfunnel`.
 
 ## Repository layout
 
 ```
-nexus/       central process (broker, orchestrator, embedded frame-agent, admin)
-runtime/     aspect and agentfunnel: providers, context persistence, comms dispatch, Hand dispatch
-agents/      per-agent home folders (populated at migration time)
+nexus/       central process: broker (chat/dashboard/observe/admin), orchestrator,
+             roster, custodian, dispatch interception, observability hub
+runtime/     aspect/agentfunnel: providers, context persistence, comms + Hand dispatch,
+             dispatch runner (broker-embedded), herald register, obs forwarding
+deploy/      k3s manifests (broker, worker, per-aspect pods)
+agents/      per-aspect home folders
 shared/      path resolution, auth, schemas
-cmd/         standalone command-line tools (relay-cli)
+cmd/         standalone command-line tools
 relay/       relay transport
-docs/        design specs and decision records
+docs/        design specs and dated decision records
 scripts/     build and launch helpers
 tests/       end-to-end harness
 ```
 
-See the README in each subdirectory for detail.
+See the README in each subdirectory for detail. This repository is public.
 
 ## License
 
 See [`LICENSE`](LICENSE).
-
-## Status note
-
-This repository is public. See [`BUILD.md`](BUILD.md) for where we are in the build plan.
