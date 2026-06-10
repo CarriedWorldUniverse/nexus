@@ -37,6 +37,9 @@ spec:
             # token for env use — it does not log the CLI in.
             - name: CLAUDE_CODE_OAUTH_TOKEN
               valueFrom: {secretKeyRef: {name: shadow-claude-auth, key: token}}
+            # claude-code refuses --dangerously-skip-permissions as root;
+            # IS_SANDBOX=1 is its container affordance ("this root is a sandbox").
+            - {name: IS_SANDBOX, value: "1"}
           volumeMounts:
             - {name: keyfile, mountPath: /etc/nexus}
             - {name: claude-state, mountPath: /root/.claude}
