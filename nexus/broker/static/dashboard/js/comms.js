@@ -56,10 +56,6 @@ const state = {
   // is how we notice and force the reconnect machinery to kick in.
   pingTimer: null,
   lastPong: 0,
-  // true once any connection has opened; lets onopen distinguish a
-  // re-connect (views need to refetch what they missed) from the
-  // first connect.
-  everConnected: false,
 };
 
 const RPC_TIMEOUT_MS = 30_000;
@@ -153,12 +149,6 @@ function connect() {
       for (const fn of state.listeners.onOpen) {
         try { fn(); } catch (e) { console.error('comms onOpen', e); }
       }
-      // Re-connect (not first connect): views that fetch over HTTP
-      // missed pushes while the socket was down — tell them to refetch.
-      if (state.everConnected) {
-        window.dispatchEvent(new CustomEvent('comms:reconnected'));
-      }
-      state.everConnected = true;
       resolve();
     };
 

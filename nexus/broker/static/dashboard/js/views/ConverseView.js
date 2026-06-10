@@ -381,10 +381,6 @@ export function ConverseView() {
       loadMessages();
       refreshReactions();
     });
-    // comms.js fires this after the WS watchdog force-reconnects;
-    // refetch whatever pushes were lost while the socket was dead.
-    const onCommsReconnected = () => { loadMessages(); };
-    window.addEventListener('comms:reconnected', onCommsReconnected);
 
     const msgInterval = setInterval(loadMessages, 30000);
     return () => {
@@ -392,7 +388,6 @@ export function ConverseView() {
       offMsg();
       offReact();
       offReconnect();
-      window.removeEventListener('comms:reconnected', onCommsReconnected);
     };
   }, []);
 
