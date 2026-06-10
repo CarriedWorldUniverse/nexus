@@ -32,6 +32,11 @@ spec:
             # decides what triggers a real claude turn.
             - {name: OPENAI_API_KEY, value: "ollama"}
             - {name: OPENAI_BASE_URL, value: "http://gemma-ollama.nexus.svc.cluster.local:11434/v1"}
+            # Long-lived claude-code OAuth token (from `claude setup-token`),
+            # held in the shadow-claude-auth secret. setup-token PRINTS a
+            # token for env use — it does not log the CLI in.
+            - name: CLAUDE_CODE_OAUTH_TOKEN
+              valueFrom: {secretKeyRef: {name: shadow-claude-auth, key: token}}
           volumeMounts:
             - {name: keyfile, mountPath: /etc/nexus}
             - {name: claude-state, mountPath: /root/.claude}
