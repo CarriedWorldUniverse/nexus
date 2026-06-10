@@ -48,6 +48,9 @@ func (c *wsConn) dispatchOperatorSubFrame(env frames.Envelope) bool {
 		c.handleSubscribeObserve(env)
 	case frames.KindUnsubscribeObserve:
 		c.handleUnsubscribeObserve(env)
+	case frames.KindPing:
+		resp, _ := frames.NewResponse(frames.KindPong, env.ID, struct{}{})
+		c.send(resp)
 	default:
 		return false
 	}

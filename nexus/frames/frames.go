@@ -179,6 +179,8 @@ const (
 	KindActivityHistoryResult Kind = "activity.history.result"
 	KindEnvHealth             Kind = "env.health"
 	KindEnvHealthResult       Kind = "env.health.result"
+	KindPing                  Kind = "ping"
+	KindPong                  Kind = "pong"
 
 	// Subscription frames (5d). Each "subscribe.X" enrolls the
 	// operator's connection in the corresponding push stream; the
@@ -363,7 +365,9 @@ func IsKnown(k Kind) bool {
 		KindRosterUpdate, KindAspectStatusPulse, KindObserveFrame,
 		KindObserveBegin, KindObserveEvent, KindObserveEnd,
 		// Operator escalation (P3c)
-		KindEscalationRequest, KindEscalationDecision:
+		KindEscalationRequest, KindEscalationDecision,
+		// App-level liveness
+		KindPing, KindPong:
 		return true
 	}
 	return false
