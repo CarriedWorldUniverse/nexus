@@ -63,15 +63,32 @@ nav:
   - Architecture: architecture.md
   - Repos:
     - repos/index.md
-    - nexus: repos/nexus.md
-    - bridle: repos/bridle.md
-    - agora: repos/agora.md
-    - acp-claude-pty: repos/acp-claude-pty.md
-    - interchange: repos/interchange.md
-    - cairn: repos/cairn.md
-    - casket-go: repos/casket-go.md
-    - casket-ts: repos/casket-ts.md
-    - casket-dotnet: repos/casket-dotnet.md
+    - Agent runtime:
+      - nexus: repos/nexus.md
+      - bridle: repos/bridle.md
+      - agora: repos/agora.md
+      - acp-claude-pty: repos/acp-claude-pty.md
+    - CWB platform:
+      - interchange: repos/interchange.md
+      - herald: repos/herald.md
+      - ledger: repos/ledger.md
+      - commonplace: repos/commonplace.md
+      - cairn: repos/cairn.md
+      - custodian: repos/custodian.md
+    - CWB clients:
+      - cw: repos/cw.md
+      - cwb-client: repos/cwb-client.md
+      - cwb-proto: repos/cwb-proto.md
+      - cwb-conformance: repos/cwb-conformance.md
+    - Distribution + products:
+      - nexus-platform: repos/nexus-platform.md
+      - porter: repos/porter.md
+      - lynxai: repos/lynxai.md
+      - vessel: repos/vessel.md
+    - Crypto:
+      - casket-go: repos/casket-go.md
+      - casket-ts: repos/casket-ts.md
+      - casket-dotnet: repos/casket-dotnet.md
   - Policies:
     - policies/index.md
     - Code standards: policies/code-standards.md
@@ -79,18 +96,32 @@ nav:
     - Git workflow: policies/git-workflow.md
   - Specs:
     - specs/index.md
-    - Frame role: archive/2026-04-28-frame-role-spec.md
-    - Aspect-funnel architecture: archive/2026-05-02-aspect-funnel-architecture.md
-    - Funnel compaction: archive/2026-05-01-funnel-compaction-design.md
-    - Funnel/bridle caching: archive/2026-05-03-funnel-bridle-caching-spec.md
-    - Commonplace build graphs + Graphify: 2026-06-07-commonplace-build-graphs-and-graphify-recommendation.md
-    - Storage abstraction: archive/2026-05-05-storage-abstraction-spec.md
-    - Credential custodian: archive/2026-06-04-credential-custodian-design.md
-    - Nexus token custodian: archive/2026-06-03-nexus-token-custodian-design.md
-    - Hand dispatch v0.1: archive/2026-04-30-hand-dispatch-v0_1.md
-    - Provider adapter: archive/2026-04-24-provider-adapter-spec.md
-    - Skill delivery: archive/2026-05-15-skill-delivery-design.md
-    - Pi extract / bridle gaps: archive/2026-05-13-pi-extract-bridle-gaps.md
-    - Observability runbook: archive/2026-05-12-observability-operator-runbook.md
-    - JSONL rewriter: archive/2026-05-10-jsonl-rewriter-spec.md
-    - Dashboard WS port: archive/2026-05-09-dashboard-ws-port-spec.md
+    - Current — dispatch-native:
+      - Dispatch-native platform architecture: 2026-06-08-dispatch-native-platform-architecture.md
+      - Dispatch pod + home model: 2026-06-08-dispatch-pod-and-home-model.md
+      - Named-agent dispatch model: 2026-06-08-named-agent-dispatch-model.md
+      - Recursive dispatch routing: 2026-06-07-recursive-dispatch-routing-design.md
+      - Recursive dispatch mechanism: 2026-06-07-recursive-dispatch-mechanism-plan.md
+      - Dispatch roles — build/review/verify: 2026-06-07-dispatch-roles-build-review-verify.md
+      - Funnel hooks + bridle passing: 2026-06-08-funnel-hooks-and-bridle-passing-design.md
+    - Current — identity + CWB:
+      - Herald-rooted agent bootstrap: 2026-06-03-herald-rooted-agent-bootstrap-design.md
+      - Nexus↔CWB gateway: archive/2026-06-03-nexus-cwb-gateway-design.md
+      - Herald MVP — bringup: archive/2026-05-30-dmon-nexus-bringup-plan.md
+      - Credential custodian: archive/2026-06-04-credential-custodian-design.md
+      - K3s work dispatch: archive/2026-06-05-k3s-work-dispatch-design.md
+    - Current — roundtable + skills:
+      - Roundtable design: 2026-06-11-roundtable-design.md
+      - Agent-skills system design: 2026-06-09-agent-skills-system-design.md
+      - Commonplace build graphs + Graphify: 2026-06-07-commonplace-build-graphs-and-graphify-recommendation.md
+    - Current — work UI:
+      - Phase 1 — watch: 2026-06-09-work-ui-phase1-watch-design.md
+      - Phase 2 — control: 2026-06-09-work-ui-phase2-control-design.md
+      - Phase 3 — converse: 2026-06-09-work-ui-phase3-converse-design.md
+      - Phase 4 — configure: 2026-06-09-work-ui-phase4-configure-design.md
+    - Foundational (archive):
+      - Frame role: archive/2026-04-28-frame-role-spec.md
+      - Aspect-funnel architecture: archive/2026-05-02-aspect-funnel-architecture.md
+      - Provider adapter: archive/2026-04-24-provider-adapter-spec.md
+      - Hand dispatch v0.1: archive/2026-04-30-hand-dispatch-v0_1.md
+      - Storage abstraction: archive/2026-05-05-storage-abstraction-spec.md

@@ -31,6 +31,14 @@ jobs:
       - name: Install MkDocs Material
         run: pip install mkdocs-material
 
+      - name: Sync repo pages from live READMEs
+        # Each docs/repos/<repo>.md is regenerated from that repo's live
+        # README.md so the published page is always the repo's own source of
+        # truth. Committed stubs are the fallback if a fetch fails.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/sync-repo-readmes.sh
+
       - name: Build site
         # No --strict: nexus/docs has 30+ spec files we don't bother
         # individually navigating; they still render and link from

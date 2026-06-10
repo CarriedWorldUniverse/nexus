@@ -1,53 +1,51 @@
+<!-- GENERATED FILE — do not edit.
+     Sourced from https://github.com/CarriedWorldUniverse/agora/blob/HEAD/README.md
+     by scripts/sync-repo-readmes.sh at docs build time.
+     Edit that README, not this file. -->
+
+!!! info "Sourced from the repo README"
+    This page mirrors [`agora`](https://github.com/CarriedWorldUniverse/agora)'s live `README.md`.
+    Edit the README in the repo, not this page.
+
 # agora
 
 [![CI](https://github.com/CarriedWorldUniverse/agora/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CarriedWorldUniverse/agora/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/CarriedWorldUniverse/agora?include_prereleases&sort=semver&display_name=tag)](https://github.com/CarriedWorldUniverse/agora/releases)
-[![License](https://img.shields.io/github/license/CarriedWorldUniverse/agora)](https://github.com/CarriedWorldUniverse/agora/blob/main/LICENSE)
+[![License](https://img.shields.io/github/license/CarriedWorldUniverse/agora)](https://github.com/CarriedWorldUniverse/agora/blob/HEAD/LICENSE)
 
-The operator-facing interactive TUI. Persistent-WS chat panel on top of bridle's claudecode engine.
+An interactive operator-facing CLI for one-to-one conversations with always-on nexus agents.
 
-**Source:** [github.com/CarriedWorldUniverse/agora](https://github.com/CarriedWorldUniverse/agora)
+`agora` opens a single full-screen DM thread with one agent. It holds a persistent operator WebSocket connection to nexus, loads chat history, renders pushed updates in real time, and sends operator messages using the same `dm:<agent>` convention as the dashboard.
 
-## What it does
-
-- Holds a persistent WebSocket to nexus (push delivery, no polling).
-- Renders chat from the cluster in real-time in a [bubbletea](https://github.com/charmbracelet/bubbletea) TUI.
-- Lets the operator type into the conversation; runs the operator-aspect identity bound to the keyfile.
-- Acts as a proactive notification channel via `notify_operator` (fenced-block parse, NEX-63).
-
-Architecturally identical to any autonomous aspect — agora reuses the same machinery (bridle claudecode driver per-turn, funnel for inbox + filter + dispatch, per-aspect keyfile). The novel piece is the outer shell + the operator-channel routing rule.
-
-## Install
+Run it with an agent name and, when the broker is not in auth-bypass mode, a pre-minted operator JWT:
 
 ```sh
-# macOS, Apple Silicon
-curl -L -o agora.tar.gz https://github.com/CarriedWorldUniverse/agora/releases/download/v0.1.0/agora_v0.1.0_darwin_arm64.tar.gz
-tar xzf agora.tar.gz
-./agora --keyfile <path-to-keyfile>
+agora -agent maren -token "$AGORA_TOKEN"
 ```
 
-Linux + macOS + Windows × amd64 + arm64.
+## Status
 
-## Build from source
+Built and in use. The one-to-one conversation shape is live, with a client-side
+heartbeat and visible connection state (#31), a turn-rhythm chat feel (#32), an
+on-demand trace pane on `ctrl+t` (#33), and mouse-wheel scrolling of the session
+(#34). See [`docs/spec.md`](https://github.com/CarriedWorldUniverse/agora/blob/HEAD/docs/spec.md) for the design.
 
-```sh
-git clone https://github.com/CarriedWorldUniverse/agora.git
-cd agora
-make build
-./bin/agora --version
-```
+## Architecture (one paragraph)
 
-## Flags worth knowing
+agora is a Bubble Tea TUI over `internal/opclient`. The client probes broker auth mode, connects to `/connect`, subscribes to chat and observe pushes, loads `chat.list` history, sends `chat.send` DM messages, and persists a cursor under the state directory for reconnect catch-up.
 
-| Flag | Purpose |
-|---|---|
-| `--keyfile <path>` | required; identity keyfile bound to operator aspect |
-| `--cursor-dir <dir>` | chat cursor file location; defaults to keyfile parent (NEX-119 — clean swap between agora ↔ CC-comms-mcp) |
-| `--claude <path>` | path to the `claude` binary (default: `claude` on PATH) |
-| `--log-file <path>` | log destination (default: `/tmp/agora.log`) |
-| `--version` | print version and exit |
+## What this is not
 
-## Where to dig deeper
+- **Not a replacement for claude-code.** claude-code stays the right tool for code-editing work. agora is the right tool for chat-driven coordination work. Side-by-side, not vs.
+- **Not a vessel.** [`vessel`](https://github.com/CarriedWorldUniverse/vessel) is the avatar-and-voice front-end. agora is the terminal-resident text front-end. Different shapes, same direction (operator interfaces to the cluster).
+- **Not an autonomous agent host.** Agents run elsewhere. agora is specifically for operator-attended conversations with those agents.
 
-- [Architecture overview](../architecture.md) — how agora fits as an operator-as-aspect
-- [Operator as aspect (WS extension)](../archive/2026-05-04-operator-as-aspect-ws-extension.md)
+## Family
+
+- [`nexus`](https://github.com/CarriedWorldUniverse/nexus) — the cluster substrate: broker, Frame, dispatcher, knowledge, chat, roster.
+- [`cairn`](https://github.com/CarriedWorldUniverse/cairn) — repo hosting (native go-git).
+- [`vessel`](https://github.com/CarriedWorldUniverse/vessel) — Tauri avatar + voice front-end to the cluster.
+
+## License
+
+Apache-2.0. See [LICENSE](https://github.com/CarriedWorldUniverse/agora/blob/HEAD/LICENSE).

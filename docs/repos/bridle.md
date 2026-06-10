@@ -1,52 +1,86 @@
+<!-- GENERATED FILE — do not edit.
+     Sourced from https://github.com/CarriedWorldUniverse/bridle/blob/HEAD/README.md
+     by scripts/sync-repo-readmes.sh at docs build time.
+     Edit that README, not this file. -->
+
+!!! info "Sourced from the repo README"
+    This page mirrors [`bridle`](https://github.com/CarriedWorldUniverse/bridle)'s live `README.md`.
+    Edit the README in the repo, not this page.
+
 # bridle
 
 [![CI](https://github.com/CarriedWorldUniverse/bridle/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CarriedWorldUniverse/bridle/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/CarriedWorldUniverse/bridle?include_prereleases&sort=semver&display_name=tag)](https://github.com/CarriedWorldUniverse/bridle/releases)
 [![Go Reference](https://pkg.go.dev/badge/github.com/CarriedWorldUniverse/bridle.svg)](https://pkg.go.dev/github.com/CarriedWorldUniverse/bridle)
-[![License](https://img.shields.io/github/license/CarriedWorldUniverse/bridle)](https://github.com/CarriedWorldUniverse/bridle/blob/main/LICENSE)
+[![License](https://img.shields.io/github/license/CarriedWorldUniverse/bridle)](https://github.com/CarriedWorldUniverse/bridle/blob/HEAD/LICENSE)
 
-Per-turn deliberation library. Drives a single LLM turn with one tool surface, emitting a structured event stream.
+The harness layer of the Nexus funnel/harness split. A small Go library that drives one deliberation turn of one model with one tool surface, emitting a stream of observable events and returning a structured `TurnResult`.
+
+The funnel imports bridle. Aspects do not import bridle directly.
 
 > A bridle controls and directs without being the horse — sits beneath the funnel, governs what the model produces, provider-agnostic.
 
-**Source:** [github.com/CarriedWorldUniverse/bridle](https://github.com/CarriedWorldUniverse/bridle)
+## Status
 
-## Providers included
+Implemented and in active use. The original build brief is preserved in
+[`docs/2026-05-01-bridle-spec.md`](https://github.com/CarriedWorldUniverse/bridle/blob/HEAD/docs/2026-05-01-bridle-spec.md); the
+current code includes direct API providers, headless CLI providers, hook
+support, MCP plumbing for direct providers, and a local tool runner.
 
-| Provider | Description |
-|---|---|
-| `claudecode` | Subprocess CLI wrapper around `claude -p`. The dominant path. |
-| `claude` | Direct Anthropic Messages API. |
-| `ollama` | Local Ollama server (open-weights models). |
-| `claudepty` | ACP-driven `claude` REPL over [acp-claude-pty](acp-claude-pty.md) subprocess. |
-| `gemini-cli` / `gemini-api` | Gemini provider via CLI or direct API. |
-| `bedrock` | AWS Bedrock Converse API. |
+## Scope
 
-## Install (as a library)
+- One stable provider interface with direct-API and subprocess-stream implementations.
+- Direct API providers: `claude-api`, `openai-api`, `bedrock`, `gemini-api`, `ollama-local`.
+- Headless CLI providers: `claude-code`, `gemini-cli`, `codex-cli`, `antigravity-cli`, plus `claude-pty`.
+- Hook surface for model-call, tool-call, step-boundary, and turn-done behavior.
+- Per-turn timing instrumentation (`TurnTiming`) at the harness seam, broken
+  down by round and tool, so the funnel can observe where a turn spends its wall clock.
+- Shared subprocess plumbing for the CLI providers lives in `internal/subprocess`.
+- `send_comms` is just a tool the funnel supplies — bridle has no special case.
+- Funnel owns session JSONL; bridle proposes deltas.
 
-```go
-import bridle "github.com/CarriedWorldUniverse/bridle"
-```
+## Provider categories
 
-`go get github.com/CarriedWorldUniverse/bridle@v0.1.0` — pulled from the Go module proxy.
+`direct-api` providers talk to a model API and let bridle own the tool loop.
+They can consume bridle `ToolDef`s, run tools through the supplied
+`ToolRunner`, fire before/after tool hooks, and use bridle MCP configuration.
 
-## Consumers
+`subprocess-stream` providers spawn a headless CLI that owns its own agent loop
+and tool execution. Bridle observes the CLI JSON stream, emits model/tool
+events, and returns a normalized `TurnResult`; it does not re-run those tool
+calls through the bridle `ToolRunner`.
 
-- [nexus/frame/funnel](nexus.md) — the load-bearing consumer; funnel wraps bridle.
-- [agora](agora.md) — uses bridle's claudecode provider directly for the operator TUI's deliberation loop.
+`codex-cli` uses `codex exec --json`. Set `TurnRequest.Model` to the Codex
+model id to pass `--model`, or use `Model: "default"` to let the Codex CLI use
+its configured default model while still satisfying bridle's required model
+field. Existing sessions resume via `codex exec resume <session-id>`.
 
-## Local dev
+`antigravity-cli` drives the `agy` CLI headless (plain-text, not stream-json),
+resuming via `-c` rather than a passed session id, and strips stale conversation
+warnings from the output.
 
-`stubfunnel` is a small CLI in this repo that exercises bridle against real providers without involving the funnel. Useful for provider development.
+`ollama-local` exposes `KeepAlive` (how long the server keeps a model resident —
+defaults to 30m so gemma-class models stay warm across quiet gaps), `NumCtx`
+(the context window, mapped to `options.num_ctx`), and an `Options` map that is
+merged into the request options on every turn.
+
+## Test
 
 ```sh
-go run ./stubfunnel/ -provider claudecode -prompt "what time is it?"
+go test ./...
 ```
 
-`stubfunnel --version` reports the build's version string (git-describe in dev, clean tag in release).
+Live provider smoke tests are opt-in. For Codex CLI:
 
-## Where to dig deeper
+```sh
+BRIDLE_LIVE_CODEX=1 go test ./provider/codexcli -run TestRoundTripLive -count=1
+```
 
-- [Provider adapter spec](../archive/2026-04-24-provider-adapter-spec.md)
-- [Funnel/bridle caching spec](../archive/2026-05-03-funnel-bridle-caching-spec.md)
-- [Pi extract / bridle gaps](../archive/2026-05-13-pi-extract-bridle-gaps.md) — design audit against Pi
+## Non-goals
+
+- Not a framework, not an agent runtime, not a session store. It does one thing: drive one turn.
+- See spec §9 for the full non-goals list.
+
+## Reference reading
+
+PydanticAI (`iter()` / `CallToolsNode`), Eino (streaming + tool-call normalization), PI (headless JSON streaming), Strands (`register_hooks`), LangGraph (interrupt/checkpoint).
