@@ -1198,3 +1198,34 @@ const (
 	EscalationApprove = "approve"
 	EscalationDeny    = "deny"
 )
+
+// SpawnRequestPayload asks the broker to fan out Count fresh-context
+// hands of the REQUESTING aspect (roundtable P2 / NEX-571). The parent
+// identity is never carried in the payload — it is always the WS
+// connection's registered aspect, so a hand request can't be forged on
+// another aspect's behalf.
+//
+// Thread, when set, threads the hands' audit posts (briefs + results)
+// under an existing topic. Empty Thread means "root a fresh audit
+// thread": the broker stores a root post attributed to the parent and
+// threads everything under it.
+type SpawnRequestPayload struct {
+	Brief  string `json:"brief"`
+	Count  int    `json:"count,omitempty"` // default 1; capped by the broker's SpawnMaxPerRequest
+	Thread string `json:"thread,omitempty"`
+}
+
+// SpawnHandle identifies one spawned hand. RunID is empty when the
+// hand was accepted but queued (spawn-concurrency or global cap) — it
+// launches when capacity frees, same queue semantics as ticket
+// dispatch.
+type SpawnHandle struct {
+	RunID string `json:"run_id,omitempty"`
+	Name  string `json:"name"`
+}
+
+// SpawnResultPayload answers a spawn.request: one handle per hand.
+// Errors come back as a spawn.request.error response instead.
+type SpawnResultPayload struct {
+	Hands []SpawnHandle `json:"hands"`
+}

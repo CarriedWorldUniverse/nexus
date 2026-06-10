@@ -478,6 +478,10 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleAspectModelConfigGet(env)
 	case frames.KindSwitchSurface:
 		c.handleSwitchSurfaceFrame(env)
+	case frames.KindSpawnRequest:
+		// Aspect-owned fan-out (NEX-571): the registered aspect asks for
+		// hands of itself. Runs in a goroutine inside the handler.
+		c.handleSpawnRequestFrame(env)
 	case frames.KindEscalationRequest:
 		// P3c: a native-API aspect's funnel paused a tool call and is
 		// asking a human. Relay to operators (identity-checked); the
