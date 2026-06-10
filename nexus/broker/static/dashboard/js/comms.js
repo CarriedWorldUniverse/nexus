@@ -51,11 +51,18 @@ const state = {
   backoffMs: 1000,
   reconnectTimer: null,
   manualClose: false,
+  // liveness watchdog: app-level ping/pong. The browser's WS object
+  // can report readyState OPEN on a dead tailnet path; pong silence
+  // is how we notice and force the reconnect machinery to kick in.
+  pingTimer: null,
+  lastPong: 0,
 };
 
 const RPC_TIMEOUT_MS = 30_000;
 const OUTBOX_CAP = 256;
 const MAX_BACKOFF_MS = 30_000;
+const PING_INTERVAL_MS = 30_000;
+const PONG_SILENCE_MS = 75_000;
 
 // crypto.randomUUID is available in every modern browser. We don't
 // need RFC4122-strict UUIDs — just collision-resistant strings. Fall
@@ -91,6 +98,10 @@ export function close() {
     clearTimeout(state.reconnectTimer);
     state.reconnectTimer = null;
   }
+  if (state.pingTimer) {
+    clearInterval(state.pingTimer);
+    state.pingTimer = null;
+  }
   if (state.ws) {
     state.ws.close(1000, 'operator close');
     state.ws = null;
@@ -125,6 +136,20 @@ function connect() {
       while (state.outbox.length > 0) {
         ws.send(state.outbox.shift());
       }
+      // Liveness watchdog. Ping every PING_INTERVAL_MS; if the server
+      // has been pong-silent past PONG_SILENCE_MS the socket is dead
+      // even though readyState says OPEN — force-close so onclose →
+      // scheduleReconnect() takes over.
+      state.lastPong = Date.now();
+      if (state.pingTimer) clearInterval(state.pingTimer);
+      state.pingTimer = setInterval(() => {
+        if (Date.now() - state.lastPong > PONG_SILENCE_MS) {
+          console.warn('comms: pong silence, forcing reconnect');
+          ws.close();
+          return;
+        }
+        sendFrame({ kind: 'ping', id: correlationID(), ts: nowISO(), payload: {} });
+      }, PING_INTERVAL_MS);
       for (const fn of state.listeners.onOpen) {
         try { fn(); } catch (e) { console.error('comms onOpen', e); }
       }
@@ -145,6 +170,10 @@ function connect() {
     ws.onclose = (ev) => {
       state.ready = false;
       state.ws = null;
+      if (state.pingTimer) {
+        clearInterval(state.pingTimer);
+        state.pingTimer = null;
+      }
       for (const fn of state.listeners.onClose) {
         try { fn(ev); } catch (e) { console.error('comms onClose', e); }
       }
@@ -200,6 +229,14 @@ function sendFrame(env) {
 }
 
 function handleFrame(env) {
+  // Liveness pong: consume before any routing. The broker replies
+  // with in_reply_to set to the ping's id, but pings aren't tracked
+  // in state.pending — intercept here so pongs feed the watchdog and
+  // never leak to handlers.
+  if (env.kind === 'pong') {
+    state.lastPong = Date.now();
+    return;
+  }
   // Response frame: route to pending by in_reply_to.
   if (env.in_reply_to) {
     const p = state.pending.get(env.in_reply_to);

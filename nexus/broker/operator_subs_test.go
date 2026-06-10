@@ -262,5 +262,16 @@ func TestOperatorSubs_UnknownSubscribeKindFallsThrough(t *testing.T) {
 	mustResponse(t, c, frames.KindSubscribeChat, frames.SubscribePayload{})
 }
 
+func TestOperatorPingGetsPong(t *testing.T) {
+	srv, _, _, _, tok := newOperatorTestServerFull(t)
+	c := dialWS(t, srv, tok)
+	// mustResponse sends the frame, reads the response, and verifies
+	// resp.InReplyTo == req.ID (correlation). We only need to assert kind.
+	resp := mustResponse(t, c, frames.KindPing, struct{}{})
+	if resp.Kind != frames.KindPong {
+		t.Fatalf("kind = %q, want %q", resp.Kind, frames.KindPong)
+	}
+}
+
 // confirm httptest.Server is the type returned, used implicitly.
 var _ *httptest.Server = (*httptest.Server)(nil)
