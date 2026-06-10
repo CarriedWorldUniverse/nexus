@@ -1,5 +1,7 @@
 # M3 — Dispatch Controller · Implementation Spec (NEX-437)
 
+> **Status (as of 2026-06-11):** historical. The standalone dispatch-controller aspect specced here was retired in favour of the **broker-inline recursive Runner**, which is the live dispatch path. Current identity model: `../2026-06-08-named-agent-dispatch-model.md`.
+
 **Status:** Design (2026-06-06) · **Epic:** NEX-434 · **Milestone:** M3 (NEX-437)
 **Depends on:** NEX-435 (M1 custodian seam — done + live-proven), NEX-436 (M2 worker runtime — built + lifecycle-proven)
 **Feeds:** M3b fan-out (separate follow-on spec)

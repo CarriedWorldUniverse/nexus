@@ -1,5 +1,7 @@
 # Recursive Cost-Routed Dispatch — Design
 
+> **Status (as of 2026-06-11):** the recursive broker-inline Runner shipped and is the live dispatch path (dispatch-controller retired), but the *faceless builder-pool / per-run identity* model below was superseded by **named-agent dispatch** (`2026-06-08-named-agent-dispatch-model.md`) — work runs as a real named team member, not an anonymous pool slot. The recursion + cost-routing framing here remains the reference; the identity model does not.
+
 > **Status:** design (brainstormed with the operator, 2026-06-07). Supersedes the flat `dispatch-controller` model. Precedes per-piece specs + implementation plans. The gemma tier is now validated empirically (2026-06-07; see §3 and *Local tier — GPU budget*); the rest of the ladder (Gemini slotting) and the routing judge are tuned from logged costs.
 
 ## One-liner
