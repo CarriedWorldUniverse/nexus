@@ -1,0 +1,38 @@
+# osv-scanner ignore list — companion to scripts/govulncheck-allowlist.txt.
+#
+# All entries are github.com/ollama/ollama@0.22.1 module-level advisories with
+# NO fixed version available (Fixed: N/A). They are server-side parsing/serving
+# DoS classes plus one client cross-domain token-exposure. Accepted because the
+# only ollama instance in this platform is the in-cluster gemma server
+# (gemma-ollama.nexus.svc) reached at a fixed cluster-DNS URL: not
+# internet-exposed, no auth tokens configured, no cross-domain redirects. Blast
+# radius is bounded to the local GPU server. The native ollama provider lane
+# (NEX-562/563) pulls the dep.
+#
+# REVIEW TRIGGER: remove the moment ollama ships fixed releases, or when the
+# dependency is dropped. Keep in lockstep with scripts/govulncheck-allowlist.txt.
+
+[[IgnoredVulns]]
+id = "GO-2025-3557"
+reason = "ollama@0.22.1 server-side DoS, no fix; in-cluster gemma only, not exposed"
+[[IgnoredVulns]]
+id = "GO-2025-3558"
+reason = "ollama@0.22.1 server-side DoS, no fix; in-cluster gemma only, not exposed"
+[[IgnoredVulns]]
+id = "GO-2025-3559"
+reason = "ollama@0.22.1 server-side DoS, no fix; in-cluster gemma only, not exposed"
+[[IgnoredVulns]]
+id = "GO-2025-3582"
+reason = "ollama@0.22.1 server-side DoS, no fix; in-cluster gemma only, not exposed"
+[[IgnoredVulns]]
+id = "GO-2025-3689"
+reason = "ollama@0.22.1 server-side DoS, no fix; in-cluster gemma only, not exposed"
+[[IgnoredVulns]]
+id = "GO-2025-3695"
+reason = "ollama@0.22.1 server-side DoS, no fix; in-cluster gemma only, not exposed"
+[[IgnoredVulns]]
+id = "GO-2025-3824"
+reason = "ollama@0.22.1 client token exposure, no fix; fixed cluster-DNS URL, no cross-domain"
+[[IgnoredVulns]]
+id = "GO-2025-4251"
+reason = "ollama@0.22.1 missing-auth model mgmt, no fix; in-cluster gemma only, not exposed"
