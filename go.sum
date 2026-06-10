@@ -1,7 +1,7 @@
 filippo.io/edwards25519 v1.2.0 h1:crnVqOiS4jqYleHd9vaKZ+HKtHfllngJIiOpNpoJsjo=
 filippo.io/edwards25519 v1.2.0/go.mod h1:xzAOLCNug/yB62zG1bQ8uziwrIqIuxhctzJT18Q77mc=
-github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260610092448-ecf2e3e5e813 h1:XVkd4mfP7kYi0/ZISKwAtU/13lVShxrCvwi/5mG7uV0=
-github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260610092448-ecf2e3e5e813/go.mod h1:nEWWic3aiWRjyUzmjdafUtqXoqS9f92KuUuuKpT5NYE=
+github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260610201547-d79b21b7959a h1:hN9dzPWEQTXSMK7/2frXeIjKkgh6pZNwsgzA/6JdfLg=
+github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260610201547-d79b21b7959a/go.mod h1:nEWWic3aiWRjyUzmjdafUtqXoqS9f92KuUuuKpT5NYE=
 github.com/CarriedWorldUniverse/casket-go v0.1.0 h1:t+DvXs8vhaNcTfkSS/sqK47fBTNVRdHfF7DT/ur0jtY=
 github.com/CarriedWorldUniverse/casket-go v0.1.0/go.mod h1:v0y8kPW/WmusBw+Q3ZtRYhVwoK/WVVVXHWSc/oRVWBo=
 github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603092700-bad238fd9d58 h1:EOFOdPFVNdmtqoJEDwRGJAdy1/yQid8VVeaJ4goQN6I=
