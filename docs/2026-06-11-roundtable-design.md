@@ -87,9 +87,11 @@ knowledge all inherit from the dispatcher. Both shapes now coexist:
   count, config_overrides}`), not by chat parsing.
 - The Runner creates worker Jobs that boot with the **parent's image,
   NEXUS.md/SOUL.md, and config** (per-work-type image seam already exists
-  in JobConfig.Image) under a **derived identity** `<parent>.sub-N` (herald
-  DeriveAgentKey lineage when herald-rooted boot lands; until then the
-  broker mints the scoped session). Effective scope = parent ∩ grant —
+  in JobConfig.Image) under a **derived identity** `<parent>.<word>` — the word leased from a
+  per-aspect pool of kindred terms (shadow.umbra, plumb.fathom,
+  anvil.temper…; operator: no numbered hands) — (herald DeriveAgentKey
+  lineage when herald-rooted boot lands; until then the broker mints the
+  scoped session). Effective scope = parent ∩ grant —
   never wider than the parent (cairn transitive model). Per v0.1, a hand's
   reply is attributed to the parent aspect; the lineage tag (not a separate
   persona) is what distinguishes it in the audit trail.
