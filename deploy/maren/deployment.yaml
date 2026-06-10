@@ -1,7 +1,7 @@
 # Always-on maren artist aspect — keel's always-on shape (agentfunnel without
 # --builder), on the maren image (builder + headless Secret Service), with a
-# PVC-backed keyring so agy's one-time OAuth login persists. replicas:1 — the
-# keyring auth is per-pod and the PVC is ReadWriteOnce.
+# PVC-backed agy state (~/.gemini holds its file-based auth AND conversation
+# store — agy does not use Secret Service here). replicas:1 — RWO PVC.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,7 +30,7 @@ spec:
               valueFrom: {secretKeyRef: {name: maren-keyring-pass, key: KEYRING_PASS}}
           volumeMounts:
             - {name: keyfile, mountPath: /etc/nexus}
-            - {name: keyring, mountPath: /root/.local/share/keyrings}
+            - {name: keyring, mountPath: /root/.gemini}
       volumes:
         - name: keyfile
           secret:
