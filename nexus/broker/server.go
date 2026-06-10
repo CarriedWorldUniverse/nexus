@@ -312,6 +312,27 @@ type Config struct {
 	// reach the ChatStore — routing them to the dispatch job engine.
 	// If nil, !dispatch messages are treated as ordinary chat.
 	Runner dispatch.Submitter
+
+	// AspectWakePolicy maps aspect name → wake policy: "always-on" |
+	// "wake-on-mention" | "dispatch-only" (the WakePolicy* constants in
+	// wake.go). Aspects absent from the map have no wake behavior —
+	// exactly the pre-napping semantics. Drives both the wake controller
+	// (chat to a wake-on-mention aspect with no live conn scales its
+	// Deployment 0→1) and the idle reaper (quiet wake-on-mention aspects
+	// scale back to zero). cmd/nexus populates this from
+	// NEXUS_ASPECT_WAKE_POLICY ("plumb=wake-on-mention,keel=always-on").
+	AspectWakePolicy map[string]string
+
+	// AspectDeployment maps aspect name → its k8s Deployment name for
+	// scale operations. Aspects absent from the map default to their own
+	// name. cmd/nexus populates this from NEXUS_ASPECT_DEPLOYMENT.
+	AspectDeployment map[string]string
+
+	// IdleTimeout is how long a wake-on-mention aspect must be quiet (no
+	// chat to/from it, no active dispatch run, no in-flight turn) before
+	// the idle reaper scales it to zero. Zero → defaultIdleTimeout (15m).
+	// cmd/nexus populates this from NEXUS_WAKE_IDLE_TIMEOUT.
+	IdleTimeout time.Duration
 }
 
 // Broker owns the HTTP server and its roster.
@@ -397,6 +418,19 @@ type Broker struct {
 	k8sReader      kubernetes.Interface
 	dispatchK8s    *dispatch.K8s
 	k8sNamespace   string
+
+	// wake scales napping wake-on-mention aspects 0→1 when chat arrives
+	// for them (wake.go). nil unless AspectWakePolicy is configured and
+	// a k8s client is available; MaybeWake is nil-safe so the chat hook
+	// doesn't gate.
+	wake *wakeController
+
+	// lastChatActivity records the most recent chat touch (as sender OR
+	// recipient) per aspect, stamped inline in HandleChatSend — the idle
+	// reaper's cheap last-activity source (no ChatStore scans). Guarded
+	// by lastChatMu; always non-nil after New.
+	lastChatMu       sync.Mutex
+	lastChatActivity map[string]time.Time
 }
 
 func New(cfg Config, r *roster.Roster) *Broker {
@@ -443,6 +477,7 @@ func New(cfg Config, r *roster.Roster) *Broker {
 		connPerIP:            make(map[string]int),
 		operators:            make(map[*wsConn]struct{}),
 		lastSessionRefreshAt: make(map[string]time.Time),
+		lastChatActivity:     make(map[string]time.Time),
 	}
 	if cfg.Observability != nil {
 		b.observability = cfg.Observability
@@ -461,6 +496,13 @@ func New(cfg Config, r *roster.Roster) *Broker {
 	b.k8sNamespace = cfg.K8sNamespace
 	if cfg.K8sReader != nil {
 		b.dispatchK8s = &dispatch.K8s{Client: cfg.K8sReader, Namespace: cfg.K8sNamespace}
+	}
+	// Wake controller: needs both a policy map and a k8s client to scale
+	// with. Outside the cluster (or with no policies) b.wake stays nil and
+	// MaybeWake no-ops — exactly the pre-napping chat semantics.
+	if len(cfg.AspectWakePolicy) > 0 && b.dispatchK8s != nil {
+		b.wake = newWakeController(b.dispatchK8s, cfg.AspectWakePolicy, cfg.AspectDeployment, b.log)
+		b.log.Info("wake controller enabled", "aspects", len(cfg.AspectWakePolicy))
 	}
 	if cfg.RunsStore != nil {
 		if err := cfg.RunsStore.Migrate(context.Background()); err != nil {
@@ -535,6 +577,15 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	}
 	b.ctx, b.ctxCancel = context.WithCancel(ctx)
 	defer b.ctxCancel()
+
+	// Idle reaper — the scale-down half of napping presence. Gated on
+	// the wake controller: never scale anything to zero that chat can't
+	// scale back up. Ticker shape mirrors the stale-reap sweep.
+	if b.wake != nil {
+		reaper := newIdleReaper(b, b.dispatchK8s, b.cfg.IdleTimeout)
+		go reaper.run(b.ctx)
+		b.log.Info("idle reaper started", "idle_timeout", reaper.timeout)
+	}
 
 	mux := http.NewServeMux()
 	// WS surface per transport spec v0.1 — see ws.go. Auth is checked

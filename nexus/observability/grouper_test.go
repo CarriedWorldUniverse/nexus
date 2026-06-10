@@ -681,3 +681,39 @@ func TestGrouperTurnDoneZeroTimingOmitted(t *testing.T) {
 		t.Errorf("payload carries timing key for unrecorded timing: %s", last.Payload)
 	}
 }
+
+func TestGrouperTurnInFlight(t *testing.T) {
+	c := &capture{}
+	g := NewGrouperWithClock("anvil", c.emit, fixedClock())
+
+	if g.TurnInFlight() {
+		t.Fatal("fresh grouper reports a turn in flight")
+	}
+	g.BeginTurn("t1", "main", "model", "provider", 0)
+	if !g.TurnInFlight() {
+		t.Fatal("open turn not reported in flight")
+	}
+	g.EndTurn()
+	if g.TurnInFlight() {
+		t.Fatal("ended turn still reported in flight")
+	}
+}
+
+func TestGrouperTurnInFlightFor(t *testing.T) {
+	c := &capture{}
+	now := time.Unix(1700000000, 0)
+	g := NewGrouperWithClock("anvil", c.emit, func() time.Time { return now })
+
+	if age, open := g.TurnInFlightFor(); open || age != 0 {
+		t.Fatalf("fresh grouper TurnInFlightFor = (%v, %v), want (0, false)", age, open)
+	}
+	g.BeginTurn("t1", "main", "model", "provider", 0)
+	now = now.Add(3 * time.Hour)
+	if age, open := g.TurnInFlightFor(); !open || age != 3*time.Hour {
+		t.Fatalf("open turn TurnInFlightFor = (%v, %v), want (3h, true)", age, open)
+	}
+	g.EndTurn()
+	if _, open := g.TurnInFlightFor(); open {
+		t.Fatal("ended turn still reported in flight by TurnInFlightFor")
+	}
+}

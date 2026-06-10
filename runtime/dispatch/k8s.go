@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -161,6 +162,23 @@ func (k *K8s) SetBriefOwner(ctx context.Context, taskID string, job *batchv1.Job
 	}}
 	_, err = k.Client.CoreV1().ConfigMaps(k.Namespace).Update(ctx, cm, metav1.UpdateOptions{})
 	return err
+}
+
+// ScaleDeployment sets the replica count on a named Deployment via the
+// scale subresource. The napping-presence seams (roundtable spec component
+// 1): the broker's wake controller scales 0→1 when chat arrives for a
+// napping wake-on-mention aspect; the idle reaper scales 1→0 when it goes
+// quiet. UpdateScale (not Get+Update) so concurrent spec edits aren't
+// clobbered.
+func (k *K8s) ScaleDeployment(ctx context.Context, name string, replicas int32) error {
+	scale := &autoscalingv1.Scale{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: k.Namespace},
+		Spec:       autoscalingv1.ScaleSpec{Replicas: replicas},
+	}
+	if _, err := k.Client.AppsV1().Deployments(k.Namespace).UpdateScale(ctx, name, scale, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("dispatch: scale deployment %s to %d: %w", name, replicas, err)
+	}
+	return nil
 }
 
 // ActiveJob is a live builder Job re-adopted on runner start.
