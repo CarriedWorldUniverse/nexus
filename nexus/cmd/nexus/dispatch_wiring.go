@@ -20,3 +20,15 @@ type brokerChatSender struct{ b *broker.Broker }
 func (s brokerChatSender) SendChat(ctx context.Context, content string, replyTo int64, topic string) (int64, error) {
 	return s.b.HandleChatSend(ctx, "dispatch", content, replyTo, topic)
 }
+
+// brokerAuditPoster posts THROUGH the broker's chat path AS a named
+// sender, returning the stored msg id. The dispatch Runner uses it for
+// spawn audit-thread roots (from=<parent>, NEX-571) — the same
+// post-as-thread-root machinery !dispatch uses, originated broker-side.
+// Spawn summaries never start with "!dispatch", so HandleChatSend does
+// not re-intercept them. Satisfies dispatch.AuditPoster.
+type brokerAuditPoster struct{ b *broker.Broker }
+
+func (s brokerAuditPoster) PostFrom(ctx context.Context, from, content string, replyTo int64, topic string) (int64, error) {
+	return s.b.HandleChatSend(ctx, from, content, replyTo, topic)
+}

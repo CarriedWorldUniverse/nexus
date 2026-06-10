@@ -417,8 +417,27 @@ func main() {
 			maxConc = n
 		}
 	}
+	// Per-parent hand cap for aspect-owned fan-out (NEX-571): how many
+	// live hands one aspect may run at once. The global MaxConc above
+	// still applies on top.
+	spawnMaxConc := 4
+	if v := os.Getenv("CW_SPAWN_MAX_CONCURRENT"); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+			spawnMaxConc = n
+		}
+	}
 	var runner dispatch.Submitter
-	dispatchRunner := &dispatch.Runner{Cfg: dispatchCfg, MaxConc: maxConc}
+	dispatchRunner := &dispatch.Runner{
+		Cfg:                dispatchCfg,
+		MaxConc:            maxConc,
+		SpawnMaxConcurrent: spawnMaxConc,
+		// Hands authenticate with a broker-minted derived session JWT
+		// (no keyfile exists for <parent>.sub-N) — the mint sits beside
+		// the aspect-keyfile-<agent> seam ticket dispatches use.
+		MintHandCredential: func(ctx context.Context, parent, derived string) (string, error) {
+			return keyfileValidator.MintDerivedCredential(ctx, parent, derived)
+		},
+	}
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		if k8s, kerr := dispatch.NewInClusterK8s(dispatchCfg.Namespace); kerr != nil {
 			slog.Error("dispatch: in-cluster k8s client failed — Runner will not spawn jobs", "err", kerr)
@@ -558,6 +577,9 @@ func main() {
 	// broker. WatchLoop only runs when a k8s client is wired (in-cluster).
 	if dispatchRunner != nil {
 		dispatchRunner.Poster = dispatch.NewWsPoster(ctx, brokerChatSender{b: b})
+		// Spawn audit roots post AS the parent aspect (NEX-571) — same
+		// chat path, sender chosen per post.
+		dispatchRunner.Audit = brokerAuditPoster{b: b}
 		if dispatchRunner.K8sIface != nil {
 			go func() { _ = dispatchRunner.WatchLoop(ctx) }()
 			logger.Info("dispatch: Job watch loop started")

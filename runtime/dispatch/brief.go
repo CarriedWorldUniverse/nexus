@@ -26,6 +26,17 @@ type Brief struct {
 	// Empty for root dispatches (operator → shadow).
 	ParentRunID string `json:"parent_run_id,omitempty"`
 
+	// SpawnParent marks a hand brief (NEX-571): the BASE aspect this
+	// worker is a fresh-context instance of. Agent is then the derived
+	// identity `<SpawnParent>.sub-N`. Empty for ticket dispatches.
+	SpawnParent string `json:"spawn_parent,omitempty"`
+
+	// SessionJWT is the broker-minted derived credential injected into
+	// a hand's Job env in place of the aspect keyfile volume. Set by
+	// Runner.launch at spawn time (never enqueued/serialised — fresh
+	// TTL per launch).
+	SessionJWT string `json:"-"`
+
 	Task string `json:"-"`
 }
 

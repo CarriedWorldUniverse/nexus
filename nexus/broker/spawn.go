@@ -37,6 +37,9 @@ type SpawnSubmitter interface {
 	SubmitSpawn(ctx context.Context, parent, brief string, count int, thread string) ([]dispatch.SpawnHandle, error)
 }
 
+// The production Runner must keep satisfying the spawn seam.
+var _ SpawnSubmitter = (*dispatch.Runner)(nil)
+
 // spawnMaxPerRequest is the effective per-request hand cap.
 func (b *Broker) spawnMaxPerRequest() int {
 	if b.cfg.SpawnMaxPerRequest > 0 {

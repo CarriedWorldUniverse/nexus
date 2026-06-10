@@ -1,0 +1,391 @@
+package dispatch_test
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
+	corev1 "k8s.io/api/core/v1"
+)
+
+type auditPost struct {
+	from    string
+	content string
+	topic   string
+}
+
+type fakeAudit struct {
+	posts []auditPost
+	err   error
+}
+
+func (f *fakeAudit) PostFrom(_ context.Context, from, content string, _ int64, topic string) (int64, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	f.posts = append(f.posts, auditPost{from: from, content: content, topic: topic})
+	return 42, nil
+}
+
+type spawnStart struct {
+	runID         string
+	ticket        string
+	agent         string
+	thread        string
+	dispatchMsgID int64
+}
+
+type spawnRecorder struct {
+	starts []spawnStart
+	done   []recorderDoneCall
+}
+
+func (r *spawnRecorder) RecordRunStart(_ context.Context, runID, ticket, agent, thread, _, _, _ string, dispatchMsgID int64) {
+	r.starts = append(r.starts, spawnStart{runID: runID, ticket: ticket, agent: agent, thread: thread, dispatchMsgID: dispatchMsgID})
+}
+
+func (r *spawnRecorder) RecordRunDone(_ context.Context, runID, status string, _ time.Time, _ string, _ int) {
+	r.done = append(r.done, recorderDoneCall{runID: runID, status: status})
+}
+
+func newSpawnFixture(fk *fakeK8s) (*dispatch.Runner, *recordingPoster, *fakeAudit, *spawnRecorder) {
+	r := newRunner(fk)
+	p := &recordingPoster{}
+	a := &fakeAudit{}
+	rec := &spawnRecorder{}
+	r.Poster = p
+	r.Audit = a
+	r.Recorder = rec
+	r.MintHandCredential = func(_ context.Context, _, derived string) (string, error) {
+		return "jwt-for-" + derived, nil
+	}
+	_ = r.Init(context.Background())
+	return r, p, a, rec
+}
+
+// The core spawn contract: N hands as derived identities of the parent,
+// no keyfile provisioning, audit root attributed to the parent, briefs
+// threaded under it, RunsStore rows keyed on the derived agent with
+// DispatchMsgID = the audit root.
+func TestSubmitSpawnCreatesDerivedHands(t *testing.T) {
+	fk := &fakeK8s{}
+	r, poster, audit, rec := newSpawnFixture(fk)
+
+	handles, err := r.SubmitSpawn(context.Background(), "plumb", "summarize the runner package", 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(handles) != 2 || handles[0].Name != "plumb.sub-1" || handles[1].Name != "plumb.sub-2" {
+		t.Fatalf("handles = %+v", handles)
+	}
+	for _, h := range handles {
+		if h.RunID == "" {
+			t.Errorf("launched hand %s should carry a RunID", h.Name)
+		}
+	}
+	if !r.AgentBusy("plumb.sub-1") || !r.AgentBusy("plumb.sub-2") {
+		t.Error("both hands should be busy")
+	}
+	if r.AgentBusy("plumb") {
+		t.Error("the parent itself must stay free — hands run beside it")
+	}
+	if len(fk.jobs) != 2 || !strings.HasPrefix(fk.jobs[0], "builder-plumb-sub-1-") {
+		t.Errorf("jobs = %v", fk.jobs)
+	}
+	if len(fk.secrets) != 0 {
+		t.Errorf("hands must not provision keyfile secrets, got %v", fk.secrets)
+	}
+	if !fk.homes["plumb.sub-1"] {
+		t.Error("hand home repo PVC should be provisioned for the derived name")
+	}
+
+	// Audit root: from=<parent>, fresh thread (no topic on the root).
+	if len(audit.posts) != 1 || audit.posts[0].from != "plumb" || audit.posts[0].topic != "" {
+		t.Fatalf("audit posts = %+v", audit.posts)
+	}
+	if !strings.Contains(audit.posts[0].content, "2 hand(s) of plumb") {
+		t.Errorf("root content = %q", audit.posts[0].content)
+	}
+
+	// Brief posts precede the spawned posts, all in the spawn-42 thread.
+	if len(poster.posts) < 4 {
+		t.Fatalf("posts = %v", poster.posts)
+	}
+	if !strings.Contains(poster.posts[0], "hand plumb.sub-1 brief:") ||
+		!strings.Contains(poster.posts[1], "hand plumb.sub-2 brief:") {
+		t.Errorf("brief posts wrong/missing: %v", poster.posts)
+	}
+	if !strings.Contains(poster.posts[2], "hand spawned as plumb.sub-1") {
+		t.Errorf("spawned post wrong: %v", poster.posts)
+	}
+
+	// RunsStore rows: agent = derived name, DispatchMsgID = audit root,
+	// thread = the rooted spawn thread.
+	if len(rec.starts) != 2 {
+		t.Fatalf("run starts = %+v", rec.starts)
+	}
+	for _, s := range rec.starts {
+		if !strings.HasPrefix(s.agent, "plumb.sub-") {
+			t.Errorf("run agent = %q", s.agent)
+		}
+		if s.dispatchMsgID != 42 {
+			t.Errorf("DispatchMsgID = %d, want the audit root 42", s.dispatchMsgID)
+		}
+		if s.thread != "spawn-42" {
+			t.Errorf("thread = %q, want spawn-42", s.thread)
+		}
+		if !strings.HasPrefix(s.ticket, "hand-") {
+			t.Errorf("ticket = %q", s.ticket)
+		}
+	}
+}
+
+// BuildJob for a hand brief: derived credential as env in place of the
+// keyfile volume, no -k arg, lineage label.
+func TestBuildJobHandSpec(t *testing.T) {
+	b := dispatch.Brief{
+		Agent:       "plumb.sub-1",
+		SpawnParent: "plumb",
+		SessionJWT:  "hand-jwt",
+		Ticket:      "hand-abc",
+		Thread:      "spawn-42",
+		RunID:       "run-1",
+	}
+	job := dispatch.BuildJob(b, dispatch.JobConfig{Namespace: "nexus", BrokerHost: "nexus.internal"}, "task-1", "claude")
+
+	if got := job.Labels["nexus.dispatch/lineage"]; got != "plumb" {
+		t.Errorf("lineage label = %q", got)
+	}
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == "keyfile" {
+			t.Error("hand Job must not mount a keyfile volume")
+		}
+	}
+	c := job.Spec.Template.Spec.Containers[0]
+	for _, m := range c.VolumeMounts {
+		if m.MountPath == "/etc/nexus" {
+			t.Error("hand Job must not mount /etc/nexus")
+		}
+	}
+	env := map[string]string{}
+	for _, e := range c.Env {
+		env[e.Name] = e.Value
+	}
+	if env["CW_SESSION_JWT"] != "hand-jwt" || env["CW_ASPECT_NAME"] != "plumb.sub-1" || env["CW_SPAWN_PARENT"] != "plumb" {
+		t.Errorf("hand env = %v", env)
+	}
+	for i, a := range c.Args {
+		if a == "-k" {
+			t.Errorf("hand args must not carry -k (args=%v, idx=%d)", c.Args, i)
+		}
+	}
+}
+
+// Ticket dispatches keep the keyfile mount + -k arg (regression guard
+// for the spawn-conditional jobspec).
+func TestBuildJobTicketDispatchKeepsKeyfile(t *testing.T) {
+	b := dispatch.Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "t", RunID: "run-1"}
+	job := dispatch.BuildJob(b, dispatch.JobConfig{Namespace: "nexus", BrokerHost: "nexus.internal"}, "task-1", "claude")
+	var hasKeyfile bool
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == "keyfile" && v.Secret != nil && v.Secret.SecretName == "aspect-keyfile-anvil" {
+			hasKeyfile = true
+		}
+	}
+	if !hasKeyfile {
+		t.Error("ticket dispatch lost its keyfile volume")
+	}
+	c := job.Spec.Template.Spec.Containers[0]
+	if len(c.Args) < 2 || c.Args[0] != "-k" {
+		t.Errorf("ticket args = %v, want leading -k", c.Args)
+	}
+	if _, ok := job.Labels["nexus.dispatch/lineage"]; ok {
+		t.Error("ticket dispatch must not carry a lineage label")
+	}
+	var envNames []string
+	for _, e := range c.Env {
+		envNames = append(envNames, e.Name)
+	}
+	for _, n := range envNames {
+		if n == "CW_SESSION_JWT" {
+			t.Error("ticket dispatch must not carry CW_SESSION_JWT")
+		}
+	}
+	_ = corev1.EnvVar{} // keep corev1 imported for future spec assertions
+}
+
+// Per-parent cap: hands beyond SpawnMaxConcurrent queue and drain when
+// a sibling completes — Submit's queue semantics.
+func TestSubmitSpawnPerParentCapQueuesAndDrains(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _, rec := newSpawnFixture(fk)
+	r.SpawnMaxConcurrent = 2
+
+	handles, err := r.SubmitSpawn(context.Background(), "plumb", "work", 3, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(handles) != 3 {
+		t.Fatalf("handles = %+v", handles)
+	}
+	if len(fk.jobs) != 2 {
+		t.Fatalf("jobs = %v, want 2 launched (third queued)", fk.jobs)
+	}
+	var queued *dispatch.SpawnHandle
+	for i := range handles {
+		if handles[i].RunID == "" {
+			queued = &handles[i]
+		}
+	}
+	if queued == nil || queued.Name != "plumb.sub-3" {
+		t.Fatalf("expected plumb.sub-3 queued with empty RunID, handles=%+v", handles)
+	}
+
+	// Complete the first hand → the queued third drains.
+	r.OnJobDone(dispatch.JobDone{Ticket: rec.starts[0].ticket, OK: true})
+	if len(fk.jobs) != 3 {
+		t.Errorf("jobs after drain = %d, want 3", len(fk.jobs))
+	}
+	if !r.AgentBusy("plumb.sub-3") {
+		t.Error("plumb.sub-3 should run after a sibling freed capacity")
+	}
+}
+
+// The global MaxConc applies on top of the per-parent cap.
+func TestSubmitSpawnGlobalMaxConcApplies(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _, _ := newSpawnFixture(fk)
+	r.MaxConc = 1
+
+	handles, err := r.SubmitSpawn(context.Background(), "plumb", "work", 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fk.jobs) != 1 {
+		t.Fatalf("jobs = %v, want 1 (global cap)", fk.jobs)
+	}
+	launched := 0
+	for _, h := range handles {
+		if h.RunID != "" {
+			launched++
+		}
+	}
+	if launched != 1 {
+		t.Errorf("launched handles = %d, want 1", launched)
+	}
+}
+
+// Overlapping spawns never collide on a derived name: indices already
+// busy (or queued) are skipped.
+func TestSubmitSpawnPicksFreeIndices(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _, _ := newSpawnFixture(fk)
+
+	if _, err := r.SubmitSpawn(context.Background(), "plumb", "first", 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	handles, err := r.SubmitSpawn(context.Background(), "plumb", "second", 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(handles) != 1 || handles[0].Name != "plumb.sub-2" {
+		t.Fatalf("handles = %+v, want plumb.sub-2 (sub-1 busy)", handles)
+	}
+}
+
+// A caller-supplied thread means the hands JOIN that thread: no extra
+// audit root, DispatchMsgID stays 0, posts target the given topic.
+func TestSubmitSpawnExistingThreadSkipsRoot(t *testing.T) {
+	fk := &fakeK8s{}
+	r, poster, audit, rec := newSpawnFixture(fk)
+
+	if _, err := r.SubmitSpawn(context.Background(), "plumb", "work", 1, "NEX-571"); err != nil {
+		t.Fatal(err)
+	}
+	if len(audit.posts) != 0 {
+		t.Errorf("no audit root expected, got %+v", audit.posts)
+	}
+	if rec.starts[0].thread != "NEX-571" || rec.starts[0].dispatchMsgID != 0 {
+		t.Errorf("start = %+v", rec.starts[0])
+	}
+	if len(poster.posts) == 0 {
+		t.Fatal("brief post missing")
+	}
+}
+
+func TestSubmitSpawnRejections(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _, _ := newSpawnFixture(fk)
+
+	if _, err := r.SubmitSpawn(context.Background(), "plumb.sub-1", "work", 1, ""); err == nil {
+		t.Error("derived parent must be rejected (no sub-of-sub)")
+	}
+	if _, err := r.SubmitSpawn(context.Background(), "plumb", "  ", 1, ""); err == nil {
+		t.Error("empty brief must be rejected")
+	}
+	r.MintHandCredential = nil
+	if _, err := r.SubmitSpawn(context.Background(), "plumb", "work", 1, ""); err == nil {
+		t.Error("missing credential minter must be rejected")
+	}
+	if len(fk.jobs) != 0 {
+		t.Errorf("no jobs expected, got %v", fk.jobs)
+	}
+}
+
+// A mint failure rolls the hand back: agent freed, run recorded failed,
+// failure posted to the thread, no handle returned.
+func TestSubmitSpawnMintFailureRollsBack(t *testing.T) {
+	fk := &fakeK8s{}
+	r, poster, _, rec := newSpawnFixture(fk)
+	r.MintHandCredential = func(context.Context, string, string) (string, error) {
+		return "", errors.New("mint boom")
+	}
+
+	if _, err := r.SubmitSpawn(context.Background(), "plumb", "work", 1, ""); err == nil {
+		t.Fatal("expected error when every hand fails to launch")
+	}
+	if r.AgentBusy("plumb.sub-1") {
+		t.Error("failed hand must be rolled back")
+	}
+	if len(rec.done) != 1 || rec.done[0].status != "failed" {
+		t.Errorf("recorder done = %+v", rec.done)
+	}
+	found := false
+	for _, p := range poster.posts {
+		if strings.Contains(p, "spawn failed") && strings.Contains(p, "mint boom") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("failure not posted: %v", poster.posts)
+	}
+	if len(fk.jobs) != 0 {
+		t.Errorf("no job should be created, got %v", fk.jobs)
+	}
+}
+
+// OnJobDone's completion post for a hand carries the lineage, not the
+// builder branch/PR block.
+func TestHandCompletionSummaryCarriesLineage(t *testing.T) {
+	fk := &fakeK8s{}
+	r, poster, _, rec := newSpawnFixture(fk)
+
+	if _, err := r.SubmitSpawn(context.Background(), "plumb", "work", 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	r.OnJobDone(dispatch.JobDone{Ticket: rec.starts[0].ticket, OK: true})
+
+	got := poster.posts[len(poster.posts)-1]
+	if !strings.Contains(got, "hand done: plumb.sub-1 (hand of plumb)") {
+		t.Errorf("summary = %q", got)
+	}
+	if strings.Contains(got, "PR:") || strings.Contains(got, "branch:") {
+		t.Errorf("hand summary must not carry the builder PR block: %q", got)
+	}
+	if r.AgentBusy("plumb.sub-1") {
+		t.Error("hand should be free after completion")
+	}
+}

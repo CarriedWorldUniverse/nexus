@@ -45,13 +45,21 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	codexProvider := provider == "codex-cli"
 	antigravityProvider := provider == "antigravity-cli"
 	// The Job runs AS the named agent: keyfile = aspect-keyfile-<agent>, and
-	// the Job name + labels carry the agent + run id.
+	// the Job name + labels carry the agent + run id. A hand brief
+	// (SpawnParent set, NEX-571) runs as the DERIVED identity instead:
+	// no keyfile exists for it, so the broker-minted session JWT is
+	// injected as env in place of the keyfile volume, and the lineage
+	// label lets observers group hands under their base aspect.
+	spawn := b.SpawnParent != ""
 	keyfileAspect := b.Agent
 	labels := map[string]string{
 		"app":                   "nexus-builder",
 		"nexus.dispatch/agent":  b.Agent,
 		"nexus.dispatch/ticket": b.Ticket,
 		"nexus.dispatch/run-id": b.RunID,
+	}
+	if spawn {
+		labels["nexus.dispatch/lineage"] = dnsLabelPart(b.SpawnParent)
 	}
 	annotations := map[string]string{}
 	if b.Thread != "" {
@@ -70,6 +78,19 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		// CODEX_HOME to the auth location, HOME-independent.
 		{Name: "CODEX_HOME", Value: "/root/.codex"},
 	}
+	if spawn {
+		// Derived hand credential (NEX-571 Task B/C): the broker-signed
+		// session JWT for `<parent>.sub-N`, injected beside where ticket
+		// dispatches mount aspect-keyfile-<agent>. Same trust domain as
+		// the keyfile Secret (cluster-internal Job spec), per the locked
+		// v1 env-injection decision; herald DeriveAgentKey replaces this
+		// when herald-rooted boot lands.
+		env = append(env,
+			corev1.EnvVar{Name: "CW_SESSION_JWT", Value: b.SessionJWT},
+			corev1.EnvVar{Name: "CW_ASPECT_NAME", Value: b.Agent},
+			corev1.EnvVar{Name: "CW_SPAWN_PARENT", Value: b.SpawnParent},
+		)
+	}
 	if cfg.LynxAIBaseURL != "" {
 		env = append(env, corev1.EnvVar{Name: "LYNXAI_BASE_URL", Value: cfg.LynxAIBaseURL})
 	}
@@ -82,7 +103,6 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		{Name: "home-repo", MountPath: homeRepoMountPath},
 		{Name: "home-work", MountPath: homeWorkMountPath},
 		{Name: "shared-repos", MountPath: sharedReposMountPath},
-		{Name: "keyfile", MountPath: "/etc/nexus", ReadOnly: true},
 		// Brief ConfigMap mounts as its OWN directory — must NOT be a
 		// file inside /etc/nexus (the keyfile Secret's mount point), or
 		// the OCI runtime fails with "not a directory" (NEX-437).
@@ -94,8 +114,11 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		{Name: "home-repo", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: HomePVCName(b.Agent)}}},
 		{Name: "home-work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: "shared-repos", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: SharedReposPVCName()}}},
-		{Name: "keyfile", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "aspect-keyfile-" + keyfileAspect}}},
 		{Name: "brief", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "brief-" + taskID}}}},
+	}
+	if !spawn {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: "keyfile", MountPath: "/etc/nexus", ReadOnly: true})
+		volumes = append(volumes, corev1.Volume{Name: "keyfile", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "aspect-keyfile-" + keyfileAspect}}})
 	}
 	var initContainers []corev1.Container
 	if codexProvider {
@@ -147,24 +170,34 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 						Name:            "builder",
 						Image:           cfg.Image,
 						ImagePullPolicy: corev1.PullNever,
-						Args: []string{
-							"-k", "/etc/nexus/keyfile.json",
-							"-builder",
-							"-brief-file", "/etc/dispatch/brief.md",
-							"-reply-topic", b.Thread,
-							"-builder-timeout", cfg.BriefTimeout,
-							"-repo", b.Repo,
-							"-ticket", b.Ticket,
-							"-branch", b.Branch,
-						},
-						Env:          env,
-						VolumeMounts: volumeMounts,
+						Args:            builderArgs(b, cfg, spawn),
+						Env:             env,
+						VolumeMounts:    volumeMounts,
 					}},
 					Volumes: volumes,
 				},
 			},
 		},
 	}
+}
+
+// builderArgs assembles the agentfunnel command line. Ticket dispatches
+// authenticate with the mounted keyfile; hand briefs (spawn) carry no
+// keyfile — their identity is the CW_SESSION_JWT env injected above.
+func builderArgs(b Brief, cfg JobConfig, spawn bool) []string {
+	var args []string
+	if !spawn {
+		args = append(args, "-k", "/etc/nexus/keyfile.json")
+	}
+	return append(args,
+		"-builder",
+		"-brief-file", "/etc/dispatch/brief.md",
+		"-reply-topic", b.Thread,
+		"-builder-timeout", cfg.BriefTimeout,
+		"-repo", b.Repo,
+		"-ticket", b.Ticket,
+		"-branch", b.Branch,
+	)
 }
 
 func HomePVCName(agent string) string {
