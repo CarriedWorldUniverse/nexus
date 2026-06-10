@@ -17,4 +17,12 @@ COPY shadow-entrypoint.sh /usr/local/bin/shadow-entrypoint.sh
 COPY shadow-claude-login.sh /usr/local/bin/shadow-claude-login
 RUN chmod 0755 /usr/local/bin/shadow-entrypoint.sh /usr/local/bin/shadow-claude-login
 
+# Operational context for the claude-code session. The funnel runs claude
+# with cmd.Dir = AspectHome = the funnel's cwd, which is the builder image's
+# WORKDIR /work — claude-code auto-reads CLAUDE.md there at session start,
+# and CLAUDE.md points at RUNBOOK.md. Image-baked (git-versioned, survives
+# pod restarts, no broker schema involved); /work has no volume mount in the
+# shadow deployment, so these stay exactly as built.
+COPY CLAUDE.md RUNBOOK.md /work/
+
 ENTRYPOINT ["/usr/local/bin/shadow-entrypoint.sh"]
