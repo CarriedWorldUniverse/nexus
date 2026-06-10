@@ -177,9 +177,15 @@ func (b *Broker) fanOutToOperators(env frames.Envelope, pred func(c *wsConn) boo
 // to every subscribing operator regardless of recipient policy
 // (operator's view is "everything").
 func (b *Broker) broadcastChatDeliverToOperators(env frames.Envelope) {
+	n := 0
 	b.fanOutToOperators(env, func(c *wsConn) bool {
-		return c.subscribedChat
+		if c.subscribedChat {
+			n++
+			return true
+		}
+		return false
 	})
+	b.log.Debug("chat.deliver operator fan-out", "subscribers", n)
 }
 
 // BroadcastChatReactionUpdate pushes a chat.reaction.update frame to
