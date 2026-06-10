@@ -1,5 +1,7 @@
 # Hand Dispatch — v0.1
 
+> **Status (as of 2026-06-11):** historical. Ticket dispatch is now **named-agent dispatch** (`../2026-06-08-named-agent-dispatch-model.md`) over the broker-inline Runner — work runs as a real named team member. The aspect-owned "hands" fan-out described here is being re-introduced alongside it (roundtable spec), distinct from ticket dispatch.
+
 **Date:** 2026-04-30
 **Status:** Spec — operator-resolved (msgs #8366 / #8368 / #8370)
 **Supersedes:** `agents/keel/HANDS_ARCHITECTURE.md` (2026-04-13) — named-persistent identity model retired

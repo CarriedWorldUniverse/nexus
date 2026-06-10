@@ -1,5 +1,7 @@
 # k3s On-Demand Work Dispatch — Design
 
+> **Status (as of 2026-06-11):** implemented and live. On-demand k3s Job dispatch shipped, but the **broker-inline recursive Runner** is the live dispatch path — the standalone dispatch-controller aspect described in the M3 milestone was retired. See `../2026-06-08-named-agent-dispatch-model.md` for the current identity model.
+
 **Status:** Approved design (2026-06-05) · **Epic:** NEX-434 · **Milestones:** NEX-435 (M1), NEX-436 (M2), NEX-437 (M3)
 **Related:** NEX-433 (case-in-point), NEX-376 (herald / unified identity), `docs/2026-06-04-credential-custodian-design.md`
 

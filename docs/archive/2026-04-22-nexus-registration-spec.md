@@ -1,5 +1,7 @@
 # Nexus Registration Architecture — Spec v0.5
 
+> **Status (as of 2026-06-11):** historical scaffold-era spec. Nexus is now a deployed broker + aspect runtime with a dispatch fabric on k3s; identity is herald-rooted (see `2026-06-03-herald-rooted-agent-bootstrap-design.md`) and the `C:\src\…` paths here are dead. For current truth start from the top-level [README](../README.md) / [architecture](../architecture.md).
+
 **Date:** 2026-04-22 (v0.1) → 2026-04-24 (v0.2 → v0.3 → v0.4 → v0.5)
 **Status:** Draft — scaffold complete at v0.3; v0.5 adds knowledge storage + retrieval.
 **Owner:** keel

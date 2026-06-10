@@ -1,5 +1,7 @@
 # Recursive Dispatch Mechanism — Implementation Plan
 
+> **Status (as of 2026-06-11):** the broker-inline recursive Runner shipped and is the live dispatch path. The pool-slot identities (`builder-1`…`builder-N`) used throughout this plan were superseded by **named-agent dispatch** (`2026-06-08-named-agent-dispatch-model.md`): jobs now run as the real named agent rather than an anonymous pool slot. Treat this as a historical implementation record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the flat dispatch-controller-as-aspect with a broker-inline recursive dispatch runner that supports parallel fan-out and per-run identity, removing the NEX-464 per-agent serialize constraint.
