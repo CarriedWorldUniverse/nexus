@@ -139,6 +139,7 @@ func (g *Grouper) OnBridleEvent(ev bridle.Event) {
 		g.turn.Events = append(g.turn.Events, TurnEvent{Kind: TurnEventStep, Step: e.Step})
 	case bridle.TurnDone:
 		g.turn.Usage = usageFromBridle(e.Result.Usage, g.clock().Sub(g.turnStart))
+		g.turn.Timing = timingFromBridle(e.Result.Timing)
 	case bridle.TurnError:
 		g.turnErrSet = true
 		if e.Err != nil {
@@ -334,6 +335,30 @@ func usageFromBridle(u bridle.Usage, d time.Duration) *UsageStats {
 		Duration:                 d,
 		CostUSD:                  u.CostUSD,
 	}
+}
+
+// timingFromBridle mirrors bridle's TurnTiming into the renderer-side
+// struct. Bridle's zero value means "not recorded" (e.g. aborted
+// turns) — return nil so the TurnFrame omits the field entirely.
+func timingFromBridle(t bridle.TurnTiming) *TurnTiming {
+	if len(t.Rounds) == 0 && len(t.Tools) == 0 && t.TotalSecs == 0 {
+		return nil
+	}
+	out := &TurnTiming{TotalSecs: t.TotalSecs}
+	for _, r := range t.Rounds {
+		out.Rounds = append(out.Rounds, RoundTiming{
+			AssemblySecs:            r.AssemblySecs,
+			StartupToFirstEventSecs: r.StartupToFirstEventSecs,
+			StreamSecs:              r.StreamSecs,
+			PromptBytes:             r.PromptBytes,
+			MessageCount:            r.MessageCount,
+			ToolDefCount:            r.ToolDefCount,
+		})
+	}
+	for _, tl := range t.Tools {
+		out.Tools = append(out.Tools, ToolTiming{ID: tl.ID, Name: tl.Name, Secs: tl.Secs})
+	}
+	return out
 }
 
 // emitTurnSnapshot deep-copies the current TurnFrame and emits it.

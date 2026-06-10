@@ -57,6 +57,7 @@ type TurnFrame struct {
 	Provider   string      `json:"provider,omitempty"`
 	Events     []TurnEvent `json:"events"`
 	Usage      *UsageStats `json:"usage,omitempty"`
+	Timing     *TurnTiming `json:"timing,omitempty"`
 	Error      string      `json:"error,omitempty"`
 }
 
@@ -176,6 +177,35 @@ type FilterDecisionFrame struct {
 	ShouldPost bool   `json:"should_post"`
 	Reason     string `json:"reason,omitempty"`
 	Class      string `json:"class,omitempty"`
+}
+
+// RoundTiming is the renderer-side mirror of bridle.RoundTiming:
+// where one provider round spent its time and what it sent.
+type RoundTiming struct {
+	AssemblySecs            float64 `json:"assembly_secs,omitempty"`
+	StartupToFirstEventSecs float64 `json:"startup_to_first_event_secs,omitempty"`
+	StreamSecs              float64 `json:"stream_secs,omitempty"`
+	PromptBytes             int     `json:"prompt_bytes,omitempty"`
+	MessageCount            int     `json:"message_count,omitempty"`
+	ToolDefCount            int     `json:"tool_def_count,omitempty"`
+}
+
+// ToolTiming is the renderer-side mirror of bridle.ToolTiming: one
+// tool call's wall-clock duration.
+type ToolTiming struct {
+	ID   string  `json:"id"`
+	Name string  `json:"name"`
+	Secs float64 `json:"secs"`
+}
+
+// TurnTiming is the renderer-side mirror of bridle.TurnTiming —
+// per-turn timing instrumentation forwarded from the TurnDone
+// result. A nil pointer on TurnFrame means timing was not recorded
+// (bridle's zero value, e.g. aborted turns).
+type TurnTiming struct {
+	Rounds    []RoundTiming `json:"rounds,omitempty"`
+	Tools     []ToolTiming  `json:"tools,omitempty"`
+	TotalSecs float64       `json:"total_secs,omitempty"`
 }
 
 // UsageStats is the renderer-side view of bridle.Usage plus the

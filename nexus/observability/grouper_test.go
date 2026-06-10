@@ -610,3 +610,74 @@ func TestGrouperOrphanResultPlaceholderLockedBehavior(t *testing.T) {
 		t.Errorf("orphan result lost: %+v", tc.Result)
 	}
 }
+
+func TestGrouperTurnDoneTiming(t *testing.T) {
+	// NEX-563: bridle's TurnTiming rides TurnDone.Result and must be
+	// forwarded on the completed TurnFrame (mirrored, like Usage).
+	c := &capture{}
+	g := NewGrouperWithClock("keel", c.emit, fixedClock())
+	g.BeginTurn("turn-1", "", "gemma3", "ollama", 0)
+	g.OnBridleEvent(bridle.TurnDone{Result: bridle.TurnResult{
+		Timing: bridle.TurnTiming{
+			Rounds: []bridle.RoundTiming{{
+				AssemblySecs:            0.01,
+				StartupToFirstEventSecs: 2.5,
+				StreamSecs:              4.25,
+				PromptBytes:             4096,
+				MessageCount:            7,
+				ToolDefCount:            12,
+			}},
+			Tools:     []bridle.ToolTiming{{ID: "t1", Name: "Bash", Secs: 1.5}},
+			TotalSecs: 6.76,
+		},
+	}})
+	g.EndTurn()
+
+	last, ok := c.lastOf(FrameTurn)
+	if !ok {
+		t.Fatal("no turn frame")
+	}
+	tf := decodeTurn(t, last)
+	if tf.Status != TurnComplete {
+		t.Fatalf("status=%s want complete", tf.Status)
+	}
+	if tf.Timing == nil {
+		t.Fatal("Timing is nil — TurnTiming not forwarded")
+	}
+	if tf.Timing.TotalSecs != 6.76 {
+		t.Errorf("TotalSecs=%v want 6.76", tf.Timing.TotalSecs)
+	}
+	if len(tf.Timing.Rounds) != 1 {
+		t.Fatalf("rounds len=%d want 1", len(tf.Timing.Rounds))
+	}
+	r := tf.Timing.Rounds[0]
+	if r.AssemblySecs != 0.01 || r.StartupToFirstEventSecs != 2.5 || r.StreamSecs != 4.25 {
+		t.Errorf("round secs: %+v", r)
+	}
+	if r.PromptBytes != 4096 || r.MessageCount != 7 || r.ToolDefCount != 12 {
+		t.Errorf("round sizes: %+v", r)
+	}
+	if len(tf.Timing.Tools) != 1 || tf.Timing.Tools[0].ID != "t1" ||
+		tf.Timing.Tools[0].Name != "Bash" || tf.Timing.Tools[0].Secs != 1.5 {
+		t.Errorf("tools: %+v", tf.Timing.Tools)
+	}
+}
+
+func TestGrouperTurnDoneZeroTimingOmitted(t *testing.T) {
+	// Zero-value TurnTiming means "not recorded" (e.g. aborted turns,
+	// older bridle) — the frame must omit it, not carry an empty object.
+	c := &capture{}
+	g := NewGrouperWithClock("keel", c.emit, fixedClock())
+	g.BeginTurn("turn-1", "", "m", "p", 0)
+	g.OnBridleEvent(bridle.TurnDone{})
+	g.EndTurn()
+
+	last, _ := c.lastOf(FrameTurn)
+	tf := decodeTurn(t, last)
+	if tf.Timing != nil {
+		t.Errorf("Timing=%+v want nil for zero-value bridle timing", tf.Timing)
+	}
+	if bytes.Contains(last.Payload, []byte(`"timing"`)) {
+		t.Errorf("payload carries timing key for unrecorded timing: %s", last.Payload)
+	}
+}
