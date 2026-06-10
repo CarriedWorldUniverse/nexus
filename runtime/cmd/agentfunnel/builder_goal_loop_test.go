@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
@@ -13,25 +14,142 @@ import (
 // pushed its work but never ran `gh pr create`; it does NOT open when nothing
 // is pushed (the agent still has work) and reports failure on a create error.
 func TestHarnessOpenPR(t *testing.T) {
-	origPushed, origCreate := branchPushedFn, prCreateFn
-	t.Cleanup(func() { branchPushedFn = origPushed; prCreateFn = origCreate })
+	origPushed, origList, origExists, origCreate := branchPushedFn, pushedBranchesFn, prExistsFn, prCreateFn
+	t.Cleanup(func() {
+		branchPushedFn = origPushed
+		pushedBranchesFn = origList
+		prExistsFn = origExists
+		prCreateFn = origCreate
+	})
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	branchPushedFn = func(string) (bool, error) { return true, nil }
-	prCreateFn = func(repo, branch string) (string, error) { return "https://pr/1", nil }
-	if url, ok := harnessOpenPR(log, "o/r", "builder/NEX-1"); !ok || url != "https://pr/1" {
+	prExistsFn = func(string, string) (bool, error) { return false, nil }
+	prCreateFn = func(repo, branch, body string) (string, error) { return "https://pr/1", nil }
+	if url, ok := harnessOpenPR(log, "o/r", "builder/NEX-1", "NEX-1", "run-1", "DoD"); !ok || url != "https://pr/1" {
 		t.Fatalf("pushed+create-ok: url=%q ok=%v, want https://pr/1 true", url, ok)
 	}
 
 	branchPushedFn = func(string) (bool, error) { return false, nil }
-	if url, ok := harnessOpenPR(log, "o/r", "builder/NEX-1"); ok || url != "" {
+	pushedBranchesFn = func() ([]string, error) { return nil, nil }
+	if url, ok := harnessOpenPR(log, "o/r", "builder/NEX-1", "NEX-1", "run-1", "DoD"); ok || url != "" {
 		t.Fatalf("not-pushed must not open (re-prompt instead): url=%q ok=%v", url, ok)
 	}
 
 	branchPushedFn = func(string) (bool, error) { return true, nil }
-	prCreateFn = func(string, string) (string, error) { return "", errors.New("boom") }
-	if _, ok := harnessOpenPR(log, "o/r", "builder/NEX-1"); ok {
+	prCreateFn = func(string, string, string) (string, error) { return "", errors.New("boom") }
+	if _, ok := harnessOpenPR(log, "o/r", "builder/NEX-1", "NEX-1", "run-1", "DoD"); ok {
 		t.Fatal("create error must not report success")
+	}
+}
+
+func TestHarnessOpenPRSalvagesUnconventionalBranchByRunOrTicket(t *testing.T) {
+	origPushed, origList, origExists, origCreate := branchPushedFn, pushedBranchesFn, prExistsFn, prCreateFn
+	t.Cleanup(func() {
+		branchPushedFn = origPushed
+		pushedBranchesFn = origList
+		prExistsFn = origExists
+		prCreateFn = origCreate
+	})
+
+	branchPushedFn = func(string) (bool, error) { return false, nil }
+	pushedBranchesFn = func() ([]string, error) {
+		return []string{"scratch/other", "fix/unusual-nex-553-name"}, nil
+	}
+	prExistsFn = func(string, string) (bool, error) { return false, nil }
+	var gotBranch string
+	prCreateFn = func(_, branch, _ string) (string, error) {
+		gotBranch = branch
+		return "https://pr/553", nil
+	}
+
+	url, ok := harnessOpenPR(slog.Default(), "o/r", "builder/NEX-553", "NEX-553", "run-abc", "DoD")
+	if !ok || url != "https://pr/553" {
+		t.Fatalf("harnessOpenPR = %q %v, want PR URL true", url, ok)
+	}
+	if gotBranch != "fix/unusual-nex-553-name" {
+		t.Fatalf("created branch = %q", gotBranch)
+	}
+}
+
+func TestHarnessOpenPRNoopsWhenPRExists(t *testing.T) {
+	origPushed, origList, origExists, origCreate := branchPushedFn, pushedBranchesFn, prExistsFn, prCreateFn
+	t.Cleanup(func() {
+		branchPushedFn = origPushed
+		pushedBranchesFn = origList
+		prExistsFn = origExists
+		prCreateFn = origCreate
+	})
+
+	branchPushedFn = func(string) (bool, error) { return false, nil }
+	pushedBranchesFn = func() ([]string, error) { return []string{"feature/run-abc123"}, nil }
+	prExistsFn = func(_, branch string) (bool, error) { return branch == "feature/run-abc123", nil }
+	prCreateFn = func(string, string, string) (string, error) {
+		t.Fatal("prCreateFn must not be called when PR already exists")
+		return "", nil
+	}
+
+	if url, ok := harnessOpenPR(slog.Default(), "o/r", "builder/NEX-553", "NEX-553", "run-abc123", "DoD"); !ok || url != "" {
+		t.Fatalf("existing PR should be treated as handled without creating: url=%q ok=%v", url, ok)
+	}
+}
+
+func TestHarnessOpenPRUsesDoDBody(t *testing.T) {
+	origPushed, origExists, origCreate := branchPushedFn, prExistsFn, prCreateFn
+	t.Cleanup(func() {
+		branchPushedFn = origPushed
+		prExistsFn = origExists
+		prCreateFn = origCreate
+	})
+
+	branchPushedFn = func(string) (bool, error) { return true, nil }
+	prExistsFn = func(string, string) (bool, error) { return false, nil }
+	var gotBody string
+	prCreateFn = func(_, _, body string) (string, error) {
+		gotBody = body
+		return "https://pr/553", nil
+	}
+
+	dod := "Definition of Done\n- salvage fires\n- body lands"
+	if _, ok := harnessOpenPR(slog.Default(), "o/r", "builder/NEX-553", "NEX-553", "run-abc123", dod); !ok {
+		t.Fatal("harnessOpenPR returned false")
+	}
+	if !strings.Contains(gotBody, dod) {
+		t.Fatalf("PR body missing DoD:\n%s", gotBody)
+	}
+	if !strings.Contains(gotBody, "opened this PR at the completion window") {
+		t.Fatalf("PR body missing salvage timing justification:\n%s", gotBody)
+	}
+}
+
+func TestDispatchDoD(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "brief DoD section",
+			content: "@anvil [TICKET NEX-553] Fix it\n\nDescription:\ncontext\n\nDefinition of Done:\n- salvage fires\n- body lands",
+			want:    "- salvage fires\n- body lands",
+		},
+		{
+			name:    "terminated by next heading",
+			content: "Preamble\n## Definition of Done\n- first\n\n## Notes\nignore",
+			want:    "- first",
+		},
+		{
+			name:    "no marker falls back to full content",
+			content: "Ship the PR",
+			want:    "Ship the PR",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dispatchDoD(tt.content); got != tt.want {
+				t.Fatalf("dispatchDoD() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
