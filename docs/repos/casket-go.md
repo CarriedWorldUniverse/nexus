@@ -1,31 +1,27 @@
+<!-- GENERATED FILE — do not edit.
+     Sourced from https://github.com/CarriedWorldUniverse/casket-go/blob/HEAD/README.md
+     by scripts/sync-repo-readmes.sh at docs build time.
+     Edit that README, not this file. -->
+
+!!! info "Sourced from the repo README"
+    This page mirrors [`casket-go`](https://github.com/CarriedWorldUniverse/casket-go)'s live `README.md`.
+    Edit the README in the repo, not this page.
+
 # casket-go
 
 [![CI](https://github.com/CarriedWorldUniverse/casket-go/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CarriedWorldUniverse/casket-go/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/CarriedWorldUniverse/casket-go?include_prereleases&sort=semver&display_name=tag)](https://github.com/CarriedWorldUniverse/casket-go/releases)
 [![Go Reference](https://pkg.go.dev/badge/github.com/CarriedWorldUniverse/casket-go.svg)](https://pkg.go.dev/github.com/CarriedWorldUniverse/casket-go)
-[![License](https://img.shields.io/github/license/CarriedWorldUniverse/casket-go)](https://github.com/CarriedWorldUniverse/casket-go/blob/main/LICENSE)
+[![License](https://img.shields.io/github/license/CarriedWorldUniverse/casket-go)](https://github.com/CarriedWorldUniverse/casket-go/blob/HEAD/LICENSE)
 
-Go port of `casket-ts` channel.ts — Ed25519 + ECDH channel identity for Frame-to-Frame relay.
+Go port of the `casket-ts` channel — Ed25519 + ECDH channel identity, plus
+at-rest AEAD envelope encryption and an HKDF-Ed25519 agent-key helper.
 
-**Source:** [github.com/CarriedWorldUniverse/casket-go](https://github.com/CarriedWorldUniverse/casket-go)
+Used across the platform for pair-relay channels, at-rest envelope encryption
+(e.g. porter blobs), and deriving named agent identities (`DeriveAgentKey`).
 
-## Sibling implementations
+Cross-compatible channel wire format with [casket-ts](https://github.com/CarriedWorldUniverse/casket-ts) (Node.js / Cloudflare Workers) and [casket-dotnet](https://github.com/CarriedWorldUniverse/casket-dotnet) (.NET).
 
-- [casket-ts](casket-ts.md) — Node.js + Cloudflare Workers
-- [casket-dotnet](casket-dotnet.md) — .NET
+## License
 
-All three speak the same wire format. The Go port is what [interchange](interchange.md) consumes for its E2E layer.
-
-## Install
-
-```go
-import "github.com/CarriedWorldUniverse/casket-go"
-```
-
-`go get github.com/CarriedWorldUniverse/casket-go@v0.1.0` — pulled from the Go module proxy.
-
-## What it covers
-
-- AES-256-GCM and ChaCha20-Poly1305 with Argon2id key derivation
-- Ed25519 channel identity
-- Wire-compatible with the TS + .NET ports
+Apache-2.0. See [LICENSE](https://github.com/CarriedWorldUniverse/casket-go/blob/HEAD/LICENSE).
