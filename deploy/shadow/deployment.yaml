@@ -21,6 +21,9 @@ spec:
     metadata:
       labels: {app: shadow-aspect}
     spec:
+      # Cluster authority: SA + cluster-admin binding live in
+      # carriedworld-cloud hosting/services/shadow-aspect-rbac.yaml.
+      serviceAccountName: shadow-aspect
       containers:
         - name: shadow
           image: localhost/nexus-shadow:dev
