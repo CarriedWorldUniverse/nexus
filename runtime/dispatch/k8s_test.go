@@ -2,12 +2,18 @@ package dispatch
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
@@ -257,5 +263,74 @@ func terminalJob(name, ticket, thread string, condition batchv1.JobConditionType
 				Status: corev1.ConditionTrue,
 			}},
 		},
+	}
+}
+
+func napDeployment(name string, replicas int32) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "nexus"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+	}
+}
+
+// scaleRecorder captures every update to the deployments/scale subresource.
+// The fake clientset's tracker doesn't model the scale subresource (it would
+// store the Scale object over the Deployment), so the assertion is on the
+// issued API action, not tracker state.
+func scaleRecorder(t *testing.T, cs *fake.Clientset) *[]autoscalingv1.Scale {
+	t.Helper()
+	var got []autoscalingv1.Scale
+	cs.PrependReactor("update", "deployments", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ua := action.(ktesting.UpdateAction)
+		if ua.GetSubresource() != "scale" {
+			return false, nil, nil
+		}
+		sc := ua.GetObject().(*autoscalingv1.Scale)
+		got = append(got, *sc)
+		return true, sc, nil
+	})
+	return &got
+}
+
+func TestScaleDeploymentUpAndDown(t *testing.T) {
+	cs := fake.NewSimpleClientset(napDeployment("plumb", 0))
+	got := scaleRecorder(t, cs)
+	k := &K8s{Client: cs, Namespace: "nexus"}
+	ctx := context.Background()
+
+	// Wake: 0 → 1.
+	if err := k.ScaleDeployment(ctx, "plumb", 1); err != nil {
+		t.Fatalf("ScaleDeployment(plumb, 1): %v", err)
+	}
+	// Nap: 1 → 0.
+	if err := k.ScaleDeployment(ctx, "plumb", 0); err != nil {
+		t.Fatalf("ScaleDeployment(plumb, 0): %v", err)
+	}
+
+	if len(*got) != 2 {
+		t.Fatalf("scale updates = %d, want 2", len(*got))
+	}
+	for i, want := range []int32{1, 0} {
+		sc := (*got)[i]
+		if sc.Name != "plumb" || sc.Namespace != "nexus" {
+			t.Errorf("scale[%d] target = %s/%s, want nexus/plumb", i, sc.Namespace, sc.Name)
+		}
+		if sc.Spec.Replicas != want {
+			t.Errorf("scale[%d] replicas = %d, want %d", i, sc.Spec.Replicas, want)
+		}
+	}
+}
+
+func TestScaleDeploymentUnknownDeploymentWrapsError(t *testing.T) {
+	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}
+	err := k.ScaleDeployment(context.Background(), "ghost", 1)
+	if err == nil {
+		t.Fatal("ScaleDeployment(ghost) = nil, want NotFound error")
+	}
+	if !apierrors.IsNotFound(errors.Unwrap(err)) && !apierrors.IsNotFound(err) {
+		t.Fatalf("err = %v, want NotFound (wrapped)", err)
+	}
+	if !strings.Contains(err.Error(), "ghost") {
+		t.Fatalf("err = %v, want deployment name in context", err)
 	}
 }
