@@ -58,7 +58,7 @@ jobs:
           go install github.com/google/osv-scanner/v2/cmd/osv-scanner@${OSV_SCANNER_VERSION}
 
       - name: govulncheck
-        run: govulncheck ./...
+        run: ./scripts/govulncheck-gate.sh
 
       - name: gosec
         # Existing SAST debt is excluded by rule family so this gate can land

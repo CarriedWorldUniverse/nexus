@@ -3,6 +3,7 @@ package observability
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // onFrameFn is the broadcast callback signature. Named so it can be
@@ -27,12 +28,20 @@ type Hub struct {
 	buffer    *Buffer
 	onFrame   atomic.Pointer[onFrameFn]
 	bufferCap int
+	clock     func() time.Time // time source for lazily-created Groupers
 }
 
 // NewHub constructs a Hub with the given per-aspect Buffer capacity.
 // onFrame is invoked synchronously for every emitted Frame; pass nil
 // if the caller hasn't wired fan-out yet and will SetOnFrame later.
 func NewHub(bufferCap int, onFrame func(aspect string, f Frame)) *Hub {
+	return NewHubWithClock(bufferCap, onFrame, time.Now)
+}
+
+// NewHubWithClock constructs a Hub whose lazily-created Groupers use
+// the supplied clock (the Grouper's NewGrouperWithClock seam). Tests
+// pass a deterministic time source; production code should use NewHub.
+func NewHubWithClock(bufferCap int, onFrame func(aspect string, f Frame), clock func() time.Time) *Hub {
 	if bufferCap <= 0 {
 		bufferCap = 500
 	}
@@ -40,6 +49,7 @@ func NewHub(bufferCap int, onFrame func(aspect string, f Frame)) *Hub {
 		groupers:  make(map[string]*Grouper),
 		buffer:    NewBuffer(bufferCap),
 		bufferCap: bufferCap,
+		clock:     clock,
 	}
 	if onFrame != nil {
 		fn := onFrameFn(onFrame)
@@ -64,12 +74,12 @@ func (h *Hub) GrouperFor(aspect string) *Grouper {
 	if g, ok = h.groupers[aspect]; ok {
 		return g
 	}
-	g = NewGrouper(aspect, func(f Frame) {
+	g = NewGrouperWithClock(aspect, func(f Frame) {
 		h.buffer.Append(f)
 		if cb := h.onFrame.Load(); cb != nil {
 			(*cb)(aspect, f)
 		}
-	})
+	}, h.clock)
 	h.groupers[aspect] = g
 	return g
 }

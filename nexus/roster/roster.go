@@ -13,6 +13,13 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
+// StatusNapping marks an aspect that is registered-but-asleep: identity
+// known, inbox accumulating, pod scaled to zero by the idle reaper, and
+// wakeable on mention. Deliberate — not staleness — so the stale sweep
+// never touches it. Sits alongside the heartbeat-driven "live" / "stale" /
+// "down" ladder (roundtable spec component 1).
+const StatusNapping = "napping"
+
 var (
 	ErrAlreadyRegistered = errors.New("aspect already registered with different session")
 	ErrNotRegistered     = errors.New("aspect not registered")
@@ -171,6 +178,22 @@ func (r *Roster) AspectNames() []string {
 	return out
 }
 
+// SetNapping flips a registered aspect to StatusNapping. Called by the
+// idle reaper after scaling the aspect's pod to zero; the wake path is
+// Register (any status → "live"). Idempotent — an already-napping aspect
+// stays napping and the call still reports true. Unknown names are a
+// no-op returning false.
+func (r *Roster) SetNapping(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a, ok := r.aspects[name]
+	if !ok {
+		return false
+	}
+	a.Status = StatusNapping
+	return true
+}
+
 // Get returns a single aspect's state, or false if absent.
 func (r *Roster) Get(name string) (schemas.AspectState, bool) {
 	r.mu.RLock()
@@ -185,13 +208,17 @@ func (r *Roster) Get(name string) (schemas.AspectState, bool) {
 // ReapStale transitions any aspect whose last heartbeat is older than
 // staleAfter to "stale", and older than 2*staleAfter to "down". Returns the
 // names that changed state so the caller can emit observability events.
+//
+// Only "live" and "stale" aspects age out: napping is deliberate (the idle
+// reaper parked the aspect with the pod scaled to zero), so its inevitably
+// ancient heartbeat must not demote it to "down".
 func (r *Roster) ReapStale(now time.Time, staleAfter time.Duration) (stale, down []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for name, a := range r.aspects {
 		age := now.Sub(a.LastHeartbeat)
 		switch {
-		case age > 2*staleAfter && a.Status != "down":
+		case age > 2*staleAfter && (a.Status == "live" || a.Status == "stale"):
 			a.Status = "down"
 			down = append(down, name)
 		case age > staleAfter && a.Status == "live":

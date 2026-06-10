@@ -91,6 +91,15 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 		recipients = b.cfg.RecipientPolicy.Compute(from, content, replyTo)
 	}
 
+	// Stamp last chat activity for the sender and every recipient — the
+	// idle reaper's quiet-window source. Inline here (the hot path
+	// already has the names) so the reaper never scans the ChatStore.
+	touchedAt := time.Now()
+	b.touchChatActivity(from, touchedAt)
+	for _, rec := range recipients {
+		b.touchChatActivity(rec, touchedAt)
+	}
+
 	// 3. Fan out chat.deliver to each recipient's live WS connection.
 	// Aspects not currently connected miss the live frame; they pick
 	// it up on next register via Lock 6 since_msg_id replay.
@@ -128,7 +137,13 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 		for _, rec := range recipients {
 			c := b.dispatcher.connFor(rec)
 			if c == nil {
-				// Not connected. Replay covers reconnect; skip silently.
+				// Not connected. If the recipient is a napping
+				// wake-on-mention aspect, scale its pod up so that register
+				// happens and record this message as the pending-wake
+				// watermark so it is force-replayed to the aspect on
+				// register (nil-safe no-op when wake isn't configured;
+				// failure logs inside, the send never fails on it).
+				b.wake.MaybeWake(ctx, rec, msg.ID)
 				continue
 			}
 			c.send(deliverEnv)

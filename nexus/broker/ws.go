@@ -1071,7 +1071,19 @@ func (c *wsConn) handleRegisterFrame(env frames.Envelope) {
 	// Live frames after Register always flow regardless of this flag.
 	// Genuine catch-up cases (debugging, late-spawn aspects, audit
 	// tooling) opt in explicitly.
-	if payload.RequestReplay && payload.SinceMsgID > 0 && c.broker.cfg.Replayer != nil {
+	//
+	// Wake delivery (NEX-568): a napping aspect woken by a mention
+	// cold-starts and registers with RequestReplay=false / SinceMsgID=0,
+	// so the opt-in path above never fires — the triggering message would
+	// be stranded in history. If the wake controller recorded a
+	// pending-wake watermark for this aspect, force a replay from that
+	// watermark REGARDLESS of the client's flag, then clear it. This is a
+	// one-shot per wake: takePendingWake read-and-clears, so a later
+	// ordinary reconnect doesn't re-replay. The opt-in default for normal
+	// reconnects (NEX-131) is untouched.
+	if since, woken := c.broker.wake.takePendingWake(state.Name); woken && c.broker.cfg.Replayer != nil {
+		go c.replayAddressedSince(state.Name, since)
+	} else if payload.RequestReplay && payload.SinceMsgID > 0 && c.broker.cfg.Replayer != nil {
 		go c.replayAddressedSince(state.Name, int64(payload.SinceMsgID))
 	}
 }
