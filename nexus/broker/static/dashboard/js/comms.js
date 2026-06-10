@@ -98,6 +98,10 @@ export function close() {
     clearTimeout(state.reconnectTimer);
     state.reconnectTimer = null;
   }
+  if (state.pingTimer) {
+    clearInterval(state.pingTimer);
+    state.pingTimer = null;
+  }
   if (state.ws) {
     state.ws.close(1000, 'operator close');
     state.ws = null;
