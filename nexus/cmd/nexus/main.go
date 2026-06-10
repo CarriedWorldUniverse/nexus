@@ -444,6 +444,14 @@ func main() {
 		}
 	}
 
+	// Napping presence (roundtable spec component 1): per-aspect wake
+	// policies + Deployment-name overrides, comma-separated k=v lists.
+	// e.g. NEXUS_ASPECT_WAKE_POLICY="plumb=wake-on-mention,keel=always-on"
+	//      NEXUS_ASPECT_DEPLOYMENT="plumb=plumb-aspect"
+	// Unset = no wake behavior (pre-napping semantics).
+	wakePolicy := parseKVList(os.Getenv("NEXUS_ASPECT_WAKE_POLICY"))
+	aspectDeployment := parseKVList(os.Getenv("NEXUS_ASPECT_DEPLOYMENT"))
+
 	activityLogDir := filepath.Join(*dataDir, "activity")
 	b := broker.New(broker.Config{
 		Addr:               *addr,
@@ -493,6 +501,10 @@ func main() {
 		OperatorLogin: buildOperatorLogin(db, nexusIdentity.NexusID, nexusIdentity.SessionSigningSecret, *addr, logger),
 		Observability: obsHub,
 		Runner:        runner,
+		// Napping presence: who wakes on mention / never sleeps, and
+		// which Deployment each aspect scales (default: its own name).
+		AspectWakePolicy: wakePolicy,
+		AspectDeployment: aspectDeployment,
 		// NEX-144 Phase 0: mount ledger's healthz on the broker's TLS
 		// listener. The registrar runs inside ListenAndServe with the
 		// broker's internal mux, so /healthz/ledger lives alongside
@@ -990,6 +1002,33 @@ func isTicketKey(s string) bool {
 		}
 	}
 	return true
+}
+
+// parseKVList parses a comma-separated "key=value" list ("a=x,b=y")
+// into a map. Whitespace around entries/keys/values is trimmed; entries
+// without "=" or with an empty key are skipped. Empty input → nil so
+// callers can len()-gate features on "was this configured at all".
+func parseKVList(raw string) map[string]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, entry := range strings.Split(raw, ",") {
+		k, v, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // envOrDefault returns os.Getenv(key) when non-empty, otherwise def.

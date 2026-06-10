@@ -128,7 +128,12 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 		for _, rec := range recipients {
 			c := b.dispatcher.connFor(rec)
 			if c == nil {
-				// Not connected. Replay covers reconnect; skip silently.
+				// Not connected. Replay covers reconnect. If the
+				// recipient is a napping wake-on-mention aspect, scale
+				// its pod up so that register happens (nil-safe no-op
+				// when wake isn't configured; failure logs inside, the
+				// send never fails on it).
+				b.wake.MaybeWake(ctx, rec)
 				continue
 			}
 			c.send(deliverEnv)
