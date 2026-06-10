@@ -190,6 +190,49 @@ func TestDispatchWithoutRunner(t *testing.T) {
 	}
 }
 
+// S4: hands cannot dispatch. A !dispatch post from a derived identity
+// is rejected before the intercept does anything: nothing reaches the
+// Runner, the !dispatch post itself is not stored, and a rejection
+// note is posted into the thread instead.
+func TestDispatchRejectsDerivedSender(t *testing.T) {
+	store := &fakeChatStore{}
+	sub := &fakeSubmitter{}
+
+	b := New(Config{
+		AuthToken:          "testtoken",
+		AllowLegacyMaster:  true,
+		HeartbeatIntervalS: 15,
+		StaleAfter:         30 * time.Second,
+		ChatStore:          store,
+		Runner:             sub,
+	}, roster.New())
+	b.ctx, b.ctxCancel = context.WithCancel(context.Background())
+	t.Cleanup(b.ctxCancel)
+
+	if _, err := b.HandleChatSend(context.Background(), "plumb.sub-1",
+		"!dispatch anvil NEX-999 build it", 0, "spawn-42"); err != nil {
+		t.Fatalf("HandleChatSend: %v", err)
+	}
+
+	if got := sub.submitCount(); got != 0 {
+		t.Errorf("Submit called %d times, want 0 (hands cannot dispatch)", got)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var rejection bool
+	for _, content := range store.inserts {
+		if strings.HasPrefix(strings.TrimSpace(content), "!dispatch") {
+			t.Errorf("the hand's !dispatch post must not be stored, got %q", content)
+		}
+		if strings.Contains(content, "hands cannot dispatch; ask your parent") {
+			rejection = true
+		}
+	}
+	if !rejection {
+		t.Errorf("rejection note missing from thread; stored = %v", store.inserts)
+	}
+}
+
 func TestSubmitDispatchRejectsDisabledAgent(t *testing.T) {
 	dir := t.TempDir()
 	db, err := storage.Open(context.Background(), dir, nil)

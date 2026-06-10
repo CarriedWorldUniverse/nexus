@@ -27,10 +27,14 @@ const defaultSpawnMaxConcurrent = 4
 // running AS a derived identity of its parent aspect (`<parent>.sub-N`,
 // roundtable P2 / NEX-571). RunID is empty when the hand is accepted
 // but queued (per-parent spawn cap or global MaxConc); it launches when
-// capacity frees, mirroring Submit's queue semantics.
+// capacity frees, mirroring Submit's queue semantics. Error is set when
+// the hand failed to launch (mint/provision/Job creation): the hand was
+// rolled back and its run recorded failed — RunID still references that
+// recorded run.
 type SpawnHandle struct {
 	RunID string
 	Name  string
+	Error string
 }
 
 // AuditPoster stores a chat post AS a named sender and returns the
@@ -92,11 +96,37 @@ func (r *Runner) SubmitSpawn(ctx context.Context, parent, brief string, count in
 	}
 
 	r.mu.Lock()
+	spawnCap := r.spawnMaxConcurrent()
 	names := r.freeHandNames(parent, count)
-	var launches []*Run
-	var queued []string
+	// Split launch-now vs queue WITHOUT reserving anything yet, so the
+	// per-parent queue bound below can reject the whole request with no
+	// side effects (reserve records run-start rows). The split mirrors
+	// canRun for a fresh derived name: global MaxConc + per-parent
+	// live-hand cap (freeHandNames already guarantees the name itself
+	// is neither busy nor queued).
+	liveNow := r.liveHands(parent)
+	activeNow := len(r.active)
+	var launchNames, queueNames []string
 	for _, name := range names {
-		b := Brief{
+		if (r.MaxConc <= 0 || activeNow+len(launchNames) < r.MaxConc) &&
+			liveNow+len(launchNames) < spawnCap {
+			launchNames = append(launchNames, name)
+		} else {
+			queueNames = append(queueNames, name)
+		}
+	}
+	// Queue bound: at most spawnCap hands QUEUED per parent, on top of
+	// the spawnCap that may be running. Without this, a parent could
+	// grow the queue without limit, one accepted request at a time.
+	if qn := r.queuedHands(parent); qn+len(queueNames) > spawnCap {
+		r.mu.Unlock()
+		err := fmt.Errorf("spawn: %s already has %d hand(s) queued (queue cap %d); wait for running hands to drain",
+			parent, qn, spawnCap)
+		r.post(thread, "spawn rejected: "+err.Error())
+		return nil, err
+	}
+	mkBrief := func(name string) Brief {
+		return Brief{
 			Agent:         name,
 			SpawnParent:   parent,
 			Ticket:        handTicket(r.nextID()),
@@ -104,12 +134,14 @@ func (r *Runner) SubmitSpawn(ctx context.Context, parent, brief string, count in
 			Task:          brief,
 			DispatchMsgID: dispatchMsgID,
 		}
-		if r.canRun(name) {
-			launches = append(launches, r.reserve(b))
-		} else {
-			r.queue = append(r.queue, b)
-			queued = append(queued, name)
-		}
+	}
+	var launches []*Run
+	for _, name := range launchNames {
+		launches = append(launches, r.reserve(mkBrief(name)))
+	}
+	queued := queueNames
+	for _, name := range queueNames {
+		r.queue = append(r.queue, mkBrief(name))
 	}
 	r.mu.Unlock()
 	slog.Info("runner: spawn accepted", "parent", parent, "count", count,
@@ -126,8 +158,12 @@ func (r *Runner) SubmitSpawn(ctx context.Context, parent, brief string, count in
 	}
 
 	// Launch outside the lock, mirroring Submit. A failed hand is
-	// rolled back + recorded failed; surviving hands keep going.
+	// rolled back + recorded failed; surviving hands keep going. The
+	// failure stays visible in the returned handles (Error set) so the
+	// requesting parent sees exactly which hands made it — not just the
+	// survivors.
 	handles := make([]SpawnHandle, 0, len(names))
+	accepted := len(queued)
 	var lastErr error
 	for _, run := range launches {
 		if err := r.launch(ctx, run); err != nil {
@@ -144,17 +180,31 @@ func (r *Runner) SubmitSpawn(ctx context.Context, parent, brief string, count in
 			}
 			r.post(thread, "hand "+run.Brief.Agent+" spawn failed: "+err.Error())
 			lastErr = err
+			handles = append(handles, SpawnHandle{RunID: run.ID, Name: run.Brief.Agent, Error: err.Error()})
 			continue
 		}
+		accepted++
 		handles = append(handles, SpawnHandle{RunID: run.ID, Name: run.Brief.Agent})
 	}
 	for _, name := range queued {
 		handles = append(handles, SpawnHandle{Name: name})
 	}
-	if len(handles) == 0 && lastErr != nil {
+	// Every hand failed and none queued: the request as a whole failed.
+	if accepted == 0 && lastErr != nil {
 		return nil, lastErr
 	}
 	return handles, nil
+}
+
+// queuedHands counts base's queued hand briefs. Caller holds r.mu.
+func (r *Runner) queuedHands(base string) int {
+	n := 0
+	for _, q := range r.queue {
+		if q.SpawnParent == base {
+			n++
+		}
+	}
+	return n
 }
 
 // freeHandNames picks the lowest free hand indices for parent —

@@ -77,7 +77,11 @@ func TestSpawnPayloadsRoundTrip(t *testing.T) {
 		t.Fatalf("rp=%+v", rp)
 	}
 	resp, err := NewResponse(KindSpawnResult, req.ID, SpawnResultPayload{
-		Hands: []SpawnHandle{{RunID: "run-1", Name: "plumb.sub-1"}, {Name: "plumb.sub-2"}},
+		Hands: []SpawnHandle{
+			{RunID: "run-1", Name: "plumb.sub-1"},
+			{Name: "plumb.sub-2"},
+			{RunID: "run-3", Name: "plumb.sub-3", Error: "mint boom"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -86,10 +90,13 @@ func TestSpawnPayloadsRoundTrip(t *testing.T) {
 	if err := PayloadAs(resp, &sp); err != nil {
 		t.Fatal(err)
 	}
-	if len(sp.Hands) != 2 || sp.Hands[0].RunID != "run-1" || sp.Hands[1].Name != "plumb.sub-2" {
+	if len(sp.Hands) != 3 || sp.Hands[0].RunID != "run-1" || sp.Hands[1].Name != "plumb.sub-2" {
 		t.Fatalf("sp=%+v", sp)
 	}
-	if sp.Hands[1].RunID != "" {
-		t.Fatalf("queued hand should round-trip an empty RunID, got %q", sp.Hands[1].RunID)
+	if sp.Hands[1].RunID != "" || sp.Hands[1].Error != "" {
+		t.Fatalf("queued hand should round-trip empty RunID + Error, got %+v", sp.Hands[1])
+	}
+	if sp.Hands[2].Error != "mint boom" {
+		t.Fatalf("failed hand should round-trip its Error marker, got %+v", sp.Hands[2])
 	}
 }

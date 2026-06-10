@@ -50,19 +50,37 @@ func (b *Broker) spawnMaxPerRequest() int {
 
 // handleSpawnRequestFrame routes a spawn.request off the read loop.
 // SubmitSpawn posts audit messages and talks to the k8s API, so it runs
-// in a goroutine — same pattern as dispatch/turn/CWB.
+// in a goroutine — same pattern as dispatch/turn/CWB. The connection
+// identity is captured HERE, on the read loop: registeredAs is written
+// by the register/deregister handlers on this same goroutine, so
+// reading it inside the spawned goroutine would race with a concurrent
+// re-register. c.auth is immutable after accept; captured alongside
+// for the same single-snapshot discipline.
 func (c *wsConn) handleSpawnRequestFrame(env frames.Envelope) {
-	go c.executeSpawn(env)
+	parent := c.registeredAs
+	auth := c.auth
+	go c.executeSpawn(env, parent, auth)
 }
 
-func (c *wsConn) executeSpawn(env frames.Envelope) {
+func (c *wsConn) executeSpawn(env frames.Envelope, parent string, auth TokenInfo) {
 	// The parent identity is the connection's REGISTERED aspect — never
 	// payload-supplied, so a hand request can't be forged on another
 	// aspect's behalf. Operator connections never register, so they
 	// fall out here too (spawn is an aspect-path-only frame).
-	parent := c.registeredAs
 	if parent == "" {
 		c.respondError(env, "spawn.request requires a registered aspect connection")
+		return
+	}
+	// Bind the registered name to the connection's AUTHENTICATED
+	// identity: a connection whose bearer resolved to aspect X must not
+	// spawn hands as a differently-registered aspect Y. Admin
+	// connections (legacy master / Frame, operator bypass) are exempt —
+	// the same carve-out the deregister and dispatch handlers apply.
+	// An empty AgentID (no resolved identity on this connection) keeps
+	// working, registration alone vouches for it.
+	if !auth.Admin && auth.AgentID != "" && auth.AgentID != parent {
+		c.respondError(env, "spawn identity mismatch: connection authenticated as "+
+			auth.AgentID+" but registered as "+parent)
 		return
 	}
 	// No sub-of-sub in v1: a hand (derived name) cannot spawn hands.
@@ -106,7 +124,7 @@ func (c *wsConn) executeSpawn(env frames.Envelope) {
 	}
 	out := make([]frames.SpawnHandle, 0, len(handles))
 	for _, h := range handles {
-		out = append(out, frames.SpawnHandle{RunID: h.RunID, Name: h.Name})
+		out = append(out, frames.SpawnHandle{RunID: h.RunID, Name: h.Name, Error: h.Error})
 	}
 	resp, rerr := frames.NewResponse(frames.KindSpawnResult, env.ID, frames.SpawnResultPayload{Hands: out})
 	if rerr != nil {

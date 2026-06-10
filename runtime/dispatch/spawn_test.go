@@ -254,6 +254,85 @@ func TestSubmitSpawnPerParentCapQueuesAndDrains(t *testing.T) {
 	}
 }
 
+// #5: the per-parent QUEUE is bounded too — at most SpawnMaxConcurrent
+// hands queued on top of SpawnMaxConcurrent running, so a chatty parent
+// can't grow the queue without bound. The overflowing request errors
+// (the broker relays it as spawn.request.error); draining a running
+// hand frees a queue slot.
+func TestSubmitSpawnQueueBoundRejectsOverflow(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _, rec := newSpawnFixture(fk)
+	// Default SpawnMaxConcurrent = 4: first request fills the run slots…
+	if _, err := r.SubmitSpawn(context.Background(), "plumb", "work", 4, ""); err != nil {
+		t.Fatal(err)
+	}
+	// …second fills the queue.
+	handles, err := r.SubmitSpawn(context.Background(), "plumb", "work", 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued := 0
+	for _, h := range handles {
+		if h.RunID == "" {
+			queued++
+		}
+	}
+	if queued != 4 {
+		t.Fatalf("queued = %d, want 4 (run slots all busy)", queued)
+	}
+	// The 9th hand exceeds cap-running + cap-queued: rejected outright.
+	if _, err := r.SubmitSpawn(context.Background(), "plumb", "work", 1, ""); err == nil {
+		t.Fatal("9th hand must be rejected: per-parent queue is full")
+	}
+	if len(fk.jobs) != 4 {
+		t.Fatalf("jobs = %d, want 4 (nothing extra launched)", len(fk.jobs))
+	}
+
+	// Drain one running hand → one queued hand launches, freeing a
+	// queue slot → a new spawn queues cleanly again.
+	r.OnJobDone(dispatch.JobDone{Ticket: rec.starts[0].ticket, OK: true})
+	if len(fk.jobs) != 5 {
+		t.Fatalf("jobs after drain = %d, want 5", len(fk.jobs))
+	}
+	if _, err := r.SubmitSpawn(context.Background(), "plumb", "work", 1, ""); err != nil {
+		t.Fatalf("drain must free a queue slot: %v", err)
+	}
+}
+
+// #9: a partial launch failure is visible in the returned handles — the
+// failed hand carries Error instead of being silently omitted, beside
+// its successfully-launched sibling.
+func TestSubmitSpawnPartialFailureMarksHandle(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _, _ := newSpawnFixture(fk)
+	r.MintHandCredential = func(_ context.Context, _, derived string) (string, error) {
+		if derived == "plumb.sub-2" {
+			return "", errors.New("mint boom")
+		}
+		return "jwt-for-" + derived, nil
+	}
+
+	handles, err := r.SubmitSpawn(context.Background(), "plumb", "work", 2, "")
+	if err != nil {
+		t.Fatalf("one hand launched fine — partial failure must not error the request: %v", err)
+	}
+	if len(handles) != 2 {
+		t.Fatalf("handles = %+v, want both hands visible", handles)
+	}
+	byName := map[string]dispatch.SpawnHandle{}
+	for _, h := range handles {
+		byName[h.Name] = h
+	}
+	ok1 := byName["plumb.sub-1"]
+	if ok1.RunID == "" || ok1.Error != "" {
+		t.Errorf("plumb.sub-1 = %+v, want launched with no error", ok1)
+	}
+	failed := byName["plumb.sub-2"]
+	if failed.Error == "" || !strings.Contains(failed.Error, "mint boom") {
+		t.Errorf("plumb.sub-2 = %+v, want Error carrying the mint failure", failed)
+	}
+}
+
 // The global MaxConc applies on top of the per-parent cap.
 func TestSubmitSpawnGlobalMaxConcApplies(t *testing.T) {
 	fk := &fakeK8s{}

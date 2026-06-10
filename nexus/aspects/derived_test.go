@@ -22,9 +22,11 @@ func derivedMintConfig(now time.Time) RefreshConfig {
 }
 
 // The derived mint round-trip: the hand's JWT signs with the broker
-// secret, sub = the derived name, kfv = the PARENT's keyfile version —
-// the exact claim shape validate/refresh issue, so the broker's WS
-// upgrade (tryVerifyAspectJWT) accepts it with no new crypto.
+// secret, sub = the derived name, kfv = the PARENT's keyfile version
+// (mirrored so kfv-based revocation enforcement, once wired, fences
+// hands with their parent) — the exact claim shape validate/refresh
+// issue, so the broker's WS upgrade (tryVerifyAspectJWT) accepts it
+// with no new crypto.
 func TestMintDerivedSessionRoundTrip(t *testing.T) {
 	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 	cfg := derivedMintConfig(now)
@@ -45,7 +47,7 @@ func TestMintDerivedSessionRoundTrip(t *testing.T) {
 		t.Errorf("sub = %q, want plumb.sub-2", claims.Sub)
 	}
 	if claims.Kfv != 3 {
-		t.Errorf("kfv = %d, want parent's 3 (keyfile revocation must fence hands)", claims.Kfv)
+		t.Errorf("kfv = %d, want parent's 3 (mirrored so future kfv-based revocation enforcement will fence hands)", claims.Kfv)
 	}
 	if claims.Iss != "nexus://test-nexus-id" {
 		t.Errorf("iss = %q", claims.Iss)

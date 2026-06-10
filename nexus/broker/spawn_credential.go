@@ -8,6 +8,11 @@
 // signs a session JWT for `<parent>.sub-N` (aspects.MintDerivedSession
 // — the validate/refresh signing seam, no new crypto) and the Runner
 // injects it into the hand's Job env instead of a keyfile volume.
+//
+// The hand JWT's kfv mirrors the parent's keyfile version so that
+// kfv-based revocation enforcement — not yet wired on any verify path;
+// see session.refresh — will fence hands together with their parent
+// when it lands.
 
 package broker
 

@@ -1223,14 +1223,18 @@ type SpawnRequestPayload struct {
 // SpawnHandle identifies one spawned hand. RunID is empty when the
 // hand was accepted but queued (spawn-concurrency or global cap) — it
 // launches when capacity frees, same queue semantics as ticket
-// dispatch.
+// dispatch. Error is set when this hand failed to launch (it was
+// rolled back and recorded failed); its siblings' handles are
+// unaffected.
 type SpawnHandle struct {
 	RunID string `json:"run_id,omitempty"`
 	Name  string `json:"name"`
+	Error string `json:"error,omitempty"`
 }
 
-// SpawnResultPayload answers a spawn.request: one handle per hand.
-// Errors come back as a spawn.request.error response instead.
+// SpawnResultPayload answers a spawn.request: one handle per hand,
+// including per-hand launch failures (Error set). Whole-request
+// failures come back as a spawn.request.error response instead.
 type SpawnResultPayload struct {
 	Hands []SpawnHandle `json:"hands"`
 }

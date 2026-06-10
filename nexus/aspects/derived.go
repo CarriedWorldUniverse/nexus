@@ -11,8 +11,10 @@
 // SessionSigningSecret. The broker's WS upgrade already accepts any
 // such JWT (tryVerifyAspectJWT), so no new crypto and no schema change
 // — the only delta is the sub being `<parent>.sub-N` and kfv mirroring
-// the PARENT's keyfile version (revoking the parent's keyfile thus
-// fences its hands' refresh path too).
+// the PARENT's keyfile version, so kfv-based revocation enforcement
+// (not yet wired anywhere — see session.refresh, which currently
+// re-reads the row without comparing kfv) will fence hands alongside
+// their parent when it lands.
 //
 // When herald-rooted boot lands, DeriveAgentKey replaces this mint;
 // the derived-name contract and the persona fallback stay.
