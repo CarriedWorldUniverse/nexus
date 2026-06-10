@@ -1115,6 +1115,8 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 			os.Getenv("OPENAI_BASE_URL"),
 		), nil
 	case "ollama", "ollama-local":
+		// bridle chat provider lane — distinct from the embeddings-only
+		// runtime/providers/ollama-local package despite sharing the name.
 		// Native Ollama API (NEX-563). The openai case pointed at
 		// ollama's /v1 compat endpoint also works, but the compat
 		// surface cannot express keep_alive (model stays loaded across
