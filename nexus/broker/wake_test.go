@@ -290,7 +290,7 @@ func TestWakeFailedScaleKeepsNewerStamp(t *testing.T) {
 	w.now = func() time.Time { return now }
 
 	ctx := context.Background()
-	w.MaybeWake(ctx, "plumb") // A stamps t0; its scale call blocks in the scaler
+	w.MaybeWake(ctx, "plumb", 1) // A stamps t0; its scale call blocks in the scaler
 	select {
 	case <-scaler.entered:
 	case <-time.After(2 * time.Second):
@@ -299,8 +299,8 @@ func TestWakeFailedScaleKeepsNewerStamp(t *testing.T) {
 
 	now = t0.Add(2 * time.Minute) // past the debounce window
 	t1 := now
-	w.MaybeWake(ctx, "plumb") // B restamps t1 and scales successfully
-	waitLog(t, logCh)         // B's success log — B's goroutine is done
+	w.MaybeWake(ctx, "plumb", 2) // B restamps t1 and scales successfully
+	waitLog(t, logCh)            // B's success log — B's goroutine is done
 
 	close(scaler.release) // A's scale call now returns its failure
 	waitLog(t, logCh)     // A's failure log — A's disarm path is done
@@ -317,7 +317,7 @@ func TestWakeFailedScaleKeepsNewerStamp(t *testing.T) {
 // chat hook calls it unconditionally.
 func TestWakeNilControllerIsNoOp(t *testing.T) {
 	var w *wakeController
-	w.MaybeWake(context.Background(), "plumb") // must not panic
+	w.MaybeWake(context.Background(), "plumb", 1) // must not panic
 }
 
 // newWSServer serves the given broker's /connect for tests that need a
