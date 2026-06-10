@@ -129,6 +129,37 @@ func TestAdminProviderBinding_PutFlipsClaudeCodeToOpenAI(t *testing.T) {
 	}
 }
 
+func TestAdminProviderBinding_PutAcceptsOllama(t *testing.T) {
+	rig := newProviderBindingTestRig(t)
+	rig.seed(t, "keel", "openai", "gemma3:12b")
+
+	// Both the short ID and bridle's ProviderID string are accepted —
+	// supportedProviders must mirror the agentfunnel buildProvider
+	// switch (NEX-563 native ollama lane).
+	for _, provider := range []string{"ollama", "ollama-local"} {
+		body := `{"provider":"` + provider + `","model":"gemma3:12b"}`
+		req, _ := http.NewRequest("PUT", rig.url+"/api/admin/aspects/keel/provider-binding", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+rig.adminToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("PUT %s: %v", provider, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("PUT %s status = %d; want 200", provider, resp.StatusCode)
+		}
+	}
+
+	row, err := rig.aspects.Get(context.Background(), "keel")
+	if err != nil {
+		t.Fatalf("readback Get: %v", err)
+	}
+	if row.Provider != "ollama-local" {
+		t.Errorf("store readback: provider=%q; want ollama-local (last PUT)", row.Provider)
+	}
+}
+
 func TestAdminProviderBinding_PutRejectsUnknownProvider(t *testing.T) {
 	rig := newProviderBindingTestRig(t)
 	rig.seed(t, "plumb", "claude-code", "claude-opus-4-7")

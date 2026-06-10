@@ -47,6 +47,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -57,6 +58,7 @@ import (
 	claudeprovider "github.com/CarriedWorldUniverse/bridle/provider/claude"
 	claudecodeprovider "github.com/CarriedWorldUniverse/bridle/provider/claudecode"
 	codexcliprovider "github.com/CarriedWorldUniverse/bridle/provider/codexcli"
+	ollamaprovider "github.com/CarriedWorldUniverse/bridle/provider/ollama"
 	openaiprovider "github.com/CarriedWorldUniverse/bridle/provider/openai"
 	toolrunner "github.com/CarriedWorldUniverse/bridle/toolrunner"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
@@ -1112,6 +1114,14 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 			os.Getenv("OPENAI_API_KEY"),
 			os.Getenv("OPENAI_BASE_URL"),
 		), nil
+	case "ollama", "ollama-local":
+		// Native Ollama API (NEX-563). The openai case pointed at
+		// ollama's /v1 compat endpoint also works, but the compat
+		// surface cannot express keep_alive (model stays loaded across
+		// quiet periods) or options.num_ctx (context window) — the two
+		// knobs that matter for an always-on local-model aspect. Env is
+		// the v1 config surface, same shape as the openai case.
+		return ollamaFromEnv(os.Getenv)
 	case "codex-cli", "codex", "codexcli":
 		// Headless Codex CLI (subprocess-stream): owns its own session +
 		// resume, so a codex aspect gets cross-turn memory without the
@@ -1126,8 +1136,45 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 		// CODEX_HOME-style override and the builder moves HOME to the worktree.
 		return antigravitycliprovider.New(), nil
 	default:
-		return nil, fmt.Errorf("unsupported provider %q (claude-api, claude-code, openai, codex-cli, antigravity-cli supported)", provider)
+		return nil, fmt.Errorf("unsupported provider %q (claude-api, claude-code, openai, ollama, codex-cli, antigravity-cli supported)", provider)
 	}
+}
+
+// ollamaFromEnv constructs the native ollama provider from env. getenv
+// is injected (rather than calling os.Getenv directly) so tests can
+// exercise the parse paths without touching process-global env.
+//
+//	OLLAMA_BASE_URL   server URL; empty → http://localhost:11434
+//	OLLAMA_KEEP_ALIVE Go duration ("30m", "1h"; negative e.g. "-1s"
+//	                  = keep the model loaded forever); empty → 0,
+//	                  bridle applies its own 30m default
+//	OLLAMA_NUM_CTX    integer context window (options.num_ctx);
+//	                  empty → 0, model default in effect
+//
+// Malformed values fail provider construction loudly — a silently
+// dropped keep_alive would look like it worked while the model
+// reloads on every post-lull turn.
+func ollamaFromEnv(getenv func(string) string) (*ollamaprovider.Provider, error) {
+	baseURL := getenv("OLLAMA_BASE_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
+	p := ollamaprovider.NewWithURL(baseURL)
+	if v := getenv("OLLAMA_KEEP_ALIVE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("buildProvider: OLLAMA_KEEP_ALIVE %q is not a Go duration (want e.g. \"30m\", \"-1s\"): %w", v, err)
+		}
+		p.KeepAlive = d
+	}
+	if v := getenv("OLLAMA_NUM_CTX"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("buildProvider: OLLAMA_NUM_CTX %q is not an integer: %w", v, err)
+		}
+		p.NumCtx = n
+	}
+	return p, nil
 }
 
 // stageAntigravityCreds copies the mounted Antigravity OAuth creds into the
