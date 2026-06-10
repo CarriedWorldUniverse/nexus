@@ -1,0 +1,12 @@
+# PVC backing shadow's ~/.claude — claude-code's OAuth credentials AND its
+# session files, so both auth and the consistent session survive pod restarts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shadow-claude-state
+  namespace: nexus
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi

@@ -1,0 +1,44 @@
+# Always-on shadow — the orchestrator as a cloud aspect (cloud-shadow step 2).
+# keel's always-on shape on the shadow image (builder + claude-code), with the
+# ~/.claude PVC for durable auth + the consistent session. The cheap-judge
+# (gemma) gates which traffic reaches an expensive claude turn, keel-style.
+# replicas:1 + Recreate — one shadow, one session, RWO PVC.
+#
+# Deployment name is shadow-aspect (not "shadow") to avoid colliding with
+# any future shadow-* infra names; the ASPECT identity comes from the keyfile.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shadow-aspect
+  namespace: nexus
+  labels: {app: shadow-aspect}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: shadow-aspect}
+  template:
+    metadata:
+      labels: {app: shadow-aspect}
+    spec:
+      containers:
+        - name: shadow
+          image: localhost/nexus-shadow:dev
+          imagePullPolicy: Never
+          args: ["-k", "/etc/nexus/keyfile.json", "-context-mode", "global"]
+          env:
+            - {name: CW_SEAM_URL, value: "https://nexus.tail41686e.ts.net:7888"}
+            # Cheap judge/compact lane (gemma), same as keel — the filter
+            # decides what triggers a real claude turn.
+            - {name: OPENAI_API_KEY, value: "ollama"}
+            - {name: OPENAI_BASE_URL, value: "http://gemma-ollama.nexus.svc.cluster.local:11434/v1"}
+          volumeMounts:
+            - {name: keyfile, mountPath: /etc/nexus}
+            - {name: claude-state, mountPath: /root/.claude}
+      volumes:
+        - name: keyfile
+          secret:
+            secretName: aspect-keyfile-shadow
+            items: [{key: keyfile.json, path: keyfile.json}]
+        - name: claude-state
+          persistentVolumeClaim: {claimName: shadow-claude-state}
