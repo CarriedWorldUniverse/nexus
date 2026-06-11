@@ -400,16 +400,28 @@ func (b *Broker) handleAspectResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// MCP profile + provider/judge/compact env resolve against the BASE
-	// aspect (the persona/config identity), so a hand materialises the
-	// parent's .mcp.json and provider creds. ResolveByName already
-	// applied the base fallback to provider/model.
+	// Provider/judge/compact env resolve against the BASE aspect (the
+	// persona/config identity), so a hand boots with the parent's
+	// provider creds. ResolveByName already applied the base fallback
+	// to provider/model.
+	//
+	// The MCP profile, however, is NOT served to derived identities
+	// (NEX-609): the parent's profile entries authenticate with the
+	// keyfile at /etc/nexus/keyfile.json, which hand Jobs deliberately
+	// do not mount (their credential is the CW_SESSION_JWT env). A
+	// served profile would make every hand turn spawn MCP servers that
+	// slow-fail their auth before bridle skips them — and the one tool
+	// a hand must not have (spawn — no sub-of-sub) lives there too.
 	base := aspects.BaseName(aspectName)
-	mcpProfile, mcpErr := resolveMCPProfile(r.Context(), v.Credentials, base)
-	if mcpErr != nil {
-		b.log.Error("resolve: mcp_profile resolve failed", "aspect", base, "err", mcpErr)
-		writeError(w, http.StatusInternalServerError, "mcp profile resolve failed")
-		return
+	var mcpProfile string
+	if !aspects.IsDerivedName(aspectName) {
+		var mcpErr error
+		mcpProfile, mcpErr = resolveMCPProfile(r.Context(), v.Credentials, base)
+		if mcpErr != nil {
+			b.log.Error("resolve: mcp_profile resolve failed", "aspect", base, "err", mcpErr)
+			writeError(w, http.StatusInternalServerError, "mcp profile resolve failed")
+			return
+		}
 	}
 	providerEnv := resolveProviderEnv(r.Context(), v.Credentials, base, resolved.Provider, b.log)
 	judgeProvider, judgeModel, judgeEnv := resolveJudgeConfig(r.Context(), v.Credentials, base, b.log)

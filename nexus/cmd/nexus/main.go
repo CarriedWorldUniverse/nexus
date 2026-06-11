@@ -408,6 +408,13 @@ func main() {
 		LynxAIBaseURL: os.Getenv("LYNXAI_BASE_URL"),
 		LynxAIKey:     os.Getenv("LYNXAI_KEY"),
 		NexusID:       nexusIdentity.NexusID,
+		// Ollama provider endpoint for dispatched Jobs (NEX-610): hands
+		// of an ollama-provider parent (and ollama ticket dispatches)
+		// need the in-cluster server URL or they dial localhost:11434.
+		// CW_-prefixed overrides win; the broker's own OLLAMA_* env is
+		// the fallback so one deployment env serves both.
+		OllamaBaseURL:   envOrDefault("CW_OLLAMA_BASE_URL", os.Getenv("OLLAMA_BASE_URL")),
+		OllamaKeepAlive: envOrDefault("CW_OLLAMA_KEEP_ALIVE", os.Getenv("OLLAMA_KEEP_ALIVE")),
 	}
 	// Hand (spawn) Jobs carry no keyfile, so they can't pin the broker's
 	// self-signed / internal-CA cert the way ticket builders do (the cert is
@@ -479,8 +486,13 @@ func main() {
 	} else {
 		slog.Info("dispatch: not in-cluster (KUBERNETES_SERVICE_HOST unset) — Runner has no k8s client (no job spawn)")
 	}
-	if err := dispatchRunner.Init(ctx); err != nil {
-		slog.Error("dispatch runner init failed — dispatch disabled", "err", err)
+	// NEX-611: on a fresh pod the CNI can take a few seconds to become
+	// routable, so the first ListActiveJobs inside Init may fail with
+	// "no route to host". Retry bounded (5 attempts, ~58s of backoff)
+	// instead of one-shot-disabling dispatch — a nil Runner leaves
+	// wake+spawn silently dead for the broker's whole lifetime.
+	if err := dispatchRunner.InitWithRetry(ctx, 5, 4*time.Second, nil); err != nil {
+		slog.Error("dispatch runner init failed after retries — dispatch disabled", "err", err)
 		dispatchRunner = nil
 	} else {
 		runner = dispatchRunner
