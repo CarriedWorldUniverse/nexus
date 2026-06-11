@@ -62,6 +62,7 @@ import (
 	ollamaprovider "github.com/CarriedWorldUniverse/bridle/provider/ollama"
 	openaiprovider "github.com/CarriedWorldUniverse/bridle/provider/openai"
 	toolrunner "github.com/CarriedWorldUniverse/bridle/toolrunner"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/judge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/rewriter"
@@ -519,6 +520,12 @@ func main() {
 		AspectID:   res.AspectName,
 		OnTaskDone: onTaskDone,
 	}
+	// Spawn (NEX-609): the native comms surface carries the spawn tool
+	// for PARENT aspects only — a hand (derived identity) never gets a
+	// working Spawner (no sub-of-sub; the broker enforces it too).
+	if !aspects.IsDerivedName(res.AspectName) {
+		commsRunner.Spawner = gateway
+	}
 
 	// Phase E remote forwarding: agentfunnel's funnel runs in a
 	// different process from the broker's observability Hub, so the
@@ -624,6 +631,15 @@ func main() {
 	if mcpCfg == nil {
 		mcpCfg = &bridle.MCPClientConfig{}
 	}
+	// NEX-609: the comms MCP server must NOT reach the bridle tool loop.
+	// Non-claude-code providers already get the full native comms surface
+	// (CommsToolDefs + the spawn tool above), so loading nexus-comms-mcp
+	// as an MCP server duplicates send_chat/read_chat/… and bridle aborts
+	// every turn with ErrToolNameCollision. claude-code is unaffected —
+	// it ignores TurnRequest.MCP and discovers servers from the
+	// materialised .mcp.json, where the comms server is exactly how it
+	// gets comms + spawn.
+	mcpCfg = dropCommsMCPServers(mcpCfg, log)
 	cfg := funnel.Config{
 		AspectID: res.AspectName,
 		// Static binding fields kept populated for back-compat (some
@@ -663,7 +679,7 @@ func main() {
 		// Tools field is for direct-API providers; claude-code subprocess
 		// owns its own tool surface natively. Mirrors cmd/nexus/main.go's
 		// toolsForProvider — see #181 for the MCP fix.
-		Tools:  toolsForProviderAgent(bridle.ProviderID(res.Provider)),
+		Tools:  toolsForProviderAgent(bridle.ProviderID(res.Provider), res.AspectName),
 		Runner: toolRunner,
 		// AutoRecall (Commonplace): turn-time recall into the system prompt,
 		// gated by the -auto-recall flag (no aspect.json on the host). Uses
@@ -1700,7 +1716,7 @@ func isClaudeCodeProvider(name string) bool {
 // promise of send_chat etc. but cannot call them, AND can talk itself
 // out of using legit native tools). Empty Tools for claude-code; full
 // CommsToolDefs for direct-API providers. MCP is the proper fix (#181).
-func toolsForProviderAgent(id bridle.ProviderID) []bridle.ToolDef {
+func toolsForProviderAgent(id bridle.ProviderID, aspectName string) []bridle.ToolDef {
 	switch id {
 	case "claude-code", "claudecode":
 		return nil
@@ -1709,7 +1725,38 @@ func toolsForProviderAgent(id bridle.ProviderID) []bridle.ToolDef {
 	// host comms (lane 2: send_chat etc.) + local coding tools (lane 1:
 	// bash/read/write/edit/glob/grep/web_fetch/web_extract). The two name
 	// sets are disjoint so ComposeRunner can route purely by tool name.
-	return append(funnel.CommsToolDefs(), toolrunner.Defs()...)
+	defs := append(funnel.CommsToolDefs(), toolrunner.Defs()...)
+	// Spawn (NEX-609): parents only — a derived (hand) identity never
+	// sees the tool, mirroring nexus-comms-mcp's spawnToolAvailable gate.
+	if !aspects.IsDerivedName(aspectName) {
+		defs = append(defs, funnel.SpawnToolDef())
+	}
+	return defs
+}
+
+// dropCommsMCPServers filters nexus-comms servers out of the funnel's
+// bridle MCP config (NEX-609). The native tool loop already carries
+// the full comms surface (send_chat, read_chat, spawn, …), so loading
+// the comms MCP server beside it makes bridle's merge fail with
+// ErrToolNameCollision and aborts the turn. Matches by the canonical
+// server names ("nexus-comms-mcp" / "nexus-comms"); other servers
+// (nexus-jira, …) pass through untouched.
+func dropCommsMCPServers(cfg *bridle.MCPClientConfig, log *slog.Logger) *bridle.MCPClientConfig {
+	if cfg == nil || len(cfg.Servers) == 0 {
+		return cfg
+	}
+	kept := cfg.Servers[:0]
+	for _, s := range cfg.Servers {
+		if s.Name == "nexus-comms-mcp" || s.Name == "nexus-comms" {
+			if log != nil {
+				log.Info("agentfunnel: comms MCP server excluded from native tool loop (comms are native; spawn rides CommsRunner)", "server", s.Name)
+			}
+			continue
+		}
+		kept = append(kept, s)
+	}
+	cfg.Servers = kept
+	return cfg
 }
 
 // runnerForProviderAgent builds the funnel's ToolRunner. claude-code owns

@@ -638,6 +638,38 @@ func (c *Client) Request(ctx context.Context, env frames.Envelope) (frames.Envel
 	return c.ws.Request(ctx, env)
 }
 
+// Spawn emits spawn.request on this aspect's authenticated connection
+// and returns the broker's handles (NEX-609). The parent identity is
+// the connection's — the broker binds it from registration (or the
+// JWT-verified identity), never from the payload, so there is nothing
+// to forge here. A whole-request rejection (cap exceeded, derived
+// caller, no runner) comes back as spawn.request.error and surfaces
+// as a Go error for the caller to relay to the model.
+func (c *Client) Spawn(ctx context.Context, brief string, count int, thread string) ([]frames.SpawnHandle, error) {
+	env, err := frames.NewRequest(frames.KindSpawnRequest, frames.SpawnRequestPayload{
+		Brief:  brief,
+		Count:  count,
+		Thread: thread,
+	})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.ws.Request(ctx, env)
+	if err != nil {
+		return nil, fmt.Errorf("wsasp: spawn.request: %w", err)
+	}
+	if string(resp.Kind) == string(frames.KindSpawnRequest)+".error" {
+		var body map[string]string
+		_ = json.Unmarshal(resp.Payload, &body)
+		return nil, fmt.Errorf("wsasp: spawn rejected: %s", body["error"])
+	}
+	var out frames.SpawnResultPayload
+	if err := frames.PayloadAs(resp, &out); err != nil {
+		return nil, fmt.Errorf("wsasp: spawn.result decode: %w", err)
+	}
+	return out.Hands, nil
+}
+
 // errNotConnected is returned by SendBestEffort when the underlying
 // wsclient isn't connected. Sentinel so callers can distinguish
 // "wire down" from a real wire-level write error.

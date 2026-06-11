@@ -982,3 +982,112 @@ func TestCommsRunner_StoreKnowledgeNoPriorEntryDefaultsToFalse(t *testing.T) {
 		t.Error("no prior entry + omitted shared must default to false")
 	}
 }
+
+// --- spawn tool (NEX-609) ---
+
+// fakeSpawner records Spawn calls and returns canned handles.
+type fakeSpawner struct {
+	brief   string
+	count   int
+	thread  string
+	calls   int
+	handles []SpawnHandle
+	err     error
+}
+
+func (s *fakeSpawner) Spawn(_ context.Context, brief string, count int, thread string) ([]SpawnHandle, error) {
+	s.calls++
+	s.brief, s.count, s.thread = brief, count, thread
+	return s.handles, s.err
+}
+
+func TestCommsRunner_SpawnNoSpawnerReturnsToolError(t *testing.T) {
+	r := CommsRunner{Gateway: &fakeGateway{}}
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameSpawn,
+		Args: mustJSON(map[string]any{"brief": "do X"}),
+	})
+	if err != nil {
+		t.Fatalf("nil Spawner must be a tool-result error, not a turn abort: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(res, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["error"] == "" {
+		t.Errorf("result = %s, want an error field", res)
+	}
+}
+
+func TestCommsRunner_SpawnDispatchesAndFormatsHandles(t *testing.T) {
+	s := &fakeSpawner{handles: []SpawnHandle{
+		{RunID: "run-1", Name: "harrow.tine"},
+		{Name: "harrow.furrow"},                              // queued
+		{RunID: "run-3", Name: "harrow.loam", Error: "boom"}, // failed
+	}}
+	r := CommsRunner{Gateway: &fakeGateway{}, Spawner: s}
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameSpawn,
+		Args: mustJSON(map[string]any{"brief": "capital of Italy", "thread": "NEX-609"}),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if s.calls != 1 || s.brief != "capital of Italy" || s.thread != "NEX-609" {
+		t.Fatalf("spawner got brief=%q thread=%q calls=%d", s.brief, s.thread, s.calls)
+	}
+	if s.count != 1 {
+		t.Errorf("count = %d, want default 1", s.count)
+	}
+	var got struct {
+		Hands []map[string]any `json:"hands"`
+	}
+	if err := json.Unmarshal(res, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Hands) != 3 {
+		t.Fatalf("hands = %v", got.Hands)
+	}
+	if got.Hands[0]["status"] != "running" || got.Hands[0]["run_id"] != "run-1" {
+		t.Errorf("hand 0 = %v", got.Hands[0])
+	}
+	if got.Hands[1]["status"] != "queued" {
+		t.Errorf("hand 1 = %v", got.Hands[1])
+	}
+	if got.Hands[2]["status"] != "failed" || got.Hands[2]["error"] != "boom" {
+		t.Errorf("hand 2 = %v", got.Hands[2])
+	}
+}
+
+func TestCommsRunner_SpawnRequiresBrief(t *testing.T) {
+	s := &fakeSpawner{}
+	r := CommsRunner{Gateway: &fakeGateway{}, Spawner: s}
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameSpawn,
+		Args: mustJSON(map[string]any{"brief": "   "}),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(res, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["error"] == "" || s.calls != 0 {
+		t.Errorf("empty brief must error without dispatching (res=%s calls=%d)", res, s.calls)
+	}
+}
+
+func TestSpawnToolDefNotInCommsToolDefs(t *testing.T) {
+	// Spawn is parent-only: callers append SpawnToolDef explicitly for
+	// non-derived identities. The base def list must not leak it to
+	// every surface (hands share CommsToolDefs).
+	for _, d := range CommsToolDefs() {
+		if d.Name == ToolNameSpawn {
+			t.Fatal("CommsToolDefs must not include spawn — it is appended per-identity")
+		}
+	}
+	if SpawnToolDef().Name != ToolNameSpawn {
+		t.Fatal("SpawnToolDef name mismatch")
+	}
+}

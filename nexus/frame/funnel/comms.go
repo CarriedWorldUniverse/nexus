@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
@@ -228,6 +229,10 @@ const (
 	// Failure to triage triggers synthetic skip rows so the operator
 	// audit trail stays complete; that's a model-compliance signal.
 	ToolNameTriage = "triage"
+	// ToolNameSpawn — aspect-owned fan-out to hands (NEX-609). NOT in
+	// CommsToolDefs: spawn is parent-only (no sub-of-sub), so callers
+	// append SpawnToolDef() explicitly for non-derived identities.
+	ToolNameSpawn = "spawn"
 )
 
 // CommsToolDefs returns the set of bridle.ToolDef registrations for
@@ -398,6 +403,52 @@ func CommsToolDefs() []bridle.ToolDef {
 	}
 }
 
+// SpawnToolDef is the spawn tool definition for the NATIVE comms
+// surface (NEX-609). Deliberately NOT part of CommsToolDefs: spawn is
+// parent-aspect-only (no sub-of-sub), so callers append it explicitly
+// for non-derived identities — agentfunnel does this in
+// toolsForProviderAgent. The schema and description mirror
+// runtime/cmd/nexus-comms-mcp's spawnTool so the model sees one spawn
+// contract regardless of which surface (MCP for claude-code, native
+// tool loop for direct-API providers) delivers it.
+func SpawnToolDef() bridle.ToolDef {
+	return bridle.ToolDef{
+		Name: ToolNameSpawn,
+		Description: "Fan a unit of work to a fresh-context hand carrying your own persona under a derived identity. " +
+			"The hand boots clean (no current conversation), does the work described in brief, and reports back into the audit thread — you keep running, never blocked. " +
+			"Use for parallel background work you'd otherwise have to do inline (research sweeps, multi-file edits, independent sub-tasks). " +
+			"The hand inherits your identity and scope; it cannot itself spawn (no sub-of-sub). Returns one handle (name + run id) per hand once accepted.",
+		InputSchema: mustJSON(map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"brief":  map[string]any{"type": "string", "description": "The work/persona instruction for the hand — a self-contained statement of what to do. The hand has no access to your current context, so include everything it needs."},
+				"count":  map[string]any{"type": "integer", "description": "How many hands to fan this brief to. Default 1. Capped by the broker's SpawnMaxPerRequest; asking for more is rejected."},
+				"thread": map[string]any{"type": "string", "description": "Audit thread (topic) the hands report their briefs and results into. Defaults to a fresh thread rooted by the broker under your identity."},
+			},
+			"required": []string{"brief"},
+		}),
+	}
+}
+
+// SpawnHandle identifies one accepted hand — the funnel-side mirror of
+// dispatch.SpawnHandle / frames.SpawnHandle, kept local so the funnel
+// doesn't depend on the dispatch package. RunID empty = queued for
+// capacity; Error set = that hand failed to launch.
+type SpawnHandle struct {
+	RunID string
+	Name  string
+	Error string
+}
+
+// SpawnGateway is the optional fan-out seam beside ChatGateway: an
+// implementation emits spawn.request on the aspect's authenticated WS
+// (wsasp.Gateway in agentfunnel) and returns the broker's handles.
+// CommsRunner treats a nil Spawner as "spawn not available on this
+// surface" — a tool-result error the model can read, not a turn abort.
+type SpawnGateway interface {
+	Spawn(ctx context.Context, brief string, count int, thread string) ([]SpawnHandle, error)
+}
+
 // CommsRunner is a bridle.ToolRunner that dispatches the five comms
 // tools to a ChatGateway. Other tools (provider-specific or aspect-
 // specific) are NOT handled here — wrap CommsRunner with a fan-out
@@ -433,6 +484,12 @@ type CommsRunner struct {
 	// runtimes use this as their clean completion signal; always-on
 	// aspects leave it nil.
 	OnTaskDone func(summary string)
+
+	// Spawner is the optional aspect-owned fan-out seam (NEX-609).
+	// When nil the spawn tool returns a "not available" tool-result
+	// error. agentfunnel wires it (wsasp.Gateway) for non-derived
+	// aspect identities only — hands never get a working spawn.
+	Spawner SpawnGateway
 }
 
 // Run dispatches a tool call by name. Unknown tool names return an
@@ -474,9 +531,58 @@ func (r CommsRunner) Run(ctx context.Context, call bridle.ToolCall) (json.RawMes
 		return r.runTaskDone(ctx, call.Args)
 	case ToolNameTriage:
 		return r.runTriage(ctx, call.Args)
+	case ToolNameSpawn:
+		return r.runSpawn(ctx, call.Args)
 	default:
 		return nil, fmt.Errorf("CommsRunner: unknown tool %q", call.Name)
 	}
+}
+
+// runSpawn dispatches the spawn tool to the SpawnGateway (NEX-609).
+// Mirrors nexus-comms-mcp's spawn handler: brief required, count
+// defaults to 1 and is passed through for the BROKER to cap (single
+// authority, no client/broker drift). Gateway errors land in the
+// tool result so a rejection (cap exceeded, no runner, …) is model-
+// recoverable, not a turn abort.
+func (r CommsRunner) runSpawn(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	if r.Spawner == nil {
+		return errorResult(fmt.Errorf("spawn is not available on this surface")), nil
+	}
+	var args struct {
+		Brief  string `json:"brief"`
+		Count  int    `json:"count"`
+		Thread string `json:"thread"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return errorResult(err), nil
+	}
+	if strings.TrimSpace(args.Brief) == "" {
+		return errorResult(fmt.Errorf("brief is required and must be non-empty")), nil
+	}
+	count := args.Count
+	if count == 0 {
+		count = 1
+	}
+	handles, err := r.Spawner.Spawn(ctx, args.Brief, count, strings.TrimSpace(args.Thread))
+	if err != nil {
+		return gatewayErrorResult(err)
+	}
+	out := make([]map[string]any, 0, len(handles))
+	for _, h := range handles {
+		entry := map[string]any{"name": h.Name}
+		switch {
+		case h.Error != "":
+			entry["status"] = "failed"
+			entry["error"] = h.Error
+		case h.RunID == "":
+			entry["status"] = "queued"
+		default:
+			entry["status"] = "running"
+			entry["run_id"] = h.RunID
+		}
+		out = append(out, entry)
+	}
+	return mustJSON(map[string]any{"hands": out}), nil
 }
 
 func (r CommsRunner) runTaskDone(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {

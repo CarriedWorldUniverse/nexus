@@ -11,7 +11,7 @@ import (
 // local coding tools (lane 1) on its tool surface, while claude-code
 // still gets nil (it self-supplies its tool surface natively).
 func TestToolsForNativeProviderIncludesLocalAndComms(t *testing.T) {
-	defs := toolsForProviderAgent(bridle.ProviderOpenAI)
+	defs := toolsForProviderAgent(bridle.ProviderOpenAI, "anvil")
 	got := map[string]bool{}
 	for _, d := range defs {
 		got[d.Name] = true
@@ -22,10 +22,10 @@ func TestToolsForNativeProviderIncludesLocalAndComms(t *testing.T) {
 			t.Errorf("native tool surface missing %q", want)
 		}
 	}
-	if toolsForProviderAgent("claude-code") != nil {
+	if toolsForProviderAgent("claude-code", "anvil") != nil {
 		t.Error("claude-code should still get nil (self-supplies tools)")
 	}
-	if toolsForProviderAgent("claudecode") != nil {
+	if toolsForProviderAgent("claudecode", "anvil") != nil {
 		t.Error("claudecode alias should still get nil (self-supplies tools)")
 	}
 }
