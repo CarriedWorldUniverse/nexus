@@ -22,6 +22,8 @@ import (
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
+	grpccodes "google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 )
 
 type agentCredFetchRequest struct {
@@ -74,6 +76,17 @@ func (b *Broker) handleAgentCredentialFetch(w http.ResponseWriter, r *http.Reque
 	}
 
 	ctx := r.Context()
+
+	// custodian routing (custodian M1): kind="git" goes to the CWB custodian
+	// pillar when a client is configured. Additive + fail-safe — when
+	// b.cfg.CustodianGit is nil (CUSTODIAN_GRPC_ADDR unset) this branch is
+	// skipped and git (like every other kind) falls through to the local
+	// store, so there is no regression. Non-git kinds never route here.
+	if credentials.Kind(req.Kind) == credentials.KindGit && b.cfg.CustodianGit != nil {
+		b.fetchGitViaCustodian(w, r, agentID, req.Host)
+		return
+	}
+
 	var cred credentials.Credential
 	switch {
 	case req.Name != "":
@@ -124,4 +137,61 @@ func (b *Broker) handleAgentCredentialFetch(w http.ResponseWriter, r *http.Reque
 	_ = json.NewEncoder(w).Encode(agentCredFetchResponse{
 		Name: cred.Name, Kind: string(cred.Kind), Bundle: bundle,
 	})
+}
+
+// fetchGitViaCustodian serves a kind="git" credential.fetch from the CWB
+// custodian pillar. The response shape matches the local-store path exactly
+// (the cw git-credential-helper consumes {bundle:{username,password,host}}), so
+// routing is transparent to the caller. custodian performs its own org-scoped,
+// scope-gated, AUDITED fetch — the audit row lives in custodian, not the broker
+// store. A custodian error surfaces as the matching HTTP status; there is no
+// fall-back to the local store (that would defeat the routing).
+func (b *Broker) fetchGitViaCustodian(w http.ResponseWriter, r *http.Request, agentID, host string) {
+	if b.cfg.CustodianOrg == "" {
+		writeError(w, http.StatusServiceUnavailable, "custodian org not configured")
+		return
+	}
+	if host == "" {
+		// git's credential protocol always supplies the host; without it
+		// custodian has no credential coordinate (name = host).
+		writeError(w, http.StatusBadRequest, "git credential fetch requires a host")
+		return
+	}
+	username, password, gotHost, err := b.cfg.CustodianGit.FetchGit(r.Context(), agentID, b.cfg.CustodianOrg, host)
+	if err != nil {
+		b.cfg.Logger.Warn("credential.fetch: custodian git fetch failed",
+			"agent", agentID, "host", host, "err", err)
+		// NotFound / PermissionDenied map to the same outward shape the local
+		// path uses (404/403); anything else is a 502 (custodian unreachable).
+		writeError(w, custodianHTTPStatus(err), "custodian git fetch failed")
+		return
+	}
+	if gotHost == "" {
+		gotHost = host
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(agentCredFetchResponse{
+		Name: gotHost,
+		Kind: string(credentials.KindGit),
+		Bundle: map[string]any{
+			"username": username,
+			"password": password,
+			"host":     gotHost,
+		},
+	})
+}
+
+// custodianHTTPStatus maps a custodian gRPC error to the broker's outward HTTP
+// status, mirroring the local-store path's 404/403 semantics.
+func custodianHTTPStatus(err error) int {
+	switch grpcstatus.Code(err) {
+	case grpccodes.NotFound:
+		return http.StatusNotFound
+	case grpccodes.PermissionDenied, grpccodes.Unauthenticated:
+		return http.StatusForbidden
+	case grpccodes.InvalidArgument, grpccodes.FailedPrecondition:
+		return http.StatusBadRequest
+	default:
+		return http.StatusBadGateway
+	}
 }

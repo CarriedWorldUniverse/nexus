@@ -217,6 +217,14 @@ func main() {
 	// emits an empty mcp_profile field (legacy shape).
 	keyfileValidator.Credentials = credentialStore
 
+	// custodian M1 git routing. When CUSTODIAN_GRPC_ADDR is set, kind="git"
+	// agent credential.fetch is served from the CWB custodian pillar instead
+	// of the local store; everything else stays local (no regression). When
+	// unset, custodianGit is nil and git stays local too — fully dark by
+	// default. Failure to dial is fatal only insofar as it leaves custodianGit
+	// nil (logged) — the broker still boots and serves git locally.
+	custodianGit, custodianOrg := buildCustodianGit(logger)
+
 	r := roster.New()
 	proj := sessions.New(db)
 
@@ -566,6 +574,10 @@ func main() {
 		// Task #218: broker-mediated credentials. Nil-safe — admin
 		// routes register only when non-nil, otherwise return 503.
 		Credentials: credentialStore,
+		// custodian M1: git credential.fetch routes here when configured
+		// (CUSTODIAN_GRPC_ADDR); nil = git stays local (no regression).
+		CustodianGit: custodianGit,
+		CustodianOrg: custodianOrg,
 		// Operator login (dashboard-ws-port spec §2.2 / 5b1).
 		// Constructed only when the Nexus has identity (signing
 		// secret available) AND the operator endpoints are wanted.
