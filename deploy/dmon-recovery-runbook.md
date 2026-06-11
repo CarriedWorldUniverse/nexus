@@ -1,15 +1,28 @@
-# dMon recovery runbook — pod-networking outage (NEX-600)
+# dMon recovery runbook — NVMe APST instability (NEX-600)
 
-**Use when:** the k3s cluster is network-isolated (broker not listening, aspects can't connect, `flannel.1` missing). Root cause 2026-06-11: the USB-Ethernet dongle (`enp0s13f0u4u4c2`) flapped → flannel lost its external interface; a wedged system D-Bus then made `systemctl` unusable, so k3s couldn't be restarted in place. Recovery is a console reboot + (durably) pinning flannel off the flaky dongle.
+**Root cause (2026-06-11, SMART-confirmed):** the **NVMe APST (autonomous power-state) Linux bug** — NOT a failing drive, NOT the network. The Micron OEM NVMe (`nvme0n1`, btrfs root) is healthy (SMART: 2% used, 100% spare, 0 media/integrity errors, btrfs error stats all zero), but Linux mishandles its deep power-saving states → the drive doesn't wake within the kernel timeout → `nvme nvme0: I/O tag X timeout, completion polled` → I/O stalls cascade into hung tasks → wedged system D-Bus (`systemctl` dies) → random reboots → the apparent "network/flannel" symptoms (all downstream of processes hung on disk I/O). One root cause for the whole class of instability.
 
-## 0. Before reboot (optional, from console)
-Nothing needs saving — sqld (the DB) and the broker PVC are on persistent volumes; pods are Running, just isolated. A clean reboot loses nothing.
+**Use when:** the box is hanging, randomly rebooting, `systemctl` won't connect to the bus, or the k3s cluster is isolated — and `sudo dmesg | grep nvme` shows `timeout, completion polled`.
 
-## 1. Reboot (at the console)
+## 0. Before reboot
+Nothing needs saving on the drive's account — the NVMe is **healthy** (zero media/btrfs errors), and the irreplaceable corpora (forge, WakeStone, canon) are already on GitHub. A clean reboot loses nothing.
+
+## 1. THE FIX — disable NVMe APST, then reboot (at the console)
+Add the kernel boot parameter that disables the deep power states the drive mishandles, so it stays responsive:
 ```
+# Fedora (grubby), applies to all kernels + persists across updates:
+sudo grubby --update-kernel=ALL --args="nvme_core.default_ps_max_latency_us=0"
+sudo grubby --info=DEFAULT | grep args      # confirm the arg is present
 sudo reboot
 ```
-(Remote reboot was avoided: dMon = ASUS ROG with boot quirks (NEX-310) + the flaky dongle — needs console eyes in case it doesn't come back on the network.)
+(dMon = ASUS ROG; if the box is mid-hang and `grubby`/`sudo` won't run because systemd is wedged, a hard power-cycle to get a clean boot first is fine — the drive is healthy, btrfs is journaled.)
+
+## 1b. Verify the fix took
+```
+sudo dmesg -T | grep -i "nvme.*timeout"     # expect: NO new entries since boot
+sudo grubby --info=$(sudo grubby --default-kernel) | grep ps_max_latency   # arg present
+```
+If `nvme … timeout, completion polled` stops appearing, the instability is fixed at the root. (If it persists, follow-ups: a per-device NVMe quirk in the kernel, or a Micron firmware update — but APST disable resolves this signature in the large majority of cases.)
 
 ## 2. Verify recovery (after boot)
 ```
@@ -26,24 +39,15 @@ sudo kubectl get deploy gemma-ollama -n nexus
 ```
 If `flannel.1` is present and the broker logs show it listening on :7888 and aspects registering → recovered, go to §4.
 
-## 3. If flannel STILL can't find its interface (the recurrence — NEX-600 durable fix)
-Symptom: k3s logs spam `vxlan_network.go: external interface not found, retrying`. flannel auto-detects via the default route, which is the flaky USB dongle. Pin it to a stable interface instead.
-
-1. Pick a STABLE interface at the console (NOT the USB dongle `enp0s13f0u4u4c2`):
-   ```
-   ip -br addr            # find the reliably-up iface with connectivity (built-in NIC, or wifi wlo1)
-   ```
-2. Add `--flannel-iface=<stable-iface>` to the k3s server args. k3s on Fedora reads `/etc/systemd/system/k3s.service` (ExecStart) or `/etc/rancher/k3s/config.yaml`. Prefer the config file (survives k3s upgrades):
-   ```
-   # /etc/rancher/k3s/config.yaml
-   flannel-iface: "<stable-iface>"
-   ```
-3. Restart k3s (systemd should be healthy post-reboot):
-   ```
-   sudo systemctl restart k3s
-   ip -br link show flannel.1     # confirm recreated
-   ```
-4. **Durable hardware fix:** the USB-Ethernet dongle is the root instability (behind both the random reboots and this outage). Replace it with a stable wired NIC, or commit to wifi (`wlo1`) as the pinned flannel-iface + default route. Until the dongle is out of the critical path, expect recurrence.
+## 3. If flannel still struggles after a clean boot (secondary — only if needed)
+With APST disabled, a clean boot should bring flannel/k3s back normally (the network symptoms were downstream of the I/O hangs). If k3s logs still spam `vxlan_network.go: external interface not found` after a stable boot, flannel's auto-detected interface is genuinely unstable — pin it explicitly:
+```
+# /etc/rancher/k3s/config.yaml   (survives k3s upgrades)
+flannel-iface: "<stable-iface>"   # ip -br addr to pick the reliably-up iface
+sudo systemctl restart k3s
+ip -br link show flannel.1        # confirm recreated
+```
+This is a fallback, not the primary fix — the NVMe APST param (§1) is what resolves the root instability.
 
 ## 4. Once healthy — land the queued roundtable work + e2e
 These branches are built, tested, and rebased onto current main, waiting on a live cluster:
