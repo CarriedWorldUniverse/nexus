@@ -418,7 +418,13 @@ func main() {
 			return "", ferr
 		}
 		state.Set(sessionSnapshot{JWT: fresh.SessionJWT, Expires: fresh.SessionExpiresAt})
-		log.Info("agentfunnel: TokenProvider re-validated via keyfile",
+		revalVia := "keyfile"
+		if kf == nil {
+			// Hand boot re-resolves via the cached JWT, not a keyfile.
+			revalVia = "JWT"
+		}
+		log.Info("agentfunnel: TokenProvider re-validated",
+			"via", revalVia,
 			"expires", fresh.SessionExpiresAt.Format(time.RFC3339))
 
 		// NEX-335: refresh the provider+model binding from the new

@@ -18,7 +18,42 @@ type JobConfig struct {
 	ActivityDir   string
 	LynxAIBaseURL string
 	LynxAIKey     string
+	// BrokerCAFile, when non-empty, is the IN-POD path at which the
+	// broker's TLS CA is mounted for hand (spawn) Jobs. A hand has no
+	// keyfile to pin the broker cert from (ticket builders carry it inside
+	// aspect-keyfile-<agent>), so the CA is delivered as a Secret volume
+	// and CW_SEAM_CA points agentfunnel's BrokerTLSConfigFromCAFile at it.
+	// Empty → no CW_SEAM_CA injected → system trust (the CA-signed / LE
+	// broker default). Set from the broker's own cert path in cmd/nexus.
+	BrokerCAFile string
+	// NexusID is the broker's nexus id, injected as CW_NEXUS_ID on hand
+	// Jobs for log correlation / WS-dial parity (informational — a hand's
+	// identity is already proven by its session JWT). Empty → not injected.
+	NexusID string
 }
+
+const (
+	// brokerCAVolumeName / brokerCAMountDir deliver the broker's TLS CA to
+	// hand Jobs via the cluster Secret nexus-broker-ca (provisioned
+	// out-of-band, like aspect-keyfile-<agent> and codex-auth). The CA file
+	// lands at brokerCAMountDir/<key>; cmd/nexus sets JobConfig.BrokerCAFile
+	// to that full in-pod path and CW_SEAM_CA mirrors it.
+	brokerCAVolumeName = "broker-ca"
+	brokerCASecretName = "nexus-broker-ca"
+	brokerCAMountDir   = "/etc/nexus-ca"
+	brokerCASecretKey  = "ca.crt"
+)
+
+// HandBrokerCAPath is the in-pod path at which a hand Job finds the broker
+// TLS CA (the nexus-broker-ca Secret mounted at brokerCAMountDir). Set
+// JobConfig.BrokerCAFile to this when the broker uses a self-signed /
+// internal-CA cert so hands can pin it via CW_SEAM_CA.
+func HandBrokerCAPath() string { return brokerCAMountDir + "/" + brokerCASecretKey }
+
+// HandBrokerCASecretName is the cluster Secret (provisioned out-of-band,
+// like aspect-keyfile-<agent>) whose ca.crt key holds the broker TLS CA
+// delivered to hand Jobs.
+func HandBrokerCASecretName() string { return brokerCASecretName }
 
 func int32p(v int32) *int32 { return &v }
 
@@ -90,6 +125,19 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 			corev1.EnvVar{Name: "CW_ASPECT_NAME", Value: b.Agent},
 			corev1.EnvVar{Name: "CW_SPAWN_PARENT", Value: b.SpawnParent},
 		)
+		// CW_SEAM_CA: pin the broker's self-signed/internal-CA cert so the
+		// hand's /api/aspect/resolve over TLS verifies. The CA file is
+		// delivered by the nexus-broker-ca Secret volume mounted below at
+		// brokerCAMountDir; CW_SEAM_CA = its in-pod path. Empty BrokerCAFile
+		// → omit → system trust (CA-signed / LE broker), unchanged behavior.
+		if cfg.BrokerCAFile != "" {
+			env = append(env, corev1.EnvVar{Name: "CW_SEAM_CA", Value: cfg.BrokerCAFile})
+		}
+		// CW_NEXUS_ID: informational (log correlation / WS-dial parity); the
+		// hand's identity is proven by its JWT, so a miss is non-fatal.
+		if cfg.NexusID != "" {
+			env = append(env, corev1.EnvVar{Name: "CW_NEXUS_ID", Value: cfg.NexusID})
+		}
 	}
 	if cfg.LynxAIBaseURL != "" {
 		env = append(env, corev1.EnvVar{Name: "LYNXAI_BASE_URL", Value: cfg.LynxAIBaseURL})
@@ -119,6 +167,14 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	if !spawn {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: "keyfile", MountPath: "/etc/nexus", ReadOnly: true})
 		volumes = append(volumes, corev1.Volume{Name: "keyfile", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "aspect-keyfile-" + keyfileAspect}}})
+	}
+	if spawn && cfg.BrokerCAFile != "" {
+		// Hands have no keyfile-pinned broker cert; mount the broker CA so
+		// CW_SEAM_CA (set above) resolves to a real file in the pod. The
+		// nexus-broker-ca Secret is provisioned out-of-band, like the
+		// keyfile Secret. Read-only — the hand only needs to read the PEM.
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: brokerCAVolumeName, MountPath: brokerCAMountDir, ReadOnly: true})
+		volumes = append(volumes, corev1.Volume{Name: brokerCAVolumeName, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: brokerCASecretName}}})
 	}
 	var initContainers []corev1.Container
 	if codexProvider {

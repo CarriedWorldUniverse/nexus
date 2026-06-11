@@ -185,6 +185,94 @@ func TestBuildJobHandSpec(t *testing.T) {
 	}
 }
 
+// A hand Job built with JobConfig.BrokerCAFile set carries the CA into
+// the pod: CW_SEAM_CA points at the in-pod mount path, and the Job has the
+// broker-CA Secret volume + read-only mount so the file exists for
+// agentfunnel's BrokerTLSConfigFromCAFile (self-signed/internal-CA broker).
+func TestBuildJobHandInjectsBrokerCA(t *testing.T) {
+	b := dispatch.Brief{
+		Agent:       "plumb.sub-1",
+		SpawnParent: "plumb",
+		SessionJWT:  "hand-jwt",
+		Ticket:      "hand-abc",
+		Thread:      "spawn-42",
+		RunID:       "run-1",
+	}
+	job := dispatch.BuildJob(b, dispatch.JobConfig{
+		Namespace:    "nexus",
+		BrokerHost:   "nexus.internal",
+		BrokerCAFile: "/etc/nexus-ca/ca.crt",
+	}, "task-1", "claude")
+
+	c := job.Spec.Template.Spec.Containers[0]
+	env := map[string]string{}
+	for _, e := range c.Env {
+		env[e.Name] = e.Value
+	}
+	if env["CW_SEAM_CA"] != "/etc/nexus-ca/ca.crt" {
+		t.Errorf("CW_SEAM_CA = %q, want the in-pod CA path /etc/nexus-ca/ca.crt", env["CW_SEAM_CA"])
+	}
+
+	var hasMount bool
+	for _, m := range c.VolumeMounts {
+		if m.Name == "broker-ca" {
+			hasMount = true
+			if !m.ReadOnly {
+				t.Error("broker-ca mount must be read-only")
+			}
+			if m.MountPath != "/etc/nexus-ca" {
+				t.Errorf("broker-ca mount path = %q, want /etc/nexus-ca", m.MountPath)
+			}
+		}
+	}
+	if !hasMount {
+		t.Error("hand Job with BrokerCAFile must mount the broker-ca volume")
+	}
+	var hasVol bool
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == "broker-ca" {
+			hasVol = true
+			if v.Secret == nil || v.Secret.SecretName != "nexus-broker-ca" {
+				t.Errorf("broker-ca volume must source the nexus-broker-ca Secret, got %+v", v.Secret)
+			}
+		}
+	}
+	if !hasVol {
+		t.Error("hand Job with BrokerCAFile must define the broker-ca Secret volume")
+	}
+}
+
+// Empty BrokerCAFile → no CW_SEAM_CA, no broker-ca volume/mount: the hand
+// falls back to system trust (the CA-signed / LE broker default, unchanged
+// behavior).
+func TestBuildJobHandNoBrokerCAByDefault(t *testing.T) {
+	b := dispatch.Brief{
+		Agent:       "plumb.sub-1",
+		SpawnParent: "plumb",
+		SessionJWT:  "hand-jwt",
+		Ticket:      "hand-abc",
+		RunID:       "run-1",
+	}
+	job := dispatch.BuildJob(b, dispatch.JobConfig{Namespace: "nexus", BrokerHost: "nexus.internal"}, "task-1", "claude")
+
+	c := job.Spec.Template.Spec.Containers[0]
+	for _, e := range c.Env {
+		if e.Name == "CW_SEAM_CA" {
+			t.Errorf("empty BrokerCAFile must not inject CW_SEAM_CA, got %q", e.Value)
+		}
+	}
+	for _, m := range c.VolumeMounts {
+		if m.Name == "broker-ca" {
+			t.Error("empty BrokerCAFile must not mount a broker-ca volume")
+		}
+	}
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == "broker-ca" {
+			t.Error("empty BrokerCAFile must not define a broker-ca volume")
+		}
+	}
+}
+
 // Ticket dispatches keep the keyfile mount + -k arg (regression guard
 // for the spawn-conditional jobspec).
 func TestBuildJobTicketDispatchKeepsKeyfile(t *testing.T) {

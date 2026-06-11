@@ -405,6 +405,18 @@ func main() {
 		ActivityDir:   filepath.Join(*dataDir, "activity"),
 		LynxAIBaseURL: os.Getenv("LYNXAI_BASE_URL"),
 		LynxAIKey:     os.Getenv("LYNXAI_KEY"),
+		NexusID:       nexusIdentity.NexusID,
+	}
+	// Hand (spawn) Jobs carry no keyfile, so they can't pin the broker's
+	// self-signed / internal-CA cert the way ticket builders do (the cert is
+	// embedded in aspect-keyfile-<agent> at mint time from <dataDir>/tls/
+	// server.crt). When the broker keeps a local cert there, that same cert
+	// is the CA hands must trust: point BrokerCAFile at the in-pod mount of
+	// the nexus-broker-ca Secret so agentfunnel pins it via CW_SEAM_CA. No
+	// local cert (CA-signed / LE broker) → leave empty → hands use system
+	// trust, unchanged.
+	if _, err := os.Stat(filepath.Join(*dataDir, "tls", "server.crt")); err == nil {
+		dispatchCfg.BrokerCAFile = dispatch.HandBrokerCAPath()
 	}
 	// Dispatch Runner: each !dispatch runs AS the named agent (mounts that
 	// agent's keyfile → its persona + attribution). Built unconditionally so
