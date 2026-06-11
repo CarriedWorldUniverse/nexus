@@ -95,6 +95,14 @@ func (r *Runner) SubmitSpawn(ctx context.Context, parent, brief string, count in
 		}
 	}
 
+	// Provider inheritance: a hand runs the PARENT's provider binding,
+	// not the launch default (claude). Resolved before the lock so the
+	// store read doesn't serialize behind r.mu. Empty → launch default.
+	var handProvider string
+	if r.HandProvider != nil {
+		handProvider = r.HandProvider(ctx, parent)
+	}
+
 	r.mu.Lock()
 	spawnCap := r.spawnMaxConcurrent()
 	names := r.freeHandNames(parent, count)
@@ -133,6 +141,7 @@ func (r *Runner) SubmitSpawn(ctx context.Context, parent, brief string, count in
 			Thread:        thread,
 			Task:          brief,
 			DispatchMsgID: dispatchMsgID,
+			Provider:      handProvider,
 		}
 	}
 	var launches []*Run
@@ -207,10 +216,16 @@ func (r *Runner) queuedHands(base string) int {
 	return n
 }
 
-// freeHandNames picks the lowest free hand indices for parent —
-// skipping names that are busy or already queued, so two overlapping
-// spawns never collide on a derived name (one-session-per-name holds
-// per hand). Caller holds r.mu.
+// freeHandNames leases count free hand names for parent from its
+// kindred-word pool (the P2 naming amendment: shadow → umbra, gloam…;
+// plumb → bob, fathom…), skipping names that are busy or already
+// queued so two overlapping spawns never collide on a derived name
+// (one-session-per-name holds per hand). When the pool is exhausted it
+// falls through to the `<parent>.hand-N` overflow naming (unreachable
+// in practice at the cap-4 concurrency, but never wedges). A name is
+// "leased" implicitly: it stays out of this set while it is in
+// agentBusy or the queue, and returns to the pool when the hand's run
+// clears agentBusy on completion. Caller holds r.mu.
 func (r *Runner) freeHandNames(parent string, count int) []string {
 	used := map[string]bool{}
 	for name := range r.agentBusy {
@@ -220,12 +235,37 @@ func (r *Runner) freeHandNames(parent string, count int) []string {
 		used[q.Agent] = true
 	}
 	out := make([]string, 0, count)
-	for i := 1; len(out) < count; i++ {
-		if name := aspects.DerivedName(parent, i); !used[name] {
+	// 1. Lease from the kindred-word pool in preference order.
+	for _, word := range r.handNamePool(parent) {
+		if len(out) >= count {
+			break
+		}
+		if name := aspects.DerivedName(parent, word); !used[name] {
 			out = append(out, name)
+			used[name] = true
+		}
+	}
+	// 2. Overflow: `<parent>.hand-N` for whatever the pool couldn't cover.
+	for i := 1; len(out) < count; i++ {
+		if name := aspects.OverflowHandName(parent, i); !used[name] {
+			out = append(out, name)
+			used[name] = true
 		}
 	}
 	return out
+}
+
+// handNamePool returns parent's effective kindred-word lease order:
+// the Runner's AspectHandNames override when set for parent, else the
+// built-in aspects.HandNamePool defaults. Unknown aspects get an empty
+// pool and lease straight from the overflow naming.
+func (r *Runner) handNamePool(parent string) []string {
+	if r.AspectHandNames != nil {
+		if pool, ok := r.AspectHandNames[parent]; ok {
+			return pool
+		}
+	}
+	return aspects.HandNamePool(parent)
 }
 
 // handTicket derives a hand's unique ticket (the Job correlation key +

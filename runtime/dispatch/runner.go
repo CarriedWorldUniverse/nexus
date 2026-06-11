@@ -108,6 +108,20 @@ type Runner struct {
 	// rejects spawn briefs at launch.
 	MintHandCredential func(ctx context.Context, parent, derived string) (string, error)
 
+	// AspectHandNames overrides the built-in kindred-word hand-name
+	// pools per parent aspect (the P2 naming amendment). Keys are base
+	// aspect names; values are the lease order. Parents absent from the
+	// map use aspects.HandNamePool's built-in defaults. cmd/nexus
+	// populates this from NEXUS_ASPECT_HAND_NAMES when set.
+	AspectHandNames map[string][]string
+
+	// HandProvider resolves the provider a hand of parent should run —
+	// so a hand inherits the PARENT's provider binding rather than
+	// defaulting to claude. nil (or an empty return) → the hand inherits
+	// nothing and the launch default applies. In production cmd/nexus
+	// wires this to the aspects store's provider column for the parent.
+	HandProvider func(ctx context.Context, parent string) string
+
 	mu        sync.Mutex
 	ctx       context.Context   // stored at Init for background callbacks (OnJobDone)
 	agentBusy map[string]string // agent name → runID of its active run

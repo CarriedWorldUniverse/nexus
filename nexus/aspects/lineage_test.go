@@ -9,13 +9,13 @@ func TestLineageNames(t *testing.T) {
 		base    string
 	}{
 		{"plumb", false, "plumb"},
-		{"plumb.sub-1", true, "plumb"},
-		{"plumb.sub-12", true, "plumb"},
-		{"maren-art.sub-4", true, "maren-art"},
-		{"plumb.sub-", false, "plumb.sub-"},
-		{"plumb.sub-x", false, "plumb.sub-x"},
-		{".sub-1", false, ".sub-1"}, // empty base is not a lineage
-		{"a.sub-1.sub-2", true, "a.sub-1"},
+		{"plumb.bob", true, "plumb"},
+		{"plumb.fathom", true, "plumb"},
+		{"shadow.umbra", true, "shadow"},
+		{"maren-art.brine", true, "maren-art"}, // hyphenated base survives
+		{"anvil.hand-7", true, "anvil"},        // overflow token is still derived
+		{"plumb.", false, "plumb."},            // empty suffix is not a lineage
+		{".umbra", false, ".umbra"},            // empty base is not a lineage
 	}
 	for _, c := range cases {
 		if got := IsDerivedName(c.name); got != c.derived {
@@ -28,13 +28,32 @@ func TestLineageNames(t *testing.T) {
 }
 
 func TestDerivedName(t *testing.T) {
-	if got := DerivedName("plumb", 3); got != "plumb.sub-3" {
+	if got := DerivedName("plumb", "fathom"); got != "plumb.fathom" {
 		t.Fatalf("DerivedName = %q", got)
 	}
-	if !IsDerivedName(DerivedName("plumb", 3)) {
+	if !IsDerivedName(DerivedName("plumb", "fathom")) {
 		t.Fatal("DerivedName output must satisfy IsDerivedName")
 	}
-	if BaseName(DerivedName("plumb", 3)) != "plumb" {
+	if BaseName(DerivedName("plumb", "fathom")) != "plumb" {
 		t.Fatal("BaseName must invert DerivedName")
+	}
+}
+
+func TestOverflowHandName(t *testing.T) {
+	got := OverflowHandName("shadow", 5)
+	if got != "shadow.hand-5" {
+		t.Fatalf("OverflowHandName = %q", got)
+	}
+	if !IsDerivedName(got) || BaseName(got) != "shadow" {
+		t.Fatalf("overflow name must round-trip as a derived name of shadow, got base %q", BaseName(got))
+	}
+}
+
+func TestHandNamePool(t *testing.T) {
+	if pool := HandNamePool("shadow"); len(pool) == 0 || pool[0] != "umbra" {
+		t.Fatalf("shadow pool unexpected: %v", pool)
+	}
+	if pool := HandNamePool("nobody-aspect"); len(pool) != 0 {
+		t.Fatalf("unknown aspect must have empty pool, got %v", pool)
 	}
 }

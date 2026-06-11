@@ -78,7 +78,8 @@ func TestSubmitSpawnCreatesDerivedHands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(handles) != 2 || handles[0].Name != "plumb.sub-1" || handles[1].Name != "plumb.sub-2" {
+	// plumb's kindred pool leases bob, then fathom (the P2 naming amendment).
+	if len(handles) != 2 || handles[0].Name != "plumb.bob" || handles[1].Name != "plumb.fathom" {
 		t.Fatalf("handles = %+v", handles)
 	}
 	for _, h := range handles {
@@ -86,19 +87,19 @@ func TestSubmitSpawnCreatesDerivedHands(t *testing.T) {
 			t.Errorf("launched hand %s should carry a RunID", h.Name)
 		}
 	}
-	if !r.AgentBusy("plumb.sub-1") || !r.AgentBusy("plumb.sub-2") {
+	if !r.AgentBusy("plumb.bob") || !r.AgentBusy("plumb.fathom") {
 		t.Error("both hands should be busy")
 	}
 	if r.AgentBusy("plumb") {
 		t.Error("the parent itself must stay free — hands run beside it")
 	}
-	if len(fk.jobs) != 2 || !strings.HasPrefix(fk.jobs[0], "builder-plumb-sub-1-") {
+	if len(fk.jobs) != 2 || !strings.HasPrefix(fk.jobs[0], "builder-plumb-bob-") {
 		t.Errorf("jobs = %v", fk.jobs)
 	}
 	if len(fk.secrets) != 0 {
 		t.Errorf("hands must not provision keyfile secrets, got %v", fk.secrets)
 	}
-	if !fk.homes["plumb.sub-1"] {
+	if !fk.homes["plumb.bob"] {
 		t.Error("hand home repo PVC should be provisioned for the derived name")
 	}
 
@@ -114,11 +115,11 @@ func TestSubmitSpawnCreatesDerivedHands(t *testing.T) {
 	if len(poster.posts) < 4 {
 		t.Fatalf("posts = %v", poster.posts)
 	}
-	if !strings.Contains(poster.posts[0], "hand plumb.sub-1 brief:") ||
-		!strings.Contains(poster.posts[1], "hand plumb.sub-2 brief:") {
+	if !strings.Contains(poster.posts[0], "hand plumb.bob brief:") ||
+		!strings.Contains(poster.posts[1], "hand plumb.fathom brief:") {
 		t.Errorf("brief posts wrong/missing: %v", poster.posts)
 	}
-	if !strings.Contains(poster.posts[2], "hand spawned as plumb.sub-1") {
+	if !strings.Contains(poster.posts[2], "hand spawned as plumb.bob") {
 		t.Errorf("spawned post wrong: %v", poster.posts)
 	}
 
@@ -128,7 +129,7 @@ func TestSubmitSpawnCreatesDerivedHands(t *testing.T) {
 		t.Fatalf("run starts = %+v", rec.starts)
 	}
 	for _, s := range rec.starts {
-		if !strings.HasPrefix(s.agent, "plumb.sub-") {
+		if !strings.HasPrefix(s.agent, "plumb.") {
 			t.Errorf("run agent = %q", s.agent)
 		}
 		if s.dispatchMsgID != 42 {
@@ -240,8 +241,8 @@ func TestSubmitSpawnPerParentCapQueuesAndDrains(t *testing.T) {
 			queued = &handles[i]
 		}
 	}
-	if queued == nil || queued.Name != "plumb.sub-3" {
-		t.Fatalf("expected plumb.sub-3 queued with empty RunID, handles=%+v", handles)
+	if queued == nil || queued.Name != "plumb.sound" {
+		t.Fatalf("expected plumb.sound queued with empty RunID, handles=%+v", handles)
 	}
 
 	// Complete the first hand → the queued third drains.
@@ -249,8 +250,8 @@ func TestSubmitSpawnPerParentCapQueuesAndDrains(t *testing.T) {
 	if len(fk.jobs) != 3 {
 		t.Errorf("jobs after drain = %d, want 3", len(fk.jobs))
 	}
-	if !r.AgentBusy("plumb.sub-3") {
-		t.Error("plumb.sub-3 should run after a sibling freed capacity")
+	if !r.AgentBusy("plumb.sound") {
+		t.Error("plumb.sound should run after a sibling freed capacity")
 	}
 }
 
@@ -306,7 +307,7 @@ func TestSubmitSpawnPartialFailureMarksHandle(t *testing.T) {
 	fk := &fakeK8s{}
 	r, _, _, _ := newSpawnFixture(fk)
 	r.MintHandCredential = func(_ context.Context, _, derived string) (string, error) {
-		if derived == "plumb.sub-2" {
+		if derived == "plumb.fathom" {
 			return "", errors.New("mint boom")
 		}
 		return "jwt-for-" + derived, nil
@@ -323,13 +324,13 @@ func TestSubmitSpawnPartialFailureMarksHandle(t *testing.T) {
 	for _, h := range handles {
 		byName[h.Name] = h
 	}
-	ok1 := byName["plumb.sub-1"]
+	ok1 := byName["plumb.bob"]
 	if ok1.RunID == "" || ok1.Error != "" {
-		t.Errorf("plumb.sub-1 = %+v, want launched with no error", ok1)
+		t.Errorf("plumb.bob = %+v, want launched with no error", ok1)
 	}
-	failed := byName["plumb.sub-2"]
+	failed := byName["plumb.fathom"]
 	if failed.Error == "" || !strings.Contains(failed.Error, "mint boom") {
-		t.Errorf("plumb.sub-2 = %+v, want Error carrying the mint failure", failed)
+		t.Errorf("plumb.fathom = %+v, want Error carrying the mint failure", failed)
 	}
 }
 
@@ -357,8 +358,9 @@ func TestSubmitSpawnGlobalMaxConcApplies(t *testing.T) {
 	}
 }
 
-// Overlapping spawns never collide on a derived name: indices already
-// busy (or queued) are skipped.
+// Overlapping spawns never collide on a derived name: pool words
+// already busy (or queued) are skipped, so the next free kindred word
+// is leased.
 func TestSubmitSpawnPicksFreeIndices(t *testing.T) {
 	fk := &fakeK8s{}
 	r, _, _, _ := newSpawnFixture(fk)
@@ -370,8 +372,8 @@ func TestSubmitSpawnPicksFreeIndices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(handles) != 1 || handles[0].Name != "plumb.sub-2" {
-		t.Fatalf("handles = %+v, want plumb.sub-2 (sub-1 busy)", handles)
+	if len(handles) != 1 || handles[0].Name != "plumb.fathom" {
+		t.Fatalf("handles = %+v, want plumb.fathom (bob busy)", handles)
 	}
 }
 
@@ -426,7 +428,7 @@ func TestSubmitSpawnMintFailureRollsBack(t *testing.T) {
 	if _, err := r.SubmitSpawn(context.Background(), "plumb", "work", 1, ""); err == nil {
 		t.Fatal("expected error when every hand fails to launch")
 	}
-	if r.AgentBusy("plumb.sub-1") {
+	if r.AgentBusy("plumb.bob") {
 		t.Error("failed hand must be rolled back")
 	}
 	if len(rec.done) != 1 || rec.done[0].status != "failed" {
@@ -446,6 +448,110 @@ func TestSubmitSpawnMintFailureRollsBack(t *testing.T) {
 	}
 }
 
+// Kindred-name leasing (the P2 naming amendment): hands take distinct
+// words from the parent's pool in order, and a completed hand returns
+// its word to the pool for the next spawn to reuse.
+func TestSubmitSpawnLeasesKindredNamesAndReturnsOnComplete(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _, rec := newSpawnFixture(fk)
+
+	// shadow's pool: umbra, gloam, shade, dusk, …
+	handles, err := r.SubmitSpawn(context.Background(), "shadow", "work", 3, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{handles[0].Name, handles[1].Name, handles[2].Name}
+	want := []string{"shadow.umbra", "shadow.gloam", "shadow.shade"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("leased names = %v, want %v", got, want)
+		}
+	}
+
+	// Complete the first hand (umbra) → its word frees.
+	r.OnJobDone(dispatch.JobDone{Ticket: rec.starts[0].ticket, OK: true})
+	if r.AgentBusy("shadow.umbra") {
+		t.Fatal("umbra must return to the pool on completion")
+	}
+	// Next spawn reuses the freed umbra ahead of an unused word.
+	more, err := r.SubmitSpawn(context.Background(), "shadow", "again", 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if more[0].Name != "shadow.umbra" {
+		t.Fatalf("reused name = %q, want shadow.umbra (returned word)", more[0].Name)
+	}
+}
+
+// Pool exhaustion falls through to the `<parent>.hand-N` overflow
+// naming without wedging (a small custom pool forces it).
+func TestSubmitSpawnOverflowsExhaustedPool(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _, _ := newSpawnFixture(fk)
+	r.SpawnMaxConcurrent = 8
+	r.MaxConc = 8
+	// Two-word custom pool for a made-up parent → the 3rd+ hand overflows.
+	r.AspectHandNames = map[string][]string{"probe": {"alpha", "beta"}}
+
+	handles, err := r.SubmitSpawn(context.Background(), "probe", "work", 4, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := []string{handles[0].Name, handles[1].Name, handles[2].Name, handles[3].Name}
+	want := []string{"probe.alpha", "probe.beta", "probe.hand-1", "probe.hand-2"}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("names = %v, want %v (pool then overflow)", names, want)
+		}
+	}
+}
+
+// Provider inheritance (Task D): a hand runs the PARENT's provider
+// binding, not the launch default — surfaced via the Job's provider
+// (codex-cli wires a codex-auth init container; claude does not).
+func TestSubmitSpawnInheritsParentProvider(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _, _ := newSpawnFixture(fk)
+	r.HandProvider = func(_ context.Context, parent string) string {
+		if parent == "plumb" {
+			return "codex-cli"
+		}
+		return ""
+	}
+
+	if _, err := r.SubmitSpawn(context.Background(), "plumb", "work", 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(fk.jobObjs) != 1 {
+		t.Fatalf("jobs = %d, want 1", len(fk.jobObjs))
+	}
+	hasCodexAuth := false
+	for _, ic := range fk.jobObjs[0].Spec.Template.Spec.InitContainers {
+		if ic.Name == "codex-auth" {
+			hasCodexAuth = true
+		}
+	}
+	if !hasCodexAuth {
+		t.Error("hand should inherit the parent's codex-cli provider (codex-auth init container missing)")
+	}
+}
+
+// With no HandProvider wired, a hand falls back to the launch default
+// (claude) — no codex-auth init container.
+func TestSubmitSpawnDefaultsProviderWhenNoInheritance(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _, _ := newSpawnFixture(fk)
+
+	if _, err := r.SubmitSpawn(context.Background(), "plumb", "work", 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, ic := range fk.jobObjs[0].Spec.Template.Spec.InitContainers {
+		if ic.Name == "codex-auth" {
+			t.Error("no provider inheritance → must use the claude launch default, not codex")
+		}
+	}
+}
+
 // OnJobDone's completion post for a hand carries the lineage, not the
 // builder branch/PR block.
 func TestHandCompletionSummaryCarriesLineage(t *testing.T) {
@@ -458,13 +564,13 @@ func TestHandCompletionSummaryCarriesLineage(t *testing.T) {
 	r.OnJobDone(dispatch.JobDone{Ticket: rec.starts[0].ticket, OK: true})
 
 	got := poster.posts[len(poster.posts)-1]
-	if !strings.Contains(got, "hand done: plumb.sub-1 (hand of plumb)") {
+	if !strings.Contains(got, "hand done: plumb.bob (hand of plumb)") {
 		t.Errorf("summary = %q", got)
 	}
 	if strings.Contains(got, "PR:") || strings.Contains(got, "branch:") {
 		t.Errorf("hand summary must not carry the builder PR block: %q", got)
 	}
-	if r.AgentBusy("plumb.sub-1") {
+	if r.AgentBusy("plumb.bob") {
 		t.Error("hand should be free after completion")
 	}
 }
