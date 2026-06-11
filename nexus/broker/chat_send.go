@@ -85,6 +85,30 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 		return msg.ID, nil
 	}
 
+	// A !convene post is, like !dispatch, the audit-thread ROOT: store it,
+	// then the broker posts the participant + facilitator briefs INTO the
+	// thread (which wake nappers via the mention path). The briefs ARE
+	// ordinary chat (they fan out + wake); the !convene command line itself
+	// is not fanned out — it's the root the briefs reply under.
+	if strings.HasPrefix(strings.TrimSpace(content), "!convene") {
+		b.log.Info("!convene intercepted", "from", from, "topic", topic, "has_chatstore", b.cfg.ChatStore != nil)
+		if b.cfg.ChatStore == nil {
+			return 0, errors.New("broker.HandleChatSend: ChatStore not configured")
+		}
+		msg, err := b.cfg.ChatStore.Insert(ctx, from, content, replyTo, topic)
+		if err != nil {
+			return 0, fmt.Errorf("broker.HandleChatSend: store convene post: %w", err)
+		}
+		thread := topic
+		if thread == "" {
+			thread = fmt.Sprintf("convene-%d", msg.ThreadRootMsgID)
+		}
+		if cerr := b.submitConvene(ctx, from, content, thread, msg.ID); cerr != nil {
+			b.log.Warn("!convene: submit failed", "err", cerr, "from", from)
+		}
+		return msg.ID, nil
+	}
+
 	if b.cfg.ChatStore == nil {
 		return 0, errors.New("broker.HandleChatSend: ChatStore not configured")
 	}
