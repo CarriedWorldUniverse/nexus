@@ -23,6 +23,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
 	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/convene"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/cwb/cwbproxy"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
@@ -237,6 +238,7 @@ func main() {
 	}
 	chatStore := chat.NewSQLStore(db)
 	runsStore := runs.NewSQLStore(db)
+	conveneStore := convene.NewSQLStore(db)
 	knowledgeStore := knowledge.New(db, logger)
 	obsHub := observability.NewHub(500, nil)
 
@@ -527,6 +529,7 @@ func main() {
 		Replayer:           replayer,
 		ChatStore:          chatStore,
 		RunsStore:          runsStore,
+		ConveneStore:       conveneStore,
 		SQLDB:              db,
 		ActivityLogDir:     activityLogDir,
 		K8sReader:          k8sReader,
