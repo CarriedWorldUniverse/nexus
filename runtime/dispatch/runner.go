@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 	"github.com/google/uuid"
 	batchv1 "k8s.io/api/batch/v1"
@@ -89,6 +90,37 @@ type Runner struct {
 	Poster   Poster
 	NewID    func() string
 	Recorder RunsRecorder
+
+	// SpawnMaxConcurrent caps live hands PER PARENT aspect (NEX-571);
+	// 0 = defaultSpawnMaxConcurrent (4). The global MaxConc still
+	// applies on top.
+	SpawnMaxConcurrent int
+
+	// Audit stores spawn audit posts AS a named sender, returning the
+	// message id — used for the spawn audit-thread root (the !dispatch
+	// post-as-thread-root pattern, but originated broker-side). nil =
+	// no root post; hands thread under a synthetic topic.
+	Audit AuditPoster
+
+	// MintHandCredential mints the derived session credential injected
+	// into a hand's Job env (broker.KeyfileValidator.MintDerivedCredential
+	// in production). Required for SubmitSpawn — a Runner without it
+	// rejects spawn briefs at launch.
+	MintHandCredential func(ctx context.Context, parent, derived string) (string, error)
+
+	// AspectHandNames overrides the built-in kindred-word hand-name
+	// pools per parent aspect (the P2 naming amendment). Keys are base
+	// aspect names; values are the lease order. Parents absent from the
+	// map use aspects.HandNamePool's built-in defaults. cmd/nexus
+	// populates this from NEXUS_ASPECT_HAND_NAMES when set.
+	AspectHandNames map[string][]string
+
+	// HandProvider resolves the provider a hand of parent should run —
+	// so a hand inherits the PARENT's provider binding rather than
+	// defaulting to claude. nil (or an empty return) → the hand inherits
+	// nothing and the launch default applies. In production cmd/nexus
+	// wires this to the aspects store's provider column for the parent.
+	HandProvider func(ctx context.Context, parent string) string
 
 	mu        sync.Mutex
 	ctx       context.Context   // stored at Init for background callbacks (OnJobDone)
@@ -225,7 +257,31 @@ func (r *Runner) canRun(agent string) bool {
 	if r.MaxConc > 0 && len(r.active) >= r.MaxConc {
 		return false
 	}
+	// Per-parent hand cap (NEX-571): a derived identity only starts
+	// while its base aspect has spare hand slots. Applies on submit AND
+	// on queue drain, so queued hands wait for a sibling to finish.
+	if base := aspects.BaseName(agent); base != agent && r.liveHands(base) >= r.spawnMaxConcurrent() {
+		return false
+	}
 	return true
+}
+
+// liveHands counts base's busy derived identities. Caller holds r.mu.
+func (r *Runner) liveHands(base string) int {
+	n := 0
+	for name := range r.agentBusy {
+		if aspects.IsDerivedName(name) && aspects.BaseName(name) == base {
+			n++
+		}
+	}
+	return n
+}
+
+func (r *Runner) spawnMaxConcurrent() int {
+	if r.SpawnMaxConcurrent > 0 {
+		return r.SpawnMaxConcurrent
+	}
+	return defaultSpawnMaxConcurrent
 }
 
 // reserve stamps a RunID, records the run, and marks the agent busy. Caller holds r.mu.
@@ -303,6 +359,21 @@ func (r *Runner) OnJobDone(done JobDone) {
 }
 
 func (r *Runner) completionSummary(run *Run, done JobDone) string {
+	// Hand completion (NEX-571): carry the lineage instead of the
+	// builder branch/PR block — hands do fan-out work in their parent's
+	// thread, not single-ticket PR runs.
+	if run.Brief.SpawnParent != "" {
+		status := "done"
+		if !done.OK {
+			status = "failed"
+		}
+		return strings.Join([]string{
+			"hand " + status + ": " + run.Brief.Agent + " (hand of " + run.Brief.SpawnParent + ")",
+			"duration: " + formatDuration(done.StartedAt, done.CompletedAt),
+			"turns: " + formatCount(r.countActivityTurns(done.Agent, done.StartedAt, done.CompletedAt)),
+		}, "\n")
+	}
+
 	branch := run.Brief.Branch
 	if branch == "" {
 		branch = "builder/" + run.Brief.Ticket
@@ -483,6 +554,18 @@ func (r *Runner) launch(ctx context.Context, run *Run) error {
 			return err
 		}
 	}
+	// Hand briefs: mint the derived credential at launch time (not at
+	// enqueue) so a queued hand boots with a fresh TTL.
+	if run.Brief.SpawnParent != "" {
+		if r.MintHandCredential == nil {
+			return fmt.Errorf("spawn: no hand-credential minter configured")
+		}
+		tok, err := r.MintHandCredential(ctx, run.Brief.SpawnParent, run.Brief.Agent)
+		if err != nil {
+			return fmt.Errorf("spawn: mint credential for %s: %w", run.Brief.Agent, err)
+		}
+		run.Brief.SessionJWT = tok
+	}
 	provider := run.Brief.Provider
 	if provider == "" {
 		provider = "claude"
@@ -503,7 +586,11 @@ func (r *Runner) launch(ctx context.Context, run *Run) error {
 	run.JobName = job.Name
 	r.mu.Unlock()
 	slog.Info("runner: builder job created", "agent", run.Brief.Agent, "ticket", run.Brief.Ticket, "job", job.Name)
-	r.post(run.Brief.Thread, "builder spawned as "+run.Brief.Agent+" ("+job.Name+")")
+	kind := "builder"
+	if run.Brief.SpawnParent != "" {
+		kind = "hand"
+	}
+	r.post(run.Brief.Thread, kind+" spawned as "+run.Brief.Agent+" ("+job.Name+")")
 	return nil
 }
 
@@ -517,8 +604,13 @@ func (r *Runner) post(thread, text string) {
 // scoped git credential, and writes the brief ConfigMap. The worker runs AS
 // the named agent, so the keyfile + cred are keyed on b.Agent.
 func provisionRun(ctx context.Context, k K8sIface, cfg JobConfig, b Brief, taskID string) error {
-	if err := k.EnsureKeyfileSecret(ctx, b.Agent); err != nil {
-		return fmt.Errorf("ensure keyfile for %s: %w", b.Agent, err)
+	// Hand briefs have no keyfile secret — their identity is the
+	// broker-minted session JWT injected as Job env (NEX-571 Task B);
+	// the mint happens in launch, beside this seam.
+	if b.SpawnParent == "" {
+		if err := k.EnsureKeyfileSecret(ctx, b.Agent); err != nil {
+			return fmt.Errorf("ensure keyfile for %s: %w", b.Agent, err)
+		}
 	}
 	if err := k.EnsureHomeRepo(ctx, b.Agent); err != nil {
 		return fmt.Errorf("ensure home repo for %s: %w", b.Agent, err)

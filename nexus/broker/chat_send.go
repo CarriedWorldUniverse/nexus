@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
@@ -43,6 +44,23 @@ func (b *Broker) HandleChatSend(ctx context.Context, from, content string, reply
 	// the broker (the spawn), not delivered as chat, so we don't fan it out to
 	// recipients — we store it and trigger the dispatch, threaded under it.
 	if strings.HasPrefix(strings.TrimSpace(content), "!dispatch") {
+		// Privilege gate: a hand (derived identity, `<base>.sub-N`) cannot
+		// dispatch — dispatch is a parent-tier capability, and a hand
+		// reaching for it is either a confused worker or an escalation
+		// attempt. The !dispatch post is NOT stored and nothing reaches
+		// the Runner; a rejection note lands in the thread so the hand
+		// (and the audit trail) see why.
+		if aspects.IsDerivedName(from) {
+			b.log.Warn("!dispatch rejected: derived identity cannot dispatch",
+				"from", from, "topic", topic)
+			if b.cfg.ChatStore != nil {
+				if _, perr := b.HandleChatSend(ctx, "dispatch",
+					"hands cannot dispatch; ask your parent", replyTo, topic); perr != nil {
+					b.log.Warn("!dispatch rejection note failed", "err", perr, "from", from)
+				}
+			}
+			return 0, nil
+		}
 		b.log.Info("!dispatch intercepted", "from", from, "topic", topic, "has_chatstore", b.cfg.ChatStore != nil)
 		if b.cfg.ChatStore == nil {
 			if err := b.submitDispatch(ctx, from, content, topic, 0); err != nil {

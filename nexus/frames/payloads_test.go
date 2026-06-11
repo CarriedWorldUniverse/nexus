@@ -49,3 +49,54 @@ func TestRunGetResultRoundTrip(t *testing.T) {
 		t.Fatalf("round-trip: %+v", back)
 	}
 }
+
+// The read loop drops unknown kinds (forward-compat per spec §5.3), so
+// forgetting IsKnown registration silently breaks a new frame. Pin the
+// spawn kinds (NEX-571).
+func TestSpawnKindsAreKnown(t *testing.T) {
+	if !IsKnown(KindSpawnRequest) {
+		t.Error("spawn.request must be registered in IsKnown or the read loop drops it")
+	}
+	if !IsKnown(KindSpawnResult) {
+		t.Error("spawn.result must be registered in IsKnown or the read loop drops it")
+	}
+}
+
+func TestSpawnPayloadsRoundTrip(t *testing.T) {
+	req, err := NewRequest(KindSpawnRequest, SpawnRequestPayload{
+		Brief: "summarize the runner package", Count: 2, Thread: "NEX-571",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rp SpawnRequestPayload
+	if err := PayloadAs(req, &rp); err != nil {
+		t.Fatal(err)
+	}
+	if rp.Brief != "summarize the runner package" || rp.Count != 2 || rp.Thread != "NEX-571" {
+		t.Fatalf("rp=%+v", rp)
+	}
+	resp, err := NewResponse(KindSpawnResult, req.ID, SpawnResultPayload{
+		Hands: []SpawnHandle{
+			{RunID: "run-1", Name: "plumb.sub-1"},
+			{Name: "plumb.sub-2"},
+			{RunID: "run-3", Name: "plumb.sub-3", Error: "mint boom"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sp SpawnResultPayload
+	if err := PayloadAs(resp, &sp); err != nil {
+		t.Fatal(err)
+	}
+	if len(sp.Hands) != 3 || sp.Hands[0].RunID != "run-1" || sp.Hands[1].Name != "plumb.sub-2" {
+		t.Fatalf("sp=%+v", sp)
+	}
+	if sp.Hands[1].RunID != "" || sp.Hands[1].Error != "" {
+		t.Fatalf("queued hand should round-trip empty RunID + Error, got %+v", sp.Hands[1])
+	}
+	if sp.Hands[2].Error != "mint boom" {
+		t.Fatalf("failed hand should round-trip its Error marker, got %+v", sp.Hands[2])
+	}
+}

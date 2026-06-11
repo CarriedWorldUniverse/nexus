@@ -217,6 +217,20 @@ const (
 	KindObserveEvent Kind = "observe.event"
 	KindObserveEnd   Kind = "observe.end"
 
+	// Spawn — aspect-owned fan-out ("hands", roundtable P2 / NEX-571).
+	// An aspect sends spawn.request mid-turn on its own authenticated WS
+	// to fan work out to fresh-context instances of ITSELF: same image +
+	// persona, derived identity `<parent>.sub-N`, audit-threaded under
+	// the spawning turn. The broker answers spawn.result immediately with
+	// the hand handles (fire-and-forget: results re-enter the thread as
+	// ordinary chat messages when each hand's Job completes). Sibling
+	// shape to the ticket dispatch above — same Runner machinery, but
+	// requested by an aspect via RPC instead of chat parsing, and the
+	// worker carries the requester's own soul rather than another named
+	// agent's.
+	KindSpawnRequest Kind = "spawn.request"
+	KindSpawnResult  Kind = "spawn.result"
+
 	// Operator escalation (ToolRunner P3c). A native-API aspect's
 	// permission policy can mark a tool call "ask a human"; the funnel's
 	// BeforeToolCall hook then pauses mid-turn and emits an
@@ -364,6 +378,8 @@ func IsKnown(k Kind) bool {
 		KindSubscribeAck,
 		KindRosterUpdate, KindAspectStatusPulse, KindObserveFrame,
 		KindObserveBegin, KindObserveEvent, KindObserveEnd,
+		// Spawn (aspect-owned fan-out, NEX-571)
+		KindSpawnRequest, KindSpawnResult,
 		// Operator escalation (P3c)
 		KindEscalationRequest, KindEscalationDecision,
 		// App-level liveness

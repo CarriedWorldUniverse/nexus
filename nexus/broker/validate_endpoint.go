@@ -30,6 +30,7 @@ import (
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
+	"github.com/CarriedWorldUniverse/nexus/nexus/jwt"
 )
 
 // KeyfileValidator wires the data /api/aspect/validate needs. cmd/nexus
@@ -183,6 +184,17 @@ func (b *Broker) registerKeyfileEndpoints(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/nexus_id", b.handleNexusID)
 	mux.HandleFunc("POST /api/aspect/validate", b.handleAspectValidate)
 
+	// NEX-571 Task D: the JWT-boot path for hands. A spawned hand holds a
+	// broker-minted session JWT (CW_SESSION_JWT) but no keyfile, so it
+	// can't run the keyfile validate handshake. This endpoint resolves
+	// the SAME persona/provider/config bundle keyed on the JWT's verified
+	// sub (derived names fall back to the base aspect). The JWT IS the
+	// credential — authenticated like the self-edit / credential.fetch
+	// endpoints, not the unauthenticated keyfile path.
+	if v.Store != nil {
+		mux.HandleFunc("POST /api/aspect/resolve", b.handleAspectResolve)
+	}
+
 	// NEX-435: agent credential seam. An agent fetches a scoped, audited
 	// credential bundle with its own session JWT — the HTTP counterpart of
 	// the WS credential.fetch frame (the cw git-credential-helper uses it).
@@ -329,6 +341,100 @@ func (b *Broker) handleAspectValidate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		b.log.Warn("validate: response encode failed", "err", err)
+	}
+}
+
+// handleAspectResolve is the JWT-boot persona resolver (NEX-571 Task D).
+// A spawned hand authenticates with its broker-minted session JWT (the
+// bearer) and asks for the persona/provider/config bundle the keyfile
+// validate path would return — without a keyfile. The JWT's sub (a
+// derived `<base>.<word>` name for a hand) is the only source of the
+// identity; ResolveByName resolves persona/provider/central against the
+// BASE aspect (inheritance + persona fallback). The response is
+// wire-identical to /api/aspect/validate apart from re-using the
+// presented JWT (no fresh mint — the hand already holds a valid token).
+func (b *Broker) handleAspectResolve(w http.ResponseWriter, r *http.Request) {
+	v := b.cfg.KeyfileValidator
+	if v == nil || v.Store == nil {
+		writeError(w, http.StatusServiceUnavailable, "validator not configured")
+		return
+	}
+
+	// The JWT is the credential. Verify against the same signing secret
+	// the validate endpoint mints with (the WS upgrade accepts the same
+	// token). sub is the verified identity — never a body/query field.
+	secret := v.SessionSigningSecret
+	if len(secret) == 0 && b.cfg.OperatorLogin != nil {
+		secret = b.cfg.OperatorLogin.SessionSigningSecret
+	}
+	token := ExtractBearer(r.Header.Get("Authorization"))
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing bearer token")
+		return
+	}
+	claims, err := jwt.Verify(secret, token, time.Now())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid session token")
+		return
+	}
+	if claims.Sub == "" || claims.Sub == "operator" {
+		writeError(w, http.StatusUnauthorized, "session token missing aspect sub claim")
+		return
+	}
+	aspectName := claims.Sub
+
+	resolved, err := aspects.ResolveByName(r.Context(), aspects.ResolveConfigByName{
+		Store:    v.Store,
+		Settings: v.Settings,
+	}, aspectName)
+	if err != nil {
+		switch {
+		case errors.Is(err, aspects.ErrUnknownAspect):
+			writeJSONError(w, http.StatusNotFound, "unknown aspect", 0)
+		case errors.Is(err, aspects.ErrRetired):
+			writeJSONError(w, http.StatusForbidden, "retired", 0)
+		default:
+			b.log.Error("resolve: internal error", "aspect", aspectName, "err", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+		}
+		return
+	}
+
+	// MCP profile + provider/judge/compact env resolve against the BASE
+	// aspect (the persona/config identity), so a hand materialises the
+	// parent's .mcp.json and provider creds. ResolveByName already
+	// applied the base fallback to provider/model.
+	base := aspects.BaseName(aspectName)
+	mcpProfile, mcpErr := resolveMCPProfile(r.Context(), v.Credentials, base)
+	if mcpErr != nil {
+		b.log.Error("resolve: mcp_profile resolve failed", "aspect", base, "err", mcpErr)
+		writeError(w, http.StatusInternalServerError, "mcp profile resolve failed")
+		return
+	}
+	providerEnv := resolveProviderEnv(r.Context(), v.Credentials, base, resolved.Provider, b.log)
+	judgeProvider, judgeModel, judgeEnv := resolveJudgeConfig(r.Context(), v.Credentials, base, b.log)
+	compactModel, compactEnv := resolveCompactConfig(r.Context(), v.Credentials, base, b.log)
+
+	resp := validateResponse{
+		OK:               true,
+		SessionJWT:       token,
+		SessionExpiresAt: time.Unix(claims.Exp, 0).UTC().Format(time.RFC3339),
+		Provider:         resolved.Provider,
+		Model:            resolved.Model,
+		Personality:      personalityWireFrom(resolved.Personality),
+		CentralNexusMD:   resolved.CentralNexusMD,
+		CentralVersion:   resolved.CentralVersion,
+		MCPProfile:       mcpProfile,
+		ProviderEnv:      providerEnv,
+		JudgeProvider:    judgeProvider,
+		JudgeModel:       judgeModel,
+		JudgeEnv:         judgeEnv,
+		CompactModel:     compactModel,
+		CompactEnv:       compactEnv,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		b.log.Warn("resolve: response encode failed", "err", err)
 	}
 }
 

@@ -36,6 +36,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -94,8 +95,16 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
 
-	if *keyfilePath == "" {
-		fail(log, "missing -k flag (path to keyfile)", nil)
+	// Boot credential: a normal aspect presents a keyfile (-k); a
+	// spawned hand (NEX-571 Task D) presents a broker-minted session JWT
+	// in CW_SESSION_JWT and NO keyfile — its Job ships no keyfile Secret,
+	// so it boots through the JWT-resolve path instead of the keyfile
+	// validate handshake. -k wins if both are somehow present (a keyfile
+	// is the stronger credential).
+	sessionJWTEnv := os.Getenv("CW_SESSION_JWT")
+	handBoot := *keyfilePath == "" && sessionJWTEnv != ""
+	if *keyfilePath == "" && !handBoot {
+		fail(log, "missing credential: pass -k <keyfile> or set CW_SESSION_JWT (hand boot)", nil)
 	}
 	cm := schemas.ContextMode(*contextMode)
 	switch cm {
@@ -104,57 +113,111 @@ func main() {
 		fail(log, fmt.Sprintf("invalid --context-mode %q (want global/thread/stateless)", *contextMode), nil)
 	}
 
-	// 1. Read keyfile.
-	kf, err := keyfile.Load(*keyfilePath)
-	if err != nil {
-		fail(log, "load keyfile", err)
-	}
-	log.Info("agentfunnel: keyfile loaded",
-		"path", *keyfilePath,
-		"nexus_url", kf.Envelope.NexusURL,
-		"nexus_id", kf.Envelope.NexusID)
+	var res *keyfile.ValidationResult
+	var brokerTLS *tls.Config
+	// kf is the loaded keyfile for the normal aspect path (used by the
+	// TokenProvider re-validate loop). nil on the hand JWT-boot path —
+	// hands re-resolve via the JWT instead.
+	var kf *keyfile.Keyfile
 
-	// 2. Validation handshake. The keyfile.Client has its own 10s
-	// per-call HTTP timeout (covers the GET /api/nexus_id and POST
-	// /api/aspect/validate calls separately). The 30s outer ctx
-	// timeout is a backstop so a hung process between calls (e.g.
-	// stuck in TLS handshake setup) eventually surfaces as a startup
-	// error rather than dangling forever.
-	// NEX-367: if the keyfile pins a self-signed broker cert, build a
-	// TLS config that trusts it (system roots + pinned cert) and use it
-	// for BOTH the validate handshake here AND the WS dial below. Nil =
-	// default system trust store (CA-signed certs just work).
-	brokerTLS, err := kf.BrokerTLSConfig()
-	if err != nil {
-		fail(log, "build broker TLS config from keyfile", err)
-	}
-	if brokerTLS != nil {
-		log.Info("agentfunnel: trusting pinned broker cert from keyfile (self-signed-capable)")
-	}
-	bootCtx, bootCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	client := &keyfile.Client{HTTP: keyfile.HTTPClientWithTLS(brokerTLS)}
-	res, err := client.Validate(bootCtx, kf)
-	bootCancel()
-	if err != nil {
-		// Render the most actionable hint we can per the sentinel.
-		switch {
-		case errors.Is(err, keyfile.ErrNexusMismatch):
-			log.Error("agentfunnel: keyfile envelope nexus_id does not match the server",
-				"hint", "the keyfile may be stale (Nexus identity regenerated) or pointed at the wrong host",
-				"err", err)
-		case errors.Is(err, keyfile.ErrValidationRejected):
-			log.Error("agentfunnel: server rejected validation",
-				"hint", "check server response — likely revoked, retired, or unknown aspect",
-				"err", err)
-		case errors.Is(err, keyfile.ErrBadServerResponse):
-			log.Error("agentfunnel: server returned malformed response — likely a Nexus bug",
-				"err", err)
-		case errors.Is(err, keyfile.ErrBadKeyfile):
-			log.Error("agentfunnel: keyfile is malformed", "err", err)
-		default:
-			log.Error("agentfunnel: validation failed", "err", err)
+	if handBoot {
+		// JWT-boot (hand): resolve persona/provider/config from the
+		// broker keyed on the JWT's verified sub. The broker is reached
+		// via CW_SEAM_URL (the Job env); the WS dial URL is derived from
+		// it. CW_SEAM_CA optionally pins a self-signed broker cert (nil =
+		// system trust, the in-cluster CA-signed default).
+		seamURL := os.Getenv("CW_SEAM_URL")
+		if seamURL == "" {
+			fail(log, "hand boot: CW_SESSION_JWT set but CW_SEAM_URL missing", nil)
 		}
-		os.Exit(1)
+		wsURL := seamHTTPToWS(seamURL)
+		var terr error
+		brokerTLS, terr = keyfile.BrokerTLSConfigFromCAFile(os.Getenv("CW_SEAM_CA"))
+		if terr != nil {
+			fail(log, "build broker TLS config from CW_SEAM_CA", terr)
+		}
+		if brokerTLS != nil {
+			log.Info("agentfunnel: trusting pinned broker cert from CW_SEAM_CA (hand boot)")
+		}
+		bootCtx, bootCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		client := &keyfile.Client{HTTP: keyfile.HTTPClientWithTLS(brokerTLS)}
+		// NexusID is informational on this path (identity already proven
+		// by the JWT signature); fetch it best-effort for logging/WS dial
+		// parity, but a miss is non-fatal.
+		nexusID := os.Getenv("CW_NEXUS_ID")
+		res, terr = client.ResolveByJWT(bootCtx, wsURL, nexusID, sessionJWTEnv)
+		bootCancel()
+		if terr != nil {
+			switch {
+			case errors.Is(terr, keyfile.ErrValidationRejected):
+				log.Error("agentfunnel: broker rejected hand JWT resolve",
+					"hint", "JWT expired/invalid, or the parent aspect is unknown/retired", "err", terr)
+			case errors.Is(terr, keyfile.ErrBadServerResponse):
+				log.Error("agentfunnel: broker returned malformed resolve response", "err", terr)
+			default:
+				log.Error("agentfunnel: hand JWT boot failed", "err", terr)
+			}
+			os.Exit(1)
+		}
+		log.Info("agentfunnel: hand booted from JWT",
+			"aspect", res.AspectName,
+			"parent", os.Getenv("CW_SPAWN_PARENT"),
+			"provider", res.Provider)
+	} else {
+		// 1. Read keyfile.
+		loaded, err := keyfile.Load(*keyfilePath)
+		if err != nil {
+			fail(log, "load keyfile", err)
+		}
+		kf = loaded
+		log.Info("agentfunnel: keyfile loaded",
+			"path", *keyfilePath,
+			"nexus_url", kf.Envelope.NexusURL,
+			"nexus_id", kf.Envelope.NexusID)
+
+		// 2. Validation handshake. The keyfile.Client has its own 10s
+		// per-call HTTP timeout (covers the GET /api/nexus_id and POST
+		// /api/aspect/validate calls separately). The 30s outer ctx
+		// timeout is a backstop so a hung process between calls (e.g.
+		// stuck in TLS handshake setup) eventually surfaces as a startup
+		// error rather than dangling forever.
+		// NEX-367: if the keyfile pins a self-signed broker cert, build a
+		// TLS config that trusts it (system roots + pinned cert) and use it
+		// for BOTH the validate handshake here AND the WS dial below. Nil =
+		// default system trust store (CA-signed certs just work).
+		var terr error
+		brokerTLS, terr = kf.BrokerTLSConfig()
+		if terr != nil {
+			fail(log, "build broker TLS config from keyfile", terr)
+		}
+		if brokerTLS != nil {
+			log.Info("agentfunnel: trusting pinned broker cert from keyfile (self-signed-capable)")
+		}
+		bootCtx, bootCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		client := &keyfile.Client{HTTP: keyfile.HTTPClientWithTLS(brokerTLS)}
+		res, terr = client.Validate(bootCtx, kf)
+		bootCancel()
+		if terr != nil {
+			// Render the most actionable hint we can per the sentinel.
+			switch {
+			case errors.Is(terr, keyfile.ErrNexusMismatch):
+				log.Error("agentfunnel: keyfile envelope nexus_id does not match the server",
+					"hint", "the keyfile may be stale (Nexus identity regenerated) or pointed at the wrong host",
+					"err", terr)
+			case errors.Is(terr, keyfile.ErrValidationRejected):
+				log.Error("agentfunnel: server rejected validation",
+					"hint", "check server response — likely revoked, retired, or unknown aspect",
+					"err", terr)
+			case errors.Is(terr, keyfile.ErrBadServerResponse):
+				log.Error("agentfunnel: server returned malformed response — likely a Nexus bug",
+					"err", terr)
+			case errors.Is(terr, keyfile.ErrBadKeyfile):
+				log.Error("agentfunnel: keyfile is malformed", "err", terr)
+			default:
+				log.Error("agentfunnel: validation failed", "err", terr)
+			}
+			os.Exit(1)
+		}
 	}
 	log.Info("agentfunnel: validated",
 		"aspect", res.AspectName,
@@ -178,6 +241,7 @@ func main() {
 	var builderHome *agentHomeSession
 	var builderRepo *builderRepoSession
 	if *builderMode {
+		var err error
 		builderHome, err = setupBuilderHome(context.Background(), res.AspectName, os.Getenv("CW_DISPATCH_RUN_ID"))
 		if err != nil {
 			fail(log, "setup builder home", err)
@@ -337,14 +401,30 @@ func main() {
 		}
 		// NEX-367: reuse the same pinned-cert trust on JWT refresh.
 		client := &keyfile.Client{HTTP: keyfile.HTTPClientWithTLS(brokerTLS)}
-		fresh, ferr := client.Validate(ctx, kf)
+		var fresh *keyfile.ValidationResult
+		var ferr error
+		if kf != nil {
+			fresh, ferr = client.Validate(ctx, kf)
+		} else {
+			// Hand boot (NEX-571 Task D): no keyfile to re-validate with.
+			// Re-resolve via the still-cached JWT against the broker. A
+			// hand's run is normally far shorter than the JWT TTL, so this
+			// is a cold-start/edge backstop, not the steady path.
+			fresh, ferr = client.ResolveByJWT(ctx, res.NexusURL, res.NexusID, snap.JWT)
+		}
 		if ferr != nil {
 			log.Warn("agentfunnel: TokenProvider re-validate failed, using cached token",
 				"err", ferr)
 			return "", ferr
 		}
 		state.Set(sessionSnapshot{JWT: fresh.SessionJWT, Expires: fresh.SessionExpiresAt})
-		log.Info("agentfunnel: TokenProvider re-validated via keyfile",
+		revalVia := "keyfile"
+		if kf == nil {
+			// Hand boot re-resolves via the cached JWT, not a keyfile.
+			revalVia = "JWT"
+		}
+		log.Info("agentfunnel: TokenProvider re-validated",
+			"via", revalVia,
 			"expires", fresh.SessionExpiresAt.Format(time.RFC3339))
 
 		// NEX-335: refresh the provider+model binding from the new
@@ -1660,4 +1740,23 @@ func fail(log *slog.Logger, msg string, err error) {
 		log.Error(msg)
 	}
 	os.Exit(2)
+}
+
+// seamHTTPToWS turns the CW_SEAM_URL the broker injects into a hand's
+// Job env (`https://host:7888`) into the WS dial URL agentfunnel needs
+// (`wss://host:7888/connect`). The /connect suffix matches what the
+// keyfile path appends below. http:// → ws:// for non-TLS test seams.
+func seamHTTPToWS(seam string) string {
+	ws := seam
+	switch {
+	case strings.HasPrefix(ws, "https://"):
+		ws = "wss://" + strings.TrimPrefix(ws, "https://")
+	case strings.HasPrefix(ws, "http://"):
+		ws = "ws://" + strings.TrimPrefix(ws, "http://")
+	}
+	ws = strings.TrimRight(ws, "/")
+	if !strings.HasSuffix(ws, "/connect") {
+		ws += "/connect"
+	}
+	return ws
 }

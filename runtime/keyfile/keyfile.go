@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -378,6 +379,30 @@ func (kf *Keyfile) BrokerTLSConfig() (*tls.Config, error) {
 	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, nil
 }
 
+// BrokerTLSConfigFromCAFile is the keyfile-less counterpart of
+// BrokerTLSConfig for the hand JWT-boot path (NEX-571 Task D): a hand
+// has no keyfile envelope to pin the broker cert from, so it reads an
+// optional CA PEM file (CW_SEAM_CA) instead. Empty path → (nil, nil)
+// for system trust (CA-signed broker cert, the in-cluster default).
+// The CA is ADDED to the system pool, same as BrokerTLSConfig.
+func BrokerTLSConfigFromCAFile(path string) (*tls.Config, error) {
+	if path == "" {
+		return nil, nil
+	}
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: read broker CA %q: %v", ErrBadKeyfile, path, err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("%w: broker CA %q is not valid PEM", ErrBadKeyfile, path)
+	}
+	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, nil
+}
+
 // HTTPClientWithTLS builds a 10s-timeout HTTP client using tlsCfg for the
 // transport. When tlsCfg is nil it returns a default client (system trust
 // store). Use the result as keyfile.Client.HTTP so the validate handshake
@@ -457,6 +482,88 @@ func (c *Client) Validate(ctx context.Context, kf *Keyfile) (*ValidationResult, 
 		NexusURL:         kf.Envelope.NexusURL,
 		NexusID:          kf.Envelope.NexusID,
 	}, nil
+}
+
+// ResolveByJWT is the keyfile-less boot path for a spawned hand
+// (NEX-571 Task D). The hand holds a broker-minted session JWT
+// (CW_SESSION_JWT) and no keyfile, so instead of the keyfile validate
+// handshake it presents the JWT as a bearer to POST /api/aspect/resolve
+// and gets back the same persona/provider/config bundle — resolved
+// against the BASE aspect (persona fallback + provider inheritance).
+//
+// wsURL/nexusID are taken from the caller's boot env (CW_SEAM_URL maps
+// to the broker, and the broker echoes its NexusID via /api/nexus_id);
+// they populate the ValidationResult fields agentfunnel needs for the
+// WS dial. The aspect name comes from the JWT's sub (via the broker),
+// not from the env, so a forged CW_ASPECT_NAME can't change identity.
+func (c *Client) ResolveByJWT(ctx context.Context, wsURL, nexusID, sessionJWT string) (*ValidationResult, error) {
+	c.ensureHTTP()
+	httpsBase, err := wsToHTTPS(wsURL)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBadKeyfile, err)
+	}
+	resp, err := c.postResolve(ctx, httpsBase, sessionJWT)
+	if err != nil {
+		return nil, err
+	}
+	aspectName, err := jwtSub(resp.SessionJWT)
+	if err != nil {
+		return nil, fmt.Errorf("keyfile.ResolveByJWT: extract aspect from JWT: %w", err)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, resp.SessionExpiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("keyfile.ResolveByJWT: parse session_expires_at %q: %w",
+			resp.SessionExpiresAt, err)
+	}
+	return &ValidationResult{
+		AspectName:       aspectName,
+		SessionJWT:       resp.SessionJWT,
+		SessionExpiresAt: expiresAt,
+		Personality:      resp.Personality,
+		CentralNexusMD:   resp.CentralNexusMD,
+		CentralVersion:   resp.CentralVersion,
+		Provider:         resp.Provider,
+		Model:            resp.Model,
+		MCPProfile:       resp.MCPProfile,
+		ProviderEnv:      resp.ProviderEnv,
+		JudgeProvider:    resp.JudgeProvider,
+		JudgeModel:       resp.JudgeModel,
+		JudgeEnv:         resp.JudgeEnv,
+		CompactModel:     resp.CompactModel,
+		CompactEnv:       resp.CompactEnv,
+		NexusURL:         wsURL,
+		NexusID:          nexusID,
+	}, nil
+}
+
+// postResolve POSTs (empty body) to /api/aspect/resolve with the
+// session JWT as the bearer and decodes the validate-shaped response.
+func (c *Client) postResolve(ctx context.Context, base, sessionJWT string) (*validateResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/aspect/resolve", nil)
+	if err != nil {
+		return nil, fmt.Errorf("keyfile.postResolve: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+sessionJWT)
+	httpResp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("keyfile.postResolve: POST: %w", err)
+	}
+	defer httpResp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, 64*1024))
+	if err != nil {
+		return nil, fmt.Errorf("keyfile.postResolve: read body: %w", err)
+	}
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%w: status %d: %s", ErrValidationRejected, httpResp.StatusCode, string(respBody))
+	}
+	var r validateResponse
+	if err := json.Unmarshal(respBody, &r); err != nil {
+		return nil, fmt.Errorf("keyfile.postResolve: decode: %w", err)
+	}
+	if !r.OK || r.SessionJWT == "" {
+		return nil, fmt.Errorf("%w: ok=%v jwt_empty=%v", ErrBadServerResponse, r.OK, r.SessionJWT == "")
+	}
+	return &r, nil
 }
 
 // checkNexusID dials GET /api/nexus_id and compares the response

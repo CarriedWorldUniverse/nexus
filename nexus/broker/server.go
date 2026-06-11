@@ -310,7 +310,9 @@ type Config struct {
 
 	// Runner, when set, intercepts !dispatch chat messages before they
 	// reach the ChatStore — routing them to the dispatch job engine.
-	// If nil, !dispatch messages are treated as ordinary chat.
+	// If nil, !dispatch messages are treated as ordinary chat. When the
+	// Runner also implements SpawnSubmitter, aspects can fan out hands
+	// of themselves via the spawn.request frame (NEX-571).
 	Runner dispatch.Submitter
 
 	// AspectWakePolicy maps aspect name → wake policy: "always-on" |
@@ -333,6 +335,11 @@ type Config struct {
 	// the idle reaper scales it to zero. Zero → defaultIdleTimeout (15m).
 	// cmd/nexus populates this from NEXUS_WAKE_IDLE_TIMEOUT.
 	IdleTimeout time.Duration
+
+	// SpawnMaxPerRequest caps how many hands a single spawn.request may
+	// ask for. 0 = defaultSpawnMaxPerRequest (4). The per-parent live
+	// cap is the Runner's SpawnMaxConcurrent, enforced at submit time.
+	SpawnMaxPerRequest int
 }
 
 // Broker owns the HTTP server and its roster.

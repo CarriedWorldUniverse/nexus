@@ -20,6 +20,7 @@ import (
 // fakeK8s satisfies the dispatch.K8sIface interface for tests.
 type fakeK8s struct {
 	jobs    []string
+	jobObjs []*batchv1.Job
 	secrets map[string]bool
 	homes   map[string]bool
 	repos   bool
@@ -87,6 +88,7 @@ func (f *fakeK8s) CreateJob(_ context.Context, job *batchv1.Job) (*batchv1.Job, 
 		}
 	}
 	f.jobs = append(f.jobs, job.Name)
+	f.jobObjs = append(f.jobObjs, job)
 	return job, nil
 }
 

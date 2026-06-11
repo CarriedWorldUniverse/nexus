@@ -331,6 +331,14 @@ type AspectState struct {
 	PrimarySurface Surface        `json:"primary_surface,omitempty"`
 	Metadata       map[string]any `json:"metadata,omitempty"`
 
+	// Lineage is the base aspect a derived hand identity belongs to
+	// (`<base>.sub-N` → <base>; NEX-571). Stamped by the roster from
+	// the registering NAME — never client-supplied. Empty for
+	// first-class aspects. Derived entries live and die with their
+	// dispatch Job; wake/idle policies must skip any entry with a
+	// non-empty Lineage.
+	Lineage string `json:"lineage,omitempty"`
+
 	// Dynamic — refreshed by heartbeats and enrichment fiber.
 	LastHeartbeat time.Time      `json:"last_heartbeat"`
 	Status        string         `json:"status"` // "live" | "stale" | "down"

@@ -405,6 +405,18 @@ func main() {
 		ActivityDir:   filepath.Join(*dataDir, "activity"),
 		LynxAIBaseURL: os.Getenv("LYNXAI_BASE_URL"),
 		LynxAIKey:     os.Getenv("LYNXAI_KEY"),
+		NexusID:       nexusIdentity.NexusID,
+	}
+	// Hand (spawn) Jobs carry no keyfile, so they can't pin the broker's
+	// self-signed / internal-CA cert the way ticket builders do (the cert is
+	// embedded in aspect-keyfile-<agent> at mint time from <dataDir>/tls/
+	// server.crt). When the broker keeps a local cert there, that same cert
+	// is the CA hands must trust: point BrokerCAFile at the in-pod mount of
+	// the nexus-broker-ca Secret so agentfunnel pins it via CW_SEAM_CA. No
+	// local cert (CA-signed / LE broker) → leave empty → hands use system
+	// trust, unchanged.
+	if _, err := os.Stat(filepath.Join(*dataDir, "tls", "server.crt")); err == nil {
+		dispatchCfg.BrokerCAFile = dispatch.HandBrokerCAPath()
 	}
 	// Dispatch Runner: each !dispatch runs AS the named agent (mounts that
 	// agent's keyfile → its persona + attribution). Built unconditionally so
@@ -417,8 +429,44 @@ func main() {
 			maxConc = n
 		}
 	}
+	// Per-parent hand cap for aspect-owned fan-out (NEX-571): how many
+	// live hands one aspect may run at once. The global MaxConc above
+	// still applies on top.
+	spawnMaxConc := 4
+	if v := os.Getenv("CW_SPAWN_MAX_CONCURRENT"); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+			spawnMaxConc = n
+		}
+	}
 	var runner dispatch.Submitter
-	dispatchRunner := &dispatch.Runner{Cfg: dispatchCfg, MaxConc: maxConc}
+	dispatchRunner := &dispatch.Runner{
+		Cfg:                dispatchCfg,
+		MaxConc:            maxConc,
+		SpawnMaxConcurrent: spawnMaxConc,
+		// Hands authenticate with a broker-minted derived session JWT
+		// (no keyfile exists for <parent>.sub-N) — the mint sits beside
+		// the aspect-keyfile-<agent> seam ticket dispatches use.
+		MintHandCredential: func(ctx context.Context, parent, derived string) (string, error) {
+			return keyfileValidator.MintDerivedCredential(ctx, parent, derived)
+		},
+		// Provider inheritance (NEX-571 Task D): a hand runs the PARENT's
+		// provider binding (the aspects.provider column), not the launch
+		// default. Best-effort — a lookup miss falls back to the default.
+		HandProvider: func(ctx context.Context, parent string) string {
+			if keyfileValidator.Store == nil {
+				return ""
+			}
+			a, err := keyfileValidator.Store.Get(ctx, parent)
+			if err != nil || a == nil {
+				return ""
+			}
+			return a.Provider
+		},
+		// Kindred-word hand-name pool overrides (the P2 naming amendment).
+		// NEXUS_ASPECT_HAND_NAMES="shadow=umbra|gloam|shade,plumb=bob|fathom".
+		// Unset → the built-in aspects.AspectHandNames defaults.
+		AspectHandNames: parseHandNamePools(os.Getenv("NEXUS_ASPECT_HAND_NAMES")),
+	}
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		if k8s, kerr := dispatch.NewInClusterK8s(dispatchCfg.Namespace); kerr != nil {
 			slog.Error("dispatch: in-cluster k8s client failed — Runner will not spawn jobs", "err", kerr)
@@ -558,6 +606,9 @@ func main() {
 	// broker. WatchLoop only runs when a k8s client is wired (in-cluster).
 	if dispatchRunner != nil {
 		dispatchRunner.Poster = dispatch.NewWsPoster(ctx, brokerChatSender{b: b})
+		// Spawn audit roots post AS the parent aspect (NEX-571) — same
+		// chat path, sender chosen per post.
+		dispatchRunner.Audit = brokerAuditPoster{b: b}
 		if dispatchRunner.K8sIface != nil {
 			go func() { _ = dispatchRunner.WatchLoop(ctx) }()
 			logger.Info("dispatch: Job watch loop started")
@@ -1037,6 +1088,41 @@ func parseKVList(raw string) map[string]string {
 			continue
 		}
 		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseHandNamePools parses NEXUS_ASPECT_HAND_NAMES — a comma-separated
+// list of `aspect=word|word|word` entries — into the Runner's per-aspect
+// kindred-word override map (NEX-571 P2 naming amendment). Empty/invalid
+// input → nil, so the Runner falls back to aspects.AspectHandNames.
+func parseHandNamePools(raw string) map[string][]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	out := make(map[string][]string)
+	for _, entry := range strings.Split(raw, ",") {
+		k, v, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		var words []string
+		for _, w := range strings.Split(v, "|") {
+			if w = strings.TrimSpace(w); w != "" {
+				words = append(words, w)
+			}
+		}
+		if len(words) > 0 {
+			out[k] = words
+		}
 	}
 	if len(out) == 0 {
 		return nil

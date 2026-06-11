@@ -73,9 +73,18 @@ func (c *wsConn) handleSessionRefreshFrame(env frames.Envelope) {
 	c.broker.lastSessionRefreshAt[aspectName] = now
 	c.broker.sessionRefreshMu.Unlock()
 
+	// Lineage (NEX-571): a hand (`<base>.sub-N`) has no aspects row of
+	// its own — its credential was broker-minted at spawn time against
+	// the parent's row. Refresh resolves the BASE row for kfv/retired
+	// state; the reissued sub stays the derived name.
+	lookupName := aspectName
+	if aspects.IsDerivedName(aspectName) {
+		lookupName = aspects.BaseName(aspectName)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	a, err := v.Store.Get(ctx, aspectName)
+	a, err := v.Store.Get(ctx, lookupName)
 	if err != nil {
 		if errors.Is(err, aspects.ErrNotFound) {
 			c.respondError(env, "aspect not found")
@@ -105,7 +114,14 @@ func (c *wsConn) handleSessionRefreshFrame(env frames.Envelope) {
 		Now:                  c.broker.refreshNow,
 		JWTTTL:               jwtTTL,
 	}
-	sess, err := aspects.MintSessionFor(cfg, a)
+	var sess *aspects.ValidatedSession
+	if lookupName != aspectName {
+		// Derived identity: mint for the hand's name against the base row
+		// (same path as the spawn-time mint).
+		sess, err = aspects.MintDerivedSession(cfg, a, aspectName)
+	} else {
+		sess, err = aspects.MintSessionFor(cfg, a)
+	}
 	if err != nil {
 		c.log.Warn("session.refresh: mint failed", "aspect", aspectName, "err", err)
 		c.respondError(env, "internal error")

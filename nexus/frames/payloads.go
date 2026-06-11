@@ -565,8 +565,11 @@ type RosterListPayload struct{}
 // internal roster + extra metadata the dashboard's Status/Agents
 // views render.
 type RosterAspect struct {
-	Name            string   `json:"name"`
-	Status          string   `json:"status"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	// Lineage is the base aspect for a derived hand identity
+	// (`<base>.sub-N`, NEX-571); empty for first-class aspects.
+	Lineage         string   `json:"lineage,omitempty"`
 	LastSeen        string   `json:"last_seen,omitempty"`
 	Capabilities    []string `json:"capabilities,omitempty"`
 	Model           string   `json:"model,omitempty"`
@@ -722,6 +725,8 @@ type RosterUpdatePayload struct {
 	Model        string   `json:"model,omitempty"`
 	Provider     string   `json:"provider,omitempty"`
 	ContextMode  string   `json:"context_mode,omitempty"`
+	// Lineage mirrors RosterAspect.Lineage (NEX-571).
+	Lineage string `json:"lineage,omitempty"`
 	// Reason names the trigger ("connect" | "disconnect" |
 	// "status_change") so the SPA can render a brief notification
 	// without inferring from prior state.
@@ -1198,3 +1203,38 @@ const (
 	EscalationApprove = "approve"
 	EscalationDeny    = "deny"
 )
+
+// SpawnRequestPayload asks the broker to fan out Count fresh-context
+// hands of the REQUESTING aspect (roundtable P2 / NEX-571). The parent
+// identity is never carried in the payload — it is always the WS
+// connection's registered aspect, so a hand request can't be forged on
+// another aspect's behalf.
+//
+// Thread, when set, threads the hands' audit posts (briefs + results)
+// under an existing topic. Empty Thread means "root a fresh audit
+// thread": the broker stores a root post attributed to the parent and
+// threads everything under it.
+type SpawnRequestPayload struct {
+	Brief  string `json:"brief"`
+	Count  int    `json:"count,omitempty"` // default 1; capped by the broker's SpawnMaxPerRequest
+	Thread string `json:"thread,omitempty"`
+}
+
+// SpawnHandle identifies one spawned hand. RunID is empty when the
+// hand was accepted but queued (spawn-concurrency or global cap) — it
+// launches when capacity frees, same queue semantics as ticket
+// dispatch. Error is set when this hand failed to launch (it was
+// rolled back and recorded failed); its siblings' handles are
+// unaffected.
+type SpawnHandle struct {
+	RunID string `json:"run_id,omitempty"`
+	Name  string `json:"name"`
+	Error string `json:"error,omitempty"`
+}
+
+// SpawnResultPayload answers a spawn.request: one handle per hand,
+// including per-hand launch failures (Error set). Whole-request
+// failures come back as a spawn.request.error response instead.
+type SpawnResultPayload struct {
+	Hands []SpawnHandle `json:"hands"`
+}
