@@ -292,6 +292,21 @@ type Config struct {
 	// surface is absent.
 	Credentials *credentials.Store
 
+	// CustodianGit, when non-nil, routes kind="git" agent credential.fetch
+	// requests to the CWB custodian pillar (custodian M1) instead of the
+	// local Credentials store. Additive + fail-safe: nil (the default, when
+	// CUSTODIAN_GRPC_ADDR is unset) keeps git — and every other kind — on the
+	// local store, so there is NO regression. Non-git kinds (provider/jira/
+	// imap) always stay on the local store regardless of this field.
+	CustodianGit GitCredentialSource
+
+	// CustodianOrg is the tenant org the broker presents to custodian on a
+	// git fetch (the cwb-org metadata). M1 interim: a single configured
+	// management org, since the broker has no per-agent herald org binding
+	// yet. Required when CustodianGit is set. The herald per-agent org
+	// derivation is the documented successor.
+	CustodianOrg string
+
 	// Observability is a pre-constructed Hub the broker should adopt
 	// instead of building its own. Nil leaves broker.New constructing
 	// its own Hub.
