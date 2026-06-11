@@ -103,7 +103,15 @@ type connLike interface {
 }
 
 // handleConveneCloseFrame is the aspect-WS entry: the facilitator aspect
-// closes its convene. Authz keys on the connection's registered identity.
+// closes its convene. Authz keys on the connection's registered identity,
+// falling back to the JWT-verified identity for an authenticated-but-
+// unregistered comms sidecar (-register=false) — the same NEX-609 rule
+// the spawn handler applies: inside a pod aspect, agentfunnel owns the
+// one-session-per-name registration slot, so nexus-comms-mcp connects
+// unregistered, and its JWT sub is the same credential registration
+// would have bound. Admin/legacy/operator connections keep falling
+// through to the closeConvene facilitator check (caller "" never
+// matches a facilitator).
 func (c *wsConn) handleConveneCloseFrame(env frames.Envelope) {
 	var p frames.ConveneClosePayload
 	if err := frames.PayloadAs(env, &p); err != nil {
@@ -112,7 +120,11 @@ func (c *wsConn) handleConveneCloseFrame(env frames.Envelope) {
 		c.send(resp)
 		return
 	}
-	result := c.broker.closeConvene(c, p, c.registeredAs, c.auth.Operator)
+	caller := c.registeredAs
+	if caller == "" && !c.auth.Admin && c.auth.AgentID != "" && c.auth.AgentID != "operator" {
+		caller = c.auth.AgentID
+	}
+	result := c.broker.closeConvene(c, p, caller, c.auth.Operator)
 	resp, _ := frames.NewResponse(frames.KindConveneCloseResult, env.ID, result)
 	c.send(resp)
 }

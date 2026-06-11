@@ -99,6 +99,13 @@ func (g *Gateway) Spawn(ctx context.Context, brief string, count int, thread str
 	return out, nil
 }
 
+// ConveneClose implements funnel.ConveneGateway (roundtable P3): the
+// facilitator's convene_close tool emits convene.close on this
+// aspect's own authenticated WS via the Client.
+func (g *Gateway) ConveneClose(ctx context.Context, conveneID, status string, summaryMsgID int64) (string, error) {
+	return g.client.ConveneClose(ctx, conveneID, status, summaryMsgID)
+}
+
 // ReadMessage / ListShared / GetShared are not yet wired on the
 // wsasp wire — out-of-process aspects can't reach the chat store
 // directly, and the wire frames for these reads aren't part of the
@@ -178,8 +185,9 @@ func (b *Bridge) MarshalDebug() json.RawMessage {
 
 // Compile-time interface checks.
 var (
-	_ funnel.ChatGateway  = (*Gateway)(nil)
-	_ funnel.SpawnGateway = (*Gateway)(nil)
+	_ funnel.ChatGateway    = (*Gateway)(nil)
+	_ funnel.SpawnGateway   = (*Gateway)(nil)
+	_ funnel.ConveneGateway = (*Gateway)(nil)
 )
 
 // (frames import retained for future inbound-translation logic — the
