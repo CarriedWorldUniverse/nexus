@@ -963,9 +963,13 @@ type composedRunner struct {
 }
 
 // commsToolAliases are tool names the CommsRunner HANDLES but does not
-// advertise via CommsToolDefs (legacy aliases). They must still route to
-// comms, so they're added to the routed set explicitly.
-var commsToolAliases = []string{ToolNameReactToMessage}
+// advertise via CommsToolDefs (legacy aliases, plus spawn — advertised
+// per-identity via SpawnToolDef, NEX-609). They must still route to
+// comms, so they're added to the routed set explicitly. Routing spawn
+// unconditionally is safe: a surface without a Spawner (hands, Frame
+// aspects) gets CommsRunner's readable "not available" tool result
+// instead of the local runner's unknown-tool error.
+var commsToolAliases = []string{ToolNameReactToMessage, ToolNameSpawn}
 
 // commsRoutedNames is the SINGLE SOURCE OF TRUTH for which tool names route
 // to the CommsRunner: every tool advertised by CommsToolDefs(), plus the
