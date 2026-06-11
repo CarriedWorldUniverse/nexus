@@ -1091,3 +1091,22 @@ func TestSpawnToolDefNotInCommsToolDefs(t *testing.T) {
 		t.Fatal("SpawnToolDef name mismatch")
 	}
 }
+
+func TestComposedRunnerRoutesSpawnToComms(t *testing.T) {
+	// NEX-609 regression: spawn is advertised per-identity (SpawnToolDef),
+	// not via CommsToolDefs, so the composed router must carry it in the
+	// explicit routed set — otherwise the call falls through to the local
+	// runner and the model sees "unknown tool".
+	s := &fakeSpawner{handles: []SpawnHandle{{RunID: "run-1", Name: "harrow.tine"}}}
+	r := ComposeRunner(CommsRunner{Gateway: &fakeGateway{}, Spawner: s}, nil)
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameSpawn,
+		Args: mustJSON(map[string]any{"brief": "do X"}),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if s.calls != 1 {
+		t.Fatalf("spawn must route to the CommsRunner (calls=%d, res=%s)", s.calls, res)
+	}
+}
