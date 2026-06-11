@@ -233,6 +233,10 @@ const (
 	// CommsToolDefs: spawn is parent-only (no sub-of-sub), so callers
 	// append SpawnToolDef() explicitly for non-derived identities.
 	ToolNameSpawn = "spawn"
+	// ToolNameConveneClose — the facilitator closes its roundtable
+	// convene (roundtable P3). Parent-only like spawn (hands never
+	// facilitate); appended per-identity via ConveneCloseToolDef().
+	ToolNameConveneClose = "convene_close"
 )
 
 // CommsToolDefs returns the set of bridle.ToolDef registrations for
@@ -430,6 +434,36 @@ func SpawnToolDef() bridle.ToolDef {
 	}
 }
 
+// ConveneCloseToolDef is the convene_close tool for the NATIVE comms
+// surface — the facilitator's half of a roundtable verdict (post the
+// CONSENSUS: summary via send_chat, then close the record). Parent-only
+// like SpawnToolDef; appended per-identity in toolsForProviderAgent.
+// Mirrors nexus-comms-mcp's conveneCloseTool.
+func ConveneCloseToolDef() bridle.ToolDef {
+	return bridle.ToolDef{
+		Name: ToolNameConveneClose,
+		Description: "Close a roundtable convene you are FACILITATING. Call this after judging the participants' lens turns and posting your 'CONSENSUS: …' summary to the convene thread. " +
+			"status=converged when the participants reached agreement (or you synthesised a verdict), status=abandoned when the roundtable cannot conclude. Only the convene's facilitator may close it.",
+		InputSchema: mustJSON(map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"convene_id":     map[string]any{"type": "string", "description": "The convene id from your facilitator brief (cv-…)."},
+				"status":         map[string]any{"type": "string", "enum": []string{"converged", "abandoned"}, "description": "Terminal status."},
+				"summary_msg_id": map[string]any{"type": "integer", "description": "Chat msg id of your CONSENSUS: summary post. Optional but strongly preferred for converged closes."},
+			},
+			"required": []string{"convene_id", "status"},
+		}),
+	}
+}
+
+// ConveneGateway is the facilitator's close seam beside SpawnGateway:
+// an implementation emits convene.close on the aspect's authenticated
+// WS and returns the record's final status. nil = "not available on
+// this surface" tool result.
+type ConveneGateway interface {
+	ConveneClose(ctx context.Context, conveneID, status string, summaryMsgID int64) (finalStatus string, err error)
+}
+
 // SpawnHandle identifies one accepted hand — the funnel-side mirror of
 // dispatch.SpawnHandle / frames.SpawnHandle, kept local so the funnel
 // doesn't depend on the dispatch package. RunID empty = queued for
@@ -490,6 +524,10 @@ type CommsRunner struct {
 	// error. agentfunnel wires it (wsasp.Gateway) for non-derived
 	// aspect identities only — hands never get a working spawn.
 	Spawner SpawnGateway
+
+	// ConveneCloser is the facilitator's convene.close seam (roundtable
+	// P3). Same wiring rule as Spawner: wsasp.Gateway, parents only.
+	ConveneCloser ConveneGateway
 }
 
 // Run dispatches a tool call by name. Unknown tool names return an
@@ -533,9 +571,40 @@ func (r CommsRunner) Run(ctx context.Context, call bridle.ToolCall) (json.RawMes
 		return r.runTriage(ctx, call.Args)
 	case ToolNameSpawn:
 		return r.runSpawn(ctx, call.Args)
+	case ToolNameConveneClose:
+		return r.runConveneClose(ctx, call.Args)
 	default:
 		return nil, fmt.Errorf("CommsRunner: unknown tool %q", call.Name)
 	}
+}
+
+// runConveneClose dispatches convene_close to the ConveneGateway. The
+// broker is the authority (facilitator-only authz, terminal-status
+// validation); here we catch only the client-side invariants. Gateway
+// errors land in the tool result — a rejection is model-recoverable.
+func (r CommsRunner) runConveneClose(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	if r.ConveneCloser == nil {
+		return errorResult(fmt.Errorf("convene_close is not available on this surface")), nil
+	}
+	var args struct {
+		ConveneID    string `json:"convene_id"`
+		Status       string `json:"status"`
+		SummaryMsgID int64  `json:"summary_msg_id"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return errorResult(err), nil
+	}
+	if strings.TrimSpace(args.ConveneID) == "" {
+		return errorResult(fmt.Errorf("convene_id is required")), nil
+	}
+	if args.Status != "converged" && args.Status != "abandoned" {
+		return errorResult(fmt.Errorf("status must be converged or abandoned")), nil
+	}
+	final, err := r.ConveneCloser.ConveneClose(ctx, strings.TrimSpace(args.ConveneID), args.Status, args.SummaryMsgID)
+	if err != nil {
+		return gatewayErrorResult(err)
+	}
+	return mustJSON(map[string]any{"ok": true, "status": final}), nil
 }
 
 // runSpawn dispatches the spawn tool to the SpawnGateway (NEX-609).
@@ -969,7 +1038,7 @@ type composedRunner struct {
 // unconditionally is safe: a surface without a Spawner (hands, Frame
 // aspects) gets CommsRunner's readable "not available" tool result
 // instead of the local runner's unknown-tool error.
-var commsToolAliases = []string{ToolNameReactToMessage, ToolNameSpawn}
+var commsToolAliases = []string{ToolNameReactToMessage, ToolNameSpawn, ToolNameConveneClose}
 
 // commsRoutedNames is the SINGLE SOURCE OF TRUTH for which tool names route
 // to the CommsRunner: every tool advertised by CommsToolDefs(), plus the

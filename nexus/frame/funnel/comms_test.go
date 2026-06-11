@@ -1110,3 +1110,79 @@ func TestComposedRunnerRoutesSpawnToComms(t *testing.T) {
 		t.Fatalf("spawn must route to the CommsRunner (calls=%d, res=%s)", s.calls, res)
 	}
 }
+
+// --- convene_close tool (roundtable P3) ---
+
+type fakeConveneCloser struct {
+	conveneID string
+	status    string
+	summaryID int64
+	calls     int
+	final     string
+	err       error
+}
+
+func (f *fakeConveneCloser) ConveneClose(_ context.Context, conveneID, status string, summaryMsgID int64) (string, error) {
+	f.calls++
+	f.conveneID, f.status, f.summaryID = conveneID, status, summaryMsgID
+	return f.final, f.err
+}
+
+func TestCommsRunner_ConveneCloseDispatches(t *testing.T) {
+	cc := &fakeConveneCloser{final: "converged"}
+	r := ComposeRunner(CommsRunner{Gateway: &fakeGateway{}, ConveneCloser: cc}, nil)
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameConveneClose,
+		Args: mustJSON(map[string]any{"convene_id": "cv-1", "status": "converged", "summary_msg_id": 8115}),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if cc.calls != 1 || cc.conveneID != "cv-1" || cc.status != "converged" || cc.summaryID != 8115 {
+		t.Fatalf("gateway got %+v", cc)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(res, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["ok"] != true || got["status"] != "converged" {
+		t.Errorf("result = %s", res)
+	}
+}
+
+func TestCommsRunner_ConveneCloseValidation(t *testing.T) {
+	cc := &fakeConveneCloser{}
+	r := CommsRunner{Gateway: &fakeGateway{}, ConveneCloser: cc}
+	for name, args := range map[string]map[string]any{
+		"missing id":  {"status": "converged"},
+		"bad status":  {"convene_id": "cv-1", "status": "done"},
+		"no spawner?": {"convene_id": "  ", "status": "converged"},
+	} {
+		res, err := r.Run(context.Background(), bridle.ToolCall{Name: ToolNameConveneClose, Args: mustJSON(args)})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var got map[string]string
+		_ = json.Unmarshal(res, &got)
+		if got["error"] == "" {
+			t.Errorf("%s: want error result, got %s", name, res)
+		}
+	}
+	if cc.calls != 0 {
+		t.Errorf("invalid args must not dispatch (calls=%d)", cc.calls)
+	}
+
+	// nil ConveneCloser → readable tool error.
+	res, err := CommsRunner{Gateway: &fakeGateway{}}.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameConveneClose,
+		Args: mustJSON(map[string]any{"convene_id": "cv-1", "status": "converged"}),
+	})
+	if err != nil {
+		t.Fatalf("nil closer must not abort the turn: %v", err)
+	}
+	var got map[string]string
+	_ = json.Unmarshal(res, &got)
+	if got["error"] == "" {
+		t.Errorf("nil closer: want error result, got %s", res)
+	}
+}

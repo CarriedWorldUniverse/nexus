@@ -670,6 +670,33 @@ func (c *Client) Spawn(ctx context.Context, brief string, count int, thread stri
 	return out.Hands, nil
 }
 
+// ConveneClose emits convene.close on this aspect's authenticated
+// connection (roundtable P3) and returns the record's final status.
+// The broker authorizes against the convene's facilitator, so there
+// is no caller in the payload.
+func (c *Client) ConveneClose(ctx context.Context, conveneID, status string, summaryMsgID int64) (string, error) {
+	env, err := frames.NewRequest(frames.KindConveneClose, frames.ConveneClosePayload{
+		ConveneID:    conveneID,
+		Status:       status,
+		SummaryMsgID: summaryMsgID,
+	})
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.ws.Request(ctx, env)
+	if err != nil {
+		return "", fmt.Errorf("wsasp: convene.close: %w", err)
+	}
+	var out frames.ConveneCloseResultPayload
+	if err := frames.PayloadAs(resp, &out); err != nil {
+		return "", fmt.Errorf("wsasp: convene.close.result decode: %w", err)
+	}
+	if !out.OK {
+		return "", fmt.Errorf("wsasp: convene.close rejected: %s", out.Message)
+	}
+	return out.Status, nil
+}
+
 // errNotConnected is returned by SendBestEffort when the underlying
 // wsclient isn't connected. Sentinel so callers can distinguish
 // "wire down" from a real wire-level write error.

@@ -115,3 +115,60 @@ func TestConveneCloseUnknownConvene(t *testing.T) {
 		t.Fatal("expected rejection: unknown convene")
 	}
 }
+
+// NEX-609 follow-through: an authenticated-but-UNREGISTERED connection
+// (the comms sidecar, -register=false) closes a convene as its
+// JWT-verified identity — same fallback rule as spawn. A registered
+// agentfunnel owns the one-session-per-name slot, so the facilitator's
+// nexus-comms-mcp could otherwise never close.
+func TestConveneCloseFromUnregisteredAuthenticatedFacilitator(t *testing.T) {
+	cv := &fakeConveneStore{}
+	seedConvene(cv, "shadow")
+	srv := newSpawnTestServerCfg(t, nil, func(cfg *Config) {
+		cfg.ConveneStore = cv
+	})
+	c := dialWS(t, srv, signSpawnAspectJWT(t, "shadow"))
+	// No register frame — the JWT identity vouches for the caller.
+	env, err := frames.NewRequest(frames.KindConveneClose, frames.ConveneClosePayload{
+		ConveneID: "cv-x", Status: "converged", SummaryMsgID: 9,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendFrame(t, c, env)
+	resp := recvFrame(t, c)
+	if resp.Kind != frames.KindConveneCloseResult {
+		t.Fatalf("kind = %q", resp.Kind)
+	}
+	var out frames.ConveneCloseResultPayload
+	if err := frames.PayloadAs(resp, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK {
+		t.Fatalf("close result = %+v, want ok", out)
+	}
+	cv.mu.Lock()
+	closedCalls := len(cv.closed)
+	closedStatus := convene.Status("")
+	if closedCalls > 0 {
+		closedStatus = cv.closed[0].status
+	}
+	cv.mu.Unlock()
+	if closedCalls != 1 || closedStatus != convene.StatusConverged {
+		t.Fatalf("store close calls = %d status = %q, want one converged close", closedCalls, closedStatus)
+	}
+
+	// And the legacy master (admin, unregistered) still cannot close.
+	c2 := dialWS(t, srv, "testtoken")
+	seedConvene(cv, "shadow") // no-op; cv-x already closed — reuse rejection shape
+	env2, _ := frames.NewRequest(frames.KindConveneClose, frames.ConveneClosePayload{
+		ConveneID: "cv-x", Status: "abandoned",
+	})
+	sendFrame(t, c2, env2)
+	resp2 := recvFrame(t, c2)
+	var out2 frames.ConveneCloseResultPayload
+	_ = frames.PayloadAs(resp2, &out2)
+	if out2.OK {
+		t.Fatal("an admin/legacy unregistered connection must not pass the facilitator check")
+	}
+}

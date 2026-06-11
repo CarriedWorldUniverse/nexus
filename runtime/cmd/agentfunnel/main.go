@@ -520,11 +520,13 @@ func main() {
 		AspectID:   res.AspectName,
 		OnTaskDone: onTaskDone,
 	}
-	// Spawn (NEX-609): the native comms surface carries the spawn tool
-	// for PARENT aspects only — a hand (derived identity) never gets a
-	// working Spawner (no sub-of-sub; the broker enforces it too).
+	// Spawn + convene_close (NEX-609 / roundtable P3): the native comms
+	// surface carries the parent-only tools for non-derived identities —
+	// a hand never gets a working Spawner (no sub-of-sub) nor a close
+	// seam (hands never facilitate; the broker enforces both).
 	if !aspects.IsDerivedName(res.AspectName) {
 		commsRunner.Spawner = gateway
+		commsRunner.ConveneCloser = gateway
 	}
 
 	// Phase E remote forwarding: agentfunnel's funnel runs in a
@@ -1726,10 +1728,11 @@ func toolsForProviderAgent(id bridle.ProviderID, aspectName string) []bridle.Too
 	// bash/read/write/edit/glob/grep/web_fetch/web_extract). The two name
 	// sets are disjoint so ComposeRunner can route purely by tool name.
 	defs := append(funnel.CommsToolDefs(), toolrunner.Defs()...)
-	// Spawn (NEX-609): parents only — a derived (hand) identity never
-	// sees the tool, mirroring nexus-comms-mcp's spawnToolAvailable gate.
+	// Spawn + convene_close (NEX-609 / roundtable P3): parents only — a
+	// derived (hand) identity never sees them, mirroring nexus-comms-mcp's
+	// spawnToolAvailable gate.
 	if !aspects.IsDerivedName(aspectName) {
-		defs = append(defs, funnel.SpawnToolDef())
+		defs = append(defs, funnel.SpawnToolDef(), funnel.ConveneCloseToolDef())
 	}
 	return defs
 }
