@@ -437,6 +437,23 @@ func main() {
 		MintHandCredential: func(ctx context.Context, parent, derived string) (string, error) {
 			return keyfileValidator.MintDerivedCredential(ctx, parent, derived)
 		},
+		// Provider inheritance (NEX-571 Task D): a hand runs the PARENT's
+		// provider binding (the aspects.provider column), not the launch
+		// default. Best-effort — a lookup miss falls back to the default.
+		HandProvider: func(ctx context.Context, parent string) string {
+			if keyfileValidator.Store == nil {
+				return ""
+			}
+			a, err := keyfileValidator.Store.Get(ctx, parent)
+			if err != nil || a == nil {
+				return ""
+			}
+			return a.Provider
+		},
+		// Kindred-word hand-name pool overrides (the P2 naming amendment).
+		// NEXUS_ASPECT_HAND_NAMES="shadow=umbra|gloam|shade,plumb=bob|fathom".
+		// Unset → the built-in aspects.AspectHandNames defaults.
+		AspectHandNames: parseHandNamePools(os.Getenv("NEXUS_ASPECT_HAND_NAMES")),
 	}
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		if k8s, kerr := dispatch.NewInClusterK8s(dispatchCfg.Namespace); kerr != nil {
@@ -1059,6 +1076,41 @@ func parseKVList(raw string) map[string]string {
 			continue
 		}
 		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseHandNamePools parses NEXUS_ASPECT_HAND_NAMES — a comma-separated
+// list of `aspect=word|word|word` entries — into the Runner's per-aspect
+// kindred-word override map (NEX-571 P2 naming amendment). Empty/invalid
+// input → nil, so the Runner falls back to aspects.AspectHandNames.
+func parseHandNamePools(raw string) map[string][]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	out := make(map[string][]string)
+	for _, entry := range strings.Split(raw, ",") {
+		k, v, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		var words []string
+		for _, w := range strings.Split(v, "|") {
+			if w = strings.TrimSpace(w); w != "" {
+				words = append(words, w)
+			}
+		}
+		if len(words) > 0 {
+			out[k] = words
+		}
 	}
 	if len(out) == 0 {
 		return nil
