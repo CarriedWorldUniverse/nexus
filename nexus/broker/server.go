@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/convene"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/cwb/custodian"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
@@ -125,6 +126,12 @@ type Config struct {
 	// RunsStore powers the persisted dispatch run spine. When configured,
 	// New migrates it and adapts it into dispatch.Runner.Recorder.
 	RunsStore runs.Store
+
+	// ConveneStore persists !convene roundtables (roundtable spec
+	// component 3). When configured, New migrates it; the !convene chat
+	// path records a row and convene.close / convenes.list operate on it.
+	// nil → !convene is rejected (no record spine).
+	ConveneStore convene.Store
 
 	// SQLDB is the broker's sqld connection (shared by the chat/runs/aspects
 	// stores). env.health pings it to report sqld reachability — sqld lives in
@@ -519,6 +526,11 @@ func New(cfg Config, r *roster.Roster) *Broker {
 				r.Recorder = newRunsAdapter(cfg.RunsStore, b.broadcastRunsUpdate)
 			}
 			b.sweepOrphanedRunningRuns(context.Background())
+		}
+	}
+	if cfg.ConveneStore != nil {
+		if err := cfg.ConveneStore.Migrate(context.Background()); err != nil {
+			b.log.Warn("convene store migration failed", "err", err)
 		}
 	}
 	return b

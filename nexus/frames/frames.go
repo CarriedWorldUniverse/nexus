@@ -163,18 +163,28 @@ const (
 	// list for the affected msg so the SPA can replace in-place — same
 	// per-id shape as chat.reactions.fetch.result so the existing
 	// rendering path works for both load and live-update.
-	KindChatReactionUpdate    Kind = "chat.reaction.update"
-	KindKnowledgeList         Kind = "knowledge.list"
-	KindKnowledgeListResult   Kind = "knowledge.list.result"
-	KindKnowledgeStoreResult  Kind = "knowledge.store.result"
-	KindAspectSay             Kind = "aspect.say"
-	KindAspectSayResult       Kind = "aspect.say.result"
-	KindRunsList              Kind = "runs.list"
-	KindRunsListResult        Kind = "runs.list.result"
-	KindRunGet                Kind = "run.get"
-	KindRunGetResult          Kind = "run.get.result"
-	KindRunCancel             Kind = "run.cancel"
-	KindRunCancelResult       Kind = "run.cancel.result"
+	KindChatReactionUpdate   Kind = "chat.reaction.update"
+	KindKnowledgeList        Kind = "knowledge.list"
+	KindKnowledgeListResult  Kind = "knowledge.list.result"
+	KindKnowledgeStoreResult Kind = "knowledge.store.result"
+	KindAspectSay            Kind = "aspect.say"
+	KindAspectSayResult      Kind = "aspect.say.result"
+	KindRunsList             Kind = "runs.list"
+	KindRunsListResult       Kind = "runs.list.result"
+	KindRunGet               Kind = "run.get"
+	KindRunGetResult         Kind = "run.get.result"
+	KindRunCancel            Kind = "run.cancel"
+	KindRunCancelResult      Kind = "run.cancel.result"
+
+	// Convene frames (roundtable spec component 3). convene.close is sent
+	// by the facilitator aspect (or an operator) to terminate a convene;
+	// convenes.list is an operator watch surface. The convene itself is
+	// created by the !convene chat-parser path (no request frame), mirroring
+	// !dispatch.
+	KindConveneClose          Kind = "convene.close"
+	KindConveneCloseResult    Kind = "convene.close.result"
+	KindConvenesList          Kind = "convenes.list"
+	KindConvenesListResult    Kind = "convenes.list.result"
 	KindActivityHistory       Kind = "activity.history"
 	KindActivityHistoryResult Kind = "activity.history.result"
 	KindEnvHealth             Kind = "env.health"
@@ -368,6 +378,9 @@ func IsKnown(k Kind) bool {
 		KindAspectSay, KindAspectSayResult,
 		KindRunsList, KindRunsListResult,
 		KindRunGet, KindRunGetResult,
+		KindRunCancel, KindRunCancelResult,
+		KindConveneClose, KindConveneCloseResult,
+		KindConvenesList, KindConvenesListResult,
 		KindActivityHistory, KindActivityHistoryResult,
 		KindEnvHealth, KindEnvHealthResult,
 		// Subscription frames (5d)

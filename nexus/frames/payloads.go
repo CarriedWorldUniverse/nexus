@@ -231,6 +231,44 @@ type RunCancelResultPayload struct {
 	Message string `json:"message,omitempty"`
 }
 
+// ConvenePayload is the operator-facing shape of a persisted convene
+// (roundtable spec component 3). Mirrors RunPayload's flat read-model
+// shape so the same watch-surface plumbing renders both.
+type ConvenePayload struct {
+	ConveneID    string   `json:"convene_id"`
+	RootMsgID    int64    `json:"root_msg_id,omitempty"`
+	Facilitator  string   `json:"facilitator"`
+	Participants []string `json:"participants"`
+	Problem      string   `json:"problem,omitempty"`
+	Status       string   `json:"status"`
+	CreatedAt    int64    `json:"created_at"`
+	ClosedAt     int64    `json:"closed_at,omitempty"`
+	SummaryMsgID int64    `json:"summary_msg_id,omitempty"`
+}
+
+// ConveneClosePayload closes a convene. Sent by the facilitator (an aspect
+// WS) or an operator conn. Status must be "converged" or "abandoned";
+// SummaryMsgID points at the facilitator's CONSENSUS: post when converged.
+type ConveneClosePayload struct {
+	ConveneID    string `json:"convene_id"`
+	Status       string `json:"status"`
+	SummaryMsgID int64  `json:"summary_msg_id,omitempty"`
+}
+
+type ConveneCloseResultPayload struct {
+	OK      bool   `json:"ok"`
+	Status  string `json:"status,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+type ConvenesListPayload struct {
+	Limit int `json:"limit,omitempty"`
+}
+
+type ConvenesListResultPayload struct {
+	Convenes []ConvenePayload `json:"convenes"`
+}
+
 type ChatItemPayload struct {
 	MsgID   int64  `json:"msg_id"`
 	From    string `json:"from"`

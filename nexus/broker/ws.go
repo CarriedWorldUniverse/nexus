@@ -483,6 +483,11 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		// Aspect-owned fan-out (NEX-571): the registered aspect asks for
 		// hands of itself. Runs in a goroutine inside the handler.
 		c.handleSpawnRequestFrame(env)
+	case frames.KindConveneClose:
+		// The facilitator aspect closes its convene. Authz keys on the
+		// connection's registered identity (must equal the convene's
+		// facilitator); operator-sent closes route via dispatchOperatorFrame.
+		c.handleConveneCloseFrame(env)
 	case frames.KindEscalationRequest:
 		// P3c: a native-API aspect's funnel paused a tool call and is
 		// asking a human. Relay to operators (identity-checked); the
