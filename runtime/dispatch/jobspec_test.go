@@ -56,7 +56,12 @@ func TestBuildJob_ProviderCodexBits(t *testing.T) {
 	}{
 		{name: "empty is codex-cli", wantCodex: true},
 		{name: "codex-cli", provider: "codex-cli", wantCodex: true},
+		// Store aliases (NEX-610): the aspects.provider column carries
+		// whatever the operator set; hand briefs inherit it raw.
+		{name: "codex alias", provider: "codex", wantCodex: true},
+		{name: "codexcli alias", provider: "codexcli", wantCodex: true},
 		{name: "openai", provider: "openai", wantCodex: false},
+		{name: "ollama", provider: "ollama", wantCodex: false},
 	}
 
 	for _, tt := range tests {

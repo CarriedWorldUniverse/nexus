@@ -170,6 +170,51 @@ func (r *Runner) Init(ctx context.Context) error {
 	return nil
 }
 
+// InitWithRetry runs Init with a bounded retry-with-backoff (NEX-611).
+// On a fresh broker pod the CNI may not be routable for the first few
+// seconds, so the one-shot Init's ListActiveJobs call fails with "no
+// route to host" and the caller used to give up — leaving the Runner
+// nil and wake+spawn silently dead. attempts bounds the total tries;
+// the delay doubles from baseDelay, capped at 30s (5 attempts at 4s ≈
+// 58s of cover). sleepFn is the wait seam (tests inject a no-op); nil
+// → real timer. Context cancellation aborts between attempts.
+func (r *Runner) InitWithRetry(ctx context.Context, attempts int, baseDelay time.Duration, sleepFn func(time.Duration)) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+	delay := baseDelay
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err = r.Init(ctx); err == nil {
+			if attempt > 1 {
+				slog.Info("runner: init succeeded after retry", "attempt", attempt)
+			}
+			return nil
+		}
+		if attempt == attempts {
+			break
+		}
+		slog.Warn("runner: init failed — retrying (in-cluster API may not be routable yet)",
+			"attempt", attempt, "max_attempts", attempts, "delay", delay, "err", err)
+		switch {
+		case sleepFn != nil:
+			sleepFn(delay)
+		case ctx != nil:
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		default:
+			time.Sleep(delay)
+		}
+		if delay *= 2; delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
+	}
+	return err
+}
+
 // WatchLoop calls K8sIface.WatchJobs to watch for job completions.
 func (r *Runner) WatchLoop(ctx context.Context) error {
 	return r.K8sIface.WatchJobs(ctx, r.OnJobDone)

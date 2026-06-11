@@ -204,9 +204,50 @@ func TestSpawnRequestRequiresRegisteredAspect(t *testing.T) {
 	fr := &fakeSpawnRunner{}
 	srv := newSpawnTestServer(t, fr)
 	c := dialWS(t, srv, "testtoken")
-	// No register frame: connection has no aspect identity.
+	// No register frame: connection has no aspect identity (the legacy
+	// master token resolves to AgentID "operator", which never spawns).
 	resp := sendSpawn(t, c, frames.SpawnRequestPayload{Brief: "do X"})
 	spawnErrorOf(t, resp)
+}
+
+// NEX-609: an authenticated-but-UNREGISTERED aspect connection spawns
+// as its JWT-verified identity. This is the comms-sidecar shape: inside
+// a pod aspect, agentfunnel owns the one-session-per-name registration
+// slot, so nexus-comms-mcp connects with the aspect's session JWT and
+// -register=false — the JWT sub is the same credential registration
+// would have bound.
+func TestSpawnRequestAllowsUnregisteredAuthenticatedAspect(t *testing.T) {
+	fr := &fakeSpawnRunner{handles: []dispatch.SpawnHandle{{RunID: "run-1", Name: "harrow.tine"}}}
+	srv := newSpawnTestServer(t, fr)
+	c := dialWS(t, srv, signSpawnAspectJWT(t, "harrow"))
+	// No register frame — the JWT identity alone vouches for the parent.
+	resp := sendSpawn(t, c, frames.SpawnRequestPayload{Brief: "do X"})
+	if resp.Kind != frames.KindSpawnResult {
+		t.Fatalf("kind = %q, want %q", resp.Kind, frames.KindSpawnResult)
+	}
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	if fr.calls != 1 || fr.parent != "harrow" {
+		t.Fatalf("SubmitSpawn calls=%d parent=%q, want 1/harrow", fr.calls, fr.parent)
+	}
+}
+
+// The unregistered fallback must not open spawn to hands: a connection
+// authenticated with a DERIVED identity's JWT (a hand's comms-mcp) is
+// still rejected — no sub-of-sub.
+func TestSpawnRequestUnregisteredDerivedJWTStillRejected(t *testing.T) {
+	fr := &fakeSpawnRunner{}
+	srv := newSpawnTestServer(t, fr)
+	c := dialWS(t, srv, signSpawnAspectJWT(t, "harrow.tine"))
+	resp := sendSpawn(t, c, frames.SpawnRequestPayload{Brief: "do X"})
+	if msg := spawnErrorOf(t, resp); !strings.Contains(msg, "sub-of-sub") {
+		t.Fatalf("error = %q, want a no-sub-of-sub rejection", msg)
+	}
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	if fr.calls != 0 {
+		t.Fatal("a hand's unregistered connection must not spawn")
+	}
 }
 
 func TestSpawnRequestRejectsDerivedParent(t *testing.T) {

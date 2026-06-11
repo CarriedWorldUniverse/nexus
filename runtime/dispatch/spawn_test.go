@@ -306,6 +306,92 @@ func TestBuildJobTicketDispatchKeepsKeyfile(t *testing.T) {
 	_ = corev1.EnvVar{} // keep corev1 imported for future spec assertions
 }
 
+// NEX-610: a hand of an ollama-provider parent must carry the provider
+// endpoint env — without OLLAMA_BASE_URL the in-Job agentfunnel dials
+// localhost:11434 and the hand's turn dies on connect.
+func TestBuildJobHandOllamaProviderEnv(t *testing.T) {
+	b := dispatch.Brief{
+		Agent:       "harrow.tine",
+		SpawnParent: "harrow",
+		SessionJWT:  "hand-jwt",
+		Ticket:      "hand-abc",
+		Thread:      "spawn-42",
+		RunID:       "run-1",
+	}
+	cfg := dispatch.JobConfig{
+		Namespace:       "nexus",
+		BrokerHost:      "nexus.internal",
+		OllamaBaseURL:   "http://gemma-ollama.nexus.svc.cluster.local:11434",
+		OllamaKeepAlive: "-1s",
+	}
+	for _, provider := range []string{"ollama", "ollama-local"} {
+		c := dispatch.BuildJob(b, cfg, "task-1", provider).Spec.Template.Spec.Containers[0]
+		env := map[string]string{}
+		for _, e := range c.Env {
+			env[e.Name] = e.Value
+		}
+		if env["OLLAMA_BASE_URL"] != cfg.OllamaBaseURL {
+			t.Errorf("provider %q: OLLAMA_BASE_URL = %q, want %q", provider, env["OLLAMA_BASE_URL"], cfg.OllamaBaseURL)
+		}
+		if env["OLLAMA_KEEP_ALIVE"] != "-1s" {
+			t.Errorf("provider %q: OLLAMA_KEEP_ALIVE = %q, want -1s", provider, env["OLLAMA_KEEP_ALIVE"])
+		}
+	}
+
+	// Non-ollama providers must not pick the env up.
+	c := dispatch.BuildJob(b, cfg, "task-1", "claude").Spec.Template.Spec.Containers[0]
+	for _, e := range c.Env {
+		if e.Name == "OLLAMA_BASE_URL" || e.Name == "OLLAMA_KEEP_ALIVE" {
+			t.Errorf("claude provider must not carry %s", e.Name)
+		}
+	}
+
+	// Empty config → omitted even for ollama (agentfunnel default applies).
+	c = dispatch.BuildJob(b, dispatch.JobConfig{Namespace: "nexus", BrokerHost: "nexus.internal"}, "task-1", "ollama").Spec.Template.Spec.Containers[0]
+	for _, e := range c.Env {
+		if e.Name == "OLLAMA_BASE_URL" || e.Name == "OLLAMA_KEEP_ALIVE" {
+			t.Errorf("empty JobConfig must not inject %s", e.Name)
+		}
+	}
+}
+
+// NEX-610: a hand of a codex-provider parent inherits the raw store
+// value ("codex", not the canonical "codex-cli") and must still get the
+// codex-auth init container + mounts that ticket dispatches get.
+func TestBuildJobHandCodexAliasAuthMount(t *testing.T) {
+	b := dispatch.Brief{
+		Agent:       "plumb.bob",
+		SpawnParent: "plumb",
+		SessionJWT:  "hand-jwt",
+		Ticket:      "hand-abc",
+		Thread:      "spawn-42",
+		RunID:       "run-1",
+	}
+	job := dispatch.BuildJob(b, dispatch.JobConfig{Namespace: "nexus", BrokerHost: "nexus.internal", Image: "img"}, "task-1", "codex")
+	pod := job.Spec.Template.Spec
+	var hasInit bool
+	for _, ic := range pod.InitContainers {
+		if ic.Name == "codex-auth" {
+			hasInit = true
+		}
+	}
+	if !hasInit {
+		t.Error("codex-alias hand Job must carry the codex-auth init container")
+	}
+	var hasSecret, hasHome bool
+	for _, v := range pod.Volumes {
+		if v.Name == "codex-secret" {
+			hasSecret = true
+		}
+		if v.Name == "codex-home" {
+			hasHome = true
+		}
+	}
+	if !hasSecret || !hasHome {
+		t.Errorf("codex-alias hand Job volumes: codex-secret=%v codex-home=%v, want both", hasSecret, hasHome)
+	}
+}
+
 // Per-parent cap: hands beyond SpawnMaxConcurrent queue and drain when
 // a sibling completes — Submit's queue semantics.
 func TestSubmitSpawnPerParentCapQueuesAndDrains(t *testing.T) {

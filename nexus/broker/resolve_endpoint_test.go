@@ -108,6 +108,40 @@ func TestEndpoint_Resolve_DerivedInheritsParent(t *testing.T) {
 	}
 }
 
+// NEX-609: the MCP profile is served to BASE aspects but NOT to hands.
+// A hand Job mounts no keyfile, so the parent's profile entries (which
+// authenticate via /etc/nexus/keyfile.json) could never boot in the
+// hand's pod — and the spawn tool (no sub-of-sub) lives there too.
+func TestEndpoint_Resolve_MCPProfileBaseOnlyNotDerived(t *testing.T) {
+	f := newKeyfileEndpointFixture(t)
+	profile := `{"mcpServers":{"nexus-comms-mcp":{"command":"/usr/local/bin/nexus-comms-mcp"}}}`
+	if err := f.creds.SetMCPProfile(context.Background(), "plumb", profile); err != nil {
+		t.Fatalf("SetMCPProfile: %v", err)
+	}
+
+	// Base aspect resolve carries the profile.
+	resp := postResolve(t, f.srv.URL, mintSessionJWT(t, f.signingSec, "plumb"))
+	defer resp.Body.Close()
+	var base validateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&base); err != nil {
+		t.Fatal(err)
+	}
+	if base.MCPProfile != profile {
+		t.Errorf("base resolve MCPProfile = %q, want the stored profile", base.MCPProfile)
+	}
+
+	// Hand resolve must not.
+	resp2 := postResolve(t, f.srv.URL, mintSessionJWT(t, f.signingSec, "plumb.fathom"))
+	defer resp2.Body.Close()
+	var hand validateResponse
+	if err := json.NewDecoder(resp2.Body).Decode(&hand); err != nil {
+		t.Fatal(err)
+	}
+	if hand.MCPProfile != "" {
+		t.Errorf("derived resolve MCPProfile = %q, want empty (hands have no keyfile to auth MCP servers)", hand.MCPProfile)
+	}
+}
+
 func TestEndpoint_Resolve_MissingBearer(t *testing.T) {
 	f := newKeyfileEndpointFixture(t)
 	resp := postResolve(t, f.srv.URL, "")
