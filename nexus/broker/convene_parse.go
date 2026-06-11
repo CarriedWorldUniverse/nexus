@@ -137,7 +137,11 @@ func parseParticipantsAndLenses(toks []string, known map[string]bool) ([]string,
 				parts = append(parts, nt)
 				i++
 			}
-			lenses[who] = strings.TrimSpace(strings.Join(parts, " "))
+			text := strings.TrimSpace(strings.Join(parts, " "))
+			if text == "" {
+				return nil, nil, fmt.Errorf("convene: lens for %q has no text", who)
+			}
+			lenses[who] = text
 			continue
 		}
 		if err := validateBaseAspect(tok, known); err != nil {

@@ -50,6 +50,11 @@ func validCloseStatus(s string) (convene.Status, bool) {
 	}
 }
 
+// NOTE: a broker-side round-cap/TTL auto-close for orphaned-open convenes
+// (facilitator dies mid-convene, leaving the record open forever) is deferred
+// to P4+. In v1 judging convergence and closing is the facilitating aspect's
+// job; the broker does not reap convenes on a timer.
+//
 // closeConvene is the shared close path. caller is the authenticated
 // identity (an aspect's registeredAs, or "operator"); isOperator relaxes
 // the facilitator-only authz. Returns a result payload (never panics on a

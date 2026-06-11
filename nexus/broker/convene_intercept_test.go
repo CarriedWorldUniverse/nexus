@@ -206,6 +206,76 @@ func TestConveneOperatorFacilitatorDefaultsShadow(t *testing.T) {
 	}
 }
 
+// TestConveneRejectsEmptyFrom verifies the !convene intercept guards an
+// empty from the same way the normal chat path does: rejected with the
+// "from required" error and no convene root inserted into the chat store.
+// (Symmetry with the normal-path guard; without it a convene thread root
+// would be attributed to nobody and the facilitator would resolve empty.)
+func TestConveneRejectsEmptyFrom(t *testing.T) {
+	scaler := newFakeScaler()
+	b, store, cv := newConveneBroker(t, scaler, map[string]string{
+		"plumb": WakePolicyWakeOnMention,
+		"anvil": WakePolicyWakeOnMention,
+	})
+	_, err := b.HandleChatSend(context.Background(), "",
+		"!convene plumb anvil — design X", 0, "")
+	if err == nil {
+		t.Fatal("expected error for empty from on !convene")
+	}
+	if !strings.Contains(err.Error(), "from required") {
+		t.Errorf("err = %v, want 'from required (convene)'", err)
+	}
+	store.mu.Lock()
+	n := len(store.msgs)
+	store.mu.Unlock()
+	if n != 0 {
+		t.Errorf("stored %d messages, want 0 (rejected before insert)", n)
+	}
+	cv.mu.Lock()
+	ncv := len(cv.inserted)
+	cv.mu.Unlock()
+	if ncv != 0 {
+		t.Errorf("inserted %d convene records, want 0", ncv)
+	}
+}
+
+// TestConveneRejectsDerivedSender verifies a !convene from a derived (hand)
+// identity is rejected before anything happens — mirroring the !dispatch
+// derived-rejection: convening a roundtable is a parent-tier capability, a
+// hand must not. Nothing reaches the convene store; the hand's !convene post
+// itself is not stored; a rejection note lands in the thread.
+func TestConveneRejectsDerivedSender(t *testing.T) {
+	scaler := newFakeScaler()
+	b, store, cv := newConveneBroker(t, scaler, map[string]string{
+		"plumb": WakePolicyWakeOnMention,
+		"anvil": WakePolicyWakeOnMention,
+	})
+	if _, err := b.HandleChatSend(context.Background(), "shadow.umbra",
+		"!convene plumb anvil — design X", 0, "spawn-7"); err != nil {
+		t.Fatalf("HandleChatSend: %v", err)
+	}
+	cv.mu.Lock()
+	ncv := len(cv.inserted)
+	cv.mu.Unlock()
+	if ncv != 0 {
+		t.Errorf("inserted %d convene records, want 0 (hands cannot convene)", ncv)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var rejection bool
+	for _, m := range store.msgs {
+		if strings.HasPrefix(strings.TrimSpace(m.Content), "!convene") {
+			t.Errorf("the hand's !convene post must not be stored, got %q", m.Content)
+		}
+		if strings.Contains(m.Content, "hands cannot convene; ask your parent") {
+			rejection = true
+		}
+	}
+	if !rejection {
+		t.Errorf("rejection note missing from thread; stored = %v", store.msgs)
+	}
+}
+
 // TestConveneUnknownAspectNoRecord verifies a bad command does NOT insert a
 // convene record (the post is still stored as ordinary text-root).
 func TestConveneUnknownAspectNoRecord(t *testing.T) {

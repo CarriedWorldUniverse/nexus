@@ -84,6 +84,33 @@ func TestParseConveneLensSegments(t *testing.T) {
 	}
 }
 
+func TestParseConveneRejectsEmptyLensText(t *testing.T) {
+	// lens:plumb= with no following text resolves to an empty lens; that's a
+	// malformed segment, not a silent empty lens.
+	_, err := parseConveneCommand(
+		"!convene plumb anvil lens:plumb= — design X",
+		known("plumb", "anvil"),
+	)
+	if err == nil {
+		t.Fatal("expected error for empty lens text (lens:plumb=)")
+	}
+}
+
+func TestParseConveneLensEqualsThenWords(t *testing.T) {
+	// lens:plumb= followed by words: the words become the lens text and it
+	// parses fine (the trailing = is just where Cut splits).
+	cmd, err := parseConveneCommand(
+		"!convene plumb anvil lens:plumb= careful about X — design X",
+		known("plumb", "anvil"),
+	)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cmd.Lenses["plumb"] != "careful about X" {
+		t.Errorf("lens[plumb] = %q, want 'careful about X'", cmd.Lenses["plumb"])
+	}
+}
+
 func TestParseConveneRejectsUnknownAspect(t *testing.T) {
 	_, err := parseConveneCommand("!convene plumb ghost — x", known("plumb", "anvil"))
 	if err == nil {
