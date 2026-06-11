@@ -69,6 +69,10 @@ func (c *wsConn) dispatchOperatorFrame(env frames.Envelope) bool {
 		c.handleOperatorRunGet(env)
 	case frames.KindRunCancel:
 		c.handleOperatorRunCancel(env)
+	case frames.KindConveneClose:
+		c.handleOperatorConveneClose(env)
+	case frames.KindConvenesList:
+		c.handleOperatorConvenesList(env)
 	case frames.KindActivityHistory:
 		c.handleOperatorActivityHistory(env)
 	case frames.KindEnvHealth:
