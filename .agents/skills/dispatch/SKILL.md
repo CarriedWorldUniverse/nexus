@@ -29,13 +29,22 @@ hand you an honest result — you must go get it.)
 ## 2. Write the directive
 First line is the directive; everything after is the task brief.
 ```
-!dispatch <agent> repo=<repo> ticket=<KEY> <one-line task>
+!dispatch <agent>%<provider> repo=<repo> ticket=<KEY> <one-line task>
 <full brief on following lines>
 ```
 - `<agent>` is the BUILDER (anvil/plumb) — NOT the ticket key. Putting the
   ticket key in the agent slot is the classic failure: it parses (unknown
   agents default to enabled), then dies deep in the runner with
   `aspect-keyfile-<KEY> not found`.
+- ALWAYS specify the provider, ATTACHED to the agent with `%`: `anvil%codex`,
+  `plumb%codex`. Syntax is `agent%provider`, NO space — `anvil %codex` as a
+  separate token parses as TASK TEXT, leaving provider empty. Empty provider →
+  the runner DEFAULTS to "claude" (runner.go:614-616) → a codex aspect gets a
+  claude-shaped Job with NO codex-auth init container → codex runs
+  unauthenticated (no /root/.codex/auth.json) → exit 1 → 30m idle → produces
+  NOTHING, no log trail. Silently burned two dispatches on 2026-06-13.
+  anvil/plumb are codex → `anvil%codex` / `plumb%codex`. (NEX-647 = fix the
+  runner to read the aspect's configured provider so this stops being needed.)
 - Set the comms `topic` to the ticket key so the builder's replies thread there.
 - The brief body MUST include the cloud-git-workflow + developer-standards
   blocks (clone /work yourself, `cw setup-git github`, `gh pr create`, one
