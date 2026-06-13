@@ -212,6 +212,7 @@ type RunPayload struct {
 	Command       string `json:"command,omitempty"`
 	Repo          string `json:"repo,omitempty"`
 	Status        string `json:"status"`
+	Reason        string `json:"reason,omitempty"`
 	StartedAt     int64  `json:"started_at"`
 	CompletedAt   int64  `json:"completed_at,omitempty"`
 	PRURL         string `json:"pr_url,omitempty"`

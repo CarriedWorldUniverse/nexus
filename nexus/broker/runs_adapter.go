@@ -54,7 +54,7 @@ func (a *runsAdapter) RecordRunAccepted(ctx context.Context, runID string, accep
 
 func (a *runsAdapter) RecordRunDone(ctx context.Context, runID, status string, completedAt time.Time, prURL string, durationSecs int) {
 	pre, _ := a.store.Get(ctx, runID)
-	_ = a.store.MarkDone(ctx, runID, runs.Status(status), completedAt, prURL, durationSecs)
+	_ = a.store.MarkDone(ctx, runID, runs.Status(status), completedAt, prURL, durationSecs, "")
 	if a.onChange != nil {
 		if r, err := a.store.Get(ctx, runID); err == nil {
 			a.onChange(r)
@@ -105,7 +105,7 @@ func (b *Broker) sweepOrphanedRunningRuns(ctx context.Context) {
 		if !run.StartedAt.IsZero() && now.After(run.StartedAt) {
 			durationSecs = int(now.Sub(run.StartedAt).Seconds())
 		}
-		if err := b.cfg.RunsStore.MarkDone(ctx, run.RunID, runs.StatusFailed, now, run.PRURL, durationSecs); err != nil {
+		if err := b.cfg.RunsStore.MarkDone(ctx, run.RunID, runs.StatusFailed, now, run.PRURL, durationSecs, "orphaned"); err != nil {
 			b.log.Warn("dispatch: running run sweep mark failed", "run_id", run.RunID, "err", err)
 			continue
 		}
@@ -144,6 +144,7 @@ func runToPayload(r runs.Run) frames.RunPayload {
 		Command:       r.Command,
 		Repo:          r.Repo,
 		Status:        string(r.Status),
+		Reason:        r.Reason,
 		StartedAt:     r.StartedAt.UnixMilli(),
 		PRURL:         r.PRURL,
 		DurationSecs:  r.DurationSecs,
