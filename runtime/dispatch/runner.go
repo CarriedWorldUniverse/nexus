@@ -255,7 +255,7 @@ func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 	var ackMsg string
 	if !r.acked[b.Ticket] {
 		r.acked[b.Ticket] = true
-		ackMsg = "dispatch accepted for " + b.Agent + " on " + b.Ticket
+		ackMsg = "dispatch submitted for " + b.Agent + " on " + b.Ticket
 	}
 
 	if !r.canRun(b.Agent) {

@@ -192,6 +192,16 @@ type DispatchErrorPayload struct {
 	Limit      int    `json:"limit,omitempty"`
 }
 
+// DispatchStatusPayload is emitted by a dispatched builder over its normal
+// aspect WebSocket once it has actually taken the work, or when it fails before
+// reaching that point. Status is "accepted" or "failed".
+type DispatchStatusPayload struct {
+	RunID  string    `json:"run_id"`
+	Status string    `json:"status"`
+	Reason string    `json:"reason,omitempty"`
+	At     time.Time `json:"at,omitempty"`
+}
+
 // RunPayload is the operator-facing shape of a persisted dispatch run.
 type RunPayload struct {
 	RunID         string `json:"run_id"`

@@ -27,6 +27,8 @@ func (f *fakeRecorder) RecordRunStart(_ context.Context, runID, ticket, agent, t
 	f.started = append(f.started, startCall{runID, ticket, agent, thread, repo, command, parentRunID})
 }
 
+func (f *fakeRecorder) RecordRunAccepted(context.Context, string, time.Time) {}
+
 func (f *fakeRecorder) RecordRunDone(_ context.Context, runID, status string, completedAt time.Time, prURL string, durationSecs int) {
 	f.done = append(f.done, doneCall{runID, status, prURL, durationSecs})
 }
