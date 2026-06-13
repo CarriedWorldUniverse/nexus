@@ -57,6 +57,23 @@ func TestInsertThenMarkDone(t *testing.T) {
 	}
 }
 
+func TestRecordAndGetLogs(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	_ = s.Insert(ctx, Run{RunID: "run-logs", Ticket: "NEX-1", Agent: "anvil", Status: StatusRunning, StartedAt: time.UnixMilli(1)})
+
+	if err := s.RecordLogs(ctx, "run-logs", "builder output\nnext line\n"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetLogs(ctx, "run-logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "builder output\nnext line\n" {
+		t.Fatalf("logs = %q", got)
+	}
+}
+
 func TestMarkDoneDoesNotOverwriteTerminal(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

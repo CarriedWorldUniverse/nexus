@@ -32,6 +32,7 @@ type Run struct {
 	CompletedAt   time.Time `json:"completed_at,omitempty"`
 	PRURL         string    `json:"pr_url,omitempty"`
 	DurationSecs  int       `json:"duration_secs,omitempty"`
+	Logs          string    `json:"-"`
 }
 
 // Store is the runs read-model. The dispatch runner is the only writer.
@@ -39,6 +40,8 @@ type Store interface {
 	Migrate(ctx context.Context) error
 	Insert(ctx context.Context, r Run) error
 	MarkDone(ctx context.Context, runID string, status Status, completedAt time.Time, prURL string, durationSecs int) error
+	RecordLogs(ctx context.Context, runID, logs string) error
+	GetLogs(ctx context.Context, runID string) (string, error)
 	ListRunning(ctx context.Context) ([]Run, error)
 	List(ctx context.Context, limit int) ([]Run, error)
 	Get(ctx context.Context, runID string) (Run, error)
@@ -63,11 +66,43 @@ func (s *SQLStore) Migrate(ctx context.Context) error {
 			started_at      INTEGER NOT NULL,
 			completed_at    INTEGER NOT NULL DEFAULT 0,
 			pr_url          TEXT NOT NULL DEFAULT '',
-			duration_secs   INTEGER NOT NULL DEFAULT 0
+			duration_secs   INTEGER NOT NULL DEFAULT 0,
+			logs            TEXT NOT NULL DEFAULT ''
 		);
 		CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);`)
 	if err != nil {
 		return fmt.Errorf("runs.Migrate: %w", err)
+	}
+	if err := s.ensureLogsColumn(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *SQLStore) ensureLogsColumn(ctx context.Context) error {
+	rows, err := s.DB.QueryContext(ctx, `PRAGMA table_info(runs)`)
+	if err != nil {
+		return fmt.Errorf("runs.Migrate columns: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("runs.Migrate scan columns: %w", err)
+		}
+		if name == "logs" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("runs.Migrate columns: %w", err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN logs TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("runs.Migrate add logs: %w", err)
 	}
 	return nil
 }
@@ -95,6 +130,23 @@ func (s *SQLStore) MarkDone(ctx context.Context, runID string, status Status, co
 		return fmt.Errorf("runs.MarkDone: %w", err)
 	}
 	return nil
+}
+
+func (s *SQLStore) RecordLogs(ctx context.Context, runID, logs string) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE runs SET logs = ? WHERE run_id = ?`, logs, runID)
+	if err != nil {
+		return fmt.Errorf("runs.RecordLogs: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLStore) GetLogs(ctx context.Context, runID string) (string, error) {
+	var logs string
+	err := s.DB.QueryRowContext(ctx, `SELECT logs FROM runs WHERE run_id = ?`, runID).Scan(&logs)
+	if err != nil {
+		return "", fmt.Errorf("runs.GetLogs: %w", err)
+	}
+	return logs, nil
 }
 
 func (s *SQLStore) ListRunning(ctx context.Context) ([]Run, error) {
