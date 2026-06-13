@@ -10,6 +10,8 @@ import (
 type Status string
 
 const (
+	StatusSubmitted Status = "submitted"
+	StatusAccepted  Status = "accepted"
 	StatusQueued    Status = "queued"
 	StatusRunning   Status = "running"
 	StatusComplete  Status = "complete"
@@ -39,6 +41,7 @@ type Run struct {
 type Store interface {
 	Migrate(ctx context.Context) error
 	Insert(ctx context.Context, r Run) error
+	MarkAccepted(ctx context.Context, runID string, acceptedAt time.Time) error
 	MarkDone(ctx context.Context, runID string, status Status, completedAt time.Time, prURL string, durationSecs int) error
 	RecordLogs(ctx context.Context, runID, logs string) error
 	GetLogs(ctx context.Context, runID string) (string, error)
@@ -121,11 +124,24 @@ func (s *SQLStore) Insert(ctx context.Context, r Run) error {
 	return nil
 }
 
+func (s *SQLStore) MarkAccepted(ctx context.Context, runID string, acceptedAt time.Time) error {
+	_, err := s.DB.ExecContext(ctx, `
+		UPDATE runs SET status = ?, started_at = ?
+		WHERE run_id = ? AND status IN (?, ?, ?)`,
+		string(StatusAccepted), acceptedAt.UnixMilli(), runID,
+		string(StatusSubmitted), string(StatusQueued), string(StatusRunning))
+	if err != nil {
+		return fmt.Errorf("runs.MarkAccepted: %w", err)
+	}
+	return nil
+}
+
 func (s *SQLStore) MarkDone(ctx context.Context, runID string, status Status, completedAt time.Time, prURL string, durationSecs int) error {
 	_, err := s.DB.ExecContext(ctx, `
 		UPDATE runs SET status = ?, completed_at = ?, pr_url = ?, duration_secs = ?
-		WHERE run_id = ? AND status = ?`,
-		string(status), completedAt.UnixMilli(), prURL, durationSecs, runID, string(StatusRunning))
+		WHERE run_id = ? AND status IN (?, ?, ?, ?)`,
+		string(status), completedAt.UnixMilli(), prURL, durationSecs, runID,
+		string(StatusSubmitted), string(StatusQueued), string(StatusRunning), string(StatusAccepted))
 	if err != nil {
 		return fmt.Errorf("runs.MarkDone: %w", err)
 	}
@@ -153,7 +169,8 @@ func (s *SQLStore) ListRunning(ctx context.Context) ([]Run, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT run_id, ticket, agent, thread, dispatch_msg_id, parent_run_id,
 		       command, repo, status, started_at, completed_at, pr_url, duration_secs
-		FROM runs WHERE status = ? ORDER BY started_at DESC`, string(StatusRunning))
+		FROM runs WHERE status IN (?, ?, ?, ?) ORDER BY started_at DESC`,
+		string(StatusSubmitted), string(StatusQueued), string(StatusRunning), string(StatusAccepted))
 	if err != nil {
 		return nil, fmt.Errorf("runs.ListRunning: %w", err)
 	}

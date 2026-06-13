@@ -47,6 +47,8 @@ func (r *spawnRecorder) RecordRunStart(_ context.Context, runID, ticket, agent, 
 	r.starts = append(r.starts, spawnStart{runID: runID, ticket: ticket, agent: agent, thread: thread, dispatchMsgID: dispatchMsgID})
 }
 
+func (r *spawnRecorder) RecordRunAccepted(context.Context, string, time.Time) {}
+
 func (r *spawnRecorder) RecordRunDone(_ context.Context, runID, status string, _ time.Time, _ string, _ int) {
 	r.done = append(r.done, recorderDoneCall{runID: runID, status: status})
 }

@@ -69,6 +69,7 @@ const (
 	KindDispatch       Kind = "dispatch"
 	KindDispatchResult Kind = "dispatch.result"
 	KindDispatchError  Kind = "dispatch.error"
+	KindDispatchStatus Kind = "dispatch.status"
 
 	// CWB data-plane relay (aspect REST/gRPC calls bridged WS<->HTTP by the broker).
 	KindCWBRequest  Kind = "cwb.request"
@@ -356,7 +357,7 @@ func IsKnown(k Kind) bool {
 	case KindRegister, KindRegisterAck, KindDeregister,
 		KindOutpostRegister, KindOutpostRegisterAck, KindOutpostDeregister,
 		KindTurn, KindTurnResult,
-		KindDispatch, KindDispatchResult, KindDispatchError,
+		KindDispatch, KindDispatchResult, KindDispatchError, KindDispatchStatus,
 		KindCWBRequest, KindCWBResponse,
 		KindChatSend, KindChatDeliver, KindChatReaction, KindChatRead,
 		KindChatReadResult, KindAnnounceFile, KindShareFile, KindFileResult,

@@ -741,6 +741,9 @@ func main() {
 		"system_prompt_bytes", len(systemPrompt),
 		"central_version", res.CentralVersion,
 		"personality_version", res.Personality.Version)
+	if *builderMode {
+		emitBuilderAccepted(ctx, wsClient, log, os.Getenv("CW_DISPATCH_RUN_ID"))
+	}
 
 	// JWT pre-expiry monitor — safety net only.
 	//
@@ -833,6 +836,18 @@ func readBriefFile(path string) (bridle.InboxItem, error) {
 		return bridle.InboxItem{}, fmt.Errorf("read brief file: %w", err)
 	}
 	return bridle.InboxItem{From: "dispatch", Content: string(b)}, nil
+}
+
+func emitBuilderAccepted(ctx context.Context, wsClient *wsasp.Client, log *slog.Logger, runID string) {
+	if runID == "" {
+		log.Warn("agentfunnel: builder accepted not emitted; CW_DISPATCH_RUN_ID missing")
+		return
+	}
+	if err := wsClient.SendDispatchStatus(ctx, runID, "accepted", "", time.Now().UTC()); err != nil {
+		log.Warn("agentfunnel: builder accepted status enqueue failed", "run_id", runID, "err", err)
+		return
+	}
+	log.Info("agentfunnel: builder accepted status queued", "run_id", runID)
 }
 
 // composeSystemPrompt layers the validation result into the four-

@@ -750,6 +750,23 @@ func (c *Client) SendBestEffort(ctx context.Context, env frames.Envelope) error 
 	return c.ws.Send(ctx, env)
 }
 
+// SendDispatchStatus emits a builder lifecycle status over the normal aspect
+// WebSocket. It uses the durable outbound queue so a status prepared before
+// the first register ack is flushed after the broker accepts the connection.
+func (c *Client) SendDispatchStatus(ctx context.Context, runID, status, reason string, at time.Time) error {
+	env, err := frames.New(frames.KindDispatchStatus, frames.DispatchStatusPayload{
+		RunID:  runID,
+		Status: status,
+		Reason: reason,
+		At:     at,
+	})
+	if err != nil {
+		return err
+	}
+	c.queueOrSend(ctx, env)
+	return nil
+}
+
 // CursorFileForAspect returns a default cursor-file path under the
 // aspect home directory (`<home>/cursor`). Convenience for callers
 // that don't want to hand-pick a path.

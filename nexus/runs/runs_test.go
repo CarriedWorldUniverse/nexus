@@ -57,6 +57,38 @@ func TestInsertThenMarkDone(t *testing.T) {
 	}
 }
 
+func TestSubmittedAcceptedDoneLifecycle(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.Insert(ctx, Run{
+		RunID: "run-life", Ticket: "NEX-653", Agent: "anvil", Thread: "NEX-653",
+		Status: StatusSubmitted, StartedAt: time.UnixMilli(1_000),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	accepted := time.UnixMilli(2_000)
+	if err := s.MarkAccepted(ctx, "run-life", accepted); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(ctx, "run-life")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusAccepted || got.StartedAt.UnixMilli() != accepted.UnixMilli() {
+		t.Fatalf("after accepted: %+v", got)
+	}
+
+	done := time.UnixMilli(5_000)
+	if err := s.MarkDone(ctx, "run-life", StatusComplete, done, "https://pr/653", 3); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.Get(ctx, "run-life")
+	if got.Status != StatusComplete || got.CompletedAt.UnixMilli() != done.UnixMilli() {
+		t.Fatalf("after done: %+v", got)
+	}
+}
+
 func TestRecordAndGetLogs(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

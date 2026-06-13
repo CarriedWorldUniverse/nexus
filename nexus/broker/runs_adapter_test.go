@@ -1,10 +1,14 @@
 package broker
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
@@ -26,10 +30,21 @@ func (m *memRuns) Insert(_ context.Context, r runs.Run) error {
 
 func (m *memRuns) MarkDone(_ context.Context, id string, st runs.Status, t time.Time, pr string, d int) error {
 	r := m.rows[id]
-	if r.Status != runs.StatusRunning {
+	if r.Status != runs.StatusAccepted && r.Status != runs.StatusSubmitted && r.Status != runs.StatusRunning && r.Status != runs.StatusQueued {
 		return nil
 	}
 	r.Status, r.CompletedAt, r.PRURL, r.DurationSecs = st, t, pr, d
+	m.rows[id] = r
+	return nil
+}
+
+func (m *memRuns) MarkAccepted(_ context.Context, id string, at time.Time) error {
+	r := m.rows[id]
+	if r.Status != runs.StatusSubmitted {
+		return nil
+	}
+	r.Status = runs.StatusAccepted
+	r.StartedAt = at
 	m.rows[id] = r
 	return nil
 }
@@ -62,10 +77,14 @@ func (m *memRuns) Get(_ context.Context, id string) (runs.Run, error) { return m
 
 func TestAdapterRecordsStartAndDone(t *testing.T) {
 	store := &memRuns{}
-	a := newRunsAdapter(store, func(runs.Run) {})
+	a := newRunsAdapter(store, func(runs.Run) {}, slog.Default())
 	a.RecordRunStart(context.Background(), "run-a", "NEX-1", "anvil", "NEX-1", "o/r", "cmd", "", 7)
-	if got := store.rows["run-a"]; got.Status != runs.StatusRunning || got.DispatchMsgID != 7 {
+	if got := store.rows["run-a"]; got.Status != runs.StatusSubmitted || got.DispatchMsgID != 7 {
 		t.Fatalf("start: %+v", got)
+	}
+	a.RecordRunAccepted(context.Background(), "run-a", time.UnixMilli(8000))
+	if got := store.rows["run-a"]; got.Status != runs.StatusAccepted || got.StartedAt.UnixMilli() != 8000 {
+		t.Fatalf("accepted: %+v", got)
 	}
 	a.RecordRunDone(context.Background(), "run-a", "complete", time.UnixMilli(9000), "pr", 4)
 	if got := store.rows["run-a"]; got.Status != runs.StatusComplete || got.DurationSecs != 4 {
@@ -74,6 +93,56 @@ func TestAdapterRecordsStartAndDone(t *testing.T) {
 	a.RecordRunLogs(context.Background(), "run-a", "builder output\n")
 	if got, _ := store.GetLogs(context.Background(), "run-a"); got != "builder output\n" {
 		t.Fatalf("logs = %q", got)
+	}
+}
+
+func TestDispatchStatusAcceptedFrameRecordsAccepted(t *testing.T) {
+	store := &memRuns{rows: map[string]runs.Run{
+		"run-a": {RunID: "run-a", Ticket: "NEX-653", Agent: "anvil", Status: runs.StatusSubmitted, StartedAt: time.UnixMilli(1)},
+	}}
+	b := New(Config{RunsStore: store}, roster.New())
+	c := &wsConn{broker: b, registeredAs: "anvil", log: slog.Default()}
+	env, err := frames.New(frames.KindDispatchStatus, frames.DispatchStatusPayload{
+		RunID:  "run-a",
+		Status: "accepted",
+		At:     time.UnixMilli(7000),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.handleDispatchStatusFrame(env)
+
+	if got := store.rows["run-a"]; got.Status != runs.StatusAccepted || got.StartedAt.UnixMilli() != 7000 {
+		t.Fatalf("run after accepted frame = %+v", got)
+	}
+}
+
+func TestDispatchStatusPreAcceptanceFailureRecordsFailedAndEscalates(t *testing.T) {
+	store := &memRuns{rows: map[string]runs.Run{
+		"run-f": {RunID: "run-f", Ticket: "NEX-653", Agent: "anvil", Status: runs.StatusSubmitted, StartedAt: time.UnixMilli(1)},
+	}}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	b := New(Config{RunsStore: store, Logger: logger}, roster.New())
+	c := &wsConn{broker: b, registeredAs: "anvil", log: logger}
+	env, err := frames.New(frames.KindDispatchStatus, frames.DispatchStatusPayload{
+		RunID:  "run-f",
+		Status: "failed",
+		Reason: "brief unreadable",
+		At:     time.UnixMilli(9000),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.handleDispatchStatusFrame(env)
+
+	if got := store.rows["run-f"]; got.Status != runs.StatusFailed || got.CompletedAt.UnixMilli() != 9000 {
+		t.Fatalf("run after failed frame = %+v", got)
+	}
+	if !strings.Contains(logs.String(), "dispatch: ESCALATION run failed pre-acceptance") {
+		t.Fatalf("escalation log missing, logs:\n%s", logs.String())
 	}
 }
 
