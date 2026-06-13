@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -14,6 +15,7 @@ type JobConfig struct {
 	NodeIP        string
 	BrokerHost    string
 	BriefTimeout  string
+	IdleTimeout   string
 	GitCredName   string
 	ActivityDir   string
 	LynxAIBaseURL string
@@ -66,7 +68,8 @@ func HandBrokerCAPath() string { return brokerCAMountDir + "/" + brokerCASecretK
 // delivered to hand Jobs.
 func HandBrokerCASecretName() string { return brokerCASecretName }
 
-func int32p(v int32) *int32 { return &v }
+func int32p(v int32) *int32   { return &v }
+func int64ptr(v int64) *int64 { return &v }
 
 const (
 	builderJobTTLSeconds = 5 * 60
@@ -84,6 +87,9 @@ const (
 func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.Job {
 	if cfg.BriefTimeout == "" {
 		cfg.BriefTimeout = "30m"
+	}
+	if cfg.IdleTimeout == "" {
+		cfg.IdleTimeout = "2m"
 	}
 	if provider == "" {
 		provider = "codex-cli"
@@ -122,6 +128,7 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		{Name: "GOCACHE", Value: "/cache/go"},
 		{Name: "CW_DISPATCH_RUN_ID", Value: b.RunID},
 		{Name: "CW_DISPATCH_PARENT_RUN_ID", Value: b.ParentRunID},
+		{Name: "CW_IDLE_TIMEOUT", Value: cfg.IdleTimeout},
 		{Name: "CW_AGENT_HOME_REPO", Value: homeRepoMountPath},
 		{Name: "CW_AGENT_HOME_WORKDIR", Value: homeWorkMountPath},
 		{Name: "CW_SHARED_REPOS_DIR", Value: sharedReposMountPath},
@@ -242,6 +249,7 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            int32p(0),
+			ActiveDeadlineSeconds:   int64ptr(activeDeadlineSeconds(cfg.BriefTimeout)),
 			TTLSecondsAfterFinished: int32p(builderJobTTLSeconds),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: annotations},
@@ -280,10 +288,19 @@ func builderArgs(b Brief, cfg JobConfig, spawn bool) []string {
 		"-brief-file", "/etc/dispatch/brief.md",
 		"-reply-topic", b.Thread,
 		"-builder-timeout", cfg.BriefTimeout,
+		"-builder-idle-timeout", cfg.IdleTimeout,
 		"-repo", b.Repo,
 		"-ticket", b.Ticket,
 		"-branch", b.Branch,
 	)
+}
+
+func activeDeadlineSeconds(timeout string) int64 {
+	d, err := time.ParseDuration(timeout)
+	if err != nil || d <= 0 {
+		d = 30 * time.Minute
+	}
+	return int64(d.Seconds())
 }
 
 func HomePVCName(agent string) string {

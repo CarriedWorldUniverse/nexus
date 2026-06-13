@@ -45,7 +45,7 @@ func TestInsertThenMarkDone(t *testing.T) {
 	}
 
 	done := time.UnixMilli(5_000)
-	if err := s.MarkDone(ctx, "run-abc", StatusComplete, done, "https://pr/1", 4); err != nil {
+	if err := s.MarkDone(ctx, "run-abc", StatusComplete, done, "https://pr/1", 4, ""); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = s.Get(ctx, "run-abc")
@@ -80,12 +80,15 @@ func TestSubmittedAcceptedDoneLifecycle(t *testing.T) {
 	}
 
 	done := time.UnixMilli(5_000)
-	if err := s.MarkDone(ctx, "run-life", StatusComplete, done, "https://pr/653", 3); err != nil {
+	if err := s.MarkDone(ctx, "run-life", StatusComplete, done, "https://pr/653", 3, "stalled"); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = s.Get(ctx, "run-life")
 	if got.Status != StatusComplete || got.CompletedAt.UnixMilli() != done.UnixMilli() {
 		t.Fatalf("after done: %+v", got)
+	}
+	if got.Reason != "stalled" {
+		t.Fatalf("reason = %q, want stalled", got.Reason)
 	}
 }
 
@@ -110,11 +113,11 @@ func TestMarkDoneDoesNotOverwriteTerminal(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	_ = s.Insert(ctx, Run{RunID: "run-c", Ticket: "NEX-1", Agent: "anvil", Status: StatusRunning, StartedAt: time.UnixMilli(1)})
-	if err := s.MarkDone(ctx, "run-c", StatusCancelled, time.UnixMilli(2), "", 0); err != nil {
+	if err := s.MarkDone(ctx, "run-c", StatusCancelled, time.UnixMilli(2), "", 0, "cancelled"); err != nil {
 		t.Fatal(err)
 	}
 	// a later failed-mark (from emitJobDeleted) must NOT overwrite cancelled
-	if err := s.MarkDone(ctx, "run-c", StatusFailed, time.UnixMilli(3), "", 0); err != nil {
+	if err := s.MarkDone(ctx, "run-c", StatusFailed, time.UnixMilli(3), "", 0, "failed"); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.Get(ctx, "run-c")
@@ -128,7 +131,7 @@ func TestListRunningReturnsOnlyRunning(t *testing.T) {
 	ctx := context.Background()
 	_ = s.Insert(ctx, Run{RunID: "run-old", Ticket: "NEX-1", Agent: "anvil", Status: StatusRunning, StartedAt: time.UnixMilli(1)})
 	_ = s.Insert(ctx, Run{RunID: "run-done", Ticket: "NEX-2", Agent: "plumb", Status: StatusRunning, StartedAt: time.UnixMilli(2)})
-	if err := s.MarkDone(ctx, "run-done", StatusComplete, time.UnixMilli(3), "", 0); err != nil {
+	if err := s.MarkDone(ctx, "run-done", StatusComplete, time.UnixMilli(3), "", 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	_ = s.Insert(ctx, Run{RunID: "run-new", Ticket: "NEX-3", Agent: "keel", Status: StatusRunning, StartedAt: time.UnixMilli(4)})

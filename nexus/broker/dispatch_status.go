@@ -61,11 +61,19 @@ func (c *wsConn) handleDispatchStatusFrame(env frames.Envelope) {
 		c.emitRunUpdate(ctx, p.RunID)
 	case "failed":
 		preAccepted := run.Status == runs.StatusSubmitted || run.Status == runs.StatusQueued || run.Status == runs.StatusRunning
-		if err := store.MarkDone(ctx, p.RunID, runs.StatusFailed, at, run.PRURL, run.DurationSecs); err != nil {
+		if err := store.MarkDone(ctx, p.RunID, runs.StatusFailed, at, run.PRURL, run.DurationSecs, p.Reason); err != nil {
 			c.log.Warn("dispatch.status failed record failed", "run_id", p.RunID, "err", err)
 			return
 		}
 		c.emitRunUpdate(ctx, p.RunID)
+		if p.Reason == "stalled" {
+			c.log.Error("dispatch: ESCALATION run stalled",
+				"run_id", p.RunID,
+				"ticket", run.Ticket,
+				"agent", run.Agent,
+				"reason", p.Reason)
+			return
+		}
 		if preAccepted {
 			c.log.Error("dispatch: ESCALATION run failed pre-acceptance",
 				"run_id", p.RunID,

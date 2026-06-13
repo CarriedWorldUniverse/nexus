@@ -28,12 +28,12 @@ func (m *memRuns) Insert(_ context.Context, r runs.Run) error {
 	return nil
 }
 
-func (m *memRuns) MarkDone(_ context.Context, id string, st runs.Status, t time.Time, pr string, d int) error {
+func (m *memRuns) MarkDone(_ context.Context, id string, st runs.Status, t time.Time, pr string, d int, reason string) error {
 	r := m.rows[id]
 	if r.Status != runs.StatusAccepted && r.Status != runs.StatusSubmitted && r.Status != runs.StatusRunning && r.Status != runs.StatusQueued {
 		return nil
 	}
-	r.Status, r.CompletedAt, r.PRURL, r.DurationSecs = st, t, pr, d
+	r.Status, r.CompletedAt, r.PRURL, r.DurationSecs, r.Reason = st, t, pr, d, reason
 	m.rows[id] = r
 	return nil
 }
@@ -143,6 +143,37 @@ func TestDispatchStatusPreAcceptanceFailureRecordsFailedAndEscalates(t *testing.
 	}
 	if !strings.Contains(logs.String(), "dispatch: ESCALATION run failed pre-acceptance") {
 		t.Fatalf("escalation log missing, logs:\n%s", logs.String())
+	}
+}
+
+func TestDispatchStatusStalledFailureRecordsFailedAndEscalatesDistinctly(t *testing.T) {
+	store := &memRuns{rows: map[string]runs.Run{
+		"run-stall": {RunID: "run-stall", Ticket: "NEX-654", Agent: "anvil", Status: runs.StatusAccepted, StartedAt: time.UnixMilli(1)},
+	}}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	b := New(Config{RunsStore: store, Logger: logger}, roster.New())
+	c := &wsConn{broker: b, registeredAs: "anvil", log: logger}
+	env, err := frames.New(frames.KindDispatchStatus, frames.DispatchStatusPayload{
+		RunID:  "run-stall",
+		Status: "failed",
+		Reason: "stalled",
+		At:     time.UnixMilli(9000),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.handleDispatchStatusFrame(env)
+
+	if got := store.rows["run-stall"]; got.Status != runs.StatusFailed || got.CompletedAt.UnixMilli() != 9000 || got.Reason != "stalled" {
+		t.Fatalf("run after stalled frame = %+v", got)
+	}
+	if !strings.Contains(logs.String(), "dispatch: ESCALATION run stalled") || !strings.Contains(logs.String(), "reason=stalled") {
+		t.Fatalf("stalled escalation log missing, logs:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "pre-acceptance") {
+		t.Fatalf("stalled accepted run should use the distinct marker, logs:\n%s", logs.String())
 	}
 }
 

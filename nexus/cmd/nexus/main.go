@@ -411,6 +411,7 @@ func main() {
 		NodeIP:        os.Getenv("CW_NODE_IP"),
 		BrokerHost:    os.Getenv("CW_BROKER_HOST"),
 		BriefTimeout:  envOrDefault("CW_BRIEF_TIMEOUT", "30m"),
+		IdleTimeout:   envOrDefault("CW_IDLE_TIMEOUT", "2m"),
 		GitCredName:   os.Getenv("CW_GIT_CRED_NAME"),
 		ActivityDir:   filepath.Join(*dataDir, "activity"),
 		LynxAIBaseURL: os.Getenv("LYNXAI_BASE_URL"),
