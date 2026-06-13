@@ -61,6 +61,8 @@ func (r *testRecorder) RecordRunDone(_ context.Context, runID, status string, _ 
 	r.done = append(r.done, recorderDoneCall{runID: runID, status: status})
 }
 
+func (r *testRecorder) RecordRunLogs(context.Context, string, string) {}
+
 func (f *fakeK8s) EnsureKeyfileSecret(_ context.Context, aspect string) error {
 	if f.ensureKeyfileErr != nil {
 		return f.ensureKeyfileErr
@@ -115,6 +117,10 @@ func (f *fakeK8s) ListActiveJobs(_ context.Context) (map[string]dispatch.ActiveJ
 
 func (f *fakeK8s) WatchJobs(_ context.Context, _ func(dispatch.JobDone)) error {
 	return nil
+}
+
+func (f *fakeK8s) GetPodLogs(context.Context, string) (string, error) {
+	return "", nil
 }
 
 func newRunner(fk *fakeK8s) *dispatch.Runner {

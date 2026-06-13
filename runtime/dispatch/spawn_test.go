@@ -51,6 +51,8 @@ func (r *spawnRecorder) RecordRunDone(_ context.Context, runID, status string, _
 	r.done = append(r.done, recorderDoneCall{runID: runID, status: status})
 }
 
+func (r *spawnRecorder) RecordRunLogs(context.Context, string, string) {}
+
 func newSpawnFixture(fk *fakeK8s) (*dispatch.Runner, *recordingPoster, *fakeAudit, *spawnRecorder) {
 	r := newRunner(fk)
 	p := &recordingPoster{}

@@ -34,6 +34,18 @@ func (m *memRuns) MarkDone(_ context.Context, id string, st runs.Status, t time.
 	return nil
 }
 
+func (m *memRuns) RecordLogs(_ context.Context, id, logs string) error {
+	r := m.rows[id]
+	r.RunID = id
+	r.Logs = logs
+	m.rows[id] = r
+	return nil
+}
+
+func (m *memRuns) GetLogs(_ context.Context, id string) (string, error) {
+	return m.rows[id].Logs, nil
+}
+
 func (m *memRuns) List(context.Context, int) ([]runs.Run, error) { return nil, nil }
 
 func (m *memRuns) ListRunning(context.Context) ([]runs.Run, error) {
@@ -58,6 +70,10 @@ func TestAdapterRecordsStartAndDone(t *testing.T) {
 	a.RecordRunDone(context.Background(), "run-a", "complete", time.UnixMilli(9000), "pr", 4)
 	if got := store.rows["run-a"]; got.Status != runs.StatusComplete || got.DurationSecs != 4 {
 		t.Fatalf("done: %+v", got)
+	}
+	a.RecordRunLogs(context.Background(), "run-a", "builder output\n")
+	if got, _ := store.GetLogs(context.Background(), "run-a"); got != "builder output\n" {
+		t.Fatalf("logs = %q", got)
 	}
 }
 

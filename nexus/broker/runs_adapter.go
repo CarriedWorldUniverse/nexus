@@ -47,6 +47,10 @@ func (a *runsAdapter) RecordRunDone(ctx context.Context, runID, status string, c
 	}
 }
 
+func (a *runsAdapter) RecordRunLogs(ctx context.Context, runID, logs string) {
+	_ = a.store.RecordLogs(ctx, runID, logs)
+}
+
 func (b *Broker) sweepOrphanedRunningRuns(ctx context.Context) {
 	if b.cfg.RunsStore == nil || b.dispatchK8s == nil {
 		return
