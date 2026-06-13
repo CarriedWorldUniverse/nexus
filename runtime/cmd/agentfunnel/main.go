@@ -269,7 +269,8 @@ func main() {
 		} else {
 			log.Info("agentfunnel: cw setup-git github ok — gh/git bridged for builder")
 		}
-		builderRepo, err = setupBuilderRepo(context.Background(), res.AspectName, os.Getenv("CW_DISPATCH_RUN_ID"), *repoFlag, builderBranch(*branchFlag, *ticketFlag))
+		dispatchRunID := os.Getenv("CW_DISPATCH_RUN_ID")
+		builderRepo, err = setupBuilderRepo(context.Background(), res.AspectName, dispatchRunID, *repoFlag, builderBranch(*branchFlag, *ticketFlag))
 		if err != nil {
 			fail(log, "setup builder repo", err)
 		}
@@ -774,6 +775,7 @@ func main() {
 	// the DoD instead of idling to the timeout when a turn lands goal_not_met.
 	// Builders seeded via the broker inbox (no captured DoD) and always-on
 	// aspects fall back to the plain cadence loop.
+	var builderOpenPR func() (string, bool)
 	if *builderMode && seedBrief.Content != "" {
 		goalCfg := funnel.GoalConfig{
 			TicketID:   *ticketFlag,
@@ -782,8 +784,8 @@ func main() {
 			ThreadRoot: seedBrief.ThreadRoot,
 		}
 		verifyPR := builderPRVerifier(log, res.AspectName, *repoFlag, *ticketFlag, *branchFlag)
-		openPR := builderPROpener(log, *repoFlag, *ticketFlag, *branchFlag)
-		go builderGoalLoop(ctx, f, log, goalCfg, verifyPR, openPR, stop)
+		builderOpenPR = builderPROpener(log, *repoFlag, *ticketFlag, *branchFlag, os.Getenv("CW_DISPATCH_RUN_ID"), seedBrief.Content)
+		go builderGoalLoop(ctx, f, log, goalCfg, verifyPR, builderOpenPR, stop)
 	} else {
 		var onComplete func() bool
 		if *builderMode {
@@ -797,6 +799,11 @@ func main() {
 			select {
 			case <-ctx.Done():
 			case <-time.After(*builderTimeout):
+				if builderOpenPR != nil {
+					if url, opened := builderOpenPR(); opened {
+						log.Info("agentfunnel: builder PR opened by harness at timeout", "ticket", *ticketFlag, "pr", url)
+					}
+				}
 				log.Error("agentfunnel: builder timeout — forcing exit", "timeout", *builderTimeout)
 				stop()
 			}
@@ -945,53 +952,152 @@ var prExistsFn = func(repo, branch string) (bool, error) {
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
-// prCreateFn opens a PR for branch via gh, filling title/body from the branch's
-// commits (--fill). Swappable in tests. Returns the printed PR URL.
-var prCreateFn = func(repo, branch string) (string, error) {
-	out, err := exec.Command("gh", "pr", "create", "--repo", repo, "--head", branch, "--base", "main", "--fill").CombinedOutput()
+// prCreateFn opens a PR for branch via gh, filling title from the branch's
+// commits and using the run DoD as the body. Swappable in tests. Returns the
+// printed PR URL.
+var prCreateFn = func(repo, branch, body string) (string, error) {
+	args := []string{"pr", "create", "--repo", repo, "--head", branch, "--base", "main", "--fill"}
+	if strings.TrimSpace(body) != "" {
+		args = append(args, "--body", body)
+	}
+	out, err := exec.Command("gh", args...).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("gh pr create: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
-// branchPushedFn reports whether branch exists on origin (i.e. the agent
-// committed + pushed its work). Swappable in tests.
-var branchPushedFn = func(branch string) (bool, error) {
-	out, err := exec.Command("git", "ls-remote", "--heads", "origin", branch).CombinedOutput()
+// pushedBranchesFn returns pushed origin branch names. Swappable in tests.
+var pushedBranchesFn = func() ([]string, error) {
+	out, err := exec.Command("git", "ls-remote", "--heads", "origin").CombinedOutput()
 	if err != nil {
-		return false, fmt.Errorf("git ls-remote: %w: %s", err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("git ls-remote: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return strings.TrimSpace(string(out)) != "", nil
+	var branches []string
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		if branch, ok := strings.CutPrefix(fields[1], "refs/heads/"); ok {
+			branches = append(branches, branch)
+		}
+	}
+	return branches, nil
 }
 
 // harnessOpenPR opens the PR for a pushed builder branch when the agent
-// committed + pushed but never ran `gh pr create` itself (NEX-528: codex
-// reliably commits + pushes but is flaky at the final PR-open, looping the
-// goal-loop to its timeout). Returns the PR URL and true on success; false when
-// nothing is pushed yet (the agent still has work to do — re-prompt) or on error.
-func harnessOpenPR(log *slog.Logger, repo, head string) (string, bool) {
-	pushed, err := branchPushedFn(head)
+// committed + pushed but never ran `gh pr create` itself (NEX-528/NEX-553).
+// Branch discovery matches the run id or ticket instead of only the default
+// builder/<ticket> convention, so a pushed fix/nex-... branch can still be
+// salvaged at completion or timeout. Returns the PR URL and true on success;
+// false when nothing is pushed yet, a PR already exists for every candidate, or
+// on error.
+func harnessOpenPR(log *slog.Logger, repo, ticket, runID, defaultHead, body string) (string, bool) {
+	heads, err := harnessPRCandidates(ticket, runID, defaultHead)
 	if err != nil {
-		log.Warn("agentfunnel: harness PR open — branch check failed", "branch", head, "err", err)
+		log.Warn("agentfunnel: harness PR open — branch discovery failed", "ticket", ticket, "run_id", runID, "err", err)
 		return "", false
 	}
-	if !pushed {
+	if len(heads) == 0 {
 		return "", false
 	}
-	url, err := prCreateFn(repo, head)
+	for _, head := range heads {
+		exists, err := prExists(repo, head)
+		if err != nil {
+			log.Warn("agentfunnel: harness PR open — PR check failed", "branch", head, "err", err)
+			return "", false
+		}
+		if exists {
+			log.Info("agentfunnel: harness PR open skipped existing PR", "branch", head)
+			continue
+		}
+		url, err := prCreateFn(repo, head, body)
+		if err != nil {
+			log.Warn("agentfunnel: harness PR open failed", "branch", head, "err", err)
+			return "", false
+		}
+		return url, true
+	}
+	return "", false
+}
+
+func harnessPRCandidates(ticket, runID, defaultHead string) ([]string, error) {
+	pushed, err := pushedBranchesFn()
 	if err != nil {
-		log.Warn("agentfunnel: harness PR open failed", "branch", head, "err", err)
-		return "", false
+		return nil, err
 	}
-	return url, true
+	ticket = strings.ToLower(strings.TrimSpace(ticket))
+	runID = strings.ToLower(strings.TrimSpace(runID))
+	defaultHead = strings.TrimSpace(defaultHead)
+	seen := make(map[string]bool)
+	var candidates []string
+	add := func(branch string) {
+		if branch == "" || seen[branch] {
+			return
+		}
+		seen[branch] = true
+		candidates = append(candidates, branch)
+	}
+	for _, branch := range pushed {
+		if branch == defaultHead {
+			add(branch)
+			break
+		}
+	}
+	for _, branch := range pushed {
+		lower := strings.ToLower(branch)
+		if branch == defaultHead {
+			add(branch)
+			continue
+		}
+		if runID != "" && branchContainsToken(lower, runID) {
+			add(branch)
+		}
+	}
+	for _, branch := range pushed {
+		lower := strings.ToLower(branch)
+		switch {
+		case branch == defaultHead:
+			add(branch)
+		case runID != "" && branchContainsToken(lower, runID):
+			add(branch)
+		case ticket != "" && branchContainsToken(lower, ticket):
+			add(branch)
+		}
+	}
+	return candidates, nil
+}
+
+func branchContainsToken(branch, token string) bool {
+	if token == "" {
+		return false
+	}
+	for start := 0; ; {
+		idx := strings.Index(branch[start:], token)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		beforeOK := idx == 0 || !isBranchTokenChar(branch[idx-1])
+		after := idx + len(token)
+		afterOK := after == len(branch) || !isBranchTokenChar(branch[after])
+		if beforeOK && afterOK {
+			return true
+		}
+		start = idx + 1
+	}
+}
+
+func isBranchTokenChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
 
 // builderPROpener returns a closure that opens the builder's PR from its pushed
 // branch (NEX-528), passed to builderGoalLoop alongside verifyPR.
-func builderPROpener(log *slog.Logger, repo, ticket, branch string) func() (string, bool) {
+func builderPROpener(log *slog.Logger, repo, ticket, branch, runID, body string) func() (string, bool) {
 	head := builderBranch(branch, ticket)
-	return func() (string, bool) { return harnessOpenPR(log, repo, head) }
+	return func() (string, bool) { return harnessOpenPR(log, repo, ticket, runID, head, body) }
 }
 
 // prExists reports whether a PR exists for branch in repo. Missing repo/branch
