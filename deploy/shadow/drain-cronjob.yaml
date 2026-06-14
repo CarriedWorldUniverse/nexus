@@ -1,0 +1,64 @@
+# shadow-drain — the heartbeat trigger for shadow's autonomous orchestrate loop.
+#
+# A CronJob (every 30 min) is the heartbeat; each fire runs ONE gated drain and
+# exits. It reuses the shadow image (agentfunnel + claude + cw) and shadow's
+# identity (aspect-keyfile-shadow) + claude OAuth (shadow-claude-auth), but runs
+# `agentfunnel ... -drain` instead of the interactive aspect:
+#   1. cost gate — agentfunnel -drain probes shadow's Jira queue (the
+#      shadow-queue label, CW_DRAIN_JIRA_* creds); if idle it exits before any
+#      Opus spend (fails OPEN if the gate creds are absent).
+#   2. drain — materialises shadow's MCP profile, bridges gh, runs one
+#      `claude -p` orchestrate drain over the queue, exits.
+#
+# No claude-state PVC: the drain is stateless (all state in Jira + git) and the
+# RWO PVC is held by the always-on shadow-aspect; claude auths via the OAuth
+# token env, not the PVC. concurrencyPolicy=Forbid so drains never overlap.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: shadow-drain
+  namespace: nexus
+  labels: {app: shadow-drain}
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 2400 # 40m hard ceiling (drain timeout is 30m)
+      backoffLimit: 0
+      template:
+        metadata:
+          labels: {app: shadow-drain}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: shadow-aspect # same cluster authority as the aspect
+          containers:
+            - name: shadow-drain
+              image: localhost/nexus-shadow:dev
+              imagePullPolicy: Never
+              args: ["-k", "/etc/nexus/keyfile.json", "-context-mode", "global", "-drain"]
+              env:
+                - {name: CW_SEAM_URL, value: "https://nexus.tail41686e.ts.net:7888"}
+                - name: CLAUDE_CODE_OAUTH_TOKEN
+                  valueFrom: {secretKeyRef: {name: shadow-claude-auth, key: token}}
+                - {name: IS_SANDBOX, value: "1"} # enables --dangerously-skip-permissions as root
+                # Cost gate: shadow's actionable Jira queue. Secret optional —
+                # absent → gate fails open (drains unconditionally, logged).
+                - {name: CW_DRAIN_QUEUE_PROJECT, value: "NEX"}
+                - {name: CW_DRAIN_QUEUE_LABEL, value: "shadow-queue"}
+                - name: CW_DRAIN_JIRA_SUBDOMAIN
+                  valueFrom: {secretKeyRef: {name: shadow-jira-gate, key: subdomain, optional: true}}
+                - name: CW_DRAIN_JIRA_EMAIL
+                  valueFrom: {secretKeyRef: {name: shadow-jira-gate, key: email, optional: true}}
+                - name: CW_DRAIN_JIRA_TOKEN
+                  valueFrom: {secretKeyRef: {name: shadow-jira-gate, key: token, optional: true}}
+              volumeMounts:
+                - {name: keyfile, mountPath: /etc/nexus}
+          volumes:
+            - name: keyfile
+              secret:
+                secretName: aspect-keyfile-shadow
+                items: [{key: keyfile.json, path: keyfile.json}]
