@@ -8,8 +8,47 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch/shadowrunner"
 	"github.com/CarriedWorldUniverse/nexus/runtime/keyfile"
 )
+
+func drainEnvOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// drainGateOpen is the cost gate: when Jira creds are present, only proceed if
+// shadow's queue has actionable work — so the 30-min heartbeat does not spin an
+// (Opus) drain over an empty queue. Fails OPEN (drain anyway, loudly logged) on a
+// gate error or missing creds: a misconfigured gate must not silently stall the
+// pipeline.
+func drainGateOpen(log *slog.Logger) bool {
+	sub := os.Getenv("CW_DRAIN_JIRA_SUBDOMAIN")
+	email := os.Getenv("CW_DRAIN_JIRA_EMAIL")
+	tok := os.Getenv("CW_DRAIN_JIRA_TOKEN")
+	if sub == "" || email == "" || tok == "" {
+		log.Warn("drain: no Jira gate creds (CW_DRAIN_JIRA_SUBDOMAIN/EMAIL/TOKEN) — skipping cost gate, draining unconditionally")
+		return true
+	}
+	project := drainEnvOr("CW_DRAIN_QUEUE_PROJECT", "NEX")
+	label := drainEnvOr("CW_DRAIN_QUEUE_LABEL", "shadow-queue")
+	gate := shadowrunner.NewJiraGate(sub, email, tok, shadowrunner.DefaultQueueJQL(project, label))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	has, err := gate.HasWork(ctx)
+	if err != nil {
+		log.Warn("drain: cost gate check failed — proceeding (fail-open)", "err", err)
+		return true
+	}
+	if !has {
+		log.Info("drain: cost gate closed — no actionable work in queue, skipping drain", "project", project, "label", label)
+		return false
+	}
+	log.Info("drain: cost gate open — work present", "project", project, "label", label)
+	return true
+}
 
 // runDrain performs ONE one-shot autonomous orchestrate drain, then exits. By
 // the time it runs, agentfunnel has validated the keyfile, materialised
@@ -21,6 +60,10 @@ import (
 // It never returns — it os.Exits with the drain's status so the pod terminates
 // per fire.
 func runDrain(log *slog.Logger, res *keyfile.ValidationResult, claudePath, prompt string) {
+	// Cost gate first — cheap Jira probe; exit before any Opus spend if idle.
+	if !drainGateOpen(log) {
+		os.Exit(0)
+	}
 	// Export the session JWT so cw (the git credential helper) + the comms /
 	// dispatch seam authenticate during the drain — same as builder mode.
 	if res.SessionJWT != "" {
