@@ -353,10 +353,20 @@ func main() {
 	// escalator-equipped harness right after the client is constructed,
 	// before funnel.New consumes it.
 	var escalator *funnel.Escalator
+	// CW_PROMPT_MODE=replace makes agentfunnel pass the composed system
+	// prompt to claude-code via --system-prompt (replacing the CLI's base
+	// prompt) instead of --append-system-prompt. Used by the local lane,
+	// whose model has no use for claude-code's Anthropic base framing.
+	// Any other value (incl. unset) = append (the unchanged default).
+	promptMode := bridle.SystemPromptAppend
+	if os.Getenv("CW_PROMPT_MODE") == "replace" {
+		promptMode = bridle.SystemPromptReplace
+	}
 	bindingCache := &atomic.Pointer[funnel.Binding]{}
 	bindingCache.Store(&funnel.Binding{
-		Provider: bridle.ProviderID(res.Provider),
-		Model:    res.Model,
+		Provider:   bridle.ProviderID(res.Provider),
+		Model:      res.Model,
+		PromptMode: promptMode,
 		// Native-API providers get the P3b permission hook registered on
 		// the Harness; claude-code is skipped (self-supplies tools).
 		Harness: newBindingHarness(provider, res.Provider, escalator, policy),
@@ -450,9 +460,10 @@ func main() {
 					"err", perr, "provider", fresh.Provider)
 			} else {
 				bindingCache.Store(&funnel.Binding{
-					Provider: bridle.ProviderID(fresh.Provider),
-					Model:    fresh.Model,
-					Harness:  newBindingHarness(newProv, fresh.Provider, escalator, policy),
+					Provider:   bridle.ProviderID(fresh.Provider),
+					Model:      fresh.Model,
+					PromptMode: promptMode,
+					Harness:    newBindingHarness(newProv, fresh.Provider, escalator, policy),
 				})
 				log.Info("agentfunnel: binding refreshed via re-validate",
 					"provider", fresh.Provider, "model", fresh.Model)
@@ -499,9 +510,10 @@ func main() {
 	// skipped inside newBindingHarness (it self-supplies tools).
 	escalator = &funnel.Escalator{Requester: wsClient, AspectID: res.AspectName}
 	bindingCache.Store(&funnel.Binding{
-		Provider: bridle.ProviderID(res.Provider),
-		Model:    res.Model,
-		Harness:  newBindingHarness(provider, res.Provider, escalator, policy),
+		Provider:   bridle.ProviderID(res.Provider),
+		Model:      res.Model,
+		PromptMode: promptMode,
+		Harness:    newBindingHarness(provider, res.Provider, escalator, policy),
 	})
 
 	gateway := wsasp.NewGateway(wsClient)
