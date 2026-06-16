@@ -256,9 +256,10 @@ type MainTurnSampling struct {
 // the harness reflects the current credentials baked into the
 // provider's client.
 type Binding struct {
-	Provider bridle.ProviderID
-	Model    string
-	Harness  *bridle.Harness
+	Provider   bridle.ProviderID
+	Model      string
+	PromptMode bridle.SystemPromptMode // append (default) or replace; how SystemPrompt reaches claude-code
+	Harness    *bridle.Harness
 }
 
 type Config struct {
@@ -289,6 +290,12 @@ type Config struct {
 	// Provider selection
 	Provider bridle.ProviderID
 	Model    string
+
+	// PromptMode selects how SystemPrompt is applied to claude-code:
+	// append (default/zero value) extends the CLI's base prompt; replace
+	// swaps it entirely (the local lane owns the framing). Superseded by
+	// BindingFn().PromptMode when BindingFn is set.
+	PromptMode bridle.SystemPromptMode
 
 	// BindingFn, when non-nil, supersedes the static Harness/Provider/
 	// Model fields on every main + compact turn. Mirrors the
@@ -1395,6 +1402,7 @@ func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, user
 	return bridle.TurnRequest{
 		AspectID:           f.cfg.AspectID,
 		AppendSystemPrompt: systemPrompt,
+		SystemPromptMode:   binding.PromptMode,
 		Session:            st.session,
 		SessionTail:        st.tail,
 		UserMessage:        userMessage,
@@ -1922,9 +1930,10 @@ func (f *Funnel) resolveBinding() Binding {
 		return f.cfg.BindingFn()
 	}
 	return Binding{
-		Provider: f.cfg.Provider,
-		Model:    f.cfg.Model,
-		Harness:  f.cfg.Harness,
+		Provider:   f.cfg.Provider,
+		Model:      f.cfg.Model,
+		PromptMode: f.cfg.PromptMode,
+		Harness:    f.cfg.Harness,
 	}
 }
 
