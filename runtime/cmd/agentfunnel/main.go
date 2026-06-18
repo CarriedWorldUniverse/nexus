@@ -74,6 +74,23 @@ import (
 	"github.com/google/uuid"
 )
 
+// defaultDrainPrompt is the self-contained orchestrate-drain instruction handed
+// to `claude -p` in -drain mode. It is deliberately standalone (does not rely on
+// claude-side skill discovery in the pod): if the `orchestrate` skill is present
+// claude follows it, otherwise this prompt carries the procedure. Mirrors
+// .agents/skills/orchestrate/SKILL.md — keep them in step.
+const defaultDrainPrompt = `You are shadow, woken for ONE autonomous orchestrate drain of your NEX work queue, then exit. State lives in Jira + git; you hold no memory of prior drains — re-read truth, never assume. If the orchestrate skill is available, follow it. Otherwise follow this procedure:
+
+1. Snapshot: jira_list_ready for Ready/To-Do issues labelled "shadow-queue". Treat the snapshot as fixed for this drain; new/changed issues wait for the next wake.
+2. For each unit, one at a time:
+   - Epic/goal with no dispatchable leaf children yet -> DECOMPOSE into leaf Tasks via jira_create (parent=<epic>, labels include "shadow-queue", a clear definition-of-done, skills tags for routing); set the goal In Progress. Do NOT dispatch the children this drain.
+   - Ready leaf task -> DISPATCH to a builder ("!dispatch <builder>%<provider> repo=<r> ticket=<NEX-key>"), VERIFY acceptance in the broker log (builder job created + Submit err=nil + pod Running, NOT the send_chat ok), then IMMEDIATELY set the unit In Progress (the double-dispatch guard). If acceptance fails -> escalate.
+3. Reconcile dispatched (In Progress) units: if their PR has landed, REVIEW it.
+4. Gates: AUTO-MERGE only when ALL hold — CI green, single-ticket scope, your review found no blocking issue, NOT cross-cutting (no deploy / proto / auth / multi-repo / scope change) — then squash-merge, delete branch, set Done. OTHERWISE ESCALATE+PARK: leave the PR open, set the unit Blocked, log a line "orchestrate: ESCALATION <key> <reason>", and ping the operator via comms. Deploys ALWAYS escalate. Builder failed/stalled -> redispatch-with-feedback ONCE, then escalate.
+5. Exit; report a one-line summary of what you did this drain.
+
+Hard rules: one ticket per builder; never bundle tickets in a dispatch; transition-on-dispatch is mandatory; when in doubt about a merge, ESCALATE; if it isn't in Jira/git/the run log, it didn't happen.`
+
 func main() {
 	keyfilePath := flag.String("k", "", "path to the aspect keyfile (required)")
 	cursorDir := flag.String("cursor-dir", "", "directory for the Lock 6 message-cursor file (defaults to <cwd>/cursor)")
@@ -92,6 +109,8 @@ func main() {
 	repoFlag := flag.String("repo", "", "builder mode: dispatched repo (owner/name) for PR-existence verification")
 	ticketFlag := flag.String("ticket", "", "builder mode: dispatched ticket, for the builder/<ticket> branch")
 	branchFlag := flag.String("branch", "", "builder mode: dispatched branch (defaults to builder/<ticket>)")
+	drainMode := flag.Bool("drain", false, "drain/one-shot mode: run ONE autonomous orchestrate drain over shadow's queue (claude -p with the materialised MCPs + gh bridged), then exit. No builder worktree/PR-verify coupling — used by the heartbeat CronJob.")
+	drainPrompt := flag.String("drain-prompt", defaultDrainPrompt, "drain mode: the orchestrate drain instruction handed to claude -p")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -305,6 +324,14 @@ func main() {
 		}
 		log.Info("agentfunnel: applied provider creds from broker store (keyless)",
 			"aspect", res.AspectName, "vars", applied)
+	}
+
+	// -drain: one-shot autonomous orchestrate drain. Everything claude needs is
+	// now in place (.mcp.json materialised in cwd, provider creds applied); run a
+	// single `claude -p` over shadow's queue and exit. No funnel serve-loop, no
+	// builder worktree/PR-verify. runDrain never returns (it os.Exits).
+	if *drainMode {
+		runDrain(log, res, *claudePath, *drainPrompt)
 	}
 
 	// 3. Build provider + initial binding cache.
