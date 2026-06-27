@@ -307,6 +307,14 @@ type Config struct {
 	// derivation is the documented successor.
 	CustodianOrg string
 
+	// ProviderBindingsFromAlmanac records that aspect provider-bindings are
+	// reconciled live from almanac (INC-4a). When true the admin
+	// PUT /api/admin/aspects/{name}/provider-binding is deprecated — the
+	// supported write path is `cw config set cwb/nexus/provider-bindings/<aspect>`
+	// (a direct PUT would be overwritten on the next reconcile pass anyway).
+	// GET stays available and reflects the effective (reconciled) binding.
+	ProviderBindingsFromAlmanac bool
+
 	// Observability is a pre-constructed Hub the broker should adopt
 	// instead of building its own. Nil leaves broker.New constructing
 	// its own Hub.

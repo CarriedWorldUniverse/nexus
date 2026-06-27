@@ -33,6 +33,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability/jsonlsink"
 	"github.com/CarriedWorldUniverse/nexus/nexus/operator"
+	"github.com/CarriedWorldUniverse/nexus/nexus/pbreconcile"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
@@ -224,6 +225,23 @@ func main() {
 	// default. Failure to dial is fatal only insofar as it leaves custodianGit
 	// nil (logged) — the broker still boots and serves git locally.
 	custodianGit, custodianOrg := buildCustodianGit(logger)
+
+	// INC-4a: reconcile aspect provider-bindings live from almanac (config
+	// truth) into the local aspects store (boots-standalone cache). Dark unless
+	// ALMANAC_GRPC_ADDR is set. almanac stays the one place you edit (cw config
+	// set cwb/nexus/provider-bindings/<aspect>); the change lands within one
+	// interval, no redeploy. Failure to dial degrades to nil (bindings stay local).
+	pbFromAlmanac := false
+	if almanacReader := buildAlmanacReader(logger); almanacReader != nil {
+		interval := 30 * time.Second
+		if v := os.Getenv("ALMANAC_POLL_INTERVAL"); v != "" {
+			if d, derr := time.ParseDuration(v); derr == nil && d > 0 {
+				interval = d
+			}
+		}
+		go pbreconcile.New(almanacReader, keyfileValidator.Store, logger).Run(ctx, interval)
+		pbFromAlmanac = true
+	}
 
 	r := roster.New()
 	proj := sessions.New(db)
@@ -579,6 +597,9 @@ func main() {
 		// (CUSTODIAN_GRPC_ADDR); nil = git stays local (no regression).
 		CustodianGit: custodianGit,
 		CustodianOrg: custodianOrg,
+		// INC-4a: when true, the admin PUT provider-binding is deprecated in
+		// favour of `cw config set cwb/nexus/provider-bindings/<aspect>`.
+		ProviderBindingsFromAlmanac: pbFromAlmanac,
 		// Operator login (dashboard-ws-port spec §2.2 / 5b1).
 		// Constructed only when the Nexus has identity (signing
 		// secret available) AND the operator endpoints are wanted.
