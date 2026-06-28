@@ -64,7 +64,7 @@ type deploymentScaler interface {
 // configured) no-ops on MaybeWake, so callers don't gate.
 type wakeController struct {
 	scaler      deploymentScaler
-	policies    map[string]string // aspect → wake policy; read-only after New
+	policies    map[string]string // aspect → wake policy; guarded by mu (SetPolicy live-reconciles it from almanac, INC-4b)
 	deployments map[string]string // aspect → Deployment name; absent = aspect name
 	log         *slog.Logger
 	now         func() time.Time // injectable clock for the debounce tests
@@ -113,6 +113,37 @@ func (w *wakeController) takePendingWake(aspect string) (int64, bool) {
 	return since, ok
 }
 
+// policyFor returns the aspect's current wake policy under the lock — policies
+// is live-reconciled by SetPolicy, so reads must be guarded.
+func (w *wakeController) policyFor(aspect string) string {
+	if w == nil {
+		return ""
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.policies[aspect]
+}
+
+// SetPolicy updates an aspect's wake policy in place and reports whether it
+// changed. The cfgreconcile wake-policy domain (INC-4b) calls this so a
+// `cw config set cwb/nexus/wake-policy/<aspect>` takes effect without a
+// redeploy. Nil-safe (wake not configured → no-op).
+func (w *wakeController) SetPolicy(aspect, policy string) (changed bool) {
+	if w == nil {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.policies == nil {
+		w.policies = make(map[string]string)
+	}
+	if w.policies[aspect] == policy {
+		return false
+	}
+	w.policies[aspect] = policy
+	return true
+}
+
 // MaybeWake scales the aspect's Deployment to 1 if its policy is
 // wake-on-mention and no wake is already in flight (debounced), and
 // records a pending-wake watermark so the triggering message msgID is
@@ -126,7 +157,7 @@ func (w *wakeController) MaybeWake(ctx context.Context, aspect string, msgID int
 	if w == nil {
 		return
 	}
-	if w.policies[aspect] != WakePolicyWakeOnMention {
+	if w.policyFor(aspect) != WakePolicyWakeOnMention {
 		return
 	}
 
@@ -180,4 +211,11 @@ func (w *wakeController) MaybeWake(ctx context.Context, aspect string, msgID int
 		}
 		w.log.Info("wake: scaled deployment for napping aspect", "aspect", aspect, "deployment", deployment)
 	}()
+}
+
+// SetWakePolicy updates an aspect's wake policy on the broker's wake controller
+// (INC-4b live reconcile from almanac). Nil-safe when wake isn't configured.
+// Reports whether the policy actually changed.
+func (b *Broker) SetWakePolicy(aspect, policy string) (changed bool) {
+	return b.wake.SetPolicy(aspect, policy)
 }

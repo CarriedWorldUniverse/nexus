@@ -315,6 +315,12 @@ type Config struct {
 	// GET stays available and reflects the effective (reconciled) binding.
 	ProviderBindingsFromAlmanac bool
 
+	// NetworkDefaultsFromAlmanac records that the network-wide judge/compact
+	// defaults are reconciled live from almanac (INC-4b). When true the admin
+	// PUT /api/admin/network-defaults is deprecated — set via
+	// `cw config set cwb/nexus/network-defaults`. GET stays available.
+	NetworkDefaultsFromAlmanac bool
+
 	// Observability is a pre-constructed Hub the broker should adopt
 	// instead of building its own. Nil leaves broker.New constructing
 	// its own Hub.
