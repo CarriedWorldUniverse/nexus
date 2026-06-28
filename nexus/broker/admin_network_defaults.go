@@ -81,6 +81,13 @@ func (b *Broker) handleAdminNetworkDefaultsSet(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusServiceUnavailable, "credentials store not configured")
 		return
 	}
+	// INC-4b: when network-defaults are reconciled from almanac, almanac wins on
+	// the next pass, so a direct PUT would silently revert. Point at the one path.
+	if b.cfg.NetworkDefaultsFromAlmanac {
+		writeError(w, http.StatusConflict,
+			"network-defaults are managed by almanac — set via: cw config set cwb/nexus/network-defaults '{\"judge_provider\":\"...\",\"judge_model\":\"...\"}'")
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
 	var req adminNetworkDefaultsReq
 	dec := json.NewDecoder(r.Body)
