@@ -43,6 +43,9 @@ RUN KUBECTL_VERSION=v1.35.5 \
  && curl -fsSL https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl -o /usr/local/bin/kubectl \
  && chmod +x /usr/local/bin/kubectl && kubectl version --client
 
+# nano - lightweight editor for hand-editing config inside the pod (e.g. croft).
+RUN apt-get update && apt-get install -y --no-install-recommends nano && rm -rf /var/lib/apt/lists/*
+
 # Prebuilt nexus binaries + cw (built on the host by build.sh, copied into
 # the context). agentfunnel runs the builder; the nexus-*-mcp servers + cw
 # are the aspect's tool surface.
