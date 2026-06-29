@@ -9,11 +9,13 @@ import (
 	"strings"
 
 	cwbv1 "github.com/CarriedWorldUniverse/cwb-proto/gen/go/cwb/v1"
-	"github.com/CarriedWorldUniverse/nexus/nexus/pbreconcile"
+	"github.com/CarriedWorldUniverse/nexus/nexus/cfgreconcile"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // buildAlmanacReader constructs the broker's READ-ONLY almanac client used to
@@ -32,14 +34,14 @@ import (
 //	ALMANAC_TLS_KEY       broker client key (PEM)
 //	ALMANAC_TLS_CA        cwb CA (PEM) to verify almanac's server cert
 //	ALMANAC_DEV_INSECURE=1  dial without mTLS (local dev only)
-func buildAlmanacReader(logger *slog.Logger) pbreconcile.Reader {
+func buildAlmanacReader(logger *slog.Logger) cfgreconcile.Reader {
 	addr := os.Getenv("ALMANAC_GRPC_ADDR")
 	if addr == "" {
 		return nil
 	}
 	org := os.Getenv("ALMANAC_GRPC_ORG")
 	if org == "" {
-		logger.Warn("ALMANAC_GRPC_ADDR set but ALMANAC_GRPC_ORG empty — live provider-binding reconcile DISABLED (bindings stay local)")
+		logger.Warn("ALMANAC_GRPC_ADDR set but ALMANAC_GRPC_ORG empty — live config reconcile DISABLED (local config stays)")
 		return nil
 	}
 	sub := os.Getenv("ALMANAC_GRPC_SUBJECT")
@@ -56,14 +58,14 @@ func buildAlmanacReader(logger *slog.Logger) pbreconcile.Reader {
 		logger.Warn("provider-binding reconcile DISABLED — dial failed (bindings stay local)", "addr", addr, "err", err)
 		return nil
 	}
-	logger.Info("provider-binding reconcile ENABLED", "addr", addr, "org", org, "subject", sub, "prefix", pbreconcile.Prefix)
+	logger.Info("live config reconcile ENABLED", "addr", addr, "org", org, "subject", sub)
 	return &almanacReader{client: cwbv1.NewConfigServiceClient(conn), org: org, sub: sub}
 }
 
-// almanacReader implements pbreconcile.Reader against almanac's ConfigService,
-// mirroring mason's snapshot semantics: list the binding prefix, fall back to
-// GetConfig for any item whose List value is empty, and abort the WHOLE
-// snapshot on any error so a partial view never zeroes a binding.
+// almanacReader implements cfgreconcile.Reader against almanac's ConfigService,
+// mirroring mason's snapshot semantics: list a prefix, fall back to GetConfig
+// for any item whose List value is empty, and abort the WHOLE snapshot on any
+// error so a partial view never zeroes local config.
 type almanacReader struct {
 	client cwbv1.ConfigServiceClient
 	org    string
@@ -75,16 +77,16 @@ func (a *almanacReader) ctx(ctx context.Context) context.Context {
 		"cwb-subject", a.sub, "cwb-org", a.org, "cwb-scopes", "config:read")
 }
 
-func (a *almanacReader) Snapshot(ctx context.Context) (map[string]string, error) {
-	resp, err := a.client.ListConfig(a.ctx(ctx), &cwbv1.ListConfigRequest{Prefix: pbreconcile.Prefix})
+func (a *almanacReader) Snapshot(ctx context.Context, prefix string) (map[string]string, error) {
+	resp, err := a.client.ListConfig(a.ctx(ctx), &cwbv1.ListConfigRequest{Prefix: prefix})
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]string, len(resp.GetItems()))
 	for _, it := range resp.GetItems() {
-		name := strings.TrimPrefix(it.GetPath(), pbreconcile.Prefix)
+		name := strings.TrimPrefix(it.GetPath(), prefix)
 		if name == "" || strings.Contains(name, "/") {
-			continue // only direct children of the prefix = aspect names
+			continue // only direct children of the prefix = leaf names
 		}
 		v := it.GetValue()
 		if v == "" {
@@ -97,6 +99,19 @@ func (a *almanacReader) Snapshot(ctx context.Context) (map[string]string, error)
 		out[name] = v
 	}
 	return out, nil
+}
+
+// Value fetches a single config key. ok=false (no error) when the key is
+// absent, so a reconciler treats "almanac doesn't manage it" as a clean no-op.
+func (a *almanacReader) Value(ctx context.Context, path string) (string, bool, error) {
+	g, err := a.client.GetConfig(a.ctx(ctx), &cwbv1.GetConfigRequest{Path: path})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return g.GetItem().GetValue(), true, nil
 }
 
 // almanacDialCreds builds gRPC transport credentials for the almanac dial: mTLS
