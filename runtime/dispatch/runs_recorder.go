@@ -9,7 +9,9 @@ import (
 // store-package import. The broker adapts nexus/runs.Store to this.
 type RunsRecorder interface {
 	RecordRunStart(ctx context.Context, runID, ticket, agent, thread, repo, command, parentRunID string, dispatchMsgID int64)
+	RecordRunAccepted(ctx context.Context, runID string, acceptedAt time.Time)
 	RecordRunDone(ctx context.Context, runID, status string, completedAt time.Time, prURL string, durationSecs int)
+	RecordRunLogs(ctx context.Context, runID, logs string)
 }
 
 func statusFor(ok bool) string {

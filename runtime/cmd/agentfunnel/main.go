@@ -62,6 +62,7 @@ import (
 	ollamaprovider "github.com/CarriedWorldUniverse/bridle/provider/ollama"
 	openaiprovider "github.com/CarriedWorldUniverse/bridle/provider/openai"
 	toolrunner "github.com/CarriedWorldUniverse/bridle/toolrunner"
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/judge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/rewriter"
@@ -83,7 +84,8 @@ func main() {
 	autoRecallTopK := flag.Int("auto-recall-topk", 0, "auto-recall: max strongest matches to inject (0 = funnel default)")
 	autoRecallMaxRank := flag.Float64("auto-recall-max-rank", 0, "auto-recall: BM25 relevance gate; only hits with score < this inject (ranks are negative, lower = stronger; 0 = no gate)")
 	builderMode := flag.Bool("builder", false, "builder/one-shot mode: drain the dispatched brief, run to the task_done signal, then exit")
-	builderTimeout := flag.Duration("builder-timeout", 30*time.Minute, "max wall-clock for a builder run before forced exit")
+	builderTimeout := flag.Duration("builder-timeout", 30*time.Minute, "builder hard ceiling value supplied by the dispatch Job; Kubernetes activeDeadlineSeconds enforces it")
+	builderIdleTimeout := flag.Duration("builder-idle-timeout", builderIdleTimeoutDefaultFromEnv(os.Getenv), "builder mode: max time without progress before stalled failure (env CW_IDLE_TIMEOUT, default 2m)")
 	builderMaxTurns := flag.Int("builder-max-turns", 20, "builder mode: max goal-pursuit turns before the ralph-loop gives up (NEX-477); -builder-timeout is the outer wall-clock backstop")
 	briefFile := flag.String("brief-file", "", "builder mode: read the seed brief from this file instead of the broker inbox")
 	replyTopic := flag.String("reply-topic", "", "builder mode: attach this topic to natural reply posts")
@@ -351,10 +353,20 @@ func main() {
 	// escalator-equipped harness right after the client is constructed,
 	// before funnel.New consumes it.
 	var escalator *funnel.Escalator
+	// CW_PROMPT_MODE=replace makes agentfunnel pass the composed system
+	// prompt to claude-code via --system-prompt (replacing the CLI's base
+	// prompt) instead of --append-system-prompt. Used by the local lane,
+	// whose model has no use for claude-code's Anthropic base framing.
+	// Any other value (incl. unset) = append (the unchanged default).
+	promptMode := bridle.SystemPromptAppend
+	if os.Getenv("CW_PROMPT_MODE") == "replace" {
+		promptMode = bridle.SystemPromptReplace
+	}
 	bindingCache := &atomic.Pointer[funnel.Binding]{}
 	bindingCache.Store(&funnel.Binding{
-		Provider: bridle.ProviderID(res.Provider),
-		Model:    res.Model,
+		Provider:   bridle.ProviderID(res.Provider),
+		Model:      res.Model,
+		PromptMode: promptMode,
 		// Native-API providers get the P3b permission hook registered on
 		// the Harness; claude-code is skipped (self-supplies tools).
 		Harness: newBindingHarness(provider, res.Provider, escalator, policy),
@@ -388,6 +400,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	progressCh := make(chan string, 16)
+	recordBuilderProgress := newBuilderProgressReporter(progressCh)
 
 	// TokenProvider returns the cached JWT when it's still healthy.
 	// Falls back to a keyfile re-validate when sessionState is empty
@@ -446,9 +460,10 @@ func main() {
 					"err", perr, "provider", fresh.Provider)
 			} else {
 				bindingCache.Store(&funnel.Binding{
-					Provider: bridle.ProviderID(fresh.Provider),
-					Model:    fresh.Model,
-					Harness:  newBindingHarness(newProv, fresh.Provider, escalator, policy),
+					Provider:   bridle.ProviderID(fresh.Provider),
+					Model:      fresh.Model,
+					PromptMode: promptMode,
+					Harness:    newBindingHarness(newProv, fresh.Provider, escalator, policy),
 				})
 				log.Info("agentfunnel: binding refreshed via re-validate",
 					"provider", fresh.Provider, "model", fresh.Model)
@@ -495,12 +510,17 @@ func main() {
 	// skipped inside newBindingHarness (it self-supplies tools).
 	escalator = &funnel.Escalator{Requester: wsClient, AspectID: res.AspectName}
 	bindingCache.Store(&funnel.Binding{
-		Provider: bridle.ProviderID(res.Provider),
-		Model:    res.Model,
-		Harness:  newBindingHarness(provider, res.Provider, escalator, policy),
+		Provider:   bridle.ProviderID(res.Provider),
+		Model:      res.Model,
+		PromptMode: promptMode,
+		Harness:    newBindingHarness(provider, res.Provider, escalator, policy),
 	})
 
 	gateway := wsasp.NewGateway(wsClient)
+	chatGateway := funnel.ChatGateway(gateway)
+	if *builderMode {
+		chatGateway = progressChatGateway{ChatGateway: gateway, progress: recordBuilderProgress}
+	}
 	// NEX-knowledge-fix (operator 2026-05-27): wire knowledge gateway
 	// over WS so remote aspects (harrow, anvil, plumb) can use the
 	// search_knowledge / store_knowledge tools. Pre-fix the Knowledge
@@ -514,10 +534,18 @@ func main() {
 		doneSentinel = builderDoneSentinel
 	}
 	commsRunner := funnel.CommsRunner{
-		Gateway:    gateway,
+		Gateway:    chatGateway,
 		Knowledge:  knowledgeGateway,
 		AspectID:   res.AspectName,
 		OnTaskDone: onTaskDone,
+	}
+	// Spawn + convene_close (NEX-609 / roundtable P3): the native comms
+	// surface carries the parent-only tools for non-derived identities —
+	// a hand never gets a working Spawner (no sub-of-sub) nor a close
+	// seam (hands never facilitate; the broker enforces both).
+	if !aspects.IsDerivedName(res.AspectName) {
+		commsRunner.Spawner = gateway
+		commsRunner.ConveneCloser = gateway
 	}
 
 	// Phase E remote forwarding: agentfunnel's funnel runs in a
@@ -532,6 +560,10 @@ func main() {
 		res.AspectName,
 		log,
 	)
+	var funnelObsHook funnel.ObservabilityHook = obsHook
+	if *builderMode {
+		funnelObsHook = progressObservabilityHook{next: obsHook, progress: recordBuilderProgress}
+	}
 
 	// NEX-293: fetch the per-aspect admin model_config overrides
 	// before constructing the filter. agentfunnel runs out-of-process
@@ -624,6 +656,15 @@ func main() {
 	if mcpCfg == nil {
 		mcpCfg = &bridle.MCPClientConfig{}
 	}
+	// NEX-609: the comms MCP server must NOT reach the bridle tool loop.
+	// Non-claude-code providers already get the full native comms surface
+	// (CommsToolDefs + the spawn tool above), so loading nexus-comms-mcp
+	// as an MCP server duplicates send_chat/read_chat/… and bridle aborts
+	// every turn with ErrToolNameCollision. claude-code is unaffected —
+	// it ignores TurnRequest.MCP and discovers servers from the
+	// materialised .mcp.json, where the comms server is exactly how it
+	// gets comms + spawn.
+	mcpCfg = dropCommsMCPServers(mcpCfg, log)
 	cfg := funnel.Config{
 		AspectID: res.AspectName,
 		// Static binding fields kept populated for back-compat (some
@@ -663,7 +704,7 @@ func main() {
 		// Tools field is for direct-API providers; claude-code subprocess
 		// owns its own tool surface natively. Mirrors cmd/nexus/main.go's
 		// toolsForProvider — see #181 for the MCP fix.
-		Tools:  toolsForProviderAgent(bridle.ProviderID(res.Provider)),
+		Tools:  toolsForProviderAgent(bridle.ProviderID(res.Provider), res.AspectName),
 		Runner: toolRunner,
 		// AutoRecall (Commonplace): turn-time recall into the system prompt,
 		// gated by the -auto-recall flag (no aspect.json on the host). Uses
@@ -679,7 +720,7 @@ func main() {
 		// calls. Required for claude-code (subprocess mode): without it,
 		// model output evaporates because the CLI has no MCP-loaded tools
 		// to call. Mirrors cmd/nexus/main.go's Frame funnel wiring.
-		ChatGateway:      gateway,
+		ChatGateway:      chatGateway,
 		StreamTextToChat: true, // NEX-240: stream text blocks to chat as they arrive
 		ReplyTopic:       builderReplyTopic(*builderMode, *replyTopic),
 		AspectHome:       cwd, // NEX-241: stderr log + session isolation anchor
@@ -691,7 +732,7 @@ func main() {
 		MainTurnSampling:  mainTurnSampling,
 		Filter:            outputFilter,
 		PostTurn:          postTurn,
-		ObservabilityHook: obsHook,
+		ObservabilityHook: funnelObsHook,
 		// NEX-96: persist the seen-msg-id set alongside the wsasp cursor
 		// so the idempotency guard survives agentfunnel restart. Same
 		// dir resolution as the cursor file (--cursor-dir / cwd).
@@ -723,6 +764,22 @@ func main() {
 		"system_prompt_bytes", len(systemPrompt),
 		"central_version", res.CentralVersion,
 		"personality_version", res.Personality.Version)
+	if *builderMode {
+		log.Info("agentfunnel: builder liveness configured",
+			"idle_timeout", *builderIdleTimeout,
+			"job_hard_timeout", *builderTimeout)
+		emitBuilderAccepted(ctx, wsClient, log, os.Getenv("CW_DISPATCH_RUN_ID"))
+		go startBuilderIdleMonitor(ctx, *builderIdleTimeout, progressCh, func() {
+			runID := os.Getenv("CW_DISPATCH_RUN_ID")
+			if err := wsClient.SendDispatchStatus(context.Background(), runID, "failed", builderStalledReason, time.Now().UTC()); err != nil {
+				log.Warn("agentfunnel: builder stalled status enqueue failed", "run_id", runID, "err", err)
+			}
+			stop()
+		}, log)
+		if builderRepo != nil {
+			go watchBuilderGitProgress(ctx, builderRepo.worktree, gitProgressPollInterval, recordBuilderProgress, log)
+		}
+	}
 
 	// JWT pre-expiry monitor — safety net only.
 	//
@@ -771,17 +828,6 @@ func main() {
 		go deliberateLoop(ctx, f, log, onComplete)
 	}
 
-	if *builderMode {
-		go func() {
-			select {
-			case <-ctx.Done():
-			case <-time.After(*builderTimeout):
-				log.Error("agentfunnel: builder timeout — forcing exit", "timeout", *builderTimeout)
-				stop()
-			}
-		}()
-	}
-
 	if err := wsClient.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("agentfunnel: wsClient.Run", "err", err)
 		os.Exit(1)
@@ -815,6 +861,30 @@ func readBriefFile(path string) (bridle.InboxItem, error) {
 		return bridle.InboxItem{}, fmt.Errorf("read brief file: %w", err)
 	}
 	return bridle.InboxItem{From: "dispatch", Content: string(b)}, nil
+}
+
+func builderIdleTimeoutDefaultFromEnv(getenv func(string) string) time.Duration {
+	raw := strings.TrimSpace(getenv("CW_IDLE_TIMEOUT"))
+	if raw == "" {
+		return defaultBuilderIdleTimeout
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return defaultBuilderIdleTimeout
+	}
+	return d
+}
+
+func emitBuilderAccepted(ctx context.Context, wsClient *wsasp.Client, log *slog.Logger, runID string) {
+	if runID == "" {
+		log.Warn("agentfunnel: builder accepted not emitted; CW_DISPATCH_RUN_ID missing")
+		return
+	}
+	if err := wsClient.SendDispatchStatus(ctx, runID, "accepted", "", time.Now().UTC()); err != nil {
+		log.Warn("agentfunnel: builder accepted status enqueue failed", "run_id", runID, "err", err)
+		return
+	}
+	log.Info("agentfunnel: builder accepted status queued", "run_id", runID)
 }
 
 // composeSystemPrompt layers the validation result into the four-
@@ -1700,7 +1770,7 @@ func isClaudeCodeProvider(name string) bool {
 // promise of send_chat etc. but cannot call them, AND can talk itself
 // out of using legit native tools). Empty Tools for claude-code; full
 // CommsToolDefs for direct-API providers. MCP is the proper fix (#181).
-func toolsForProviderAgent(id bridle.ProviderID) []bridle.ToolDef {
+func toolsForProviderAgent(id bridle.ProviderID, aspectName string) []bridle.ToolDef {
 	switch id {
 	case "claude-code", "claudecode":
 		return nil
@@ -1709,7 +1779,39 @@ func toolsForProviderAgent(id bridle.ProviderID) []bridle.ToolDef {
 	// host comms (lane 2: send_chat etc.) + local coding tools (lane 1:
 	// bash/read/write/edit/glob/grep/web_fetch/web_extract). The two name
 	// sets are disjoint so ComposeRunner can route purely by tool name.
-	return append(funnel.CommsToolDefs(), toolrunner.Defs()...)
+	defs := append(funnel.CommsToolDefs(), toolrunner.Defs()...)
+	// Spawn + convene_close (NEX-609 / roundtable P3): parents only — a
+	// derived (hand) identity never sees them, mirroring nexus-comms-mcp's
+	// spawnToolAvailable gate.
+	if !aspects.IsDerivedName(aspectName) {
+		defs = append(defs, funnel.SpawnToolDef(), funnel.ConveneCloseToolDef())
+	}
+	return defs
+}
+
+// dropCommsMCPServers filters nexus-comms servers out of the funnel's
+// bridle MCP config (NEX-609). The native tool loop already carries
+// the full comms surface (send_chat, read_chat, spawn, …), so loading
+// the comms MCP server beside it makes bridle's merge fail with
+// ErrToolNameCollision and aborts the turn. Matches by the canonical
+// server names ("nexus-comms-mcp" / "nexus-comms"); other servers
+// (nexus-jira, …) pass through untouched.
+func dropCommsMCPServers(cfg *bridle.MCPClientConfig, log *slog.Logger) *bridle.MCPClientConfig {
+	if cfg == nil || len(cfg.Servers) == 0 {
+		return cfg
+	}
+	kept := cfg.Servers[:0]
+	for _, s := range cfg.Servers {
+		if s.Name == "nexus-comms-mcp" || s.Name == "nexus-comms" {
+			if log != nil {
+				log.Info("agentfunnel: comms MCP server excluded from native tool loop (comms are native; spawn rides CommsRunner)", "server", s.Name)
+			}
+			continue
+		}
+		kept = append(kept, s)
+	}
+	cfg.Servers = kept
+	return cfg
 }
 
 // runnerForProviderAgent builds the funnel's ToolRunner. claude-code owns

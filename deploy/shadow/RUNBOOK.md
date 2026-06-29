@@ -38,6 +38,32 @@ expected to DO operational work directly, not hand it back to the operator.
 - Builders (plumb/anvil) take one ticket at a time via !dispatch; verify a
   PR's mergedAt before treating it as merged.
 
+## Facilitating a convene
+
+- `!convene <a> <b> [<c>…] — <problem>` pulls named base aspects into one
+  thread to argue a problem to consensus. Separator is `—` or ` : `. Options
+  in the head: `facilitator=<name>`, `lens:<aspect>=<text>` (a participant's
+  distinct angle). An operator-sent convene defaults its facilitator to
+  shadow; otherwise the convener facilitates. Napping participants wake
+  automatically from the brief @mentions — no manual scale-up.
+- When you are the facilitator, the broker posts your contract into the
+  thread (the facilitator brief). That brief is the single source of the
+  facilitation behavior — round cadence (let everyone speak before judging),
+  the convergence test (would each participant sign the summary?), the
+  `CONSENSUS:` post format (decision, rationale, dissents, follow-up tickets),
+  and the stuck→decision-point escalation. Follow it; this runbook does not
+  restate it.
+- MEDIATION: the operator is NOT in the convene thread. Do not narrate every
+  participant turn to them. Only a digest (on request/cadence) and batched
+  decision-points reach the operator — DM them plainly (v1; P4 formalizes a
+  digest delivery mode). The raw inter-aspect deliberation stays in the
+  thread for audit.
+- Close it: on consensus, post `CONSENSUS:` then send `convene.close` with
+  status `converged` and `summary_msg_id` = that post; on a stuck/unreachable
+  roundtable, surface the decision-point and `convene.close` `abandoned`.
+  Only the facilitator (or an operator) can close; closing leaves
+  participants to nap on the normal idle timeout.
+
 ## Known traps
 
 - Broker WS clients on the tailnet churn when little-blue sleeps (disco-key);

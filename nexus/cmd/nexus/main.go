@@ -23,6 +23,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
 	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/convene"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/cwb/cwbproxy"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
@@ -32,6 +33,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability/jsonlsink"
 	"github.com/CarriedWorldUniverse/nexus/nexus/operator"
+	"github.com/CarriedWorldUniverse/nexus/nexus/cfgreconcile"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
@@ -216,6 +218,28 @@ func main() {
 	// emits an empty mcp_profile field (legacy shape).
 	keyfileValidator.Credentials = credentialStore
 
+	// custodian M1 git routing. When CUSTODIAN_GRPC_ADDR is set, kind="git"
+	// agent credential.fetch is served from the CWB custodian pillar instead
+	// of the local store; everything else stays local (no regression). When
+	// unset, custodianGit is nil and git stays local too — fully dark by
+	// default. Failure to dial is fatal only insofar as it leaves custodianGit
+	// nil (logged) — the broker still boots and serves git locally.
+	custodianGit, custodianOrg := buildCustodianGit(logger)
+
+	// INC-4a/4b: live config reconcile from almanac (the one place you edit;
+	// changes land within one interval, no redeploy). Dark unless
+	// ALMANAC_GRPC_ADDR is set. Build the reader NOW so the broker.Config flags
+	// below reflect whether it's active; the reconcilers START after broker.New
+	// (the wake-policy domain needs the broker). Degrades to nil on dial failure.
+	almanacReader := buildAlmanacReader(logger)
+	fromAlmanac := almanacReader != nil
+	almanacInterval := 30 * time.Second
+	if v := os.Getenv("ALMANAC_POLL_INTERVAL"); v != "" {
+		if d, derr := time.ParseDuration(v); derr == nil && d > 0 {
+			almanacInterval = d
+		}
+	}
+
 	r := roster.New()
 	proj := sessions.New(db)
 
@@ -237,6 +261,7 @@ func main() {
 	}
 	chatStore := chat.NewSQLStore(db)
 	runsStore := runs.NewSQLStore(db)
+	conveneStore := convene.NewSQLStore(db)
 	knowledgeStore := knowledge.New(db, logger)
 	obsHub := observability.NewHub(500, nil)
 
@@ -401,11 +426,19 @@ func main() {
 		NodeIP:        os.Getenv("CW_NODE_IP"),
 		BrokerHost:    os.Getenv("CW_BROKER_HOST"),
 		BriefTimeout:  envOrDefault("CW_BRIEF_TIMEOUT", "30m"),
+		IdleTimeout:   envOrDefault("CW_IDLE_TIMEOUT", "2m"),
 		GitCredName:   os.Getenv("CW_GIT_CRED_NAME"),
 		ActivityDir:   filepath.Join(*dataDir, "activity"),
 		LynxAIBaseURL: os.Getenv("LYNXAI_BASE_URL"),
 		LynxAIKey:     os.Getenv("LYNXAI_KEY"),
 		NexusID:       nexusIdentity.NexusID,
+		// Ollama provider endpoint for dispatched Jobs (NEX-610): hands
+		// of an ollama-provider parent (and ollama ticket dispatches)
+		// need the in-cluster server URL or they dial localhost:11434.
+		// CW_-prefixed overrides win; the broker's own OLLAMA_* env is
+		// the fallback so one deployment env serves both.
+		OllamaBaseURL:   envOrDefault("CW_OLLAMA_BASE_URL", os.Getenv("OLLAMA_BASE_URL")),
+		OllamaKeepAlive: envOrDefault("CW_OLLAMA_KEEP_ALIVE", os.Getenv("OLLAMA_KEEP_ALIVE")),
 	}
 	// Hand (spawn) Jobs carry no keyfile, so they can't pin the broker's
 	// self-signed / internal-CA cert the way ticket builders do (the cert is
@@ -477,8 +510,13 @@ func main() {
 	} else {
 		slog.Info("dispatch: not in-cluster (KUBERNETES_SERVICE_HOST unset) — Runner has no k8s client (no job spawn)")
 	}
-	if err := dispatchRunner.Init(ctx); err != nil {
-		slog.Error("dispatch runner init failed — dispatch disabled", "err", err)
+	// NEX-611: on a fresh pod the CNI can take a few seconds to become
+	// routable, so the first ListActiveJobs inside Init may fail with
+	// "no route to host". Retry bounded (5 attempts, ~58s of backoff)
+	// instead of one-shot-disabling dispatch — a nil Runner leaves
+	// wake+spawn silently dead for the broker's whole lifetime.
+	if err := dispatchRunner.InitWithRetry(ctx, 5, 4*time.Second, nil); err != nil {
+		slog.Error("dispatch runner init failed after retries — dispatch disabled", "err", err)
 		dispatchRunner = nil
 	} else {
 		runner = dispatchRunner
@@ -527,6 +565,7 @@ func main() {
 		Replayer:           replayer,
 		ChatStore:          chatStore,
 		RunsStore:          runsStore,
+		ConveneStore:       conveneStore,
 		SQLDB:              db,
 		ActivityLogDir:     activityLogDir,
 		K8sReader:          k8sReader,
@@ -551,6 +590,14 @@ func main() {
 		// Task #218: broker-mediated credentials. Nil-safe — admin
 		// routes register only when non-nil, otherwise return 503.
 		Credentials: credentialStore,
+		// custodian M1: git credential.fetch routes here when configured
+		// (CUSTODIAN_GRPC_ADDR); nil = git stays local (no regression).
+		CustodianGit: custodianGit,
+		CustodianOrg: custodianOrg,
+		// INC-4a/4b: when true, the admin PUT provider-binding / network-defaults
+		// are deprecated in favour of `cw config set cwb/nexus/...`.
+		ProviderBindingsFromAlmanac: fromAlmanac,
+		NetworkDefaultsFromAlmanac:  fromAlmanac,
 		// Operator login (dashboard-ws-port spec §2.2 / 5b1).
 		// Constructed only when the Nexus has identity (signing
 		// secret available) AND the operator endpoints are wanted.
@@ -719,6 +766,20 @@ func main() {
 	var supervisor atomic.Pointer[autospawn.Supervisor]
 	go runAutoSpawn(ctx, logger, *aspectDir, *harnessPath, *agoraPath, *dataDir, *addr, token,
 		autospawn.AspectTokenResolverFunc(tokenResolverFunc), &supervisor)
+
+	// INC-4a/4b: start the live config reconcilers now that the broker exists
+	// (the wake-policy domain drives b.SetWakePolicy). One poll loop, all
+	// domains. Dark unless ALMANAC_GRPC_ADDR is set (almanacReader nil).
+	if almanacReader != nil {
+		recs := []cfgreconcile.DomainReconciler{
+			cfgreconcile.NewProviderBindings(almanacReader, keyfileValidator.Store, logger),
+			cfgreconcile.NewWakePolicy(almanacReader, b, logger),
+		}
+		if credentialStore != nil {
+			recs = append(recs, cfgreconcile.NewNetworkDefaults(almanacReader, credentialStore, logger))
+		}
+		go cfgreconcile.RunAll(ctx, almanacInterval, logger, recs...)
+	}
 
 	serveErr := b.ListenAndServe(ctx)
 

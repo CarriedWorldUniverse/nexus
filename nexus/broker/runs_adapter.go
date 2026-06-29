@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
@@ -13,10 +14,14 @@ import (
 type runsAdapter struct {
 	store    runs.Store
 	onChange func(runs.Run)
+	log      *slog.Logger
 }
 
-func newRunsAdapter(store runs.Store, onChange func(runs.Run)) *runsAdapter {
-	return &runsAdapter{store: store, onChange: onChange}
+func newRunsAdapter(store runs.Store, onChange func(runs.Run), log *slog.Logger) *runsAdapter {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &runsAdapter{store: store, onChange: onChange, log: log}
 }
 
 func (a *runsAdapter) RecordRunStart(ctx context.Context, runID, ticket, agent, thread, repo, command, parentRunID string, dispatchMsgID int64) {
@@ -29,7 +34,7 @@ func (a *runsAdapter) RecordRunStart(ctx context.Context, runID, ticket, agent, 
 		Command:       command,
 		ParentRunID:   parentRunID,
 		DispatchMsgID: dispatchMsgID,
-		Status:        runs.StatusRunning,
+		Status:        runs.StatusSubmitted,
 		StartedAt:     time.Now(),
 	}
 	_ = a.store.Insert(ctx, r)
@@ -38,13 +43,37 @@ func (a *runsAdapter) RecordRunStart(ctx context.Context, runID, ticket, agent, 
 	}
 }
 
-func (a *runsAdapter) RecordRunDone(ctx context.Context, runID, status string, completedAt time.Time, prURL string, durationSecs int) {
-	_ = a.store.MarkDone(ctx, runID, runs.Status(status), completedAt, prURL, durationSecs)
+func (a *runsAdapter) RecordRunAccepted(ctx context.Context, runID string, acceptedAt time.Time) {
+	_ = a.store.MarkAccepted(ctx, runID, acceptedAt)
 	if a.onChange != nil {
 		if r, err := a.store.Get(ctx, runID); err == nil {
 			a.onChange(r)
 		}
 	}
+}
+
+func (a *runsAdapter) RecordRunDone(ctx context.Context, runID, status string, completedAt time.Time, prURL string, durationSecs int) {
+	pre, _ := a.store.Get(ctx, runID)
+	_ = a.store.MarkDone(ctx, runID, runs.Status(status), completedAt, prURL, durationSecs, "")
+	if a.onChange != nil {
+		if r, err := a.store.Get(ctx, runID); err == nil {
+			a.onChange(r)
+		}
+	}
+	if status == string(runs.StatusFailed) && runFailedBeforeAcceptance(pre.Status) {
+		a.log.Error("dispatch: ESCALATION run failed pre-acceptance",
+			"run_id", runID,
+			"ticket", pre.Ticket,
+			"agent", pre.Agent)
+	}
+}
+
+func runFailedBeforeAcceptance(status runs.Status) bool {
+	return status == runs.StatusSubmitted || status == runs.StatusQueued || status == runs.StatusRunning
+}
+
+func (a *runsAdapter) RecordRunLogs(ctx context.Context, runID, logs string) {
+	_ = a.store.RecordLogs(ctx, runID, logs)
 }
 
 func (b *Broker) sweepOrphanedRunningRuns(ctx context.Context) {
@@ -76,7 +105,7 @@ func (b *Broker) sweepOrphanedRunningRuns(ctx context.Context) {
 		if !run.StartedAt.IsZero() && now.After(run.StartedAt) {
 			durationSecs = int(now.Sub(run.StartedAt).Seconds())
 		}
-		if err := b.cfg.RunsStore.MarkDone(ctx, run.RunID, runs.StatusFailed, now, run.PRURL, durationSecs); err != nil {
+		if err := b.cfg.RunsStore.MarkDone(ctx, run.RunID, runs.StatusFailed, now, run.PRURL, durationSecs, "orphaned"); err != nil {
 			b.log.Warn("dispatch: running run sweep mark failed", "run_id", run.RunID, "err", err)
 			continue
 		}
@@ -115,6 +144,7 @@ func runToPayload(r runs.Run) frames.RunPayload {
 		Command:       r.Command,
 		Repo:          r.Repo,
 		Status:        string(r.Status),
+		Reason:        r.Reason,
 		StartedAt:     r.StartedAt.UnixMilli(),
 		PRURL:         r.PRURL,
 		DurationSecs:  r.DurationSecs,

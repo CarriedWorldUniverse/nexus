@@ -65,6 +65,7 @@ type K8sIface interface {
 	SetBriefOwner(ctx context.Context, taskID string, job *batchv1.Job) error
 	ListActiveJobs(ctx context.Context) (map[string]ActiveJob, error)
 	WatchJobs(ctx context.Context, onDone func(JobDone)) error
+	GetPodLogs(ctx context.Context, jobName string) (string, error)
 }
 
 // Submitter is the interface the broker calls for !dispatch interception.
@@ -170,6 +171,51 @@ func (r *Runner) Init(ctx context.Context) error {
 	return nil
 }
 
+// InitWithRetry runs Init with a bounded retry-with-backoff (NEX-611).
+// On a fresh broker pod the CNI may not be routable for the first few
+// seconds, so the one-shot Init's ListActiveJobs call fails with "no
+// route to host" and the caller used to give up — leaving the Runner
+// nil and wake+spawn silently dead. attempts bounds the total tries;
+// the delay doubles from baseDelay, capped at 30s (5 attempts at 4s ≈
+// 58s of cover). sleepFn is the wait seam (tests inject a no-op); nil
+// → real timer. Context cancellation aborts between attempts.
+func (r *Runner) InitWithRetry(ctx context.Context, attempts int, baseDelay time.Duration, sleepFn func(time.Duration)) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+	delay := baseDelay
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err = r.Init(ctx); err == nil {
+			if attempt > 1 {
+				slog.Info("runner: init succeeded after retry", "attempt", attempt)
+			}
+			return nil
+		}
+		if attempt == attempts {
+			break
+		}
+		slog.Warn("runner: init failed — retrying (in-cluster API may not be routable yet)",
+			"attempt", attempt, "max_attempts", attempts, "delay", delay, "err", err)
+		switch {
+		case sleepFn != nil:
+			sleepFn(delay)
+		case ctx != nil:
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		default:
+			time.Sleep(delay)
+		}
+		if delay *= 2; delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
+	}
+	return err
+}
+
 // WatchLoop calls K8sIface.WatchJobs to watch for job completions.
 func (r *Runner) WatchLoop(ctx context.Context) error {
 	return r.K8sIface.WatchJobs(ctx, r.OnJobDone)
@@ -209,7 +255,7 @@ func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 	var ackMsg string
 	if !r.acked[b.Ticket] {
 		r.acked[b.Ticket] = true
-		ackMsg = "dispatch accepted for " + b.Agent + " on " + b.Ticket
+		ackMsg = "dispatch submitted for " + b.Agent + " on " + b.Ticket
 	}
 
 	if !r.canRun(b.Agent) {
@@ -349,6 +395,14 @@ func (r *Runner) OnJobDone(done JobDone) {
 		ctx := r.ctx
 		if ctx == nil {
 			ctx = context.Background()
+		}
+		if r.K8sIface != nil && run.JobName != "" {
+			logs, err := r.K8sIface.GetPodLogs(ctx, run.JobName)
+			if err != nil {
+				slog.Warn("dispatch: capture builder logs failed", "run_id", run.ID, "job", run.JobName, "err", err)
+			} else {
+				r.Recorder.RecordRunLogs(ctx, run.ID, logs)
+			}
 		}
 		dur := int(done.CompletedAt.Sub(done.StartedAt).Seconds())
 		r.Recorder.RecordRunDone(ctx, run.ID, statusFor(done.OK), done.CompletedAt, prURLForRun(run), dur)

@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -14,6 +15,7 @@ type JobConfig struct {
 	NodeIP        string
 	BrokerHost    string
 	BriefTimeout  string
+	IdleTimeout   string
 	GitCredName   string
 	ActivityDir   string
 	LynxAIBaseURL string
@@ -30,6 +32,17 @@ type JobConfig struct {
 	// Jobs for log correlation / WS-dial parity (informational — a hand's
 	// identity is already proven by its session JWT). Empty → not injected.
 	NexusID string
+	// OllamaBaseURL / OllamaKeepAlive propagate the ollama provider
+	// endpoint into Jobs whose provider is ollama-flavoured (NEX-610).
+	// An ollama-provider parent's deployment carries OLLAMA_BASE_URL
+	// (e.g. the in-cluster gemma service); its hands run the same
+	// provider but a fresh Job spec, which without these dials the
+	// agentfunnel default localhost:11434 and fails. Set from cmd/nexus
+	// env (CW_OLLAMA_BASE_URL / CW_OLLAMA_KEEP_ALIVE, falling back to
+	// the broker's own OLLAMA_* env), same seam as BrokerCAFile/NexusID.
+	// Empty → not injected → agentfunnel default.
+	OllamaBaseURL   string
+	OllamaKeepAlive string
 }
 
 const (
@@ -55,7 +68,8 @@ func HandBrokerCAPath() string { return brokerCAMountDir + "/" + brokerCASecretK
 // delivered to hand Jobs.
 func HandBrokerCASecretName() string { return brokerCASecretName }
 
-func int32p(v int32) *int32 { return &v }
+func int32p(v int32) *int32   { return &v }
+func int64ptr(v int64) *int64 { return &v }
 
 const (
 	builderJobTTLSeconds = 5 * 60
@@ -74,11 +88,20 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	if cfg.BriefTimeout == "" {
 		cfg.BriefTimeout = "30m"
 	}
+	if cfg.IdleTimeout == "" {
+		cfg.IdleTimeout = "2m"
+	}
 	if provider == "" {
 		provider = "codex-cli"
 	}
-	codexProvider := provider == "codex-cli"
-	antigravityProvider := provider == "antigravity-cli"
+	// Provider aliases mirror broker.supportedProviders (NEX-610): the
+	// aspects.provider column holds whatever the operator set ("codex",
+	// "ollama-local", "agy", …), and hand briefs inherit that raw value
+	// via Runner.HandProvider — matching only the canonical id silently
+	// dropped the codex-auth mount for provider="codex" parents.
+	codexProvider := provider == "codex-cli" || provider == "codex" || provider == "codexcli"
+	antigravityProvider := provider == "antigravity-cli" || provider == "antigravity" || provider == "agy"
+	ollamaProvider := provider == "ollama" || provider == "ollama-local"
 	// The Job runs AS the named agent: keyfile = aspect-keyfile-<agent>, and
 	// the Job name + labels carry the agent + run id. A hand brief
 	// (SpawnParent set, NEX-571) runs as the DERIVED identity instead:
@@ -105,6 +128,7 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		{Name: "GOCACHE", Value: "/cache/go"},
 		{Name: "CW_DISPATCH_RUN_ID", Value: b.RunID},
 		{Name: "CW_DISPATCH_PARENT_RUN_ID", Value: b.ParentRunID},
+		{Name: "CW_IDLE_TIMEOUT", Value: cfg.IdleTimeout},
 		{Name: "CW_AGENT_HOME_REPO", Value: homeRepoMountPath},
 		{Name: "CW_AGENT_HOME_WORKDIR", Value: homeWorkMountPath},
 		{Name: "CW_SHARED_REPOS_DIR", Value: sharedReposMountPath},
@@ -137,6 +161,19 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		// hand's identity is proven by its JWT, so a miss is non-fatal.
 		if cfg.NexusID != "" {
 			env = append(env, corev1.EnvVar{Name: "CW_NEXUS_ID", Value: cfg.NexusID})
+		}
+	}
+	// Ollama provider endpoint (NEX-610): without OLLAMA_BASE_URL the
+	// agentfunnel in the Job dials localhost:11434 — dead inside a pod.
+	// Injected for any ollama-provider Job (hand or ticket dispatch);
+	// empty config values are omitted so non-ollama clusters see no
+	// behaviour change.
+	if ollamaProvider {
+		if cfg.OllamaBaseURL != "" {
+			env = append(env, corev1.EnvVar{Name: "OLLAMA_BASE_URL", Value: cfg.OllamaBaseURL})
+		}
+		if cfg.OllamaKeepAlive != "" {
+			env = append(env, corev1.EnvVar{Name: "OLLAMA_KEEP_ALIVE", Value: cfg.OllamaKeepAlive})
 		}
 	}
 	if cfg.LynxAIBaseURL != "" {
@@ -212,6 +249,7 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            int32p(0),
+			ActiveDeadlineSeconds:   int64ptr(activeDeadlineSeconds(cfg.BriefTimeout)),
 			TTLSecondsAfterFinished: int32p(builderJobTTLSeconds),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: annotations},
@@ -250,10 +288,19 @@ func builderArgs(b Brief, cfg JobConfig, spawn bool) []string {
 		"-brief-file", "/etc/dispatch/brief.md",
 		"-reply-topic", b.Thread,
 		"-builder-timeout", cfg.BriefTimeout,
+		"-builder-idle-timeout", cfg.IdleTimeout,
 		"-repo", b.Repo,
 		"-ticket", b.Ticket,
 		"-branch", b.Branch,
 	)
+}
+
+func activeDeadlineSeconds(timeout string) int64 {
+	d, err := time.ParseDuration(timeout)
+	if err != nil || d <= 0 {
+		d = 30 * time.Minute
+	}
+	return int64(d.Seconds())
 }
 
 func HomePVCName(agent string) string {

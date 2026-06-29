@@ -32,6 +32,12 @@ type fakeK8s struct {
 	createErr func(jobName string) error
 	// active is returned by ListActiveJobs — used to exercise recovery.
 	active map[string]dispatch.ActiveJob
+	// listErrs are consumed one per ListActiveJobs call before active is
+	// returned — used to exercise the InitWithRetry CNI-race path
+	// (NEX-611: first call(s) fail "no route to host", then recover).
+	listErrs []error
+	// listCalls counts ListActiveJobs invocations.
+	listCalls int
 }
 
 type briefOwnerCall struct {
@@ -45,15 +51,24 @@ type recorderDoneCall struct {
 }
 
 type testRecorder struct {
-	done []recorderDoneCall
+	starts   []string
+	accepted []string
+	done     []recorderDoneCall
 }
 
-func (r *testRecorder) RecordRunStart(context.Context, string, string, string, string, string, string, string, int64) {
+func (r *testRecorder) RecordRunStart(_ context.Context, runID, _, _, _, _, _, _ string, _ int64) {
+	r.starts = append(r.starts, runID)
+}
+
+func (r *testRecorder) RecordRunAccepted(_ context.Context, runID string, _ time.Time) {
+	r.accepted = append(r.accepted, runID)
 }
 
 func (r *testRecorder) RecordRunDone(_ context.Context, runID, status string, _ time.Time, _ string, _ int) {
 	r.done = append(r.done, recorderDoneCall{runID: runID, status: status})
 }
+
+func (r *testRecorder) RecordRunLogs(context.Context, string, string) {}
 
 func (f *fakeK8s) EnsureKeyfileSecret(_ context.Context, aspect string) error {
 	if f.ensureKeyfileErr != nil {
@@ -98,11 +113,21 @@ func (f *fakeK8s) SetBriefOwner(_ context.Context, taskID string, job *batchv1.J
 }
 
 func (f *fakeK8s) ListActiveJobs(_ context.Context) (map[string]dispatch.ActiveJob, error) {
+	f.listCalls++
+	if len(f.listErrs) > 0 {
+		err := f.listErrs[0]
+		f.listErrs = f.listErrs[1:]
+		return nil, err
+	}
 	return f.active, nil
 }
 
 func (f *fakeK8s) WatchJobs(_ context.Context, _ func(dispatch.JobDone)) error {
 	return nil
+}
+
+func (f *fakeK8s) GetPodLogs(context.Context, string) (string, error) {
+	return "", nil
 }
 
 func newRunner(fk *fakeK8s) *dispatch.Runner {
@@ -168,8 +193,36 @@ func TestRunnerMarksRunFailedWhenSubmitLaunchFails(t *testing.T) {
 	if rec.done[0].runID != "run-fail" || rec.done[0].status != "failed" {
 		t.Fatalf("RecordRunDone = %+v, want run-fail failed", rec.done[0])
 	}
+	if len(rec.accepted) != 0 {
+		t.Fatalf("RecordRunAccepted calls = %+v, want none before builder ack", rec.accepted)
+	}
 	if r.AgentBusy("anvil") {
 		t.Fatal("agent should be free after launch failure")
+	}
+}
+
+func TestRunnerSubmitDoesNotRecordAccepted(t *testing.T) {
+	fk := &fakeK8s{}
+	rec := &testRecorder{}
+	r := newRunner(fk)
+	r.NewID = func() string { return "run-submit" }
+	r.Recorder = rec
+	if err := r.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	runID, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-653", Thread: "t", Task: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runID != "run-submit" {
+		t.Fatalf("runID = %q", runID)
+	}
+	if len(rec.starts) != 1 || rec.starts[0] != "run-submit" {
+		t.Fatalf("RecordRunStart calls = %+v", rec.starts)
+	}
+	if len(rec.accepted) != 0 {
+		t.Fatalf("RecordRunAccepted calls = %+v, want none at submit", rec.accepted)
 	}
 }
 
@@ -317,6 +370,47 @@ func TestRunnerInitRecoversAgentBusy(t *testing.T) {
 	}
 	if !r.AgentBusy("plumb") {
 		t.Error("plumb should run despite anvil being busy")
+	}
+}
+
+// NEX-611: InitWithRetry survives the boot-time CNI race — the first
+// ListActiveJobs calls fail ("no route to host"), then the API becomes
+// routable and init succeeds. The one-shot Init used to leave the
+// Runner nil (wake+spawn dead) on the first failure.
+func TestRunnerInitWithRetryRecoversFromTransientAPIFailure(t *testing.T) {
+	fk := &fakeK8s{
+		listErrs: []error{
+			errors.New("dial tcp 10.43.0.1:443: connect: no route to host"),
+			errors.New("dial tcp 10.43.0.1:443: connect: no route to host"),
+		},
+	}
+	r := newRunner(fk)
+	var slept []time.Duration
+	if err := r.InitWithRetry(context.Background(), 5, 4*time.Second, func(d time.Duration) { slept = append(slept, d) }); err != nil {
+		t.Fatalf("InitWithRetry should recover once the API is routable: %v", err)
+	}
+	if fk.listCalls != 3 {
+		t.Errorf("ListActiveJobs calls = %d, want 3 (two failures + success)", fk.listCalls)
+	}
+	if len(slept) != 2 || slept[0] != 4*time.Second || slept[1] != 8*time.Second {
+		t.Errorf("backoff = %v, want [4s 8s]", slept)
+	}
+}
+
+// InitWithRetry gives up after the attempt bound and returns the last error.
+func TestRunnerInitWithRetryExhaustsAttempts(t *testing.T) {
+	fk := &fakeK8s{
+		listErrs: []error{
+			errors.New("err1"), errors.New("err2"), errors.New("err3"),
+		},
+	}
+	r := newRunner(fk)
+	err := r.InitWithRetry(context.Background(), 3, time.Millisecond, func(time.Duration) {})
+	if err == nil || err.Error() != "err3" {
+		t.Fatalf("err = %v, want the last attempt's error (err3)", err)
+	}
+	if fk.listCalls != 3 {
+		t.Errorf("ListActiveJobs calls = %d, want exactly the attempt bound (3)", fk.listCalls)
 	}
 }
 

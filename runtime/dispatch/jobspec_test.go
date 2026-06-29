@@ -33,6 +33,9 @@ func TestBuildJob(t *testing.T) {
 	if *job.Spec.BackoffLimit != 0 {
 		t.Errorf("backoffLimit = %d, want 0", *job.Spec.BackoffLimit)
 	}
+	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != 1800 {
+		t.Errorf("activeDeadlineSeconds = %v, want 1800", job.Spec.ActiveDeadlineSeconds)
+	}
 	// NEX-437: the brief must mount in its own directory, never as a file
 	// inside /etc/nexus (the keyfile Secret's mount) — else the OCI runtime
 	// fails the container with "not a directory".
@@ -46,6 +49,12 @@ func TestBuildJob(t *testing.T) {
 	if !contains(c.Args, "/etc/dispatch/brief.md") {
 		t.Errorf("-brief-file should point at /etc/dispatch/brief.md, args: %v", c.Args)
 	}
+	if !argValueEquals(c.Args, "-builder-idle-timeout", "2m") {
+		t.Errorf("args missing default -builder-idle-timeout 2m: %v", c.Args)
+	}
+	if !envValueEquals(c.Env, "CW_IDLE_TIMEOUT", "2m") {
+		t.Errorf("env missing CW_IDLE_TIMEOUT=2m: %v", c.Env)
+	}
 }
 
 func TestBuildJob_ProviderCodexBits(t *testing.T) {
@@ -56,7 +65,12 @@ func TestBuildJob_ProviderCodexBits(t *testing.T) {
 	}{
 		{name: "empty is codex-cli", wantCodex: true},
 		{name: "codex-cli", provider: "codex-cli", wantCodex: true},
+		// Store aliases (NEX-610): the aspects.provider column carries
+		// whatever the operator set; hand briefs inherit it raw.
+		{name: "codex alias", provider: "codex", wantCodex: true},
+		{name: "codexcli alias", provider: "codexcli", wantCodex: true},
 		{name: "openai", provider: "openai", wantCodex: false},
+		{name: "ollama", provider: "ollama", wantCodex: false},
 	}
 
 	for _, tt := range tests {
@@ -224,6 +238,22 @@ func TestBuildJob_PassesRepoTicket(t *testing.T) {
 	}
 	if !argValueEquals(c.Args, "-branch", "") {
 		t.Errorf("args missing empty -branch: %v", c.Args)
+	}
+}
+
+func TestBuildJob_PassesIdleTimeoutAndHardCeiling(t *testing.T) {
+	cfg := JobConfig{Namespace: "nexus", Image: "img", BriefTimeout: "45m", IdleTimeout: "90s"}
+	c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-654"}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+	job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-654"}, cfg, "t1", "codex-cli")
+
+	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != 2700 {
+		t.Fatalf("activeDeadlineSeconds = %v, want 2700", job.Spec.ActiveDeadlineSeconds)
+	}
+	if !argValueEquals(c.Args, "-builder-idle-timeout", "90s") {
+		t.Fatalf("args missing -builder-idle-timeout 90s: %v", c.Args)
+	}
+	if !envValueEquals(c.Env, "CW_IDLE_TIMEOUT", "90s") {
+		t.Fatalf("env missing CW_IDLE_TIMEOUT=90s: %v", c.Env)
 	}
 }
 

@@ -982,3 +982,207 @@ func TestCommsRunner_StoreKnowledgeNoPriorEntryDefaultsToFalse(t *testing.T) {
 		t.Error("no prior entry + omitted shared must default to false")
 	}
 }
+
+// --- spawn tool (NEX-609) ---
+
+// fakeSpawner records Spawn calls and returns canned handles.
+type fakeSpawner struct {
+	brief   string
+	count   int
+	thread  string
+	calls   int
+	handles []SpawnHandle
+	err     error
+}
+
+func (s *fakeSpawner) Spawn(_ context.Context, brief string, count int, thread string) ([]SpawnHandle, error) {
+	s.calls++
+	s.brief, s.count, s.thread = brief, count, thread
+	return s.handles, s.err
+}
+
+func TestCommsRunner_SpawnNoSpawnerReturnsToolError(t *testing.T) {
+	r := CommsRunner{Gateway: &fakeGateway{}}
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameSpawn,
+		Args: mustJSON(map[string]any{"brief": "do X"}),
+	})
+	if err != nil {
+		t.Fatalf("nil Spawner must be a tool-result error, not a turn abort: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(res, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["error"] == "" {
+		t.Errorf("result = %s, want an error field", res)
+	}
+}
+
+func TestCommsRunner_SpawnDispatchesAndFormatsHandles(t *testing.T) {
+	s := &fakeSpawner{handles: []SpawnHandle{
+		{RunID: "run-1", Name: "harrow.tine"},
+		{Name: "harrow.furrow"},                              // queued
+		{RunID: "run-3", Name: "harrow.loam", Error: "boom"}, // failed
+	}}
+	r := CommsRunner{Gateway: &fakeGateway{}, Spawner: s}
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameSpawn,
+		Args: mustJSON(map[string]any{"brief": "capital of Italy", "thread": "NEX-609"}),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if s.calls != 1 || s.brief != "capital of Italy" || s.thread != "NEX-609" {
+		t.Fatalf("spawner got brief=%q thread=%q calls=%d", s.brief, s.thread, s.calls)
+	}
+	if s.count != 1 {
+		t.Errorf("count = %d, want default 1", s.count)
+	}
+	var got struct {
+		Hands []map[string]any `json:"hands"`
+	}
+	if err := json.Unmarshal(res, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Hands) != 3 {
+		t.Fatalf("hands = %v", got.Hands)
+	}
+	if got.Hands[0]["status"] != "running" || got.Hands[0]["run_id"] != "run-1" {
+		t.Errorf("hand 0 = %v", got.Hands[0])
+	}
+	if got.Hands[1]["status"] != "queued" {
+		t.Errorf("hand 1 = %v", got.Hands[1])
+	}
+	if got.Hands[2]["status"] != "failed" || got.Hands[2]["error"] != "boom" {
+		t.Errorf("hand 2 = %v", got.Hands[2])
+	}
+}
+
+func TestCommsRunner_SpawnRequiresBrief(t *testing.T) {
+	s := &fakeSpawner{}
+	r := CommsRunner{Gateway: &fakeGateway{}, Spawner: s}
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameSpawn,
+		Args: mustJSON(map[string]any{"brief": "   "}),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(res, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["error"] == "" || s.calls != 0 {
+		t.Errorf("empty brief must error without dispatching (res=%s calls=%d)", res, s.calls)
+	}
+}
+
+func TestSpawnToolDefNotInCommsToolDefs(t *testing.T) {
+	// Spawn is parent-only: callers append SpawnToolDef explicitly for
+	// non-derived identities. The base def list must not leak it to
+	// every surface (hands share CommsToolDefs).
+	for _, d := range CommsToolDefs() {
+		if d.Name == ToolNameSpawn {
+			t.Fatal("CommsToolDefs must not include spawn — it is appended per-identity")
+		}
+	}
+	if SpawnToolDef().Name != ToolNameSpawn {
+		t.Fatal("SpawnToolDef name mismatch")
+	}
+}
+
+func TestComposedRunnerRoutesSpawnToComms(t *testing.T) {
+	// NEX-609 regression: spawn is advertised per-identity (SpawnToolDef),
+	// not via CommsToolDefs, so the composed router must carry it in the
+	// explicit routed set — otherwise the call falls through to the local
+	// runner and the model sees "unknown tool".
+	s := &fakeSpawner{handles: []SpawnHandle{{RunID: "run-1", Name: "harrow.tine"}}}
+	r := ComposeRunner(CommsRunner{Gateway: &fakeGateway{}, Spawner: s}, nil)
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameSpawn,
+		Args: mustJSON(map[string]any{"brief": "do X"}),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if s.calls != 1 {
+		t.Fatalf("spawn must route to the CommsRunner (calls=%d, res=%s)", s.calls, res)
+	}
+}
+
+// --- convene_close tool (roundtable P3) ---
+
+type fakeConveneCloser struct {
+	conveneID string
+	status    string
+	summaryID int64
+	calls     int
+	final     string
+	err       error
+}
+
+func (f *fakeConveneCloser) ConveneClose(_ context.Context, conveneID, status string, summaryMsgID int64) (string, error) {
+	f.calls++
+	f.conveneID, f.status, f.summaryID = conveneID, status, summaryMsgID
+	return f.final, f.err
+}
+
+func TestCommsRunner_ConveneCloseDispatches(t *testing.T) {
+	cc := &fakeConveneCloser{final: "converged"}
+	r := ComposeRunner(CommsRunner{Gateway: &fakeGateway{}, ConveneCloser: cc}, nil)
+	res, err := r.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameConveneClose,
+		Args: mustJSON(map[string]any{"convene_id": "cv-1", "status": "converged", "summary_msg_id": 8115}),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if cc.calls != 1 || cc.conveneID != "cv-1" || cc.status != "converged" || cc.summaryID != 8115 {
+		t.Fatalf("gateway got %+v", cc)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(res, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["ok"] != true || got["status"] != "converged" {
+		t.Errorf("result = %s", res)
+	}
+}
+
+func TestCommsRunner_ConveneCloseValidation(t *testing.T) {
+	cc := &fakeConveneCloser{}
+	r := CommsRunner{Gateway: &fakeGateway{}, ConveneCloser: cc}
+	for name, args := range map[string]map[string]any{
+		"missing id":  {"status": "converged"},
+		"bad status":  {"convene_id": "cv-1", "status": "done"},
+		"no spawner?": {"convene_id": "  ", "status": "converged"},
+	} {
+		res, err := r.Run(context.Background(), bridle.ToolCall{Name: ToolNameConveneClose, Args: mustJSON(args)})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var got map[string]string
+		_ = json.Unmarshal(res, &got)
+		if got["error"] == "" {
+			t.Errorf("%s: want error result, got %s", name, res)
+		}
+	}
+	if cc.calls != 0 {
+		t.Errorf("invalid args must not dispatch (calls=%d)", cc.calls)
+	}
+
+	// nil ConveneCloser → readable tool error.
+	res, err := CommsRunner{Gateway: &fakeGateway{}}.Run(context.Background(), bridle.ToolCall{
+		Name: ToolNameConveneClose,
+		Args: mustJSON(map[string]any{"convene_id": "cv-1", "status": "converged"}),
+	})
+	if err != nil {
+		t.Fatalf("nil closer must not abort the turn: %v", err)
+	}
+	var got map[string]string
+	_ = json.Unmarshal(res, &got)
+	if got["error"] == "" {
+		t.Errorf("nil closer: want error result, got %s", res)
+	}
+}

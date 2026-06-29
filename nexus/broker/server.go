@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
+	"github.com/CarriedWorldUniverse/nexus/nexus/convene"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/cwb/custodian"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
@@ -125,6 +126,12 @@ type Config struct {
 	// RunsStore powers the persisted dispatch run spine. When configured,
 	// New migrates it and adapts it into dispatch.Runner.Recorder.
 	RunsStore runs.Store
+
+	// ConveneStore persists !convene roundtables (roundtable spec
+	// component 3). When configured, New migrates it; the !convene chat
+	// path records a row and convene.close / convenes.list operate on it.
+	// nil → !convene is rejected (no record spine).
+	ConveneStore convene.Store
 
 	// SQLDB is the broker's sqld connection (shared by the chat/runs/aspects
 	// stores). env.health pings it to report sqld reachability — sqld lives in
@@ -284,6 +291,35 @@ type Config struct {
 	// completion) become available. Nil = pre-#218 boot, credentials
 	// surface is absent.
 	Credentials *credentials.Store
+
+	// CustodianGit, when non-nil, routes kind="git" agent credential.fetch
+	// requests to the CWB custodian pillar (custodian M1) instead of the
+	// local Credentials store. Additive + fail-safe: nil (the default, when
+	// CUSTODIAN_GRPC_ADDR is unset) keeps git — and every other kind — on the
+	// local store, so there is NO regression. Non-git kinds (provider/jira/
+	// imap) always stay on the local store regardless of this field.
+	CustodianGit GitCredentialSource
+
+	// CustodianOrg is the tenant org the broker presents to custodian on a
+	// git fetch (the cwb-org metadata). M1 interim: a single configured
+	// management org, since the broker has no per-agent herald org binding
+	// yet. Required when CustodianGit is set. The herald per-agent org
+	// derivation is the documented successor.
+	CustodianOrg string
+
+	// ProviderBindingsFromAlmanac records that aspect provider-bindings are
+	// reconciled live from almanac (INC-4a). When true the admin
+	// PUT /api/admin/aspects/{name}/provider-binding is deprecated — the
+	// supported write path is `cw config set cwb/nexus/provider-bindings/<aspect>`
+	// (a direct PUT would be overwritten on the next reconcile pass anyway).
+	// GET stays available and reflects the effective (reconciled) binding.
+	ProviderBindingsFromAlmanac bool
+
+	// NetworkDefaultsFromAlmanac records that the network-wide judge/compact
+	// defaults are reconciled live from almanac (INC-4b). When true the admin
+	// PUT /api/admin/network-defaults is deprecated — set via
+	// `cw config set cwb/nexus/network-defaults`. GET stays available.
+	NetworkDefaultsFromAlmanac bool
 
 	// Observability is a pre-constructed Hub the broker should adopt
 	// instead of building its own. Nil leaves broker.New constructing
@@ -516,9 +552,14 @@ func New(cfg Config, r *roster.Roster) *Broker {
 			b.log.Warn("runs store migration failed", "err", err)
 		} else {
 			if r, ok := cfg.Runner.(*dispatch.Runner); ok {
-				r.Recorder = newRunsAdapter(cfg.RunsStore, b.broadcastRunsUpdate)
+				r.Recorder = newRunsAdapter(cfg.RunsStore, b.broadcastRunsUpdate, b.log)
 			}
 			b.sweepOrphanedRunningRuns(context.Background())
+		}
+	}
+	if cfg.ConveneStore != nil {
+		if err := cfg.ConveneStore.Migrate(context.Background()); err != nil {
+			b.log.Warn("convene store migration failed", "err", err)
 		}
 	}
 	return b

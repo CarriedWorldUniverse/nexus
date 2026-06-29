@@ -638,6 +638,65 @@ func (c *Client) Request(ctx context.Context, env frames.Envelope) (frames.Envel
 	return c.ws.Request(ctx, env)
 }
 
+// Spawn emits spawn.request on this aspect's authenticated connection
+// and returns the broker's handles (NEX-609). The parent identity is
+// the connection's — the broker binds it from registration (or the
+// JWT-verified identity), never from the payload, so there is nothing
+// to forge here. A whole-request rejection (cap exceeded, derived
+// caller, no runner) comes back as spawn.request.error and surfaces
+// as a Go error for the caller to relay to the model.
+func (c *Client) Spawn(ctx context.Context, brief string, count int, thread string) ([]frames.SpawnHandle, error) {
+	env, err := frames.NewRequest(frames.KindSpawnRequest, frames.SpawnRequestPayload{
+		Brief:  brief,
+		Count:  count,
+		Thread: thread,
+	})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.ws.Request(ctx, env)
+	if err != nil {
+		return nil, fmt.Errorf("wsasp: spawn.request: %w", err)
+	}
+	if string(resp.Kind) == string(frames.KindSpawnRequest)+".error" {
+		var body map[string]string
+		_ = json.Unmarshal(resp.Payload, &body)
+		return nil, fmt.Errorf("wsasp: spawn rejected: %s", body["error"])
+	}
+	var out frames.SpawnResultPayload
+	if err := frames.PayloadAs(resp, &out); err != nil {
+		return nil, fmt.Errorf("wsasp: spawn.result decode: %w", err)
+	}
+	return out.Hands, nil
+}
+
+// ConveneClose emits convene.close on this aspect's authenticated
+// connection (roundtable P3) and returns the record's final status.
+// The broker authorizes against the convene's facilitator, so there
+// is no caller in the payload.
+func (c *Client) ConveneClose(ctx context.Context, conveneID, status string, summaryMsgID int64) (string, error) {
+	env, err := frames.NewRequest(frames.KindConveneClose, frames.ConveneClosePayload{
+		ConveneID:    conveneID,
+		Status:       status,
+		SummaryMsgID: summaryMsgID,
+	})
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.ws.Request(ctx, env)
+	if err != nil {
+		return "", fmt.Errorf("wsasp: convene.close: %w", err)
+	}
+	var out frames.ConveneCloseResultPayload
+	if err := frames.PayloadAs(resp, &out); err != nil {
+		return "", fmt.Errorf("wsasp: convene.close.result decode: %w", err)
+	}
+	if !out.OK {
+		return "", fmt.Errorf("wsasp: convene.close rejected: %s", out.Message)
+	}
+	return out.Status, nil
+}
+
 // errNotConnected is returned by SendBestEffort when the underlying
 // wsclient isn't connected. Sentinel so callers can distinguish
 // "wire down" from a real wire-level write error.
@@ -689,6 +748,23 @@ func (c *Client) SendBestEffort(ctx context.Context, env frames.Envelope) error 
 		return errNotConnected
 	}
 	return c.ws.Send(ctx, env)
+}
+
+// SendDispatchStatus emits a builder lifecycle status over the normal aspect
+// WebSocket. It uses the durable outbound queue so a status prepared before
+// the first register ack is flushed after the broker accepts the connection.
+func (c *Client) SendDispatchStatus(ctx context.Context, runID, status, reason string, at time.Time) error {
+	env, err := frames.New(frames.KindDispatchStatus, frames.DispatchStatusPayload{
+		RunID:  runID,
+		Status: status,
+		Reason: reason,
+		At:     at,
+	})
+	if err != nil {
+		return err
+	}
+	c.queueOrSend(ctx, env)
+	return nil
 }
 
 // CursorFileForAspect returns a default cursor-file path under the

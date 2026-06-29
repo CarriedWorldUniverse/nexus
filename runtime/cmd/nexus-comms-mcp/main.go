@@ -621,6 +621,26 @@ func newMCPServer(b *wsBridge, log *slog.Logger) *mcpserver.MCPServer {
 		b.handleStoreKnowledge,
 	)
 
+	// spawn (NEX-601): only materialised for a parent aspect identity.
+	// Derived hands (no-sub-of-sub) and the operator transport don't get
+	// it — the broker would reject them anyway, this keeps the surface
+	// honest. See spawnToolAvailable / spawn.go.
+	if spawnToolAvailable(b.defaultFrom) {
+		srv.AddTool(spawnTool(), b.handleSpawn)
+		log.Info("spawn tool materialised", "aspect", b.defaultFrom)
+	} else {
+		log.Debug("spawn tool withheld (derived/operator identity)", "identity", b.defaultFrom)
+	}
+
+	// convene_close (roundtable P3): facilitators are parent aspects, so
+	// the gate mirrors spawn's — hands and the operator transport (which
+	// closes via the operator frame path) don't get it. The broker
+	// re-authorizes against the convene's facilitator on every close.
+	if spawnToolAvailable(b.defaultFrom) {
+		srv.AddTool(conveneCloseTool(), b.handleConveneClose)
+		log.Info("convene_close tool materialised", "aspect", b.defaultFrom)
+	}
+
 	return srv
 }
 

@@ -132,7 +132,7 @@ func TestIdleReaperSkipsActiveDispatchRun(t *testing.T) {
 	}
 
 	// Run completes → next sweep reaps.
-	_ = h.runs.MarkDone(context.Background(), "run-1", runs.StatusComplete, h.now, "", 1)
+	_ = h.runs.MarkDone(context.Background(), "run-1", runs.StatusComplete, h.now, "", 1, "")
 	h.sweep()
 	if calls := h.scaler.scaleCalls(); len(calls) != 1 {
 		t.Fatalf("scale calls = %v, want reap once the run is done", calls)

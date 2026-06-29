@@ -7,7 +7,7 @@ import (
 )
 
 // brokerChatSender lets the broker-inline dispatch Runner post its status
-// lines ("dispatch accepted/queued", "builder spawned", "completed") through
+// lines ("dispatch submitted/queued", "builder spawned", "completed") through
 // the broker's own chat path — the in-process equivalent of the deleted
 // dispatch-controller's wsasp send-chat. It posts as the "dispatch" system
 // identity to the brief's thread topic.

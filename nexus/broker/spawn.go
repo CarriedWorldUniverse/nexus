@@ -59,16 +59,32 @@ func (b *Broker) spawnMaxPerRequest() int {
 func (c *wsConn) handleSpawnRequestFrame(env frames.Envelope) {
 	parent := c.registeredAs
 	auth := c.auth
+	// Comms-sidecar path (NEX-609): inside a pod aspect, agentfunnel
+	// owns the one-session-per-name registration slot, so the aspect's
+	// nexus-comms-mcp connects authenticated-but-unregistered
+	// (-register=false). The connection's JWT-verified identity
+	// (auth.AgentID = the session JWT's sub) vouches for the parent
+	// exactly as a registration would — it is the same credential the
+	// register path binds. Gated on !Admin: aspect session JWTs are the
+	// only non-admin identities (tryVerifyAspectJWT), so the operator
+	// JWT (AgentID "operator", Admin) and the legacy master/Frame token
+	// (Admin) keep falling out at executeSpawn's parent=="" guard.
+	if parent == "" && !auth.Admin && auth.AgentID != "" && auth.AgentID != "operator" {
+		parent = auth.AgentID
+	}
 	go c.executeSpawn(env, parent, auth)
 }
 
 func (c *wsConn) executeSpawn(env frames.Envelope, parent string, auth TokenInfo) {
-	// The parent identity is the connection's REGISTERED aspect — never
-	// payload-supplied, so a hand request can't be forged on another
-	// aspect's behalf. Operator connections never register, so they
-	// fall out here too (spawn is an aspect-path-only frame).
+	// The parent identity is the connection's REGISTERED aspect, or —
+	// for an authenticated-but-unregistered comms sidecar — the
+	// connection's JWT-verified identity (resolved by the read-loop
+	// handler above). Never payload-supplied, so a hand request can't
+	// be forged on another aspect's behalf. Operator connections
+	// resolve to neither, so they fall out here (spawn is an
+	// aspect-path-only frame).
 	if parent == "" {
-		c.respondError(env, "spawn.request requires a registered aspect connection")
+		c.respondError(env, "spawn.request requires an aspect-authenticated connection")
 		return
 	}
 	// Bind the registered name to the connection's AUTHENTICATED
