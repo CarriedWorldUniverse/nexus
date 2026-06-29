@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	filippo.io/edwards25519 v1.2.0
-	github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260611001639-485d4e71b9b0
+	github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260616044812-c574daa0ddbc
 	github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603092700-bad238fd9d58
 	github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260611212122-c2fe7a68f6af
 	github.com/CarriedWorldUniverse/ledger v0.1.4

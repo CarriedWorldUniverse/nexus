@@ -41,6 +41,39 @@ func TestCreateAndListJobs(t *testing.T) {
 	_ = metav1.ObjectMeta{}
 }
 
+func TestGetPodLogsFindsBuilderPodByRunID(t *testing.T) {
+	ctx := context.Background()
+	job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-652", RunID: "run-652"}, JobConfig{Namespace: "nexus"}, "run-652", "codex-cli")
+	job.Name = "builder-anvil-run-652"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "builder-anvil-run-652-pod",
+			Namespace: "nexus",
+			Labels: map[string]string{
+				"app":                   "nexus-builder",
+				"nexus.dispatch/run-id": "run-652",
+			},
+		},
+	}
+	k := &K8s{Client: fake.NewSimpleClientset(job, pod), Namespace: "nexus"}
+	var gotPod string
+	k.readPodLogs = func(_ context.Context, podName string) (string, error) {
+		gotPod = podName
+		return "builder output\n", nil
+	}
+
+	logs, err := k.GetPodLogs(ctx, "builder-anvil-run-652")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPod != "builder-anvil-run-652-pod" {
+		t.Fatalf("pod = %q", gotPod)
+	}
+	if logs != "builder output\n" {
+		t.Fatalf("logs = %q", logs)
+	}
+}
+
 func TestSetBriefOwner(t *testing.T) {
 	// NEX-461: the brief ConfigMap must end up owned by its Job so it GCs with it.
 	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}

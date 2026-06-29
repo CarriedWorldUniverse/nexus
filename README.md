@@ -105,7 +105,9 @@ and are in flight.)*
   branch-summary first-class.
 - **Dispatch-backed async over held sessions.** Spawn → post the brief → agent
   reports back → exit is deterministic and needs no fragile always-on session.
-  The audit thread doubles as the result inbox.
+  The audit thread doubles as the result inbox. Dispatched builders use
+  `CW_IDLE_TIMEOUT` (default `2m`) as the progress-based stall window, while
+  `CW_BRIEF_TIMEOUT` (default `30m`) remains the Kubernetes hard ceiling.
 
 ## Cross-platform
 

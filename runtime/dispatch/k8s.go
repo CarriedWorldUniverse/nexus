@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
@@ -11,14 +12,16 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
 
 type K8s struct {
-	Client    kubernetes.Interface
-	Namespace string
+	Client      kubernetes.Interface
+	Namespace   string
+	readPodLogs func(ctx context.Context, podName string) (string, error)
 }
 
 // NewInClusterK8s builds a K8s client from the pod's in-cluster service
@@ -128,6 +131,42 @@ func (k *K8s) PutBriefConfigMap(ctx context.Context, taskID, brief string) error
 
 func (k *K8s) CreateJob(ctx context.Context, job *batchv1.Job) (*batchv1.Job, error) {
 	return k.Client.BatchV1().Jobs(k.Namespace).Create(ctx, job, metav1.CreateOptions{})
+}
+
+func (k *K8s) GetPodLogs(ctx context.Context, jobName string) (string, error) {
+	job, err := k.Client.BatchV1().Jobs(k.Namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("dispatch: get job %s for logs: %w", jobName, err)
+	}
+	runID := job.Labels["nexus.dispatch/run-id"]
+	if runID == "" {
+		return "", fmt.Errorf("dispatch: job %s missing run id label", jobName)
+	}
+	selector := labels.Set{
+		"app":                   "nexus-builder",
+		"nexus.dispatch/run-id": runID,
+	}.AsSelector().String()
+	pods, err := k.Client.CoreV1().Pods(k.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return "", fmt.Errorf("dispatch: list pods for job %s logs: %w", jobName, err)
+	}
+	if len(pods.Items) == 0 {
+		return "", fmt.Errorf("dispatch: no pod found for job %s", jobName)
+	}
+	if k.readPodLogs != nil {
+		return k.readPodLogs(ctx, pods.Items[0].Name)
+	}
+	req := k.Client.CoreV1().Pods(k.Namespace).GetLogs(pods.Items[0].Name, &corev1.PodLogOptions{})
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return "", fmt.Errorf("dispatch: stream pod logs for job %s: %w", jobName, err)
+	}
+	defer stream.Close()
+	data, err := io.ReadAll(stream)
+	if err != nil {
+		return "", fmt.Errorf("dispatch: read pod logs for job %s: %w", jobName, err)
+	}
+	return string(data), nil
 }
 
 // DeleteJob deletes a builder Job by name with the given grace period (seconds).

@@ -49,7 +49,7 @@ func (c *wsConn) handleOperatorRunCancel(env frames.Envelope) {
 	if err != nil {
 		// Already finished/aged-out: mark cancelled best-effort and report ok.
 		if c.broker.cfg.RunsStore != nil {
-			_ = c.broker.cfg.RunsStore.MarkDone(ctx, p.RunID, runs.StatusCancelled, time.Now(), "", 0)
+			_ = c.broker.cfg.RunsStore.MarkDone(ctx, p.RunID, runs.StatusCancelled, time.Now(), "", 0, "cancelled")
 		}
 		resp, _ := frames.NewResponse(frames.KindRunCancelResult, env.ID, frames.RunCancelResultPayload{OK: true, Message: "run already ended"})
 		c.send(resp)
@@ -57,7 +57,7 @@ func (c *wsConn) handleOperatorRunCancel(env frames.Envelope) {
 	}
 	// Mark cancelled first so the async emitJobDeleted failed-mark is a no-op.
 	if c.broker.cfg.RunsStore != nil {
-		_ = c.broker.cfg.RunsStore.MarkDone(ctx, p.RunID, runs.StatusCancelled, time.Now(), "", 0)
+		_ = c.broker.cfg.RunsStore.MarkDone(ctx, p.RunID, runs.StatusCancelled, time.Now(), "", 0, "cancelled")
 	}
 	if err := c.broker.dispatchK8s.DeleteJob(ctx, name, grace); err != nil {
 		c.operatorError(env, "run.cancel: delete job: "+err.Error())

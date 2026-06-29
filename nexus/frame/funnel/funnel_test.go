@@ -1720,3 +1720,39 @@ func TestBindingFn_TurnRequestCarriesBindingProviderAndModel(t *testing.T) {
 			prov.last.Model)
 	}
 }
+
+// TestBindingFn_TurnRequestCarriesPromptMode pins the funnel→bridle wiring
+// for per-aspect system-prompt mode: a Binding with PromptMode=replace must
+// flow binding → TurnRequest.SystemPromptMode → (run.go) →
+// ProviderRequest.SystemPromptMode, so claudecode emits --system-prompt
+// instead of --append-system-prompt. The zero value (append) is the default
+// and is exercised by every other binding test in this file.
+func TestBindingFn_TurnRequestCarriesPromptMode(t *testing.T) {
+	prov := &scriptedProvider{}
+	f, err := New(Config{
+		AspectID:     "frame",
+		SystemPrompt: "test",
+		Harness:      bridle.NewHarness(&scriptedProvider{}),
+		Provider:     "static-id",
+		Model:        "static-model",
+		Runner:       noopRunner{},
+		BindingFn: func() Binding {
+			return Binding{
+				Provider:   "dynamic-id",
+				Model:      "dynamic-model",
+				PromptMode: bridle.SystemPromptReplace,
+				Harness:    bridle.NewHarness(prov),
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Deliberate(context.Background(), "ping"); err != nil {
+		t.Fatal(err)
+	}
+	if prov.last.SystemPromptMode != bridle.SystemPromptReplace {
+		t.Errorf("ProviderRequest.SystemPromptMode = %q, want %q (from binding)",
+			prov.last.SystemPromptMode, bridle.SystemPromptReplace)
+	}
+}

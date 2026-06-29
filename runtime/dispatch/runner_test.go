@@ -51,15 +51,24 @@ type recorderDoneCall struct {
 }
 
 type testRecorder struct {
-	done []recorderDoneCall
+	starts   []string
+	accepted []string
+	done     []recorderDoneCall
 }
 
-func (r *testRecorder) RecordRunStart(context.Context, string, string, string, string, string, string, string, int64) {
+func (r *testRecorder) RecordRunStart(_ context.Context, runID, _, _, _, _, _, _ string, _ int64) {
+	r.starts = append(r.starts, runID)
+}
+
+func (r *testRecorder) RecordRunAccepted(_ context.Context, runID string, _ time.Time) {
+	r.accepted = append(r.accepted, runID)
 }
 
 func (r *testRecorder) RecordRunDone(_ context.Context, runID, status string, _ time.Time, _ string, _ int) {
 	r.done = append(r.done, recorderDoneCall{runID: runID, status: status})
 }
+
+func (r *testRecorder) RecordRunLogs(context.Context, string, string) {}
 
 func (f *fakeK8s) EnsureKeyfileSecret(_ context.Context, aspect string) error {
 	if f.ensureKeyfileErr != nil {
@@ -115,6 +124,10 @@ func (f *fakeK8s) ListActiveJobs(_ context.Context) (map[string]dispatch.ActiveJ
 
 func (f *fakeK8s) WatchJobs(_ context.Context, _ func(dispatch.JobDone)) error {
 	return nil
+}
+
+func (f *fakeK8s) GetPodLogs(context.Context, string) (string, error) {
+	return "", nil
 }
 
 func newRunner(fk *fakeK8s) *dispatch.Runner {
@@ -180,8 +193,36 @@ func TestRunnerMarksRunFailedWhenSubmitLaunchFails(t *testing.T) {
 	if rec.done[0].runID != "run-fail" || rec.done[0].status != "failed" {
 		t.Fatalf("RecordRunDone = %+v, want run-fail failed", rec.done[0])
 	}
+	if len(rec.accepted) != 0 {
+		t.Fatalf("RecordRunAccepted calls = %+v, want none before builder ack", rec.accepted)
+	}
 	if r.AgentBusy("anvil") {
 		t.Fatal("agent should be free after launch failure")
+	}
+}
+
+func TestRunnerSubmitDoesNotRecordAccepted(t *testing.T) {
+	fk := &fakeK8s{}
+	rec := &testRecorder{}
+	r := newRunner(fk)
+	r.NewID = func() string { return "run-submit" }
+	r.Recorder = rec
+	if err := r.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	runID, err := r.Submit(context.Background(), dispatch.Brief{Agent: "anvil", Ticket: "NEX-653", Thread: "t", Task: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runID != "run-submit" {
+		t.Fatalf("runID = %q", runID)
+	}
+	if len(rec.starts) != 1 || rec.starts[0] != "run-submit" {
+		t.Fatalf("RecordRunStart calls = %+v", rec.starts)
+	}
+	if len(rec.accepted) != 0 {
+		t.Fatalf("RecordRunAccepted calls = %+v, want none at submit", rec.accepted)
 	}
 }
 

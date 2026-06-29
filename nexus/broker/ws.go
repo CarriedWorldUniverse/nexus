@@ -451,6 +451,8 @@ func (c *wsConn) dispatch(env frames.Envelope) {
 		c.handleSessionEntryAppended(env)
 	case frames.KindDispatch:
 		c.handleDispatchFrame(env)
+	case frames.KindDispatchStatus:
+		c.handleDispatchStatusFrame(env)
 	case frames.KindChatSend:
 		c.handleChatSendFrame(env)
 	case frames.KindSessionRefresh:

@@ -65,6 +65,7 @@ type K8sIface interface {
 	SetBriefOwner(ctx context.Context, taskID string, job *batchv1.Job) error
 	ListActiveJobs(ctx context.Context) (map[string]ActiveJob, error)
 	WatchJobs(ctx context.Context, onDone func(JobDone)) error
+	GetPodLogs(ctx context.Context, jobName string) (string, error)
 }
 
 // Submitter is the interface the broker calls for !dispatch interception.
@@ -254,7 +255,7 @@ func (r *Runner) Submit(ctx context.Context, b Brief) (string, error) {
 	var ackMsg string
 	if !r.acked[b.Ticket] {
 		r.acked[b.Ticket] = true
-		ackMsg = "dispatch accepted for " + b.Agent + " on " + b.Ticket
+		ackMsg = "dispatch submitted for " + b.Agent + " on " + b.Ticket
 	}
 
 	if !r.canRun(b.Agent) {
@@ -394,6 +395,14 @@ func (r *Runner) OnJobDone(done JobDone) {
 		ctx := r.ctx
 		if ctx == nil {
 			ctx = context.Background()
+		}
+		if r.K8sIface != nil && run.JobName != "" {
+			logs, err := r.K8sIface.GetPodLogs(ctx, run.JobName)
+			if err != nil {
+				slog.Warn("dispatch: capture builder logs failed", "run_id", run.ID, "job", run.JobName, "err", err)
+			} else {
+				r.Recorder.RecordRunLogs(ctx, run.ID, logs)
+			}
 		}
 		dur := int(done.CompletedAt.Sub(done.StartedAt).Seconds())
 		r.Recorder.RecordRunDone(ctx, run.ID, statusFor(done.OK), done.CompletedAt, prURLForRun(run), dur)

@@ -307,6 +307,20 @@ type Config struct {
 	// derivation is the documented successor.
 	CustodianOrg string
 
+	// ProviderBindingsFromAlmanac records that aspect provider-bindings are
+	// reconciled live from almanac (INC-4a). When true the admin
+	// PUT /api/admin/aspects/{name}/provider-binding is deprecated — the
+	// supported write path is `cw config set cwb/nexus/provider-bindings/<aspect>`
+	// (a direct PUT would be overwritten on the next reconcile pass anyway).
+	// GET stays available and reflects the effective (reconciled) binding.
+	ProviderBindingsFromAlmanac bool
+
+	// NetworkDefaultsFromAlmanac records that the network-wide judge/compact
+	// defaults are reconciled live from almanac (INC-4b). When true the admin
+	// PUT /api/admin/network-defaults is deprecated — set via
+	// `cw config set cwb/nexus/network-defaults`. GET stays available.
+	NetworkDefaultsFromAlmanac bool
+
 	// Observability is a pre-constructed Hub the broker should adopt
 	// instead of building its own. Nil leaves broker.New constructing
 	// its own Hub.
@@ -538,7 +552,7 @@ func New(cfg Config, r *roster.Roster) *Broker {
 			b.log.Warn("runs store migration failed", "err", err)
 		} else {
 			if r, ok := cfg.Runner.(*dispatch.Runner); ok {
-				r.Recorder = newRunsAdapter(cfg.RunsStore, b.broadcastRunsUpdate)
+				r.Recorder = newRunsAdapter(cfg.RunsStore, b.broadcastRunsUpdate, b.log)
 			}
 			b.sweepOrphanedRunningRuns(context.Background())
 		}
