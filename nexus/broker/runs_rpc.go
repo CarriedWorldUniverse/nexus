@@ -2,6 +2,7 @@ package broker
 
 import (
 	"sort"
+	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
@@ -53,6 +54,23 @@ func mergeTimeline(msgs []chat.Message, acts []observability.Frame) []frames.Tim
 	return out
 }
 
+func filterRunTimelineMessages(msgs []chat.Message, startedAt, completedAt time.Time) []chat.Message {
+	if startedAt.IsZero() && completedAt.IsZero() {
+		return msgs
+	}
+	out := msgs[:0]
+	for _, m := range msgs {
+		if !startedAt.IsZero() && m.CreatedAt.Before(startedAt) {
+			continue
+		}
+		if !completedAt.IsZero() && m.CreatedAt.After(completedAt) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 func (c *wsConn) handleOperatorRunsList(env frames.Envelope) {
 	store := c.broker.cfg.RunsStore
 	if store == nil {
@@ -101,11 +119,12 @@ func (c *wsConn) handleOperatorRunGet(env frames.Envelope) {
 	var msgs []chat.Message
 	if cs := c.broker.cfg.ChatStore; cs != nil && run.DispatchMsgID > 0 {
 		msgs, _ = cs.ListThread(ctx, run.DispatchMsgID, 0, 1000)
+		msgs = filterRunTimelineMessages(msgs, run.StartedAt, run.CompletedAt)
 	}
 	var acts []observability.Frame
 	partial := false
 	if c.broker.activityReader != nil {
-		acts, err = c.broker.activityReader.ReadByRun(ctx, run.Agent, run.RunID, 2000)
+		acts, err = c.broker.activityReader.ReadByRunWindow(ctx, run.Agent, run.RunID, run.StartedAt, run.CompletedAt, 2000)
 		if err != nil {
 			partial = true
 		}

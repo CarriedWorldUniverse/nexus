@@ -19,7 +19,7 @@ func (c *wsConn) handleOperatorActivityHistory(env frames.Envelope) {
 		c.operatorError(env, "activity.history: unknown run")
 		return
 	}
-	acts, err := c.broker.activityReader.ReadByRun(ctx, run.Agent, p.RunID, p.Limit)
+	acts, err := c.broker.activityReader.ReadByRunWindow(ctx, run.Agent, p.RunID, run.StartedAt, run.CompletedAt, p.Limit)
 	partial := err != nil
 	items := make([]frames.ActivityItemPayload, 0, len(acts))
 	for _, f := range acts {
