@@ -98,6 +98,14 @@ func (b *Broker) handleAdminProviderBindingSet(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusServiceUnavailable, "aspects store not configured")
 		return
 	}
+	// INC-4a: when provider-bindings are reconciled from almanac (the config
+	// source of truth), almanac wins on the next reconcile pass, so a direct
+	// PUT here would silently revert. Reject it and point at the one write path.
+	if b.cfg.ProviderBindingsFromAlmanac {
+		writeError(w, http.StatusConflict,
+			"provider-bindings are managed by almanac — set via: cw config set cwb/nexus/provider-bindings/"+r.PathValue("name")+" '{\"provider\":\"...\",\"model\":\"...\"}'")
+		return
+	}
 	aspect := r.PathValue("name")
 	if aspect == "" {
 		writeError(w, http.StatusBadRequest, "aspect name required in path")

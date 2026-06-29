@@ -33,6 +33,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability/jsonlsink"
 	"github.com/CarriedWorldUniverse/nexus/nexus/operator"
+	"github.com/CarriedWorldUniverse/nexus/nexus/cfgreconcile"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
@@ -224,6 +225,20 @@ func main() {
 	// default. Failure to dial is fatal only insofar as it leaves custodianGit
 	// nil (logged) — the broker still boots and serves git locally.
 	custodianGit, custodianOrg := buildCustodianGit(logger)
+
+	// INC-4a/4b: live config reconcile from almanac (the one place you edit;
+	// changes land within one interval, no redeploy). Dark unless
+	// ALMANAC_GRPC_ADDR is set. Build the reader NOW so the broker.Config flags
+	// below reflect whether it's active; the reconcilers START after broker.New
+	// (the wake-policy domain needs the broker). Degrades to nil on dial failure.
+	almanacReader := buildAlmanacReader(logger)
+	fromAlmanac := almanacReader != nil
+	almanacInterval := 30 * time.Second
+	if v := os.Getenv("ALMANAC_POLL_INTERVAL"); v != "" {
+		if d, derr := time.ParseDuration(v); derr == nil && d > 0 {
+			almanacInterval = d
+		}
+	}
 
 	r := roster.New()
 	proj := sessions.New(db)
@@ -579,6 +594,10 @@ func main() {
 		// (CUSTODIAN_GRPC_ADDR); nil = git stays local (no regression).
 		CustodianGit: custodianGit,
 		CustodianOrg: custodianOrg,
+		// INC-4a/4b: when true, the admin PUT provider-binding / network-defaults
+		// are deprecated in favour of `cw config set cwb/nexus/...`.
+		ProviderBindingsFromAlmanac: fromAlmanac,
+		NetworkDefaultsFromAlmanac:  fromAlmanac,
 		// Operator login (dashboard-ws-port spec §2.2 / 5b1).
 		// Constructed only when the Nexus has identity (signing
 		// secret available) AND the operator endpoints are wanted.
@@ -747,6 +766,20 @@ func main() {
 	var supervisor atomic.Pointer[autospawn.Supervisor]
 	go runAutoSpawn(ctx, logger, *aspectDir, *harnessPath, *agoraPath, *dataDir, *addr, token,
 		autospawn.AspectTokenResolverFunc(tokenResolverFunc), &supervisor)
+
+	// INC-4a/4b: start the live config reconcilers now that the broker exists
+	// (the wake-policy domain drives b.SetWakePolicy). One poll loop, all
+	// domains. Dark unless ALMANAC_GRPC_ADDR is set (almanacReader nil).
+	if almanacReader != nil {
+		recs := []cfgreconcile.DomainReconciler{
+			cfgreconcile.NewProviderBindings(almanacReader, keyfileValidator.Store, logger),
+			cfgreconcile.NewWakePolicy(almanacReader, b, logger),
+		}
+		if credentialStore != nil {
+			recs = append(recs, cfgreconcile.NewNetworkDefaults(almanacReader, credentialStore, logger))
+		}
+		go cfgreconcile.RunAll(ctx, almanacInterval, logger, recs...)
+	}
 
 	serveErr := b.ListenAndServe(ctx)
 
