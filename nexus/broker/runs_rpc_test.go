@@ -30,3 +30,21 @@ func TestMergeTimelineOrdersByTimeChatBeforeActivityOnTie(t *testing.T) {
 	}
 	_ = frames.TimelineItemPayload{}
 }
+
+func TestFilterRunTimelineMessagesFreezesCompletedRun(t *testing.T) {
+	msgs := []chat.Message{
+		{ID: 1, Content: "!dispatch", CreatedAt: time.UnixMilli(100)},
+		{ID: 2, Content: "done", CreatedAt: time.UnixMilli(200)},
+		{ID: 3, Content: "later unrelated chatter", CreatedAt: time.UnixMilli(300)},
+	}
+
+	got := filterRunTimelineMessages(msgs, time.UnixMilli(100), time.UnixMilli(200))
+	if len(got) != 2 {
+		t.Fatalf("len = %d, got = %+v", len(got), got)
+	}
+	for _, m := range got {
+		if m.ID == 3 {
+			t.Fatalf("completed run included later chat: %+v", got)
+		}
+	}
+}
