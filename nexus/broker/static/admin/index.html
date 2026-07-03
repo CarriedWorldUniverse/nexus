@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Nexus — Admin</title>
+  <link rel="stylesheet" href="/admin/css/admin.css" />
+  <script src="https://unpkg.com/htmx.org@2.0.4"
+          integrity="sha384-HGfztofBIsoU3HlIlGcI7ztG6MoMmAL6sqbMjwmlttr5L3PnZ/pCtCQ1JQBGt4J6"
+          crossorigin="anonymous"></script>
+  <script src="/admin/js/admin.js"></script>
+</head>
+<body>
+  <div class="layout">
+
+    <!-- Header -->
+    <header class="layout-header">
+      <a href="/admin" class="logo">The Nexus</a>
+      <nav class="layout-nav">
+        <a href="/admin/status">Status</a>
+        <a href="/admin/settings/aspects">Aspects</a>
+        <a href="/admin/settings/credentials">Credentials</a>
+        <a href="/admin/chat">Chat</a>
+        <a href="/dashboard" class="layout-nav-external">Dashboard</a>
+      </nav>
+      <div class="layout-header-right">
+        <span id="last-refresh" class="text-muted mono">—</span>
+      </div>
+    </header>
+
+    <!-- Main content area (HTMX swaps here) -->
+    <main id="main" class="layout-main">
+    </main>
+
+    <!-- Loading indicator -->
+    <div id="spinner" class="htmx-indicator">
+      <div class="spinner"></div>
+    </div>
+
+  </div>
+</body>
+</html>
