@@ -1,18 +1,16 @@
-// admin_chat.go — Admin UI chat view.
+package broker
+
+// Admin UI chat view.
 //
 // Returns an HTML fragment for the chat interface. Uses HTMX for the
 // send form (cleaner, handles errors, auto-clears) and a minimal
 // vanilla JS WebSocket handler for live message delivery.
-
-package broker
 
 import (
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/CarriedWorldUniverse/nexus/nexus/broker/api"
 )
 
 // handleAdminChat returns the chat view.

@@ -1,17 +1,17 @@
-// admin_aspects.go — Admin UI aspects settings view.
-//
-// Returns an HTML fragment for the per-aspect model/credential config.
-// Each aspect is a card with editable primary/judge/compact model fields
-// and a dispatch toggle. Inline editing via HTMX POST.
-
 package broker
+
+// Admin UI aspects settings view.
+//
+// Renders a per-aspect card with editable primary/judge/compact model fields
+// and a dispatch toggle. Inline editing via HTMX POST.
 
 import (
 	"fmt"
 	"net/http"
 	"strings"
 
-	"github.com/CarriedWorldUniverse/nexus/nexus/broker/api"
+	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
+	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // handleAdminAspectsList returns the aspects settings page.
@@ -47,7 +47,7 @@ func (b *Broker) handleAdminAspectsList(w http.ResponseWriter, r *http.Request) 
 	w.Write([]byte(buf.String()))
 }
 
-func (b *Broker) renderAspectCard(agent api.Agent, creds []api.Credential) string {
+func (b *Broker) renderAspectCard(agent adminRosterAspect, creds []credentials.Metadata) string {
 	var buf strings.Builder
 
 	// Build credential options
@@ -171,10 +171,10 @@ func (b *Broker) handleAdminAspectsSave(w http.ResponseWriter, r *http.Request) 
 	compactCred := r.FormValue("cred-" + name + "-compact")
 
 	// Build the model config payload
-	config := api.ModelConfig{
-		Primary: api.ModelOverride{Model: primaryModel, Credential: primaryCred},
-		Judge:   api.ModelOverride{Model: judgeModel, Credential: judgeCred},
-		Compact: api.ModelOverride{Model: compactModel, Credential: compactCred},
+	config := schemas.ModelConfig{
+		Primary: schemas.ModelOverride{Model: primaryModel, Credential: primaryCred},
+		Judge:   schemas.ModelOverride{Model: judgeModel, Credential: judgeCred},
+		Compact: schemas.ModelOverride{Model: compactModel, Credential: compactCred},
 	}
 
 	// Call the existing admin API to set the model config
@@ -200,25 +200,4 @@ func (b *Broker) handleAdminAspectsSave(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "text/html")
 	w.Write([]byte(cardHTML))
-}
-
-// getCredentials fetches the credential list from the broker.
-func (b *Broker) getCredentials(r *http.Request) ([]api.Credential, error) {
-	// Use the existing /api/admin/credentials endpoint
-	req, err := http.NewRequest("GET", "/api/admin/credentials", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", r.Header.Get("Authorization"))
-
-	// This would call the credentials endpoint
-	// For now, return an empty list
-	return nil, nil
-}
-
-// getModelConfigFor returns the model config for an aspect.
-func (b *Broker) getModelConfigFor(name string) *api.ModelConfig {
-	// This would call the broker's model config getter
-	// For now, return nil
-	return nil
 }

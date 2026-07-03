@@ -17,15 +17,39 @@ package broker
 import (
 	"context"
 	"crypto/rand"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
+
+//go:embed all:static/admin
+var adminFS embed.FS
+
+// Admin UI embedded file system subpaths.
+var (
+	adminCSSFS fs.FS
+	adminJSFS  fs.FS
+	adminFSFS  fs.FS
+)
+
+func init() {
+	adminFSFS = adminFS
+	if s, err := fs.Sub(adminFS, "static/admin/css"); err == nil {
+		adminCSSFS = s
+	}
+	if s, err := fs.Sub(adminFS, "static/admin/js"); err == nil {
+		adminJSFS = s
+	}
+}
 
 // AdminCallbacks injects the broker's admin-action implementations.
 // Each callback is optional: a nil callback returns 501 not_implemented
@@ -150,6 +174,81 @@ func (b *Broker) requireAdmin(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	}))
+}
+
+// registerAdminRoutes wires /admin/* routes onto mux for the HTMX admin UI.
+// Called from ListenAndServe. Serves static files and registers handlers for
+// each admin UI view (status, aspects, credentials, chat).
+func (b *Broker) registerAdminRoutes(mux *http.ServeMux) {
+	// Redirect bare /admin → /admin/status
+	mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/status", http.StatusFound)
+	})
+
+	// Static assets
+	mux.Handle("GET /admin/css/", http.StripPrefix("/admin/css/",
+		http.FileServer(http.FS(adminCSSFS))))
+	mux.Handle("GET /admin/js/", http.StripPrefix("/admin/js/",
+		http.FileServer(http.FS(adminJSFS))))
+
+	// Static files (index.html)
+	mux.Handle("GET /admin/", http.StripPrefix("/admin/",
+		http.FileServer(http.FS(adminFS))))
+
+	// Data endpoints — auth is via operator JWT (same as dashboard)
+	mux.Handle("GET /admin/status", b.auth(http.HandlerFunc(b.handleAdminStatus)))
+	mux.Handle("GET /admin/settings/aspects", b.auth(http.HandlerFunc(b.handleAdminAspectsList)))
+	mux.Handle("POST /admin/settings/aspects/{name}", b.auth(http.HandlerFunc(b.handleAdminAspectsSave)))
+	mux.Handle("GET /admin/settings/credentials", b.auth(http.HandlerFunc(b.handleAdminCredentialsList)))
+	mux.Handle("POST /admin/settings/credentials", b.auth(http.HandlerFunc(b.handleAdminCredentialUpsert)))
+	mux.Handle("DELETE /admin/settings/credentials/{name}", b.auth(http.HandlerFunc(b.handleAdminCredentialDelete)))
+	mux.Handle("GET /admin/chat", b.auth(http.HandlerFunc(b.handleAdminChat)))
+	mux.Handle("POST /admin/chat/send", b.auth(http.HandlerFunc(b.handleAdminChatSend)))
+}
+
+// handleAdminStatus returns the system status page.
+func (b *Broker) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+
+	// Get dispatch status if available
+	dispatchStatus := b.cfg.Admin.DispatchStatus
+	if dispatchStatus == nil {
+		// Default state when dispatch not configured
+		dispatchStatus = func(ctx context.Context) (DispatchStatusReport, error) {
+			return DispatchStatusReport{
+				ActiveWorkers: 0,
+				SoftCap:       0,
+				HardCeiling:   0,
+				QueueDepth:    0,
+			}, nil
+		}
+	}
+
+	report, err := dispatchStatus(r.Context())
+	if err != nil {
+		http.Error(w, "failed to get dispatch status", http.StatusInternalServerError)
+		return
+	}
+
+	w.Write([]byte(fmt.Sprintf(`
+<div class="status-view">
+  <h2>System Status</h2>
+  <div class="status-grid">
+    <div class="status-card">
+      <h3>Dispatch Queue</h3>
+      <p>Active: %d / %d</p>
+      <p>Queue Depth: %d</p>
+    </div>
+    <div class="status-card">
+      <h3>Aspects</h3>
+      <p>Busy: %v</p>
+    </div>
+  </div>
+  <script>
+    setTimeout(() => location.reload(), 5000);
+  </script>
+</div>
+`, report.ActiveWorkers, report.HardCeiling, report.QueueDepth, report.BusyAspects)))
 }
 
 // registerAdmin wires /api/admin/* routes onto mux. Called from
@@ -466,4 +565,38 @@ func (b *Broker) handleAdminOp(w http.ResponseWriter, r *http.Request) {
 		resp["error"] = op.Err
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// getCredentials fetches the credential list from the broker.
+func (b *Broker) getCredentials(r *http.Request) ([]credentials.Metadata, error) {
+	if b.cfg.Credentials == nil {
+		return nil, nil
+	}
+	return b.cfg.Credentials.List(r.Context(), "")
+}
+
+// getModelConfigFor returns the aspect row by name for admin UI rendering.
+// Returns nil if the store is unavailable or the aspect doesn't exist.
+func (b *Broker) getModelConfigFor(name string) *aspects.Aspect {
+	if store, ok := b.keyfileStore(); ok {
+		entry, err := store.Get(r.Context(), name)
+		if err != nil {
+			return nil
+		}
+		return entry
+	}
+	return nil
+}
+
+// getAgentList returns all agents from the roster.
+func (b *Broker) getAgentList(r *http.Request) ([]adminRosterAspect, error) {
+	rows := b.roster.List()
+	out := make([]adminRosterAspect, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, adminRosterAspect{
+			AspectState:     a,
+			DispatchEnabled: b.aspectDispatchEnabled(a.Name),
+		})
+	}
+	return out, nil
 }
