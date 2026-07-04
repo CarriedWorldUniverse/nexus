@@ -93,17 +93,39 @@ worker_status: {agent, role, personality, work_item_id,
 
 **Chat is the audit surface; files + refs are the data plane.** Handoff JSON lives in the work graph; artifacts pass by reference (cairn commit ids, paths); the **cairn line checkout is the shared workspace** (builder commits, tester/reviewer read the same line; evidence files ride alongside). Chat carries only human-readable summaries. No context service, no new store.
 
-## 9. Minimal status view (not the UI)
+## 9. Document register + operator approval gate
 
-One server-rendered page over `GET /api/admin/workers` + the work graph (deliberately boring; HTMX-style). The **full UI rethink is Phase 5**, designed against the running network. Requirements already banked: work-graph view, gate verdicts, blocked-items queue, operator-visual judgment queue.
+Specs/plans/designs are first-class, structured, lifecycle-managed — **never a pile of files in a folder**. A doc that isn't attached to a work-item with a status doesn't exist.
+
+```
+document: {id, kind: spec|plan|design|report, title, version,
+           status: draft|awaiting_approval|approved|approved_with_changes|rejected|superseded,
+           work_item_id,      -- every doc BELONGS to a job; orphans impossible
+           cairn_ref,         -- MD content lives in cairn (versioned, diffable)
+           approvals: [{by, verdict, comments, at}]}
+```
+
+- **Storage/structure split:** cairn stores the markdown (history + diffs, already there); the register is the queryable index with lifecycle. Finding = query by kind/status/stream, never folder-browsing.
+- **Approval is a work-item** (`role: operator-approval`) in the operator's queue — same graph, same verdict machinery: approve → dependents go ready (the doc rides into builder briefs as context, per §8); approve-with-changes → operator's inline edits commit to cairn as a new version, then proceed; reject → reasons become a rework item to the authoring role.
+- **Dispatch context lives here too:** builder briefs reference register doc ids; the funnel materialises them as files at spawn.
+- **Whose space it is:** the register + approval queue is the **operator + interface-AI (shadow) shared workbench** — this is where the two of them work on specs/plans together, *including* documents that originated in the orchestrator layer (a decomposition plan the orchestrator files surfaces here for the pair to review and refine before verdict). shadow has first-class read/draft/revise access from planning sessions; **verdicts are operator-only**. shadow refines, operator decides. The register API must therefore be reachable from croft, not internal to the orchestrator.
+
+## 9a. Operator console v0 (upgraded from "minimal status view")
+
+One boring server-rendered (HTMX-style) surface, two panes:
+1. **Approval queue** — rendered markdown, inline-editable, three verdict buttons.
+2. **Fleet + graph status** — `GET /api/admin/workers` + work-graph view (streams, gates, blocked items).
+
+The **full UI rethink remains Phase 5**, designed against the running network. Banked requirements: work-graph view, gate verdicts, blocked queue, operator-visual judgment queue (art/renders).
 
 ## 10. Build order
 
-1. `work_items` table + graph CRUD in the runs store  *(builder)*
-2. `Brief` extension + jobspec threading + funnel role-overlay/policy/skill-gating  *(builder ×2, parallel)*
-3. Pool leasing + cap  *(builder)*
-4. Worker status frames + `worker_status` table + `/api/admin/workers`  *(builder)*
-5. Orchestrator graph-drain + OnJobDone wake + auth preflight/alerts  *(builder, after 1+4)*
-6. Auth secret wiring + CLI version knob + CI image rebuild  *(infra)*
-7. Minimal status view  *(builder, last)*
+1. `work_items` table + graph CRUD (incl. cancel/requeue §2.1) in the runs store  *(builder)*
+2. `documents` register table + lifecycle API (§9)  *(builder, parallel with 1)*
+3. `Brief` extension + jobspec threading + funnel role-overlay/policy/skill-gating + doc-context materialisation  *(builder ×2, parallel)*
+4. Pool leasing + cap  *(builder)*
+5. Worker status frames + `worker_status` table + `/api/admin/workers`  *(builder)*
+6. Orchestrator graph-drain + OnJobDone wake + auth preflight/alerts + heartbeat auto-reap  *(builder, after 1+5)*
+7. Auth secret wiring + CLI version knob + CI image rebuild  *(infra)*
+8. Operator console v0: approval queue + fleet/graph status (§9a)  *(builder, after 2+5)*
 Each unit: bounded spec + acceptance criteria, gates per `ROLE-MODEL.md` §4. Built via the existing ticket-pipeline (shadow orchestrates) — the new network builds itself only after it exists.
