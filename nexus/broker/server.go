@@ -779,6 +779,9 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	// belong to the Frame because the Frame IS the Nexus.
 	b.registerAdmin(mux)
 
+	// HTMX admin UI routes — served at /admin/* with auth via operator JWT.
+	b.registerAdminRoutes(mux)
+
 	// Embedder-supplied peer-service routes (NEX-144). cmd/nexus uses
 	// this hook to mount ledger.HealthzHandler at /healthz/ledger on the
 	// existing HTTPS listener. Invoked after the broker's own routes so
