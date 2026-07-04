@@ -1,0 +1,20 @@
+== nexus --help (find central-md / roster read) ==
+    	path to the agora binary used for auto-spawn when aspect primary_surface=agora (falls back to NEXUS_AGORA env)
+    	comma-separated directories to scan for aspect homes (falls back to NEXUS_ASPECT_DIR env; disabled if neither set). The broker uses this as the source of truth for aspect homes (#21).
+    	aspect becomes stale after this gap without heartbeat (default 30s)
+== aspect roster from admin (if reachable) ==
+NAME                 STATUS   VERSION  PROVIDER         MODEL                   UPDATED
+anvil                active   7        openai           ornith                  2026-06-28 02:35:36
+builder-1            retired  1        codex-cli        default                 2026-06-07 20:12:20
+builder-2            retired  1        codex-cli        default                 2026-06-07 20:12:21
+dispatch-controller  retired  2                                                 2026-06-07 20:12:21
+forge                active   5        claude-code      claude-sonnet-4-6       2026-05-30 02:55:49
+harrow               active   6        ollama           gemma                   2026-06-06 02:56:51
+keel                 active   6        ollama           gemma                   2026-06-06 02:56:51
+keel-cli             active   1                                                 2026-05-11 19:23:13
+maren                active   6        antigravity-cli  Gemini 3.5 Flash (Low)  2026-06-09 18:44:39
+observer             active   1                                                 2026-06-06 22:30:43
+plumb                active   5        claude-code      claude-sonnet-4-6       2026-06-15 20:30:22
+plumb-w1             active   1        codex-cli        default                 2026-06-05 19:07:44
+shadow               active   2        claude-code      claude-opus-4-7         2026-06-06 02:56:51
+test-keel            active   1        claude-code      claude-opus-4-7         2026-05-11 08:05:18
