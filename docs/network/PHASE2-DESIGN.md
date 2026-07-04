@@ -79,7 +79,7 @@ worker_status: {agent, role, personality, work_item_id,
 
 ## 6. Frontier auth resilience
 
-- **Credential:** `claude setup-token` (operator, one-time browser flow) → k8s secret → `CLAUDE_CODE_OAUTH_TOKEN` injected into every frontier seat (orchestrator invocations, reviewer/security pods, croft). Kills the idle->8h expiry & the morning re-login.
+- **Credential:** `claude setup-token` (operator, one-time browser flow) → **almanac `SecureParameter`** (source of truth — AUDIT correction: the frontier token is *internal platform config*, almanac's domain; custodian is external-creds only) → k8s secret as delivery → `CLAUDE_CODE_OAUTH_TOKEN` in every frontier seat (orchestrator invocations, reviewer/security pods, croft). Kills the idle->8h expiry & the morning re-login.
 - **Fail-loud:** orchestrator preflight (§2) + `auth_ok/token_expires_at` in every heartbeat (§5) + alert on failure or near-expiry (loki-alert-bridge → operator). The queue holds; work never silently fails.
 
 ## 7. CLI version strategy
@@ -128,16 +128,20 @@ The **full UI rethink remains Phase 5**, designed against the running network. B
 | Document register | **ledger** (lifecycle/approvals) + **cairn** (MD content) + **commonplace** (approved-knowledge distillate) |
 | Artifacts / shared workspace | **cairn** |
 | Pool slot identities | **herald** (IdP) + **casket** (keys) — herald is DORMANT; see sequencing note |
-| Secrets (frontier token, creds) | **custodian** as source of truth; k8s secret as delivery |
-| Scheduled triggers (hermes) | **almanac** (VERIFY its scope first); CronJob remains the dumb timer |
+| Internal secrets + platform config (incl. frontier token) | **almanac** (`SecureParameter`) as source of truth; k8s secret as delivery — AUDIT-corrected from custodian |
+| External creds (git tokens, Drive OAuth) | **custodian** — its real domain (kind=git today; porter's Drive OAuth is its consumer-of-record) |
+| Scheduled triggers (hermes) | **k8s CronJob only** — AUDIT: no scheduling pillar exists anywhere in CWB; almanac is config/secrets, not a scheduler |
 | Base/fleet knowledge | **commonplace** (live) |
-| Backup of all of it | **porter** (already backs commonplace) |
+| Backup of all of it | **porter** (backup half is built + custodian-integrated; verify scope covers work-graph + register data) |
+| Agent web access (web_fetch/extract) | **lynxai → core CWB** (cwb-core supporting service; operator-confirmed a service, never an aspect; moves before nexus-ns cleanup) |
 
 Rules:
 1. **Consume where the product genuinely is the thing; never force-fit.** Ephemeral runtime state (heartbeats, pool leases) stays broker-local.
 2. **Dogfood-or-delete is now the pillar test.** The network is each pillar's consumer-of-record; a pillar with no consumer after this mapping is a delete candidate, not a freeze candidate.
 
 Sequencing guard: **herald revival must not block the pipeline** — v1 leases broker keyfiles (existing machinery), v2 swaps the identity source to herald behind the same seam.
+
+AUDIT finding that reshapes this section: **nexus's CWB-client integration already exists and is DARK** — custodian/almanac/cfgreconcile code is written and tested but disabled by default (gated on unset `*_GRPC_ADDR`, silent local fallback). The dogfood cutover is mostly *activate-and-cut-over*, not greenfield. nexus's internal reimplementations (embedded ledger.Service, the local FTS5 "knowledge" store, the AES-GCM credentials table, broker-minted identities) each retire as its pillar consumption goes live.
 
 ## 10a. Build order
 
@@ -147,6 +151,6 @@ Sequencing guard: **herald revival must not block the pipeline** — v1 leases b
 4. Pool leasing + cap  *(builder)*
 5. Worker status frames + `worker_status` table + `/api/admin/workers`  *(builder)*
 6. Orchestrator graph-drain + OnJobDone wake + auth preflight/alerts + heartbeat auto-reap  *(builder, after 1+5)*
-7. Auth wiring (**custodian**-sourced secret) + CLI version knob + CI image rebuild  *(infra)*
+7. Auth wiring (**almanac**-sourced secret) + CLI version knob + CI image rebuild (note: worker image is `PullNever` — CI must distribute images to nodes, not just push a registry)  *(infra)*
 8. Operator console v0: approval queue + fleet/graph status (§9a)  *(builder, after 2+5)*
 Each unit: bounded spec + acceptance criteria, gates per `ROLE-MODEL.md` §4. Built via the existing ticket-pipeline (shadow orchestrates) — the new network builds itself only after it exists.
