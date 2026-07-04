@@ -15,7 +15,7 @@ cairn hard-depends on herald (SSH auth: casket fingerprint → agent lookup) + l
 herald/ledger being dependency-free makes them trivially relocatable; cairn slots on top.
 
 ## Hard problems found (must solve before deploy)
-1. **arm64 images (BLOCKER-to-verify).** robo-dog = GB10 arm64. cwb images were on a `feat/multi-arch-image` branch (~Jun 27) but NOT pre-pulled on robo-dog (`crictl images` empty). MUST confirm arm64 manifests exist (or build+push them) before anything schedules.
+1. **arm64 images — RESOLVED 2026-07-04.** The deployed sha tags (cairn:sha-ae4e9a1, herald:sha-2a9b631, ledger:sha-c2c4c6f) are **amd64-only** and will NOT run on robo-dog. BUT the **`:main` tag for all three is a proper multi-arch OCI index (amd64+arm64)** — verified by a live `k3s ctr pull` of `ledger:main` on robo-dog (aarch64): pulled clean, `linux/amd64,linux/arm64`. → **Use `:main` images for the sovereign node.** Caveat: `:main` is NEWER than cwb-core's deployed shas, so the robo-dog stack runs slightly ahead — fine for a fresh node, note minor behavior deltas at cutover. No image build needed.
 2. **mTLS cert SANs.** `cairn-client-tls` SAN = `cairn.cwb.svc` / `.cluster.local` / `cairn` — NO localhost / tailnet IP. Two fixes:
    - *Internal* (the 3 dialing each other on the same host, hostNetwork → shared localhost): `hostAliases` mapping `herald.cwb.svc`/`ledger.cwb.svc`/`cairn.cwb.svc` → 127.0.0.1 so certs verify.
    - *External* (croft / pool builders over tailnet at 100.92.111.3): either the same hostAlias trick client-side, OR re-issue the cairn cert with a tailnet SAN. Decide.
