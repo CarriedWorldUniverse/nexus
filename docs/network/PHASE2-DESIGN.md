@@ -39,6 +39,17 @@ Not a CronJob-cadence drain (pays latency at every hop of every stream), not an 
 - **Body:** evolve `-drain` mode (`runtime/cmd/agentfunnel/drain.go`) — the orchestrate procedure exists; retarget it from Jira-snapshot to graph-drain, keep the cheap gate (don't spend frontier tokens on an empty graph).
 - **Preflight (fail-loud):** every wake starts with an auth probe (§6). Auth dead → HOLD the queue (items stay queued, nothing fails) + alert operator via chat + loki-alert-bridge. A stalled pipeline pages; it never waits to be noticed.
 
+## 2.1 Terminate-and-requeue (built-in, not an afterthought)
+
+`cancel(work_item, requeue=true)` — kill the k8s Job, release the pool lease, mark the **run** `cancelled`, set the **work_item** back to **`queued`** with the termination reason recorded in `prior_results` (a redispatch knows it was cut short and why). `requeue=false` = abandon: item → `cancelled`, dependents → `blocked` → operator escalation.
+
+Callers:
+1. **Operator** — chat command / `nexus work cancel <id>` / admin API (reuse+extend the existing run-cancel RPC).
+2. **Orchestrator judgment** — gate evidence says a stream is wrong → cut it early rather than let it finish.
+3. **Orchestrator automation** — stale heartbeat (§5) > N min → reap Job, requeue item; alert only on second strike. Recovery before escalation.
+
+Half-done work is preserved: the terminated builder's cairn line keeps its commits; the requeued item redispatches onto the same line so work continues (or the orchestrator explicitly abandons the line). Nothing partial reaches main — only the orchestrator folds, only on all-gates-pass.
+
 ## 3. Role-at-spawn
 
 - **`Brief` gains:** `Role`, `WorkItemID`, `SkillAllowlist []string`, `PolicyFragment` (ToolPolicy overlay), `Personality string`. Transport unchanged (brief ConfigMap → `-brief-file`).
