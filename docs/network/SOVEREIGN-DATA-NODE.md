@@ -53,3 +53,8 @@ Proven: arm64 :main images boot on GB10; /data hostPath works; mesh TLS certs ve
 6. **GitHub mirror CronJob** (per-repo mirror push).
 
 Nexus-rebuild tie-in: this ledger IS the work-graph store (MIGRATION M1/M2) — point nexus's ledger consumption here.
+
+## herald identity root MIGRATED 2026-07-04 (operator: "migrate")
+Copied cwb-core's live herald.db (1.3MB) → robo-dog /data/sovereign/herald (quiesced herald-rd to 0 during copy; single db file, no WAL sidecar). Injected persistent identity config into herald-rd: HERALD_SIGNING_KEY + HERALD_GENESIS_OWNER_PASSWORD (both from herald-secrets), HERALD_ISSUER (dmonextreme gateway, unchanged for token continuity), HERALD_GATEWAY_URL, HERALD_OIDC_CLIENTS. Verified: clean boot (no ephemeral-key warning, no genesis-skip), and DB content — 3 orgs (cwb-admin/carriedworld/docs), 5 users, 10 scope_grants, 2952 refresh_tokens. herald-rd is now the real identity authority. NOTE: HERALD_ISSUER still points at the dMon gateway — revisit if the gateway also moves; for now keeps token `iss` continuity through cutover.
+
+REMAINING: ledger/cairn data (fresh-ok or migrate — minor); cutover (Service selector flips herald/ledger/cairn → *-rd, then cairn-ssh LB); remove 3 containers from cwb-core (disruptive monolith Recreate); GitHub mirror cronjob.
