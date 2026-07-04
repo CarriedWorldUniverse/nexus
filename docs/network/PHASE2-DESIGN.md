@@ -118,14 +118,35 @@ One boring server-rendered (HTMX-style) surface, two panes:
 
 The **full UI rethink remains Phase 5**, designed against the running network. Banked requirements: work-graph view, gate verdicts, blocked queue, operator-visual judgment queue (art/renders).
 
-## 10. Build order
+## 10. Nexus as a CWB consumer (dogfood mapping)
 
-1. `work_items` table + graph CRUD (incl. cancel/requeue §2.1) in the runs store  *(builder)*
-2. `documents` register table + lifecycle API (§9)  *(builder, parallel with 1)*
+**Context (operator, 2026-07-05):** nexus came first; CWB grew from its expanding needs. The rework makes nexus a proper CONSUMER of CWB products, with this architecture as the core of the adjustment — use our own products, don't just have them.
+
+| Component | CWB product |
+|---|---|
+| Work graph / work_items | **ledger** (the tracker — cairn already files PRs as ledger issues); a work-item is a structured ledger issue with deps/status/handoff |
+| Document register | **ledger** (lifecycle/approvals) + **cairn** (MD content) + **commonplace** (approved-knowledge distillate) |
+| Artifacts / shared workspace | **cairn** |
+| Pool slot identities | **herald** (IdP) + **casket** (keys) — herald is DORMANT; see sequencing note |
+| Secrets (frontier token, creds) | **custodian** as source of truth; k8s secret as delivery |
+| Scheduled triggers (hermes) | **almanac** (VERIFY its scope first); CronJob remains the dumb timer |
+| Base/fleet knowledge | **commonplace** (live) |
+| Backup of all of it | **porter** (already backs commonplace) |
+
+Rules:
+1. **Consume where the product genuinely is the thing; never force-fit.** Ephemeral runtime state (heartbeats, pool leases) stays broker-local.
+2. **Dogfood-or-delete is now the pillar test.** The network is each pillar's consumer-of-record; a pillar with no consumer after this mapping is a delete candidate, not a freeze candidate.
+
+Sequencing guard: **herald revival must not block the pipeline** — v1 leases broker keyfiles (existing machinery), v2 swaps the identity source to herald behind the same seam.
+
+## 10a. Build order
+
+1. Work graph CRUD (incl. cancel/requeue §2.1) on a **ledger adapter** (work-items as structured ledger issues); runs store keeps runtime-only state  *(builder)*
+2. Document register lifecycle on **ledger + cairn** (§9)  *(builder, parallel with 1)*
 3. `Brief` extension + jobspec threading + funnel role-overlay/policy/skill-gating + doc-context materialisation  *(builder ×2, parallel)*
 4. Pool leasing + cap  *(builder)*
 5. Worker status frames + `worker_status` table + `/api/admin/workers`  *(builder)*
 6. Orchestrator graph-drain + OnJobDone wake + auth preflight/alerts + heartbeat auto-reap  *(builder, after 1+5)*
-7. Auth secret wiring + CLI version knob + CI image rebuild  *(infra)*
+7. Auth wiring (**custodian**-sourced secret) + CLI version knob + CI image rebuild  *(infra)*
 8. Operator console v0: approval queue + fleet/graph status (§9a)  *(builder, after 2+5)*
 Each unit: bounded spec + acceptance criteria, gates per `ROLE-MODEL.md` §4. Built via the existing ticket-pipeline (shadow orchestrates) — the new network builds itself only after it exists.
