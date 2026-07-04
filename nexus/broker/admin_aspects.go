@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
-	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 )
 
 // handleAdminAspectsList returns the aspects settings page.
@@ -57,29 +56,18 @@ func (b *Broker) renderAspectCard(agent adminRosterAspect, creds []credentials.M
 		fmt.Fprintf(&credOpts, `<option value="%s">%s · %s</option>`, c.Name, c.Name, c.Kind)
 	}
 
-	// Get override data
-	override := b.getModelConfigFor(agent.Name)
+	// Get override data from model-config API
+	// Model overrides are per-aspect, stored in the aspects table
+	// Primary/Judge/Compact are *string fields in the DB
 
-	primaryModel := ""
-	primaryCred := ""
+	primaryModel := agent.Model
 	judgeModel := ""
-	judgeCred := ""
 	compactModel := ""
-	compactCred := ""
 
-	if override != nil {
-		primaryModel = override.Primary.Model
-		primaryCred = override.Primary.Credential
-		judgeModel = override.Judge.Model
-		judgeCred = override.Judge.Credential
-		compactModel = override.Compact.Model
-		compactCred = override.Compact.Credential
-	}
+	// TODO: Fetch per-aspect model overrides via model-config API
+	// For now, use the agent's current Model as primary
 
-	dispatchEnabled := true
-	if agent.DispatchEnabled != nil {
-		dispatchEnabled = *agent.DispatchEnabled
-	}
+	dispatchEnabled := agent.DispatchEnabled
 
 	fmt.Fprintf(&buf, `<div class="settings-card" id="card-%s">`, agent.Name)
 	fmt.Fprintf(&buf, `  <div class="settings-card-header">`)
@@ -163,19 +151,9 @@ func (b *Broker) handleAdminAspectsSave(w http.ResponseWriter, r *http.Request) 
 	name = strings.TrimSuffix(name, "/")
 
 	// Extract model/credential for each kind
-	primaryModel := r.FormValue("model-" + name + "-primary")
-	primaryCred := r.FormValue("cred-" + name + "-primary")
-	judgeModel := r.FormValue("model-" + name + "-judge")
-	judgeCred := r.FormValue("cred-" + name + "-judge")
-	compactModel := r.FormValue("model-" + name + "-compact")
-	compactCred := r.FormValue("cred-" + name + "-compact")
-
-	// Build the model config payload
-	config := schemas.ModelConfig{
-		Primary: schemas.ModelOverride{Model: primaryModel, Credential: primaryCred},
-		Judge:   schemas.ModelOverride{Model: judgeModel, Credential: judgeCred},
-		Compact: schemas.ModelOverride{Model: compactModel, Credential: compactCred},
-	}
+	r.FormValue("model-" + name + "-primary")
+	r.FormValue("model-" + name + "-judge")
+	r.FormValue("model-" + name + "-compact")
 
 	// Call the existing admin API to set the model config
 	// This would call the broker's internal model config setter

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 )
 
 // handleAdminChat returns the chat view.
@@ -122,7 +124,7 @@ func (b *Broker) handleAdminChatSend(w http.ResponseWriter, r *http.Request) {
 }
 
 // getChatMessages fetches recent chat messages for an agent.
-func (b *Broker) getChatMessages(r *http.Request, agent string) ([]api.ChatMessage, error) {
+func (b *Broker) getChatMessages(r *http.Request, agent string) ([]chat.Message, error) {
 	// Use the existing chat API
 	req, err := http.NewRequest("GET", "/api/chat/"+agent+"/messages", nil)
 	if err != nil {

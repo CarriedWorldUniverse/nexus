@@ -579,7 +579,7 @@ func (b *Broker) getCredentials(r *http.Request) ([]credentials.Metadata, error)
 // Returns nil if the store is unavailable or the aspect doesn't exist.
 func (b *Broker) getModelConfigFor(name string) *aspects.Aspect {
 	if store, ok := b.keyfileStore(); ok {
-		entry, err := store.Get(r.Context(), name)
+		entry, err := store.Get(context.Background(), name)
 		if err != nil {
 			return nil
 		}
