@@ -58,3 +58,17 @@ Nexus-rebuild tie-in: this ledger IS the work-graph store (MIGRATION M1/M2) — 
 Copied cwb-core's live herald.db (1.3MB) → robo-dog /data/sovereign/herald (quiesced herald-rd to 0 during copy; single db file, no WAL sidecar). Injected persistent identity config into herald-rd: HERALD_SIGNING_KEY + HERALD_GENESIS_OWNER_PASSWORD (both from herald-secrets), HERALD_ISSUER (dmonextreme gateway, unchanged for token continuity), HERALD_GATEWAY_URL, HERALD_OIDC_CLIENTS. Verified: clean boot (no ephemeral-key warning, no genesis-skip), and DB content — 3 orgs (cwb-admin/carriedworld/docs), 5 users, 10 scope_grants, 2952 refresh_tokens. herald-rd is now the real identity authority. NOTE: HERALD_ISSUER still points at the dMon gateway — revisit if the gateway also moves; for now keeps token `iss` continuity through cutover.
 
 REMAINING: ledger/cairn data (fresh-ok or migrate — minor); cutover (Service selector flips herald/ledger/cairn → *-rd, then cairn-ssh LB); remove 3 containers from cwb-core (disruptive monolith Recreate); GitHub mirror cronjob.
+
+## CUTOVER DONE 2026-07-04 (fresh ledger, migrated cairn repo)
+- **cairn data migrated:** full consistent DB set (cairn.db + 4.1MB WAL + shm) + the `doc-store` repo (id 2d1efbec…) copied to /data/sovereign/cairn. (First copy caught a bug — grabbed only the 69KB main db without the WAL where the real data lived; redone with the complete set.) cairn-rd boots clean, serves the repo.
+- **ledger:** fresh (work-graph is new).
+- **Service cutover (reversible):** flipped selectors `ledger`/`herald`/`cairn`/`cairn-ssh` from app=cwb-core → app=*-rd. Endpoints now the robo-dog pods (10.42.2.x). cairn-ssh LB ext-ip 100.92.111.3 (robo-dog local). Verified: cairn-rd reaches herald.cwb.svc + ledger.cwb.svc (now the -rd pods), repo present.
+- **GitHub mirror:** CronJob `cairn-github-mirror` (cwb ns, robo-dog, `23 */6 * * *`) — reads cairn.db for id→slug, pushes each bare repo to `CarriedWorldUniverse/cairn-mirror-<slug>` (auto-creates). PROVEN: created `cairn-mirror-doc-store` on GitHub + pushed main. Script in cm `cairn-mirror-script`, PAT in secret `cairn-mirror-pat`.
+
+## DEFERRED (deliberately): cwb-core container removal
+The cwb-core cairn/herald/ledger containers are now ORPHANED (no service points at them) but still running — this is intentional: it's the **instant rollback** (flip selectors back) while the robo-dog stack bakes under real use. Removing them = editing cwb-core deploy → full monolith Recreate (brief CWB-wide blip) + burns the rollback bridge. Do it after a confidence bake, NOT at cutover. Then retire cairn-data/herald-data/ledger-data PVCs on dMon after a backup.
+
+## FOLLOW-UPS
+- Commit the -rd Deployments + flipped Services + mirror CronJob to `carriedworld-cloud` (currently live-only = unreproducible, the M0.1 lesson).
+- HERALD_ISSUER still points at the dMon gateway — fine for now (token continuity); revisit if the gateway relocates.
+- This ledger IS the nexus work-graph store (MIGRATION M1/M2) — point nexus's ledger consumption here.
