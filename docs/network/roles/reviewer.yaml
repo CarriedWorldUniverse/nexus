@@ -1,0 +1,12 @@
+# Role: reviewer — correctness/quality/convention read. Cooperative stance.
+role: reviewer
+tier: frontier            # swing lane: flip to Ornith only after it proves it catches semantic misses
+provider_hint: claude-api
+writes: none              # read-only; separation of duties
+skills:
+  - code-review
+  - read
+  - cairn-diff-blame
+handoff:
+  receives: builder/tester results + the cairn line diff
+  returns: verdict pass|reject with findings most-severe first

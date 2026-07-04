@@ -1,0 +1,17 @@
+# Role: builder — bounded execution. One specced unit per work-item.
+role: builder
+tier: local-ornith        # bridle native-API (openai provider -> vllm-ornith /v1)
+provider_hint: openai/ornith
+writes: own cairn line + task workdir only
+skills:
+  - read-write-edit
+  - bash
+  - glob-grep
+  - cairn-line            # express/commit on the task line; never fold, never push main
+  - verify                # MUST run the change (tests/build/curl) before claiming done
+handoff:
+  receives: work_item with task_spec + acceptance_criteria + cairn_line
+  returns: result with diff/commit artifacts + self-verify evidence
+constraints:
+  - task must be bounded and specced; reject open-ended items back to orchestrator
+  - never claim done without runnable evidence (proven pattern: tests-first, fix, re-run)

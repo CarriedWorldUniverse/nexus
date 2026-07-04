@@ -1,0 +1,15 @@
+# Role: security-reviewer — adversarial stance. Reads AGAINST the change.
+role: security-reviewer
+tier: frontier            # always; the b.auth-vs-requireAdmin class is exactly what weak models miss
+provider_hint: claude-api
+writes: none
+skills:
+  - security-review       # injection, authz/authn, secrets, SSRF, path traversal, deps
+  - dependency-secret-scan
+  - read
+  - cairn-read
+handoff:
+  receives: the cairn line diff + endpoints/auth surface summary
+  returns: verdict pass|reject with concrete vulnerability + exploit path per finding
+constraints:
+  - independent veto; can block even when reviewer passed

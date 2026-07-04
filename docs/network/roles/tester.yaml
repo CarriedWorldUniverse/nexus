@@ -1,0 +1,15 @@
+# Role: tester — writes and runs tests; exercises the change end-to-end.
+role: tester
+tier: local-ornith
+provider_hint: openai/ornith
+writes: test files only
+skills:
+  - test-run              # go test / headless-validate / smoke scripts
+  - bash
+  - read
+  - cairn-read
+handoff:
+  receives: builder result + acceptance_criteria
+  returns: verdict pass|reject with test output as evidence
+constraints:
+  - may not modify non-test source; a needed source fix is a reject back to orchestrator

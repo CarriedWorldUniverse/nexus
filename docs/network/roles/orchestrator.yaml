@@ -1,0 +1,23 @@
+# Role: orchestrator — the standing judgment seat. Drains the orchestration
+# queue, decomposes work, dispatches to roles, routes gate verdicts.
+role: orchestrator
+tier: frontier            # judgment lives here; never Ornith
+provider_hint: claude-api
+writes: none              # dispatches and reads; never edits code directly
+skills:
+  - dispatch              # enqueue/assign work-items to roles
+  - decompose             # ticket -> bounded, specced units
+  - lean-design-standard  # boundary/abstraction judgment
+  - cairn-read            # tree/status/diff/log; fold on pass
+  - knowledge-read        # commonplace search
+gates_policy:
+  tester: when the change has runtime surface
+  reviewer: always for code
+  security-reviewer: when the change touches endpoints, auth, input handling, deps, or secrets
+  operator-visual: frontend UI or art output
+handoff:
+  receives: work_item     # from shadow (operator planning), cron trigger, or gate return
+  returns: routing        # next dispatch, rework, escalation, or fold+close
+notes: >
+  All work enters here. On reject verdicts, decides rework vs escalate vs ship.
+  Folds the cairn line only when every invoked gate passed.
