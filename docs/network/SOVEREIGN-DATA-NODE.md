@@ -34,3 +34,22 @@ herald/ledger being dependency-free makes them trivially relocatable; cairn slot
 9. Remove herald/ledger/cairn containers from cwb-core; retire the dMon PVCs after backup.
 
 Intersects the rebuild: ledger here is ALSO the work-graph store (MIGRATION M1/M2). Build the sovereign node such that nexus's ledger consumption points at THIS ledger.
+
+## STAND-UP PROVEN 2026-07-04 (non-destructive, alongside cwb-core)
+
+All three services deployed on robo-dog and validated — every technical unknown resolved:
+- **ledger-rd** (svc ledger-rd:8081) — gRPC serving, fresh ledger.db on /data/sovereign/ledger.
+- **herald-rd** (svc herald-rd:8098/8099) — serving; surfaced the REQUIRED identity migration (fresh herald = ephemeral signing key + "genesis skipped, no admin org" → no identities). herald.db + signing key MUST migrate from cwb-core (or re-seed genesis + re-mint), else auth chain is empty.
+- **cairn-rd** (ssh:2222 grpc:8102 http:8100) — pointed at the REAL herald.cwb.svc + ledger.cwb.svc, connected over mTLS (cert SANs matched cross-node), serving. Fresh cairn.db + repos on /data. Reuses cairn-secrets/ssh_host_key for stable host identity.
+
+Proven: arm64 :main images boot on GB10; /data hostPath works; mesh TLS certs verify; normal pod networking + cross-node ClusterIP + cluster DNS all work on robo-dog (the ollama hostNetwork was egress-only). The cert-SAN problem DISSOLVED — services use standard .cwb.svc names, existing certs match.
+
+## Remaining sequence (no unknowns; 2 deliberate decisions)
+1. **herald identity-root migration (REQUIRED, security-sensitive):** migrate cwb-core herald.db + HERALD_SIGNING_KEY (+ org seed) to /data/sovereign/herald, OR re-seed genesis + re-mint agent identities. DECISION: migrate vs fresh.
+2. **ledger + cairn data:** ledger issues (fresh-ok since work-graph is new, or migrate history); cairn repos (fresh + git pull from GitHub, or copy the 1 old repo). DECISION: migrate vs fresh.
+3. **Cutover (the clean switch):** flip Service selectors `herald`/`ledger`/`cairn` from app=cwb-core → app=*-rd. Clients keep using .cwb.svc names, certs still match, robo-dog pods serve. Verify each.
+4. **Tailnet:** flip cairn-ssh LB selector → cairn-rd (already on robo-dog node 100.92.111.3).
+5. **Remove** herald/ledger/cairn containers from cwb-core (DISRUPTIVE: full monolith Recreate — brief CWB restart). Retire dMon PVCs after backup.
+6. **GitHub mirror CronJob** (per-repo mirror push).
+
+Nexus-rebuild tie-in: this ledger IS the work-graph store (MIGRATION M1/M2) — point nexus's ledger consumption here.
