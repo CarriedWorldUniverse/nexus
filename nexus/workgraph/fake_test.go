@@ -224,6 +224,14 @@ func (f *fakeLedger) GetOrg(_ context.Context, in *cwbv1.GetOrgRequest, _ ...grp
 	return &cwbv1.GetOrgResponse{Org: &cwbv1.Organisation{Slug: in.GetSlug()}}, nil
 }
 
+func (f *fakeLedger) CreateUser(_ context.Context, _ *cwbv1.CreateUserRequest, _ ...grpc.CallOption) (*cwbv1.CreateUserResponse, error) {
+	return &cwbv1.CreateUserResponse{}, nil
+}
+
+func (f *fakeLedger) AddMember(_ context.Context, _ *cwbv1.AddMemberRequest, _ ...grpc.CallOption) (*cwbv1.AddMemberResponse, error) {
+	return &cwbv1.AddMemberResponse{}, nil
+}
+
 // newTestClient builds a Client wired directly to a fresh fakeLedger — no
 // network/dial involved (fakeLedger satisfies issueClient/projectClient/
 // adminClient structurally).

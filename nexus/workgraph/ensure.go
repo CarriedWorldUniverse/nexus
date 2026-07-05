@@ -3,6 +3,7 @@ package workgraph
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	cwbv1 "github.com/CarriedWorldUniverse/cwb-proto/gen/go/cwb/v1"
 	"google.golang.org/grpc/codes"
@@ -55,17 +56,49 @@ func (c *Client) EnsureProject(ctx context.Context) error {
 }
 
 func (c *Client) ensureOrg(ctx context.Context) error {
+	// 1. Org exists (create if absent).
 	_, err := c.admin.GetOrg(c.ctx(ctx), &cwbv1.GetOrgRequest{Slug: c.Org})
-	if err == nil {
-		return nil
+	if err != nil {
+		if !isNotFound(err) {
+			return fmt.Errorf("workgraph.EnsureProject: get org %q: %w", c.Org, err)
+		}
+		if _, err := c.admin.CreateOrg(c.ctx(ctx), &cwbv1.CreateOrgRequest{Slug: c.Org, Name: c.Org}); err != nil && !isAlreadyExists(err) {
+			return fmt.Errorf("workgraph.EnsureProject: create org %q: %w", c.Org, err)
+		}
 	}
-	if status.Code(err) != codes.NotFound {
-		return fmt.Errorf("workgraph.EnsureProject: get org %q: %w", c.Org, err)
+	// 2. Caller is a member (project creation requires it). Always ensured,
+	// not only on first org creation — a pre-existing org may still lack this
+	// caller as a member. Both create+add are idempotent. Subject is the
+	// accountable actor for the work graph.
+	if _, err := c.admin.CreateUser(c.ctx(ctx), &cwbv1.CreateUserRequest{Id: c.Subject, Kind: "ai"}); err != nil && !isAlreadyExists(err) {
+		return fmt.Errorf("workgraph.EnsureProject: create user %q: %w", c.Subject, err)
 	}
-	if _, err := c.admin.CreateOrg(c.ctx(ctx), &cwbv1.CreateOrgRequest{Slug: c.Org, Name: c.Org}); err != nil {
-		return fmt.Errorf("workgraph.EnsureProject: create org %q: %w", c.Org, err)
+	if _, err := c.admin.AddMember(c.ctx(ctx), &cwbv1.AddMemberRequest{Slug: c.Org, UserId: c.Subject, Role: "owner"}); err != nil && !isAlreadyExists(err) {
+		return fmt.Errorf("workgraph.EnsureProject: add member %q to %q: %w", c.Subject, c.Org, err)
 	}
 	return nil
+}
+
+// isAlreadyExists reports whether err signals a resource that already exists
+// (so an idempotent create can ignore it). Like isNotFound, the ledger does
+// not always use codes.AlreadyExists — match the code and the message.
+func isAlreadyExists(err error) bool {
+	if status.Code(err) == codes.AlreadyExists {
+		return true
+	}
+	m := strings.ToLower(status.Convert(err).Message())
+	return strings.Contains(m, "already exists") || strings.Contains(m, "already a member") || strings.Contains(m, "duplicate") || strings.Contains(m, "unique constraint")
+}
+
+// isNotFound reports whether err signals an absent resource. The sovereign
+// ledger does not always use codes.NotFound — GetOrg on a missing org
+// returns codes.Internal with a "not found" message — so match both the
+// clean code and the message substring.
+func isNotFound(err error) bool {
+	if status.Code(err) == codes.NotFound {
+		return true
+	}
+	return strings.Contains(strings.ToLower(status.Convert(err).Message()), "not found")
 }
 
 func (c *Client) ensureProjectKey(ctx context.Context) error {

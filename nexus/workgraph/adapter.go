@@ -46,7 +46,7 @@ var ledgerToStatus = map[string]Status{
 func (c *Client) CreateWorkItem(ctx context.Context, wi WorkItem) (string, error) {
 	req := &cwbv1.CreateIssueRequest{
 		Project:          c.Project,
-		Type:             "task",
+		Type:             "Task",
 		Summary:          summarize(wi),
 		Description:      wi.TaskSpec,
 		DefinitionOfDone: strings.Join(wi.AcceptanceCriteria, "\n"),

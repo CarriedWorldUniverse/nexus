@@ -5,6 +5,8 @@ import (
 
 	cwbv1 "github.com/CarriedWorldUniverse/cwb-proto/gen/go/cwb/v1"
 	"google.golang.org/grpc"
+	"strings"
+
 	"google.golang.org/grpc/metadata"
 )
 
@@ -38,6 +40,8 @@ type projectClient interface {
 type adminClient interface {
 	CreateOrg(ctx context.Context, in *cwbv1.CreateOrgRequest, opts ...grpc.CallOption) (*cwbv1.CreateOrgResponse, error)
 	GetOrg(ctx context.Context, in *cwbv1.GetOrgRequest, opts ...grpc.CallOption) (*cwbv1.GetOrgResponse, error)
+	CreateUser(ctx context.Context, in *cwbv1.CreateUserRequest, opts ...grpc.CallOption) (*cwbv1.CreateUserResponse, error)
+	AddMember(ctx context.Context, in *cwbv1.AddMemberRequest, opts ...grpc.CallOption) (*cwbv1.AddMemberResponse, error)
 }
 
 // Client is the work-graph adapter: a gRPC client to the sovereign ledger,
@@ -56,6 +60,12 @@ type Client struct {
 	// Project is the ledger project key work items are created under
 	// (see EnsureProject).
 	Project string
+	// Scopes are the cwb-scopes asserted on every RPC. On the direct mesh
+	// path (no gateway) the client self-asserts scopes; the mTLS cert is
+	// the trust boundary. The orchestrator manages the whole graph
+	// (create/transition/cancel + project bootstrap) so it holds
+	// issue:admin, the superset for ordinary issue scopes.
+	Scopes []string
 }
 
 // New builds a Client from an established gRPC connection to the sovereign
@@ -70,6 +80,7 @@ func New(conn grpc.ClientConnInterface, org, subject, project string) *Client {
 		Org:     org,
 		Subject: subject,
 		Project: project,
+		Scopes:  []string{"issue:admin"},
 	}
 }
 
@@ -77,7 +88,11 @@ func New(conn grpc.ClientConnInterface, org, subject, project string) *Client {
 // (project creation in particular reads organisation from this context, not
 // the request body — see cwb-proto's CreateProjectRequest comment).
 func (c *Client) ctx(ctx context.Context) context.Context {
-	return metadata.AppendToOutgoingContext(ctx, "cwb-subject", c.Subject, "cwb-org", c.Org)
+	ctx = metadata.AppendToOutgoingContext(ctx, "cwb-subject", c.Subject, "cwb-org", c.Org)
+	if len(c.Scopes) > 0 {
+		ctx = metadata.AppendToOutgoingContext(ctx, "cwb-scopes", strings.Join(c.Scopes, " "))
+	}
+	return ctx
 }
 
 const defaultActor = "nexus-workgraph"
