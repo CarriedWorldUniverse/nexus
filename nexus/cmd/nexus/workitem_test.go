@@ -73,6 +73,34 @@ func TestParseWorkitemCreateArgs_FlagsOverrideEnv(t *testing.T) {
 	}
 }
 
+// TestParseWorkitemCreateArgs_Repo covers the Phase 4 "real REPO tickets"
+// --repo flag (nexus workitem create --repo <owner/name>).
+func TestParseWorkitemCreateArgs_Repo(t *testing.T) {
+	cfg, err := parseWorkitemCreateArgs([]string{
+		"--role", "builder", "--task", "x", "--criteria", "y",
+		"--repo", "CarriedWorldUniverse/nexus",
+	})
+	if err != nil {
+		t.Fatalf("parseWorkitemCreateArgs: %v", err)
+	}
+	if cfg.Repo != "CarriedWorldUniverse/nexus" {
+		t.Errorf("Repo = %q, want CarriedWorldUniverse/nexus", cfg.Repo)
+	}
+}
+
+// TestParseWorkitemCreateArgs_RepoDefaultsEmpty: absent --repo must default
+// to "" (respond-only work, no repo/branch/PR gate), unchanged from before
+// this flag existed.
+func TestParseWorkitemCreateArgs_RepoDefaultsEmpty(t *testing.T) {
+	cfg, err := parseWorkitemCreateArgs([]string{"--role", "builder", "--task", "x", "--criteria", "y"})
+	if err != nil {
+		t.Fatalf("parseWorkitemCreateArgs: %v", err)
+	}
+	if cfg.Repo != "" {
+		t.Errorf("Repo = %q, want empty default", cfg.Repo)
+	}
+}
+
 func TestParseWorkitemCreateArgs_Help(t *testing.T) {
 	_, err := parseWorkitemCreateArgs([]string{"--help"})
 	if !errors.Is(err, flag.ErrHelp) {
@@ -174,6 +202,21 @@ func TestBuildWorkItem_MapsRoleAndFields(t *testing.T) {
 	if wi.Role != "builder" || wi.TaskSpec != "do the thing" ||
 		len(wi.AcceptanceCriteria) != 2 || wi.AcceptanceCriteria[0] != "builds" || wi.AcceptanceCriteria[1] != "tests pass" {
 		t.Errorf("wi = %+v, want role/task/criteria mapped straight through", wi)
+	}
+}
+
+// TestBuildWorkItem_MapsRepo: buildWorkItem must carry cfg.Repo straight
+// onto workgraph.WorkItem.Repo (Phase 4 "real REPO tickets").
+func TestBuildWorkItem_MapsRepo(t *testing.T) {
+	wi, err := buildWorkItem(&workitemCreateConfig{
+		Role: "builder", Task: "fix the bug", Criteria: []string{"builds"},
+		Repo: "CarriedWorldUniverse/nexus",
+	})
+	if err != nil {
+		t.Fatalf("buildWorkItem: %v", err)
+	}
+	if wi.Repo != "CarriedWorldUniverse/nexus" {
+		t.Errorf("Repo = %q, want CarriedWorldUniverse/nexus", wi.Repo)
 	}
 }
 

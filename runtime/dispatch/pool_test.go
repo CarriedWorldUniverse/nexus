@@ -427,6 +427,69 @@ func TestSubmitPool_JobEnvCarriesRoleWorkItemPersonality(t *testing.T) {
 	}
 }
 
+// TestSubmitPoolItemThreadsRepo covers the Phase 4 "real REPO tickets" gap:
+// PoolItem.Repo must reach the leased Brief and, from there, the Job's
+// -repo arg (jobspec.go's builderArgs) exactly like named dispatch's
+// Brief.Repo already does — see runtime/dispatch/README.md "The pool
+// model" and the orchestrator's dispatchOne (drain.go). Branch is
+// deliberately NOT set here: it always falls back to the builder/<ticket>
+// convention (ticket == WorkItemID for pool dispatch), unchanged.
+func TestSubmitPoolItemThreadsRepo(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _ := newPoolFixture(fk)
+
+	if _, err := r.SubmitPoolItem(context.Background(), dispatch.PoolItem{
+		Role:       "builder",
+		Task:       "do work",
+		WorkItemID: "wi-repo-1",
+		Repo:       "CarriedWorldUniverse/nexus",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fk.jobObjs) != 1 {
+		t.Fatalf("jobs = %d, want 1", len(fk.jobObjs))
+	}
+	c := fk.jobObjs[0].Spec.Template.Spec.Containers[0]
+	if !argValueEquals(c.Args, "-repo", "CarriedWorldUniverse/nexus") {
+		t.Errorf("args missing -repo: %v", c.Args)
+	}
+	if !argValueEquals(c.Args, "-ticket", "wi-repo-1") {
+		t.Errorf("args missing -ticket: %v", c.Args)
+	}
+	if !argValueEquals(c.Args, "-branch", "") {
+		t.Errorf("args should carry empty -branch (falls back to builder/<ticket> convention): %v", c.Args)
+	}
+}
+
+// TestSubmitPoolWithoutRepoReproducesRespondOnlyBehavior: a PoolItem with no
+// Repo (the zero value, and every pre-Phase-4 caller) must produce an empty
+// -repo arg — no accidental repo/branch/PR-gate activation for respond-only
+// pool work.
+func TestSubmitPoolWithoutRepoReproducesRespondOnlyBehavior(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _ := newPoolFixture(fk)
+
+	if _, err := r.SubmitPool(context.Background(), "builder", "do work", "wi-norepo", ""); err != nil {
+		t.Fatal(err)
+	}
+	c := fk.jobObjs[0].Spec.Template.Spec.Containers[0]
+	if !argValueEquals(c.Args, "-repo", "") {
+		t.Errorf("args should carry empty -repo, got: %v", c.Args)
+	}
+}
+
+// argValueEquals mirrors jobspec_test.go's (package dispatch, internal)
+// helper of the same name — duplicated here rather than exported since
+// this file is package dispatch_test (external).
+func argValueEquals(ss []string, key, want string) bool {
+	for i := 0; i < len(ss)-1; i++ {
+		if ss[i] == key {
+			return ss[i+1] == want
+		}
+	}
+	return false
+}
+
 func itoa(n int) string {
 	digits := "0123456789"
 	if n == 0 {

@@ -92,6 +92,19 @@ type PoolItem struct {
 	// into the leased Brief. Empty = no criteria captured, same back-compat
 	// story as the other overlay fields.
 	AcceptanceCriteria string
+
+	// Repo mirrors Brief.Repo (Phase 4, "real REPO tickets"): the git repo
+	// (workgraph.WorkItem.Repo, threaded by the orchestrator's dispatchOne)
+	// a builder should check out and PR against. Empty = respond-only work
+	// — reproduces every pre-Phase-4 pool dispatch exactly (no builder home
+	// repo checkout, no git-credential grant, no PR gate; see runner.go's
+	// provisionRun and jobspec.go's builderArgs, both already gated on
+	// Brief.Repo != ""). The branch is NOT a PoolItem field: it always
+	// follows the existing builder/<ticket> convention (ticket ==
+	// WorkItemID for pool dispatch) that Brief.Branch's empty-string
+	// default and agentfunnel's builderBranch already apply uniformly
+	// across every dispatch mode.
+	Repo string
 }
 
 // SubmitPool dispatches a role-based work item onto the shared pool
@@ -151,6 +164,7 @@ func (r *Runner) SubmitPoolItem(ctx context.Context, item PoolItem) (string, err
 		SkillAllowlist:     item.SkillAllowlist,
 		PolicyFragment:     item.PolicyFragment,
 		AcceptanceCriteria: item.AcceptanceCriteria,
+		Repo:               item.Repo,
 	}
 
 	r.mu.Lock()

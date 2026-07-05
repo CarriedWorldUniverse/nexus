@@ -313,6 +313,51 @@ func TestDrainOnceThreadsAcceptanceCriteria(t *testing.T) {
 	}
 }
 
+// TestDrainOnceThreadsRepo covers the Phase 4 "real REPO tickets" gap:
+// dispatchOne must carry wi.Repo straight onto PoolItem.Repo so it reaches
+// Brief.Repo (and, downstream, the git-credential grant / -repo arg / PR
+// gate) — see nexus/workgraph/README.md's repo mapping note and
+// runtime/dispatch/README.md's pool model. A work item with no repo (every
+// pre-Phase-4 caller, and respond-only work today) must produce an empty
+// PoolItem.Repo, reproducing today's behavior exactly.
+func TestDrainOnceThreadsRepo(t *testing.T) {
+	graph := newFakeGraph()
+	graph.addReady("wi-1", workgraph.WorkItem{
+		Role:     "builder",
+		TaskSpec: "fix the bug",
+		Repo:     "CarriedWorldUniverse/nexus",
+	})
+	graph.addReady("wi-2", workgraph.WorkItem{Role: "builder", TaskSpec: "respond to the thread"})
+	disp := &fakeDispatcher{}
+	o := &Orchestrator{
+		Graph:        graph,
+		Dispatcher:   disp,
+		WorkerStatus: &fakeWorkerStatus{},
+		Roles:        []string{"builder"},
+	}
+
+	if _, err := o.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("DrainOnce: %v", err)
+	}
+	if len(disp.calls) != 2 {
+		t.Fatalf("expected 2 SubmitPoolItem calls, got %d", len(disp.calls))
+	}
+	var withRepo, without dispatch.PoolItem
+	for _, c := range disp.calls {
+		if c.WorkItemID == "wi-1" {
+			withRepo = c
+		} else {
+			without = c
+		}
+	}
+	if withRepo.Repo != "CarriedWorldUniverse/nexus" {
+		t.Errorf("Repo = %q, want CarriedWorldUniverse/nexus", withRepo.Repo)
+	}
+	if without.Repo != "" {
+		t.Errorf("work item with no repo must produce empty PoolItem.Repo, got %q", without.Repo)
+	}
+}
+
 func TestDrainOnceSkipsAlreadyDispatchedAcrossTwoPasses(t *testing.T) {
 	graph := newFakeGraph()
 	graph.addReady("wi-1", workgraph.WorkItem{Role: "builder", TaskSpec: "build the thing"})

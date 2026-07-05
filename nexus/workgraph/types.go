@@ -88,10 +88,22 @@ type WorkItem struct {
 	AcceptanceCriteria []string   `json:"acceptance_criteria"`
 	CairnLine          string     `json:"cairn_line,omitempty"`
 	Artifacts          []Artifact `json:"artifacts,omitempty"`
-	BaseKnowledge      []string   `json:"base_knowledge,omitempty"`
-	Personality        string     `json:"personality,omitempty"`
-	PriorResults       []Result   `json:"prior_results,omitempty"`
-	Origin             Origin     `json:"origin,omitempty"`
+	// Repo is the git repo (owner/name, or any form dispatch.Brief.Repo
+	// accepts) this work item's builder should check out and branch off of
+	// (Phase 4, "real REPO tickets"). Empty = respond-only work: no builder
+	// home repo checkout, no branch, no PR gate — reproduces the pre-Phase-4
+	// pool behavior exactly. NOT the same thing as CairnLine (this repo's
+	// own internal VCS line for a knowledge/design artifact) — Repo is a
+	// plain git remote a builder clones/branches/PRs against. Threaded to
+	// dispatch.PoolItem.Repo -> Brief.Repo by the orchestrator's dispatchOne
+	// (drain.go); the branch itself is never carried explicitly — it always
+	// follows the existing builder/<ticket> convention (ticket ==
+	// WorkItemID for pool dispatch), same as named dispatch's default.
+	Repo          string   `json:"repo,omitempty"`
+	BaseKnowledge []string `json:"base_knowledge,omitempty"`
+	Personality   string   `json:"personality,omitempty"`
+	PriorResults  []Result `json:"prior_results,omitempty"`
+	Origin        Origin   `json:"origin,omitempty"`
 
 	// Status is the current lifecycle status (graph-only; not part of the
 	// handoff.schema.json work_item, which is the point-in-time payload
@@ -116,6 +128,9 @@ type handoffBlob struct {
 	BaseKnowledge []string   `json:"base_knowledge,omitempty"`
 	Personality   string     `json:"personality,omitempty"`
 	Origin        Origin     `json:"origin,omitempty"`
+	// Repo mirrors WorkItem.Repo — no first-class ledger column, same as
+	// the other handoff-only fields above.
+	Repo string `json:"repo,omitempty"`
 }
 
 func (h handoffBlob) marshal() (string, error) {

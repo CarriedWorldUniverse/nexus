@@ -81,6 +81,7 @@ func (c *Client) CreateWorkItem(ctx context.Context, wi WorkItem) (string, error
 		BaseKnowledge: wi.BaseKnowledge,
 		Personality:   wi.Personality,
 		Origin:        wi.Origin,
+		Repo:          wi.Repo,
 	}
 	body, err := blob.marshal()
 	if err != nil {
@@ -163,6 +164,7 @@ func (c *Client) GetWorkItem(ctx context.Context, id string) (WorkItem, error) {
 				wi.BaseKnowledge = h.BaseKnowledge
 				wi.Personality = h.Personality
 				wi.Origin = h.Origin
+				wi.Repo = h.Repo
 			}
 		case strings.HasPrefix(body, commentTagResult+"\n"):
 			var r Result

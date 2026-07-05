@@ -86,6 +86,15 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, role string, wi workgrap
 		SkillAllowlist:     skills,
 		PolicyFragment:     policy,
 		AcceptanceCriteria: formatAcceptanceCriteria(wi.AcceptanceCriteria),
+		// Repo (Phase 4, "real REPO tickets"): threading wi.Repo straight
+		// through to PoolItem.Repo -> Brief.Repo is the whole gap this
+		// closes — SubmitPoolItem/BuildJob already do everything else
+		// (git-credential grant, -repo/-branch args, PR gate) once Brief.Repo
+		// is non-empty; only the work-item -> PoolItem leg was missing this
+		// field (see runtime/dispatch/README.md "The pool model" and
+		// nexus/workgraph/README.md's repo mapping note). Empty wi.Repo
+		// reproduces every pre-Phase-4 pool dispatch exactly.
+		Repo: wi.Repo,
 	}
 	if _, err := o.Dispatcher.SubmitPoolItem(ctx, item); err != nil {
 		report.Errors = append(report.Errors, errf("submit %s: %v", wi.ID, err))

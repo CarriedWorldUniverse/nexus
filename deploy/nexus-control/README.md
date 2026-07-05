@@ -28,6 +28,37 @@ and safe to leave).
   frozen `sqld` (cwb) it pointed at (scaled back to 0). The PVC itself
   stays — nexus-control mounts it.
 
+## Phase 4 deploy gap: `CW_GIT_CRED_NAME` (real REPO tickets)
+
+`runtime/dispatch/runner.go`'s `provisionRun` only issues the scoped git
+credential (`cw credential issue-git-permission --aspect <worker> --name
+<CW_GIT_CRED_NAME>`) when `cfg.GitCredName != "" && b.Repo != ""` — see
+`nexus/cmd/nexus/main.go`'s `JobConfig{GitCredName: os.Getenv
+("CW_GIT_CRED_NAME")}`. **This env var is not in nexus-control's env list
+above** (it was never added in the 2026-07-05 convergence, which only
+wired pool dispatch's provider/orchestrator plumbing, not repo work). Until
+it's set, EVERY dispatch through this broker — named or pool — that
+carries a repo logs `dispatch: skipping git credential grant; git
+credential name not configured` and the worker has no push credential for
+`b.Repo`, even though `-repo`/`-branch`/the PR gate all still activate
+correctly off `Brief.Repo` alone (see `runtime/dispatch/jobspec.go`'s
+`builderArgs` and `runtime/cmd/agentfunnel/main.go`'s `*repoFlag` gate,
+neither of which needs `GitCredName`).
+
+**To un-gap:** set `CW_GIT_CRED_NAME=<name>` on `nexus-control`, where
+`<name>` is the name of an already-provisioned `kind=git` credential (`cw
+credential create` / `POST /api/admin/credentials`, see
+`nexus/broker/admin_credentials.go`) granted to whichever aspects/
+personalities dispatch repo work (`cw credential issue-git-permission`
+scopes a per-worker grant off an existing credential — it does not create
+one). This ticket does not invent a name/value for that credential; it is
+an operator-owned secret provisioning step, same posture as `WORKGRAPH_*`/
+`POOL_*` in "What the convergence changed" above. Once set, Phase 4's pool
+repo-ticket threading (`WorkItem.Repo` -> `PoolItem.Repo` -> `Brief.Repo`,
+see `nexus/workgraph/README.md`'s repo mapping note and
+`runtime/dispatch/README.md`'s pool model) needs no further broker config —
+the same `JobConfig.GitCredName` already served named dispatch.
+
 ## Live-verified after convergence
 - NET-23 → `plumb-builder` leased, ran on Ornith, output CONVERGED-ALPHA-OK
   (token confirmed in log), task_done, Job Complete 20s.

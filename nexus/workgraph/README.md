@@ -27,8 +27,21 @@ to place an item in the dependency graph:
 | `depends_on[]` | `issue_links type=blocks`, blocker -> this (`AddLink(key=blocker, to_key=this)`) |
 | `status` | workflow state, see the table below |
 | `stream_id` | `Issue.parent_key` (epic) — a stream is an epic subtree |
-| `handoff` (cairn_line/artifacts/base_knowledge/personality/origin) | a JSON comment tagged `cwb:handoff` (no first-class column) |
+| `handoff` (cairn_line/artifacts/base_knowledge/personality/origin/repo) | a JSON comment tagged `cwb:handoff` (no first-class column) |
 | `result` (full blob) | a JSON comment tagged `cwb:result` (one comment per result; `GetWorkItem` folds every `cwb:result` comment into `PriorResults`, in timeline order) |
+
+`repo` (Phase 4, "real REPO tickets") is folded into the `cwb:handoff` blob
+alongside the other handoff-only fields above — the git repo a builder
+should check out/branch/PR against. Empty = respond-only work (no builder
+home-repo checkout, no branch, no PR gate), unchanged from before this
+field existed. Distinct from `cairn_line`: `cairn_line` is this repo's own
+internal VCS (cairn) line for a knowledge/design artifact, `repo` is a
+plain git remote. Threaded `WorkItem.Repo` -> `dispatch.PoolItem.Repo` ->
+`Brief.Repo` by the orchestrator's `dispatchOne` (drain.go); the branch is
+never carried explicitly — it always follows the existing
+`builder/<ticket>` convention (ticket == `WorkItemID` for pool dispatch),
+same default `runtime/cmd/agentfunnel/builder_repos.go`'s `builderBranch`
+already applies to named dispatch.
 
 `Issue.type` is always `"Task"` — ledger's live type vocabulary is
 `Epic|Story|Task|Subtask|Bug` (capitalized, checked against the real

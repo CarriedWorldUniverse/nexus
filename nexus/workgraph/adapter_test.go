@@ -80,6 +80,7 @@ func TestGetWorkItemFoldsFields(t *testing.T) {
 		Role: "tester", TaskSpec: "verify X", AcceptanceCriteria: []string{"a", "b"},
 		StreamID: "NET-EPIC", Origin: OriginScheduled, Personality: "meticulous",
 		BaseKnowledge: []string{"k1", "k2"}, CairnLine: "builder/foo",
+		Repo: "CarriedWorldUniverse/nexus",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -109,6 +110,9 @@ func TestGetWorkItemFoldsFields(t *testing.T) {
 	}
 	if wi.CairnLine != "builder/foo" {
 		t.Errorf("CairnLine = %q", wi.CairnLine)
+	}
+	if wi.Repo != "CarriedWorldUniverse/nexus" {
+		t.Errorf("Repo = %q", wi.Repo)
 	}
 	if wi.Status != StatusQueued {
 		t.Errorf("Status = %q, want queued", wi.Status)
