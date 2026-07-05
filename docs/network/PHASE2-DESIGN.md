@@ -174,3 +174,19 @@ The event-triggered orchestrator loop physically exists in code, fully unit-test
 6. **RoleResolver** — the docs/network/roles/*.yaml → resolved-prompt transform is a seam (interface only); needs an impl.
 
 **REMAINING M1 units:** 2 (document register on ledger+cairn), 7 (auth wiring almanac-sourced + CLI version knob + CI image rebuild — covers follow-up #3), 8 (operator console v0 — reads #397's register + #399's /api/admin/workers). The core loop is done; these are the surfaces + the live-wiring around it.
+
+## M1 COMPLETE 2026-07-05 — all 8 units built + gated + PR'd
+- Unit 1 work-graph (#397, live-e2e verified) · units 3+4 role-at-spawn+pool (#398) · units 5+6 worker-status+orchestrator (#399) · units 2+7+8 doc-register+auth/CLI+console (#400, the complete stack).
+- Every unit: builder → independent verify → review → security → PR. Verify-gate caught ~9 real-ledger mismatches (unit 1). Orchestrator layer caught the cross-unit Brief.Role conflict (wave 2). Unit 8 fixes the 4 admin-htmx-ui review findings that opened this whole session (requireAdmin/vendored-htmx/escaping/embed-subFS).
+- The pool machinery EXISTS in code, fully unit-tested: work-graph on the sovereign ledger → role-at-spawn dispatch → pool leasing → worker-status heartbeat → event-triggered orchestrator drain (reap/hold/dispatch) → doc register + operator approval → auth/CLI knob → operator console.
+
+**M1 = the CODE. Next is LIVE INTEGRATION (M2/M3/M4 of MIGRATION.md) — wiring this to a running broker:**
+1. Result channel worker→orchestrator (JobDone only carries OK bool today; RecordJobResult tested + ready).
+2. Real alert sink (Alerter is a seam; loki-alert-bridge is pull-only).
+3. Console auth: session/passkey flow (v0 uses ?token=→localStorage).
+4. Graph-status pane: wire workgraph into the broker (a list-by-status endpoint).
+5. Skill-gating: per-worker MCP-client wiring (none exists for any provider).
+6. Pool aspect row provisioned (MintDerivedCredential needs it).
+7. RoleResolver impl (roles/*.yaml → resolved prompt).
+8. Wire DocRegister + WorkerStatusStore + orchestrator into cmd/nexus/main.go for the live broker.
+Then the dogfood cutover (M2: nexus consumes the sovereign ledger as the work-graph store), fleet retirement (M3), and prove-it (M4: real tickets through the pipeline).
