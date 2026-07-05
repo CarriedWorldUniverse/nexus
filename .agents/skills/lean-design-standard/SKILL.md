@@ -1,6 +1,7 @@
 ---
 name: lean-design-standard
-description: Use when designing or cutting a module, system, or seam — or reviewing a change to one — and deciding where to draw a boundary, what to expose vs hide, whether to add an abstraction, whether to delete vs freeze, or where a correctness check belongs. Applies to the game engine, the nexus, or any project. Symptoms: a change keeps rippling into unrelated callers; tempted to add a "just-in-case" interface or unifying framework; a tool/platform promises a "10x"; unsure if a check belongs on the hot path.
+description: 'Use when designing or cutting a module, system, or seam — or reviewing a change to one — and deciding where to draw a boundary, what to expose vs hide, whether to add an abstraction, whether to delete vs freeze, or where a correctness check belongs. Applies to the game engine, the nexus, or any project. Symptoms: a change keeps rippling into unrelated callers; tempted to add a "just-in-case" interface or unifying framework; a tool/platform promises a "10x"; unsure if a check belongs on the hot path.'
+when_to_use: 'When designing or cutting a module, system, or seam — or reviewing such a change — and deciding where to draw a boundary, what to expose vs hide, whether to add an abstraction, whether to delete vs freeze, or where a correctness check belongs.'
 ---
 
 # Lean Design Standard

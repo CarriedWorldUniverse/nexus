@@ -1,6 +1,7 @@
 ---
 name: cairn
 description: Use when committing, pushing, branching, or managing Carried World code with the cairn VCS — the go-git-backed dogfood version control on dMon whose origin IS the carried-world-godot GitHub repo. Covers the working-change / line / express / fold model, the daily commit→push loop, the autosync + push-auto-reconcile behaviour, the full command surface, and the hard-won gotchas (commit ≠ push, message quoting over ssh, token-free push, protected-branch rejection, validating against the live tree not a stale clone).
+when_to_use: 'When committing, pushing, branching, or managing Carried World code with the cairn VCS (the go-git dogfood VCS on dMon).'
 ---
 
 # cairn — the Carried World VCS

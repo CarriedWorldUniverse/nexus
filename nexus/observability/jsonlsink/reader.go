@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 )
@@ -20,6 +21,15 @@ func NewReader(root string) *Reader { return &Reader{root: root} }
 // scanned but returned in sequence order, capped at limit. Missing files are
 // not an error (returns what exists).
 func (r *Reader) ReadByRun(ctx context.Context, aspect, runID string, limit int) ([]observability.Frame, error) {
+	return r.ReadByRunWindow(ctx, aspect, runID, time.Time{}, time.Time{}, limit)
+}
+
+// ReadByRunWindow returns frames attributed to runID within the run's lifetime.
+// A frame belongs to the run when it carries runID, or when it is an older
+// untagged frame emitted by the same aspect inside the run window. Completed
+// runs are capped at completedAt so stale run_id tags cannot keep appending
+// later activity to a terminal timeline.
+func (r *Reader) ReadByRunWindow(ctx context.Context, aspect, runID string, startedAt, completedAt time.Time, limit int) ([]observability.Frame, error) {
 	if limit <= 0 || limit > 5000 {
 		limit = 1000
 	}
@@ -40,7 +50,7 @@ func (r *Reader) ReadByRun(ctx context.Context, aspect, runID string, limit int)
 			return out, err
 		}
 		fs, err := scanFile(filepath.Join(dir, e.Name()), func(f observability.Frame) bool {
-			return f.RunID == runID
+			return frameBelongsToRun(f, runID, startedAt, completedAt)
 		})
 		if err != nil {
 			continue // a corrupt/locked day file must not sink the whole read
@@ -52,6 +62,22 @@ func (r *Reader) ReadByRun(ctx context.Context, aspect, runID string, limit int)
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+func frameBelongsToRun(f observability.Frame, runID string, startedAt, completedAt time.Time) bool {
+	if runID == "" {
+		return false
+	}
+	if !startedAt.IsZero() && f.TS.Before(startedAt) {
+		return false
+	}
+	if !completedAt.IsZero() && f.TS.After(completedAt) {
+		return false
+	}
+	if f.RunID == runID {
+		return true
+	}
+	return f.RunID == "" && !startedAt.IsZero()
 }
 
 func scanFile(path string, keep func(observability.Frame) bool) ([]observability.Frame, error) {

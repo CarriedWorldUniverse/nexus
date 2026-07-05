@@ -1,6 +1,7 @@
 ---
 name: vision-review
 description: Use whenever you need to actually SEE an image — review a game screenshot/render, judge how something looks, or read on-screen HUD/UI text. Sends the image to the qwen3.6 multimodal model on robo-dog (shadow's "eyes") and returns a concrete description. The default path for visually judging Carried World renders (terrain, water, settlements, HUD/economy panels) and for reading any image shadow can't reliably read itself.
+when_to_use: 'When you need to actually see an image — review a game screenshot/render, judge how something looks, or read on-screen HUD/UI text that shadow cannot reliably read itself.'
 ---
 
 # Vision Review (qwen3.6 on robo-dog)
