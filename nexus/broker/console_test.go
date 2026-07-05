@@ -13,6 +13,7 @@ import (
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/docregister"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
+	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/workerstatus"
 )
 
@@ -26,6 +27,7 @@ type consoleTestRig struct {
 	peerToken  string
 	docs       *docregister.Register
 	workers    *memWorkerStatus
+	runs       *memRuns
 }
 
 func newConsoleTestRig(t *testing.T) *consoleTestRig {
@@ -37,6 +39,7 @@ func newConsoleTestRig(t *testing.T) *consoleTestRig {
 	store := docregister.NewSQLStore(db)
 	reg := &docregister.Register{Store: store, Content: newFakeDocContent()}
 	workers := &memWorkerStatus{}
+	runsStore := &memRuns{}
 
 	tokens := NewTokenStore()
 	if err := tokens.mintInMemory("frame", true); err != nil {
@@ -52,6 +55,7 @@ func newConsoleTestRig(t *testing.T) *consoleTestRig {
 		Admin:             &AdminCallbacks{},
 		DocRegister:       reg,
 		WorkerStatusStore: workers,
+		RunsStore:         runsStore,
 	}, r)
 
 	mux := http.NewServeMux()
@@ -67,6 +71,7 @@ func newConsoleTestRig(t *testing.T) *consoleTestRig {
 		peerToken:  tokens.TokenForAgent("peer"),
 		docs:       reg,
 		workers:    workers,
+		runs:       runsStore,
 	}
 }
 
@@ -303,5 +308,89 @@ func TestConsole_FleetFragmentClassifiesStaleAndTerminalWorkers(t *testing.T) {
 	}
 	if !strings.Contains(body, "fleet-row-terminal") {
 		t.Errorf("fleet fragment did not classify a done worker as terminal; body=%s", body)
+	}
+}
+
+// --- "Recently completed" pane reads runs.Store (runtime/dispatch's
+//     RunsRecorder spine), since completed worker_status rows are
+//     deliberately deleted at JobDone (reap-loop fix) ---
+
+func TestConsole_FleetFragmentEmptyCompletedRunsState(t *testing.T) {
+	rig := newConsoleTestRig(t)
+
+	resp := rig.get(t, "/console/fragments/fleet", rig.adminToken)
+	defer resp.Body.Close()
+	body := bodyString(t, resp)
+
+	if !strings.Contains(body, "Recently completed") {
+		t.Errorf("fleet fragment missing the Recently completed section heading; body=%s", body)
+	}
+	if !strings.Contains(body, "No completed runs yet.") {
+		t.Errorf("fleet fragment did not render the empty-completed-runs state; body=%s", body)
+	}
+}
+
+func TestConsole_FleetFragmentRendersCompletedRunsWithOutcomeAndDuration(t *testing.T) {
+	rig := newConsoleTestRig(t)
+	started := time.Now().Add(-90 * time.Second)
+	rig.runs.rows = map[string]runs.Run{
+		"run-done": {
+			RunID: "run-done", Ticket: "NEX-101", Agent: "anvil-builder",
+			Status: runs.StatusComplete, StartedAt: started,
+			CompletedAt: started.Add(90 * time.Second), DurationSecs: 90,
+		},
+		"run-failed": {
+			RunID: "run-failed", Ticket: "NEX-102", Agent: "harrow-reviewer",
+			Status: runs.StatusFailed, StartedAt: started,
+			CompletedAt: started.Add(30 * time.Second), DurationSecs: 30,
+		},
+	}
+
+	resp := rig.get(t, "/console/fragments/fleet", rig.adminToken)
+	defer resp.Body.Close()
+	body := bodyString(t, resp)
+
+	if !strings.Contains(body, "NEX-101") || !strings.Contains(body, "NEX-102") {
+		t.Errorf("fleet fragment missing completed run tickets; body=%s", body)
+	}
+	if !strings.Contains(body, "anvil-builder") || !strings.Contains(body, "harrow-reviewer") {
+		t.Errorf("fleet fragment missing completed run agents; body=%s", body)
+	}
+	// Role derived via aspects.SplitWorker from the agent name.
+	if !strings.Contains(body, "<td>builder</td>") || !strings.Contains(body, "<td>reviewer</td>") {
+		t.Errorf("fleet fragment did not derive role from agent name; body=%s", body)
+	}
+	if !strings.Contains(body, "state-fresh\">complete") {
+		t.Errorf("fleet fragment did not badge a complete run as fresh; body=%s", body)
+	}
+	if !strings.Contains(body, "state-terminal\">failed") {
+		t.Errorf("fleet fragment did not badge a failed run as terminal; body=%s", body)
+	}
+	if !strings.Contains(body, "1m30s") {
+		t.Errorf("fleet fragment missing rendered duration; body=%s", body)
+	}
+	if strings.Contains(body, "No completed runs yet.") {
+		t.Errorf("fleet fragment should not render the empty state when completed runs exist; body=%s", body)
+	}
+}
+
+func TestConsole_FleetFragmentExcludesLiveRunsFromCompletedSection(t *testing.T) {
+	rig := newConsoleTestRig(t)
+	rig.runs.rows = map[string]runs.Run{
+		"run-live": {
+			RunID: "run-live", Ticket: "NEX-200", Agent: "anvil-builder",
+			Status: runs.StatusRunning, StartedAt: time.Now(),
+		},
+	}
+
+	resp := rig.get(t, "/console/fragments/fleet", rig.adminToken)
+	defer resp.Body.Close()
+	body := bodyString(t, resp)
+
+	if strings.Contains(body, "NEX-200") {
+		t.Errorf("fleet fragment's Recently completed section leaked a still-running run; body=%s", body)
+	}
+	if !strings.Contains(body, "No completed runs yet.") {
+		t.Errorf("fleet fragment should show the empty-completed state when only live runs exist; body=%s", body)
 	}
 }

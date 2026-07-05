@@ -32,6 +32,34 @@
 </table>
 {{end}}
 
+<h2>Recently completed</h2>
+{{if not .RunsConfigured}}
+  <p class="empty">Runs store not configured on this broker.</p>
+{{else if not .CompletedRuns}}
+  <p class="empty">No completed runs yet.</p>
+{{else}}
+<table class="fleet-table">
+  <thead>
+    <tr>
+      <th>Agent</th><th>Role</th><th>Ticket</th><th>Outcome</th>
+      <th>Duration</th><th>Completed</th>
+    </tr>
+  </thead>
+  <tbody>
+  {{range .CompletedRuns}}
+    <tr>
+      <td>{{.Agent}}</td>
+      <td>{{.Role}}</td>
+      <td>{{.Ticket}}</td>
+      <td><span class="state-badge state-{{.OutcomeClass}}">{{.Outcome}}</span></td>
+      <td>{{.DurationDisplay}}</td>
+      <td>{{.CompletedDisplay}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+
 <h2>Work graph</h2>
 <p class="graph-status-todo">
   {{.GraphStatusNote}}

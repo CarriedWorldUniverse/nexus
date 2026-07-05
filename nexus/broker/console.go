@@ -43,7 +43,9 @@ import (
 
 	"github.com/yuin/goldmark"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/docregister"
+	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/workerstatus"
 )
 
@@ -217,7 +219,63 @@ type consoleWorkerRow struct {
 type consoleFleetData struct {
 	WorkersConfigured bool
 	Workers           []consoleWorkerRow
+	RunsConfigured    bool
+	CompletedRuns     []consoleCompletedRunRow
 	GraphStatusNote   string
+}
+
+// consoleRecentRunsLimit caps the "Recently completed" section at the
+// last 15 runs (spec: "Last ~15 runs, most recent first"), mirroring
+// the runs.Store's own List/ListCompleted clamp-and-default pattern.
+const consoleRecentRunsLimit = 15
+
+// consoleCompletedRunRow is the template-facing shape for one completed
+// dispatch run in the fleet pane's "Recently completed" history table —
+// the run-lifecycle counterpart to consoleWorkerRow, sourced from
+// runs.Store (runtime/dispatch's RunsRecorder spine) rather than
+// worker_status, since completed worker_status rows are deliberately
+// deleted at JobDone (see consoleTerminalStates' doc comment above).
+type consoleCompletedRunRow struct {
+	Agent            string
+	Role             string
+	Ticket           string
+	Outcome          string // "complete" or "failed" (also covers "cancelled")
+	OutcomeClass     string // CSS hook: reuses state-fresh/state-terminal badge styles
+	DurationDisplay  string
+	CompletedDisplay string // age, e.g. "5m ago"
+}
+
+// classifyRunOutcome maps a runs.Status to the fleet pane's outcome
+// badge class, reusing the live table's fresh/terminal palette: done
+// runs render fresh (green), anything else that reached a terminal
+// dispatch status (failed/cancelled) renders terminal (grey/red-ish).
+func classifyRunOutcome(status runs.Status) string {
+	if status == runs.StatusComplete {
+		return "fresh"
+	}
+	return "terminal"
+}
+
+// consoleRunDuration renders a run's wall-clock duration from its
+// recorded DurationSecs, falling back to completed-minus-started when
+// DurationSecs wasn't recorded (defensive; RecordRunDone always passes
+// it today).
+func consoleRunDuration(r runs.Run) string {
+	d := time.Duration(r.DurationSecs) * time.Second
+	if r.DurationSecs == 0 && !r.StartedAt.IsZero() && !r.CompletedAt.IsZero() && r.CompletedAt.After(r.StartedAt) {
+		d = r.CompletedAt.Sub(r.StartedAt)
+	}
+	return d.Round(time.Second).String()
+}
+
+// consoleRunAge renders how long ago a run completed, relative to now,
+// e.g. "5m ago" — same style as the live table's heartbeat age, just
+// phrased for a one-shot completion event rather than an ongoing one.
+func consoleRunAge(t time.Time, now time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	return now.Sub(t).Round(time.Second).String() + " ago"
 }
 
 // graphStatusTODONote documents the work-graph half of this pane's
@@ -264,6 +322,33 @@ func (b *Broker) handleConsoleFleetFragment(w http.ResponseWriter, r *http.Reque
 		})
 	}
 	data.Workers = out
+
+	if b.cfg.RunsStore != nil {
+		data.RunsConfigured = true
+		completed, err := b.cfg.RunsStore.ListCompleted(r.Context(), consoleRecentRunsLimit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list completed runs: "+err.Error())
+			return
+		}
+		rows := make([]consoleCompletedRunRow, 0, len(completed))
+		for _, run := range completed {
+			role := ""
+			if _, rl, ok := aspects.SplitWorker(run.Agent); ok {
+				role = rl
+			}
+			rows = append(rows, consoleCompletedRunRow{
+				Agent:            run.Agent,
+				Role:             role,
+				Ticket:           run.Ticket,
+				Outcome:          string(run.Status),
+				OutcomeClass:     classifyRunOutcome(run.Status),
+				DurationDisplay:  consoleRunDuration(run),
+				CompletedDisplay: consoleRunAge(run.CompletedAt, now),
+			})
+		}
+		data.CompletedRuns = rows
+	}
+
 	b.renderConsoleFragment(w, "fleet.html.tmpl", data)
 }
 
