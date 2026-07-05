@@ -108,6 +108,12 @@ func SplitWorker(name string) (personality, role string, ok bool) {
 // IsWorkerName reports whether name is a pool-worker identity.
 func IsWorkerName(name string) bool { _, _, ok := SplitWorker(name); return ok }
 
+// WorkerName composes a pool-worker identity from a personality and a role
+// (`anvil` + `builder` → `anvil-builder`). It is the inverse of SplitWorker.
+func WorkerName(personality, role string) string {
+	return personality + "-" + role
+}
+
 // PersonalityOf returns the identity whose persona/config/credentials a name
 // resolves to: the personality for a pool worker `<personality>-<role>`, the
 // base aspect for a dotted hand, or the name itself. It is the resolver every
@@ -125,6 +131,9 @@ func PersonalityOf(name string) string {
 // The base and the suffix must both be non-empty (`.umbra` and
 // `shadow.` are not lineages).
 func IsDerivedName(name string) bool {
+	if IsWorkerName(name) { // pool worker `<personality>-<role>` is a hand of its personality
+		return true
+	}
 	i := strings.IndexByte(name, '.')
 	return i > 0 && i < len(name)-1
 }
@@ -134,6 +143,9 @@ func IsDerivedName(name string) bool {
 // unchanged, so callers can use it unconditionally as "the identity
 // whose persona/config applies".
 func BaseName(name string) string {
+	if p, _, ok := SplitWorker(name); ok { // pool worker → its personality
+		return p
+	}
 	if i := strings.IndexByte(name, '.'); i > 0 && i < len(name)-1 {
 		return name[:i]
 	}

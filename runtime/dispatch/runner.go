@@ -97,12 +97,12 @@ type Runner struct {
 	// applies on top.
 	SpawnMaxConcurrent int
 
-	// PoolSize caps concurrent leases of the role-based worker pool (M1
-	// Unit 4, pool.go, PHASE2-DESIGN §4); 0 = defaultPoolSize (3). This
-	// is a DISTINCT cap dimension from SpawnMaxConcurrent — pool slots
-	// never compete with (or borrow capacity from) a named aspect's hand
-	// cap. The global MaxConc still applies on top.
-	PoolSize int
+	// Personalities is the pool worker roster: the base aspects a pool
+	// lease may run as (`<personality>-<role>`). One job per personality —
+	// the first free personality is leased for an incoming role, so the
+	// roster size is the natural concurrency cap. nil → aspects.WorkerPersonalities.
+	// cmd/nexus populates this from POOL_PERSONALITIES.
+	Personalities []string
 
 	// Audit stores spawn audit posts AS a named sender, returning the
 	// message id — used for the spawn audit-thread root (the !dispatch
@@ -322,32 +322,44 @@ func (r *Runner) canRun(agent string) bool {
 	}
 	// Per-parent hand cap (NEX-571): a derived identity only starts
 	// while its base aspect has spare hand slots. Applies on submit AND
-	// on queue drain, so queued hands wait for a sibling to finish. The
-	// pool base (M1 Unit 4, pool.go) uses its OWN cap dimension
-	// (poolSize, default 3) here — a distinct dimension from the
-	// per-aspect hand cap (spawnMaxConcurrent, default 4) so growing one
-	// never silently loosens or tightens the other.
-	if base := aspects.BaseName(agent); base != agent && r.liveHands(base) >= r.capForBase(base) {
+	// on queue drain, so queued hands wait for a sibling to finish. Pool
+	// workers (`<personality>-<role>`) are capped on their OWN dimension —
+	// one job per personality, enforced at lease time by
+	// tryLeaseWorkerSlot — so liveHands deliberately counts only kindred
+	// (dotted) hands: growing one dimension never silently loosens or
+	// tightens the other.
+	if base := aspects.BaseName(agent); base != agent && r.liveHands(base) >= r.spawnMaxConcurrent() {
 		return false
 	}
 	return true
 }
 
-// capForBase returns the live-hand cap that applies to base — the pool
-// cap (poolSize) for the pool identity, the generic per-aspect hand cap
-// (spawnMaxConcurrent) for everything else. Caller holds r.mu.
-func (r *Runner) capForBase(base string) int {
-	if base == poolParentName {
-		return r.poolSize()
-	}
-	return r.spawnMaxConcurrent()
-}
-
-// liveHands counts base's busy derived identities. Caller holds r.mu.
+// liveHands counts base's busy KINDRED (dotted `<base>.<word>`) hands —
+// the SubmitSpawn fan-out cap dimension. Pool workers (`<personality>-
+// <role>`) are excluded even though they too are derived of the
+// personality: a pool lease must not eat into the personality's own
+// hand-fan-out headroom (the two caps are documented as independent).
+// Pool occupancy is counted by liveWorkers instead. Caller holds r.mu.
 func (r *Runner) liveHands(base string) int {
 	n := 0
 	for name := range r.agentBusy {
+		if aspects.IsWorkerName(name) {
+			continue
+		}
 		if aspects.IsDerivedName(name) && aspects.BaseName(name) == base {
+			n++
+		}
+	}
+	return n
+}
+
+// liveWorkers counts personality's busy pool workers (`<personality>-
+// <role>`) — the pool's one-job-per-personality cap dimension, disjoint
+// from the kindred-hand count above. Caller holds r.mu.
+func (r *Runner) liveWorkers(personality string) int {
+	n := 0
+	for name := range r.agentBusy {
+		if p, _, ok := aspects.SplitWorker(name); ok && p == personality {
 			n++
 		}
 	}
@@ -450,16 +462,17 @@ func (r *Runner) OnJobDone(done JobDone) {
 }
 
 func (r *Runner) completionSummary(run *Run, done JobDone) string {
-	// Pool-lease completion (M1 Unit 4): accountability is the slot
+	// Pool-lease completion (M1 Unit 4): accountability is the worker
 	// identity + role + work item, not the builder branch/PR block or
-	// the hand-of-parent lineage line.
-	if run.Brief.SpawnParent == poolParentName {
+	// the hand-of-parent lineage line. A leased worker is `<personality>-
+	// <role>` (aspects.IsWorkerName); the personality is its SpawnParent.
+	if aspects.IsWorkerName(run.Brief.Agent) {
 		status := "done"
 		if !done.OK {
 			status = "failed"
 		}
 		return strings.Join([]string{
-			"pool " + status + ": slot=" + run.Brief.Agent + " role=" + run.Brief.Role + " work_item=" + run.Brief.WorkItemID,
+			"pool " + status + ": worker=" + run.Brief.Agent + " role=" + run.Brief.Role + " work_item=" + run.Brief.WorkItemID,
 			"duration: " + formatDuration(done.StartedAt, done.CompletedAt),
 			"turns: " + formatCount(r.countActivityTurns(done.Agent, done.StartedAt, done.CompletedAt)),
 		}, "\n")
@@ -615,11 +628,13 @@ func (r *Runner) reserveQueued() []*Run {
 	var runs []*Run
 	kept := make([]Brief, 0, len(r.queue))
 	for _, b := range r.queue {
-		// A queued pool work-item (pool.go) carries no Agent yet — any
-		// free slot will do, so it can't be checked via canRun(agent)
-		// like a fixed-identity brief. Lease whichever slot is free now.
+		// A queued pool work-item (pool.go) carries no personality/Agent
+		// yet — any free personality will do, so it can't be checked via
+		// canRun(agent) like a fixed-identity brief. Lease a free
+		// personality for its role now.
 		if b.SpawnParent == poolParentName && b.Agent == "" {
-			if name := r.tryLeasePoolSlot(); name != "" {
+			if personality, name := r.tryLeaseWorkerSlot(b.Role); name != "" {
+				b.SpawnParent = personality
 				b.Agent = name
 				runs = append(runs, r.reserve(b))
 			} else {

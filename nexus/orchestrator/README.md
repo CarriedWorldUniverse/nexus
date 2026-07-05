@@ -332,7 +332,7 @@ wiring a concrete resolver is a follow-up.
    configured per `runtime/dispatch/README.md`'s pool live-verify
    prerequisites). Call `Orchestrator.DrainOnce` (or wait for the cadence
    ticker / `OnJobDoneHook` poke once wired). Confirm: the item's ledger
-   status moves `To Do -> In Progress`, a `pool.sub-N` Job appears
+   status moves `To Do -> In Progress`, a `<personality>-<role>` worker Job appears
    (`GET /api/admin/workers` or `kubectl get jobs -l
    nexus.dispatch/lineage=pool`), and `DrainReport.Dispatched` contains the
    item id.

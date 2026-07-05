@@ -422,7 +422,10 @@ func (b *Broker) handleAspectResolve(w http.ResponseWriter, r *http.Request) {
 	// a hand must not have (spawn — no sub-of-sub) lives there too.
 	base := aspects.PersonalityOf(aspectName)
 	var mcpProfile string
-	if !aspects.IsDerivedName(aspectName) && !aspects.IsWorkerName(aspectName) {
+	// IsDerivedName covers BOTH shapes — dotted hands and pool workers
+	// (aspects/lineage.go) — so this one check withholds the profile from
+	// each.
+	if !aspects.IsDerivedName(aspectName) {
 		var mcpErr error
 		mcpProfile, mcpErr = resolveMCPProfile(r.Context(), v.Credentials, base)
 		if mcpErr != nil {

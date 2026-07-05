@@ -12,8 +12,9 @@ machinery, and one `OnJobDone` completion path:
    names) for background work, capped per-parent by `SpawnMaxConcurrent`
    (default 4, NEX-571).
 3. **Pool leasing** (`SubmitPool`, `pool.go`, **M1 Unit 4**) — a role-based
-   work item leases a slot from a fixed pool of N interchangeable derived
-   identities, capped by `PoolSize` (default 3) — described below.
+   work item leases the first FREE personality from a roster of existing
+   aspects and runs as `<personality>-<role>` (e.g. `anvil-builder`), one
+   pool job per personality — roster size is the cap. Described below.
 
 Every spawned worker, across all three modes, can additionally be stamped
 with role-at-spawn metadata (**M1 Unit 3**) — a role overlay, scoped skills,
@@ -21,13 +22,16 @@ and a tool-policy fragment applied at boot. See "Role-at-spawn" below.
 
 ## The pool model
 
-- The pool is a synthetic parent identity, `pool` (`poolParentName` in
-  `pool.go`), with a fixed, numbered slot vocabulary: `pool.sub-1 .. pool.sub-N`
-  (`N` = `Runner.PoolSize`, default `defaultPoolSize` = 3). Unlike a hand's
-  kindred-word lineage (`plumb.bob`, `shadow.umbra`, …), pool slots carry no
-  persona lineage — they are interchangeable workers; accountability comes
-  from the **Role** (label) and **WorkItemID** stamped on the Brief, not the
-  slot name.
+- A pool worker is `<personality>-<role>` (`aspects.WorkerName` /
+  `SplitWorker`, `nexus/aspects/lineage.go`): the personality is a real
+  single-word aspect lent to the pool (`Runner.Personalities`, default
+  `aspects.WorkerPersonalities` = anvil/plumb/keel/maren/harrow — shadow is
+  the orchestrator, never a worker), and the role comes from the work item.
+  Any personality may take any role; the worker resolves persona/config/
+  credentials to its PERSONALITY (`aspects.PersonalityOf`). One pool job per
+  personality at a time, so the roster size is the pool's concurrency cap.
+  Accountability comes from the worker name plus the **Role** (label) and
+  **WorkItemID** stamped on the Brief.
 - A pool work item is dispatched via `Runner.SubmitPool(ctx, role, task,
   workItemID, thread)`. `workItemID` doubles as `Brief.Ticket`, the
   idempotency key — resubmitting the same work item while it is active or
@@ -44,62 +48,73 @@ and a tool-policy fragment applied at boot. See "Role-at-spawn" below.
   through `SubmitPoolItem` instead. `SubmitPool` is now one line of sugar
   calling `SubmitPoolItem` with a zero-value overlay — byte-for-byte the
   same behavior as before this addition.
-- Slots are derived identities minted through the same
-  `MintHandCredential` seam a hand spawn uses (`aspects.DerivedName`,
-  `IsDerivedName`, broker-signed session JWT) — no keyfile, no new crypto.
-  **Production prerequisite:** the credential mint
+- Workers are derived identities minted through the same
+  `MintHandCredential` seam a hand spawn uses (broker-signed session JWT;
+  `IsDerivedName`/`BaseName` treat `<personality>-<role>` as a hand of the
+  personality) — no keyfile per combo, no new crypto. **Production
+  prerequisite:** the credential mint
   (`broker.KeyfileValidator.MintDerivedCredential`) looks the parent up as a
-  real, non-retired row in the aspects store, so a `pool` aspect row must
-  exist for pool leases to mint in a live broker (a one-time roster addition,
-  not built by this unit — see the live-verify note below).
+  real, non-retired row in the aspects store, so each roster personality must
+  exist as an aspects row (`ensurePoolPersonalities` in `cmd/nexus`
+  self-provisions the roster + the shared Ornith provider credential at
+  boot).
 
 ## Lease/release lifecycle
 
-1. **Acquire.** `SubmitPool` tries `tryLeasePoolSlot()`: first-free slot name
-   in `pool.sub-1..N` order, gated by the pool cap (`liveHands("pool") <
-   PoolSize`) and the global `MaxConc` (same as every other dispatch path). A
-   free slot → the Brief is stamped `Agent=<slot>`, reserved, and launched
-   immediately (same `reserve`/`launch` as `Submit`/`SubmitSpawn`).
-2. **Queue.** No free slot → the Brief (with `Agent` still empty — no slot
-   name assigned yet, since any of the N could free next) is appended to the
+1. **Acquire.** `SubmitPool` tries `tryLeaseWorkerSlot(role)`: the first
+   personality with no live pool worker (`liveWorkers(p) == 0`), in roster
+   order, gated by the global `MaxConc` (same as every other dispatch path).
+   A free personality → the Brief is stamped `SpawnParent=<personality>`,
+   `Agent=<personality>-<role>`, reserved, and launched immediately (same
+   `reserve`/`launch` as `Submit`/`SubmitSpawn`).
+2. **Queue.** No free personality → the Brief (with `Agent` still empty and
+   `SpawnParent` holding the `"pool"` QUEUE SENTINEL — no personality
+   assigned yet, since any could free next) is appended to the
    Runner's ordinary `queue`. A "pool dispatch queued" status posts to the
    thread.
 3. **Release + drain.** `OnJobDone` (unchanged — this unit only adds a new
    caller shape, not a new completion path) frees the completed run's
    `agentBusy[slot]` entry exactly like it frees a named agent or a hand, then
    calls `reserveQueued()`. `reserveQueued` recognizes a queued pool item
-   (`SpawnParent == "pool"` and `Agent == ""`) and leases whichever slot is
-   free *now* (`tryLeasePoolSlot`) rather than checking a fixed identity —
-   this is the one place pool draining differs from `Submit`'s per-name
-   drain, because a pool item isn't bound to one specific slot ahead of time.
-4. **Reuse.** A released slot returns to the free set the instant
-   `agentBusy` drops its key — the very next `SubmitPool` (or a queued item
-   draining) can lease it again. There is no persistent "cooldown" or
-   retirement; slots are purely interchangeable capacity.
+   (`SpawnParent == "pool"` and `Agent == ""`) and leases whichever
+   personality is free *now* (`tryLeaseWorkerSlot(b.Role)`), overwriting the
+   sentinel with the real personality — this is the one place pool draining
+   differs from `Submit`'s per-name drain, because a pool item isn't bound
+   to one specific personality ahead of time. The sentinel never reaches the
+   credential mint.
+4. **Reuse.** A released personality returns to the free set the instant
+   `agentBusy` drops its worker's key — the very next `SubmitPool` (or a
+   queued item draining) can lease it again. There is no persistent
+   "cooldown" or retirement; personalities are reusable capacity.
 
 ## The pool-cap dimension (distinct from per-agent-name serialization)
 
-`canRun`'s per-parent hand-cap check (`liveHands(base) >= cap`) now resolves
-its cap via `capForBase(base)`:
+The two derived-identity cap dimensions are counted by two disjoint
+counters, both keyed off the busy-name shape:
 
-- `base == "pool"` → `PoolSize` (default 3) — the new, independent cap this
-  unit adds.
-- any other base (a real aspect running hands) → `SpawnMaxConcurrent`
-  (default 4) — unchanged NEX-571 behavior.
+- **Kindred hand fan-out** (`SubmitSpawn`): `liveHands(base)` counts only
+  dotted `<base>.<word>` hands — pool workers are explicitly excluded — and
+  is capped by `SpawnMaxConcurrent` (default 4, unchanged NEX-571 behavior).
+- **Pool leasing**: `liveWorkers(personality)` counts only
+  `<personality>-<role>` workers, capped at ONE per personality at lease
+  time (`tryLeaseWorkerSlot`); roster size is the aggregate cap.
 
-This keeps the two dimensions from bleeding into each other: raising
-`SpawnMaxConcurrent` for aspect hand fan-out never loosens the pool cap, and
-vice versa. Per-agent-name serialization (`agentBusy`, one live run per exact
-name) is untouched — it still governs `!dispatch <named-agent>` exactly as
-before this unit, and pool slot names (`pool.sub-N`) simply occupy their own
-entries in the same map, alongside named agents and hands, with zero
-cross-talk.
+This keeps the dimensions from bleeding into each other even though both
+name shapes are hands of the SAME real personalities: a pool lease of
+`anvil` never eats into anvil's own hand-fan-out headroom, and anvil's live
+kindred hands never block the pool from leasing it
+(`TestPoolLeaseDoesNotConsumeKindredHandCap`). Per-agent-name serialization
+(`agentBusy`, one live run per exact name) is untouched — it still governs
+`!dispatch <named-agent>` exactly as before this unit, and worker names
+simply occupy their own entries in the same map, alongside named agents and
+hands, with zero cross-talk.
 
 ## Coexistence with named dispatch
 
 Named dispatch, hand fan-out, and pool leasing all read/write the same
 `Runner.agentBusy`/`active`/`queue` state under the same mutex, but on
-disjoint keys (a real aspect name, `<aspect>.<word>`, or `pool.sub-N`), so:
+disjoint keys (a real aspect name, `<aspect>.<word>`, or
+`<personality>-<role>`), so:
 
 - A full pool never blocks or delays a named-agent dispatch, and vice versa.
 - `!dispatch anvil …` still serializes strictly per name (a second `anvil`
@@ -126,20 +141,22 @@ OK bool).
 
 ## Pool live-verify path (not run by this unit — documented for the operator)
 
-1. Ensure a `pool` aspect row exists in the roster (non-retired) so
-   `MintDerivedCredential(ctx, "pool", "pool.sub-N")` can mint — a one-time
-   setup step, analogous to any named aspect needing a keyfile row.
-2. Dispatch `N+1` pool work items (`PoolSize` + 1) via `Runner.SubmitPool`
+1. Ensure the roster personalities exist as non-retired aspects rows so
+   `MintDerivedCredential(ctx, <personality>, <personality>-<role>)` can
+   mint — `ensurePoolPersonalities` (cmd/nexus) does this at boot, along
+   with the shared Ornith provider credential + per-personality default.
+2. Dispatch `N+1` pool work items (`N` = roster size) via `Runner.SubmitPool`
    (or whatever caller wires role-based dispatch to it — the orchestrator's
    graph-drain, per PHASE2-DESIGN §2, is the intended production caller).
-3. Observe: `N` Jobs running as `pool.sub-1..N` (`GET /api/admin/workers` or
-   `kubectl get jobs -l nexus.dispatch/lineage=pool`), and the `(N+1)`th item
-   sitting queued (a "pool dispatch queued" post in its thread, no Job yet).
+3. Observe: `N` Jobs running as `<personality>-<role>` in roster order
+   (`GET /api/admin/workers` or `kubectl get jobs -l nexus.dispatch/lineage`),
+   and the `(N+1)`th item sitting queued (a "pool dispatch queued" post in
+   its thread, no Job yet).
 4. Complete one of the `N` running Jobs (let it finish, or force-complete in
    a test cluster). Observe the queued `(N+1)`th item transition to running
-   on the freed slot — a new Job appears as the same `pool.sub-<k>` name the
-   just-completed lease held, and its completion summary in chat stamps
-   `slot=pool.sub-<k> role=<role> work_item=<id>`.
+   on the freed personality — a new Job appears leasing the personality the
+   just-completed run held, and its completion summary in chat stamps
+   `worker=<personality>-<role> role=<role> work_item=<id>`.
 5. Confirm named dispatch (`!dispatch <agent> …`) issued at any point during
    steps 2–4 lands and runs unaffected — the pool being at cap never blocks
    it, and it never blocks the pool queue from draining.
@@ -147,7 +164,7 @@ OK bool).
 ## Accountability
 
 Every pool run's completion summary (`Runner.completionSummary`) stamps
-`slot=<pool.sub-N> role=<role> work_item=<id>` instead of the builder
+`worker=<personality>-<role> role=<role> work_item=<id>` instead of the builder
 branch/PR block (ticket dispatch) or the `hand of <parent>` lineage line
 (aspect hand fan-out) — mirroring how each dispatch mode records identity in
 its own accountable shape.

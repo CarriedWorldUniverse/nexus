@@ -376,7 +376,7 @@ func TestReapStaleRequeuesAndSecondStrikeAlerts(t *testing.T) {
 
 	old := time.Now().Add(-1 * time.Hour)
 	ws := &fakeWorkerStatus{rows: []workerstatus.Status{
-		{Agent: "pool.sub-1", WorkItemID: "wi-1", LastHeartbeat: old},
+		{Agent: "anvil-builder", WorkItemID: "wi-1", LastHeartbeat: old},
 	}}
 	alerter := &fakeAlerter{}
 	o := &Orchestrator{
@@ -421,7 +421,7 @@ func TestReapStaleRecoveryClearsStrike(t *testing.T) {
 
 	stale := time.Now().Add(-1 * time.Hour)
 	ws := &fakeWorkerStatus{rows: []workerstatus.Status{
-		{Agent: "pool.sub-1", WorkItemID: "wi-1", LastHeartbeat: stale},
+		{Agent: "anvil-builder", WorkItemID: "wi-1", LastHeartbeat: stale},
 	}}
 	alerter := &fakeAlerter{}
 	o := &Orchestrator{

@@ -526,6 +526,11 @@ func main() {
 		// NEXUS_ASPECT_HAND_NAMES="shadow=umbra|gloam|shade,plumb=bob|fathom".
 		// Unset → the built-in aspects.AspectHandNames defaults.
 		AspectHandNames: parseHandNamePools(os.Getenv("NEXUS_ASPECT_HAND_NAMES")),
+		// Pool worker roster: the personalities a role-based lease may run
+		// as (`<personality>-<role>`). POOL_PERSONALITIES overrides; unset →
+		// aspects.WorkerPersonalities. Mirrors ensurePoolPersonalities, which
+		// provisions the same roster's rows + shared Ornith credential.
+		Personalities: parseCSVOrDefault(os.Getenv("POOL_PERSONALITIES"), aspects.WorkerPersonalities),
 	}
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		if k8s, kerr := dispatch.NewInClusterK8s(dispatchCfg.Namespace); kerr != nil {

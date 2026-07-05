@@ -26,58 +26,40 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 )
 
-// poolParentName is the synthetic parent identity pool slots derive
-// from (`pool.sub-1..N`). It is not a real named aspect — it exists
-// only as the DerivedName base, the liveHands/capForBase cap key, and
-// the MintHandCredential "parent" argument for slot credentials. In
-// production the credential mint (broker.KeyfileValidator.MintDerivedCredential)
-// looks the parent up as a real aspects-store row, so a "pool" aspect
-// row must exist (non-retired) for pool leases to mint — see the
-// README's live-verify prerequisites.
+// poolParentName is the in-memory sentinel a QUEUED (not-yet-leased) pool
+// work item carries as its SpawnParent — the discriminator reserveQueued
+// uses to re-lease by role. It is never minted or looked up as an aspect:
+// leasing resolves it to a real personality (`<personality>-<role>`, with
+// SpawnParent = the personality) before any credential mint. See the
+// worker-identity grammar in aspects/lineage.go.
 const poolParentName = "pool"
 
-// defaultPoolSize is the pool's slot count when Runner.PoolSize is
-// unset (0). Configurable per Runner.PoolSize, set at boot from a
-// broker setting/env (cmd/nexus's wiring, not this package's job).
-const defaultPoolSize = 3
-
-// poolSize returns the effective pool cap.
-func (r *Runner) poolSize() int {
-	if r.PoolSize > 0 {
-		return r.PoolSize
+// personalities returns the pool worker roster (Runner.Personalities, or
+// aspects.WorkerPersonalities when unset). Lease order = roster order.
+func (r *Runner) personalities() []string {
+	if len(r.Personalities) > 0 {
+		return r.Personalities
 	}
-	return defaultPoolSize
+	return aspects.WorkerPersonalities
 }
 
-// poolSlotWords returns the fixed `sub-1..sub-n` slot vocabulary. Pool
-// slots are interchangeable and numbered, unlike the hand kindred-word
-// pool (aspects.HandNamePool) — there is no persona lineage to a pool
-// slot, only accountability (Role/WorkItemID) stamped per lease.
-func poolSlotWords(n int) []string {
-	words := make([]string, n)
-	for i := 1; i <= n; i++ {
-		words[i-1] = fmt.Sprintf("sub-%d", i)
-	}
-	return words
-}
-
-// tryLeasePoolSlot returns the first free pool slot's derived name
-// (`pool.sub-1..N`, first-free order), or "" if the pool is at cap (or
-// the global MaxConc leaves no room). Caller holds r.mu.
-func (r *Runner) tryLeasePoolSlot() string {
+// tryLeaseWorkerSlot leases the first FREE personality for role and returns
+// (personality, `<personality>-<role>`), or ("","") if none is free (or the
+// global MaxConc leaves no room). A personality is free when it has no live
+// worker hand — one job per personality, so "the first agent available,
+// regardless of name, is spawned with a personality and the role"
+// (PHASE2-DESIGN §4). Caller holds r.mu.
+func (r *Runner) tryLeaseWorkerSlot(role string) (personality, name string) {
 	if r.MaxConc > 0 && len(r.active) >= r.MaxConc {
-		return ""
+		return "", ""
 	}
-	if r.liveHands(poolParentName) >= r.poolSize() {
-		return ""
-	}
-	for _, word := range poolSlotWords(r.poolSize()) {
-		name := aspects.DerivedName(poolParentName, word)
-		if _, busy := r.agentBusy[name]; !busy {
-			return name
+	for _, p := range r.personalities() {
+		if r.liveWorkers(p) > 0 { // personality already running a pool job
+			continue
 		}
+		return p, aspects.WorkerName(p, role)
 	}
-	return ""
+	return "", ""
 }
 
 // PoolItem is SubmitPoolItem's payload: SubmitPool's basic (role, task,
@@ -180,13 +162,14 @@ func (r *Runner) SubmitPoolItem(ctx context.Context, item PoolItem) (string, err
 		}
 	}
 
-	name := r.tryLeasePoolSlot()
+	personality, name := r.tryLeaseWorkerSlot(role)
 	if name == "" {
 		r.queue = append(r.queue, b)
 		r.mu.Unlock()
-		r.post(thread, fmt.Sprintf("pool dispatch queued (role %s, all %d slot(s) busy)", role, r.poolSize()))
+		r.post(thread, fmt.Sprintf("pool dispatch queued (role %s, all %d personalit(ies) busy)", role, len(r.personalities())))
 		return "", nil
 	}
+	b.SpawnParent = personality
 	b.Agent = name
 	run := r.reserve(b)
 	r.mu.Unlock()
