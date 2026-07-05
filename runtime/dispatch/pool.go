@@ -85,6 +85,13 @@ type PoolItem struct {
 	RolePrompt     string
 	SkillAllowlist []string
 	PolicyFragment *funnel.ToolPolicy
+
+	// AcceptanceCriteria mirrors Brief.AcceptanceCriteria (Unit B — verified
+	// task_done, NET-22/23/24): the ledger work item's DoD checklist,
+	// pre-formatted as text by the orchestrator (drain.go), carried straight
+	// into the leased Brief. Empty = no criteria captured, same back-compat
+	// story as the other overlay fields.
+	AcceptanceCriteria string
 }
 
 // SubmitPool dispatches a role-based work item onto the shared pool
@@ -134,15 +141,16 @@ func (r *Runner) SubmitPoolItem(ctx context.Context, item PoolItem) (string, err
 	}
 
 	b := Brief{
-		SpawnParent:    poolParentName,
-		Role:           role,
-		WorkItemID:     workItemID,
-		Ticket:         workItemID,
-		Thread:         thread,
-		Task:           task,
-		RolePrompt:     item.RolePrompt,
-		SkillAllowlist: item.SkillAllowlist,
-		PolicyFragment: item.PolicyFragment,
+		SpawnParent:        poolParentName,
+		Role:               role,
+		WorkItemID:         workItemID,
+		Ticket:             workItemID,
+		Thread:             thread,
+		Task:               task,
+		RolePrompt:         item.RolePrompt,
+		SkillAllowlist:     item.SkillAllowlist,
+		PolicyFragment:     item.PolicyFragment,
+		AcceptanceCriteria: item.AcceptanceCriteria,
 	}
 
 	r.mu.Lock()

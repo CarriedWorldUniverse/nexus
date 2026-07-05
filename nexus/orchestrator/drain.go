@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/workgraph"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
@@ -78,12 +79,13 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, role string, wi workgrap
 
 	rolePrompt, skills, policy := o.resolve(role)
 	item := dispatch.PoolItem{
-		Role:           role,
-		Task:           wi.TaskSpec,
-		WorkItemID:     wi.ID,
-		RolePrompt:     rolePrompt,
-		SkillAllowlist: skills,
-		PolicyFragment: policy,
+		Role:               role,
+		Task:               wi.TaskSpec,
+		WorkItemID:         wi.ID,
+		RolePrompt:         rolePrompt,
+		SkillAllowlist:     skills,
+		PolicyFragment:     policy,
+		AcceptanceCriteria: formatAcceptanceCriteria(wi.AcceptanceCriteria),
 	}
 	if _, err := o.Dispatcher.SubmitPoolItem(ctx, item); err != nil {
 		report.Errors = append(report.Errors, errf("submit %s: %v", wi.ID, err))
@@ -95,4 +97,24 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, role string, wi workgrap
 		return
 	}
 	report.Dispatched = append(report.Dispatched, wi.ID)
+}
+
+// formatAcceptanceCriteria renders a work item's AcceptanceCriteria list as
+// plain bullet text for dispatch.PoolItem.AcceptanceCriteria — Unit B
+// (verified task_done, NET-22/23/24). Deliberately a plain "- " bullet
+// rather than workgraph's dodTicked/dodUnticked checklist markers: this
+// text is read by the agentfunnel task_done verifier (a cheap-judge
+// prompt), not re-parsed back into a checklist, so there is nothing to tick.
+// Empty/nil criteria formats to "" — the caller (agentfunnel) treats an
+// empty AcceptanceCriteria as "no DoD captured" and honors task_done
+// unconditionally, exactly like today.
+func formatAcceptanceCriteria(criteria []string) string {
+	if len(criteria) == 0 {
+		return ""
+	}
+	lines := make([]string, len(criteria))
+	for i, c := range criteria {
+		lines[i] = "- " + c
+	}
+	return strings.Join(lines, "\n")
 }

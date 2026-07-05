@@ -201,3 +201,55 @@ func TestBuildFilter_MisconfigFallsToHardRules(t *testing.T) {
 		t.Errorf("misconfig should be bare HardRulesFilter; got %#v", f)
 	}
 }
+
+// --- BuildAcceptanceVerifier (Unit B — verified task_done, NET-22/23/24) ---
+// Mirrors BuildFilter's resolution tests above: same Spec, same provider/
+// model resolution, just a different constructed type (and nil rather than
+// a hard-rules downgrade, since there's no rules-only fallback for a
+// classifier that judges against caller-supplied criteria text).
+
+func TestBuildAcceptanceVerifier_InheritsMainProvider(t *testing.T) {
+	v := BuildAcceptanceVerifier(Spec{
+		Label: "test", MainProvider: stubProvider{name: "stub"}, MainProviderID: "stub",
+		MainModel: "stub-model", Logger: quiet(),
+	})
+	if v == nil {
+		t.Fatal("expected a non-nil verifier")
+	}
+	if v.Provider != "stub" || v.Model != "stub-model" {
+		t.Errorf("inherit: Provider=%q Model=%q, want stub/stub-model", v.Provider, v.Model)
+	}
+	if v.Harness == nil {
+		t.Error("verifier harness nil — provider not built")
+	}
+}
+
+func TestBuildAcceptanceVerifier_ClaudeInheritDefaultsHaiku(t *testing.T) {
+	v := BuildAcceptanceVerifier(Spec{
+		Label: "test", MainProvider: stubProvider{name: "claude-api"}, MainProviderID: "claude-api",
+		MainModel: "claude-opus-4-8", Logger: quiet(),
+	})
+	if v == nil || v.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("claude-api inherit: verifier=%#v, want Model=claude-haiku-4-5-20251001 (expanded)", v)
+	}
+}
+
+func TestBuildAcceptanceVerifier_UnknownOverrideReturnsNil(t *testing.T) {
+	v := BuildAcceptanceVerifier(Spec{
+		Label: "test", MainProvider: stubProvider{name: "stub"}, MainProviderID: "stub",
+		MainModel: "m", JudgeProviderName: "voodoo-llm", Logger: quiet(),
+	})
+	if v != nil {
+		t.Errorf("unknown override must return nil (caller fails open); got %#v", v)
+	}
+}
+
+func TestBuildAcceptanceVerifier_MisconfigReturnsNil(t *testing.T) {
+	v := BuildAcceptanceVerifier(Spec{
+		Label: "test", MainProvider: stubProvider{name: "stub"}, MainProviderID: "stub",
+		MainModel: "", Logger: quiet(),
+	})
+	if v != nil {
+		t.Errorf("no resolvable judge model must return nil; got %#v", v)
+	}
+}

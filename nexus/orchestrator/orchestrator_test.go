@@ -241,6 +241,51 @@ func TestDrainOnceDispatchesReadyItems(t *testing.T) {
 	}
 }
 
+// TestDrainOnceThreadsAcceptanceCriteria covers Unit B's WorkItem ->
+// PoolItem leg of the acceptance-criteria threading (NET-22/23/24):
+// dispatchOne formats wi.AcceptanceCriteria as bullet text on
+// PoolItem.AcceptanceCriteria so it reaches the Brief (and, via BuildJob,
+// -acceptance-file) unmodified. A work item with no criteria must NOT set
+// the field at all — reproducing today's Brief with no acceptance.md.
+func TestDrainOnceThreadsAcceptanceCriteria(t *testing.T) {
+	graph := newFakeGraph()
+	graph.addReady("wi-1", workgraph.WorkItem{
+		Role:               "builder",
+		TaskSpec:           "build the thing",
+		AcceptanceCriteria: []string{"must produce token CONVERGED-OK", "no test regressions"},
+	})
+	graph.addReady("wi-2", workgraph.WorkItem{Role: "builder", TaskSpec: "build the other thing"})
+	disp := &fakeDispatcher{}
+	o := &Orchestrator{
+		Graph:        graph,
+		Dispatcher:   disp,
+		WorkerStatus: &fakeWorkerStatus{},
+		Roles:        []string{"builder"},
+	}
+
+	if _, err := o.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("DrainOnce: %v", err)
+	}
+	if len(disp.calls) != 2 {
+		t.Fatalf("expected 2 SubmitPoolItem calls, got %d", len(disp.calls))
+	}
+	var withCriteria, without dispatch.PoolItem
+	for _, c := range disp.calls {
+		if c.WorkItemID == "wi-1" {
+			withCriteria = c
+		} else {
+			without = c
+		}
+	}
+	want := "- must produce token CONVERGED-OK\n- no test regressions"
+	if withCriteria.AcceptanceCriteria != want {
+		t.Errorf("AcceptanceCriteria = %q, want %q", withCriteria.AcceptanceCriteria, want)
+	}
+	if without.AcceptanceCriteria != "" {
+		t.Errorf("work item with no criteria must produce empty AcceptanceCriteria, got %q", without.AcceptanceCriteria)
+	}
+}
+
 func TestDrainOnceSkipsAlreadyDispatchedAcrossTwoPasses(t *testing.T) {
 	graph := newFakeGraph()
 	graph.addReady("wi-1", workgraph.WorkItem{Role: "builder", TaskSpec: "build the thing"})

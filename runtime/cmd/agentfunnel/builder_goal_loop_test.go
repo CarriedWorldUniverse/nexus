@@ -88,6 +88,28 @@ func TestBuilderPRVerifier(t *testing.T) {
 	}
 }
 
+// TestBuilderPRVerifierRepoLessBypassesGate covers Unit B item 3
+// (respond-only completion, NET-22): a repo-less brief has no PR to gate
+// on, so the verifier must return true unconditionally WITHOUT calling
+// prExistsFn (a gh call for an empty repo would only ever error) — this is
+// what stops builderGoalLoop from re-prompting the model to open a PR that
+// can never exist (the anvil-builder "blocked after success" bug).
+func TestBuilderPRVerifierRepoLessBypassesGate(t *testing.T) {
+	orig := prExistsFn
+	defer func() { prExistsFn = orig }()
+	called := false
+	prExistsFn = func(string, string) (bool, error) {
+		called = true
+		return false, errors.New("should never be called for a repo-less brief")
+	}
+	if ok := builderPRVerifier(slog.Default(), "anvil", "", "NET-22", "")(); !ok {
+		t.Fatal("repo-less verifier must return true (PR gate skipped)")
+	}
+	if called {
+		t.Fatal("repo-less verifier must not call prExistsFn at all")
+	}
+}
+
 func TestBuilderPRVerifierUsesCustomBranch(t *testing.T) {
 	orig := prExistsFn
 	defer func() { prExistsFn = orig }()

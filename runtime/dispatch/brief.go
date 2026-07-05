@@ -89,6 +89,16 @@ type Brief struct {
 	// bundle (res.Personality) that composeSystemPrompt already layers in.
 	Personality string `json:"personality,omitempty"`
 
+	// AcceptanceCriteria carries the ledger work item's DoD checklist
+	// (workgraph.WorkItem.AcceptanceCriteria, formatted one-per-line) into
+	// the spawn — Unit B "verified task_done" (NET-22/23/24): the funnel
+	// judges the builder's task_done claim against this text before
+	// honoring completion, instead of trusting the model's self-report
+	// unconditionally. Empty = no criteria captured on this dispatch (e.g.
+	// non-ledger !dispatch), which reproduces today's unconditional-honor
+	// behavior exactly — see agentfunnel's builderOnTaskDone.
+	AcceptanceCriteria string `json:"acceptance_criteria,omitempty"`
+
 	Task string `json:"-"`
 }
 
@@ -103,6 +113,9 @@ func briefConfigMapData(b Brief) (map[string]string, error) {
 	data := map[string]string{"brief.md": b.Task}
 	if b.RolePrompt != "" {
 		data[briefRoleFileName] = b.RolePrompt
+	}
+	if b.AcceptanceCriteria != "" {
+		data[briefAcceptanceFileName] = b.AcceptanceCriteria
 	}
 	if b.PolicyFragment != nil {
 		raw, err := json.Marshal(b.PolicyFragment)

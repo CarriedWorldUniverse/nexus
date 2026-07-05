@@ -295,6 +295,11 @@ func TestBriefConfigMapData(t *testing.T) {
 			b:    Brief{Task: "do the thing", PolicyFragment: &funnel.ToolPolicy{DefaultAllow: false}},
 			want: map[string]string{"brief.md": "do the thing", "policy.json": `{"default_allow":false}`},
 		},
+		{
+			name: "acceptance criteria adds acceptance.md",
+			b:    Brief{Task: "do the thing", AcceptanceCriteria: "- must produce token X"},
+			want: map[string]string{"brief.md": "do the thing", "acceptance.md": "- must produce token X"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

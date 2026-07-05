@@ -380,6 +380,7 @@ const (
 	briefDir                = "/etc/dispatch"
 	briefRoleFileName       = "role.md"
 	briefPolicyFragmentName = "policy.json"
+	briefAcceptanceFileName = "acceptance.md"
 )
 
 // builderArgs assembles the agentfunnel command line. Ticket dispatches
@@ -408,6 +409,9 @@ func builderArgs(b Brief, cfg JobConfig, spawn bool) []string {
 	}
 	if b.PolicyFragment != nil {
 		args = append(args, "-policy-fragment-file", briefDir+"/"+briefPolicyFragmentName)
+	}
+	if b.AcceptanceCriteria != "" {
+		args = append(args, "-acceptance-file", briefDir+"/"+briefAcceptanceFileName)
 	}
 	return args
 }

@@ -290,7 +290,7 @@ func TestBuildJob_RoleAtSpawn(t *testing.T) {
 
 	t.Run("empty brief: no role-at-spawn args/env/labels", func(t *testing.T) {
 		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
-		if contains(c.Args, "-role-file") || contains(c.Args, "-policy-fragment-file") {
+		if contains(c.Args, "-role-file") || contains(c.Args, "-policy-fragment-file") || contains(c.Args, "-acceptance-file") {
 			t.Errorf("empty brief must not pass role-at-spawn flags: %v", c.Args)
 		}
 		for _, name := range []string{"CW_ROLE", "CW_WORK_ITEM_ID", "CW_PERSONALITY", "CW_SKILL_ALLOWLIST"} {
@@ -320,6 +320,16 @@ func TestBuildJob_RoleAtSpawn(t *testing.T) {
 		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", PolicyFragment: &funnel.ToolPolicy{DefaultAllow: false}}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
 		if !argValueEquals(c.Args, "-policy-fragment-file", "/etc/dispatch/policy.json") {
 			t.Errorf("args missing -policy-fragment-file /etc/dispatch/policy.json: %v", c.Args)
+		}
+	})
+
+	// Unit B (verified task_done, NET-22/23/24): acceptance criteria sets
+	// -acceptance-file pointing at the brief ConfigMap mount, mirroring the
+	// role-prompt/policy-fragment overlay wiring above exactly.
+	t.Run("acceptance criteria sets -acceptance-file", func(t *testing.T) {
+		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", AcceptanceCriteria: "- must produce token X"}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		if !argValueEquals(c.Args, "-acceptance-file", "/etc/dispatch/acceptance.md") {
+			t.Errorf("args missing -acceptance-file /etc/dispatch/acceptance.md: %v", c.Args)
 		}
 	})
 
