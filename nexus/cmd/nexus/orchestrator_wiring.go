@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/docregister"
 	"github.com/CarriedWorldUniverse/nexus/nexus/orchestrator"
 	"github.com/CarriedWorldUniverse/nexus/nexus/workgraph"
@@ -244,26 +245,56 @@ func parseCSVOrDefault(raw string, def []string) []string {
 // an existing row (any status other than retired) is left alone. Env
 // POOL_PROVIDER / POOL_MODEL set the derived slots' brain (default the local
 // Ornith builder brain).
-func ensurePoolAspect(ctx context.Context, store aspects.Store, logger *slog.Logger) {
+func ensurePoolAspect(ctx context.Context, store aspects.Store, credStore *credentials.Store, logger *slog.Logger) {
 	if store == nil {
 		return
 	}
 	const poolName = "pool" // mirrors runtime/dispatch.poolParentName
-	if a, err := store.Get(ctx, poolName); err == nil && a != nil && a.Status != aspects.StatusRetired {
-		return // already provisioned
-	}
 	provider := envOr("POOL_PROVIDER", "openai")
 	model := envOr("POOL_MODEL", "ornith")
-	if err := store.Insert(ctx, aspects.Aspect{
-		Name:     poolName,
-		Status:   aspects.StatusActive,
-		Provider: provider,
-		Model:    model,
-	}); err != nil {
-		logger.Warn("orchestrator: ensurePoolAspect: insert pool aspect failed (pool dispatch will fail to mint slots)", "err", err)
+
+	// 1. The pool parent aspect row (MintDerivedCredential needs it).
+	if a, err := store.Get(ctx, poolName); err != nil || a == nil || a.Status == aspects.StatusRetired {
+		if err := store.Insert(ctx, aspects.Aspect{
+			Name: poolName, Status: aspects.StatusActive, Provider: provider, Model: model,
+		}); err != nil {
+			logger.Warn("orchestrator: ensurePoolAspect: insert pool aspect failed (pool dispatch will fail to mint slots)", "err", err)
+			return
+		}
+		logger.Info("orchestrator: provisioned pool aspect row", "provider", provider, "model", model)
+	}
+
+	// 2. The pool's PROVIDER credential + default, so derived pool.sub-N
+	// workers resolve their brain endpoint. Derived agents have no aspects
+	// row of their own — the broker resolves their provider credential
+	// through BaseName (=pool), so the default MUST live on the pool row.
+	// Only when POOL_PROVIDER_BASE_URL is set (else the worker inherits its
+	// process env). Idempotent: upsert + set-default every boot.
+	baseURL := os.Getenv("POOL_PROVIDER_BASE_URL")
+	if credStore == nil || baseURL == "" {
 		return
 	}
-	logger.Info("orchestrator: provisioned pool aspect row", "provider", provider, "model", model)
+	shape := "openai"
+	if provider == "claude-api" || provider == "anthropic" || provider == "claude" {
+		shape = "anthropic"
+	}
+	const credName = "pool-provider"
+	if err := credStore.Set(ctx, credentials.UpsertParams{
+		Name:           credName,
+		Description:    "pool derived-worker brain (self-provisioned at boot)",
+		Kind:           credentials.KindProvider,
+		Bundle:         map[string]any{"api_shape": shape, "base_url": baseURL, "key": envOr("POOL_PROVIDER_KEY", "dummy"), "default_model": model},
+		AllowedAspects: []string{"*"},
+		Mode:           credentials.ModeFetch,
+	}); err != nil {
+		logger.Warn("orchestrator: ensurePoolAspect: upsert pool-provider credential failed", "err", err)
+		return
+	}
+	if err := credStore.SetAspectDefault(ctx, poolName, shape, credName); err != nil {
+		logger.Warn("orchestrator: ensurePoolAspect: set pool default provider credential failed", "err", err)
+		return
+	}
+	logger.Info("orchestrator: provisioned pool provider credential + default", "shape", shape, "base_url", baseURL, "model", model)
 }
 
 func envOr(k, def string) string {

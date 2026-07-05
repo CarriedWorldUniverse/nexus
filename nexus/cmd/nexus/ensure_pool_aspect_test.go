@@ -28,7 +28,7 @@ func TestEnsurePoolAspect(t *testing.T) {
 	if a, _ := store.Get(ctx, "pool"); a != nil {
 		t.Fatalf("pool should not exist yet")
 	}
-	ensurePoolAspect(ctx, store, logger)
+	ensurePoolAspect(ctx, store, nil, logger)
 	a, err := store.Get(ctx, "pool")
 	if err != nil || a == nil {
 		t.Fatalf("pool not provisioned: %v", err)
@@ -39,7 +39,7 @@ func TestEnsurePoolAspect(t *testing.T) {
 	t.Logf("provisioned pool aspect: status=%s provider=%s model=%s", a.Status, a.Provider, a.Model)
 
 	// Present → idempotent (no error, no duplicate).
-	ensurePoolAspect(ctx, store, logger)
+	ensurePoolAspect(ctx, store, nil, logger)
 	if a2, err := store.Get(ctx, "pool"); err != nil || a2 == nil {
 		t.Fatalf("pool disappeared after second ensure: %v", err)
 	}

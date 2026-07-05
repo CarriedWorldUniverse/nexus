@@ -313,13 +313,20 @@ func (b *Broker) handleAspectValidate(w http.ResponseWriter, r *http.Request) {
 	// aspect constructs its native-API provider with the broker-held key
 	// (no key in start scripts/env). Best-effort: any miss falls back to
 	// the aspect's own process env.
-	providerEnv := resolveProviderEnv(r.Context(), v.Credentials, sess.AspectName, sess.Provider, b.log)
+	// Resolve provider/judge/compact credentials by BASE name: a derived
+	// hand (`<parent>.sub-N`) has no aspects row of its own, so its provider
+	// credential + defaults live on the parent (see aspects/derived.go —
+	// "credentials resolve through BaseName"). BaseName is identity for a
+	// non-derived name, so this is safe for keyfile aspects too. Mirrors
+	// handleAspectResolve, which already does this.
+	credAspect := aspects.BaseName(sess.AspectName)
+	providerEnv := resolveProviderEnv(r.Context(), v.Credentials, credAspect, sess.Provider, b.log)
 
 	// NEX-373: resolve the effective judge + compact config here and deliver
 	// it in the validate response, instead of the out-of-process aspect doing
 	// a startup WS round-trip (which raced wsClient.Run and timed out).
-	judgeProvider, judgeModel, judgeEnv := resolveJudgeConfig(r.Context(), v.Credentials, sess.AspectName, b.log)
-	compactModel, compactEnv := resolveCompactConfig(r.Context(), v.Credentials, sess.AspectName, b.log)
+	judgeProvider, judgeModel, judgeEnv := resolveJudgeConfig(r.Context(), v.Credentials, credAspect, b.log)
+	compactModel, compactEnv := resolveCompactConfig(r.Context(), v.Credentials, credAspect, b.log)
 
 	resp := validateResponse{
 		OK:               true,
