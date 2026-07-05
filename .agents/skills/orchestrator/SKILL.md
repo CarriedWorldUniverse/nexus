@@ -1,6 +1,7 @@
 ---
 name: orchestrator
-description: Use when a task is big enough to split into pieces — plan and decompose on Opus (you), then hand the bounded/mechanical/parallelizable pieces to SONNET subagents (Agent tool, model:"sonnet") and verify + synthesize the results yourself. The always-on, permission-mode-free version of opusplan: Opus does the thinking, Sonnet does the doing, and because it's a MODEL choice (not Plan Mode) it composes with auto/bypass — no mode switch, no flow break. Saves Opus quota on execution-heavy work.
+description: 'Use when a task is big enough to split into pieces — plan and decompose on Opus (you), then hand the bounded/mechanical/parallelizable pieces to SONNET subagents (Agent tool, model:"sonnet") and verify + synthesize the results yourself. The always-on, permission-mode-free version of opusplan: Opus does the thinking, Sonnet does the doing, and because it is a MODEL choice (not Plan Mode) it composes with auto/bypass — no mode switch, no flow break. Saves Opus quota on execution-heavy work.'
+when_to_use: 'When a task decomposes into bounded, spec-able pieces — plan on Opus, delegate execution to Sonnet subagents via the Agent tool, then verify and synthesize the results yourself.'
 ---
 
 # Orchestrator — Opus plans, Sonnet subagents execute
