@@ -566,6 +566,7 @@ func main() {
 	// drain loop starts, exactly as before this wiring existed. See
 	// orchestrator_wiring.go for the env-var reference.
 	if dispatchRunner != nil {
+		ensurePoolAspect(ctx, keyfileValidator.Store, logger)
 		workgraphClient := buildWorkgraphClient(logger)
 		if orch := buildOrchestrator(logger, workgraphClient, dispatchRunner, workerStatusStore); orch != nil {
 			dispatchRunner.OnJobDoneHook = orch.OnJobDoneHook()

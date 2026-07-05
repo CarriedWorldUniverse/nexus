@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/docregister"
 	"github.com/CarriedWorldUniverse/nexus/nexus/orchestrator"
 	"github.com/CarriedWorldUniverse/nexus/nexus/workgraph"
@@ -232,4 +233,42 @@ func parseCSVOrDefault(raw string, def []string) []string {
 		return def
 	}
 	return out
+}
+
+// ensurePoolAspect self-provisions the synthetic "pool" parent aspect row the
+// pool-leasing dispatch path needs: MintDerivedCredential looks the parent up
+// as a real, non-retired aspects-store row before signing a pool.sub-N session
+// (see runtime/dispatch/pool.go + nexus/broker/spawn_credential.go). The pool
+// carries no keyfile/persona, so it never self-registers like a named aspect —
+// the broker inserts it at boot when orchestration is enabled. Idempotent:
+// an existing row (any status other than retired) is left alone. Env
+// POOL_PROVIDER / POOL_MODEL set the derived slots' brain (default the local
+// Ornith builder brain).
+func ensurePoolAspect(ctx context.Context, store aspects.Store, logger *slog.Logger) {
+	if store == nil {
+		return
+	}
+	const poolName = "pool" // mirrors runtime/dispatch.poolParentName
+	if a, err := store.Get(ctx, poolName); err == nil && a != nil && a.Status != aspects.StatusRetired {
+		return // already provisioned
+	}
+	provider := envOr("POOL_PROVIDER", "openai")
+	model := envOr("POOL_MODEL", "ornith")
+	if err := store.Insert(ctx, aspects.Aspect{
+		Name:     poolName,
+		Status:   aspects.StatusActive,
+		Provider: provider,
+		Model:    model,
+	}); err != nil {
+		logger.Warn("orchestrator: ensurePoolAspect: insert pool aspect failed (pool dispatch will fail to mint slots)", "err", err)
+		return
+	}
+	logger.Info("orchestrator: provisioned pool aspect row", "provider", provider, "model", model)
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
 }
