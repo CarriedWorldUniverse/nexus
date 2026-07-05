@@ -190,3 +190,12 @@ The event-triggered orchestrator loop physically exists in code, fully unit-test
 7. RoleResolver impl (roles/*.yaml → resolved prompt).
 8. Wire DocRegister + WorkerStatusStore + orchestrator into cmd/nexus/main.go for the live broker.
 Then the dogfood cutover (M2: nexus consumes the sovereign ledger as the work-graph store), fleet retirement (M3), and prove-it (M4: real tickets through the pipeline).
+
+## LIVE INTEGRATION STARTED 2026-07-05 — orchestrator drains the real sovereign ledger (PROVEN)
+Line `builder/li1-orchestrator-wiring` (off m1-unit8-console). The orchestrator wiring (item 8) is in cmd/nexus/main.go (env-gated, fail-soft: DocRegister + workgraph client + orchestrator construct + OnJobDoneHook wake + drain goroutine). PROVEN end-to-end against the LIVE sovereign ledger (ledger.cwb.svc:8081) via TestLiveOrchestratorDrain: seed a queued builder work-item → DrainOnce reads it from the real graph → dispatches it → second pass SKIPS it (now In Progress) — no double-dispatch, errors=[].
+
+**Two real-ledger bugs the live integration surfaced (the verify gate again, at integration level):**
+1. **Claim conflict code:** the real ledger returns `codes.Aborted` "already claimed by another agent" — unit 1's guessed FailedPrecondition/AlreadyExists never matched (its e2e didn't exercise the conflict path). Fixed workgraph.Claim to map Aborted + the message.
+2. **Assignment IS the claim:** ledger's ClaimIssue rule is `assignee != "" && assignee != actor → ErrAlreadyClaimed`. CreateWorkItem sets assignee_aspect=role, so the item is claimed-for-the-role at creation; the orchestrator (a different identity) can NEVER Claim it. So the orchestrator's Claim-based idempotency guard was wrong. Fixed: idempotency is STATUS-based — ListReady preserves real status (queued=To Do, dispatched=In Progress); dispatchOne dispatches only queued, skips dispatched. Dropped the orchestrator Claim. Fakes+tests realigned.
+
+**Remaining live-integration items** (the other 7 from the M1-complete list): result channel worker→orchestrator (JobDone still OK-bool only — the drain dispatches but a worker's real verdict doesn't flow back yet), real alert sink, console session-auth, graph-status pane wiring, skill-gating MCP wiring, **pool aspect row provisioned** (needed for a real SubmitPoolItem to mint a derived credential — the live probe used a fake dispatcher), RoleResolver impl. Next real milestone: a REAL dispatch (not fake) — needs the pool aspect row + running the wired broker in-cluster.
