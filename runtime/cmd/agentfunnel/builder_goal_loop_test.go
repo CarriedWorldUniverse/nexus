@@ -94,6 +94,43 @@ func TestBuilderDecide_Acceptance(t *testing.T) {
 	}
 }
 
+// TestBuilderDecide_AcceptanceGatesNonCompleteReasons is the bounded-residual
+// regression (live-reproduced 2026-07-05 08:19): a rejected task_done mid-
+// turn is a live completion CLAIM regardless of what that SAME turn's judge
+// separately classified the overall reply as. Restricting the acceptance
+// gate to reason=="complete" let a scratch/loop_cap/unknown_class-classified
+// turn silently override the rejection with an unconditional exit — the
+// model's task_done was denied, but the goal-loop still walked away as if
+// there were nothing left to verify. acceptance must win regardless of
+// result.Reason whenever the caller (builderGoalLoop) decided to run the
+// gate at all; only the PR check stays reason=="complete"-scoped (a
+// scratch/loop_cap/unknown_class turn never claimed a PR-worthy completion).
+func TestBuilderDecide_AcceptanceGatesNonCompleteReasons(t *testing.T) {
+	cases := []struct {
+		name       string
+		reason     string
+		acceptance taskDoneStep
+		want       builderStep
+	}{
+		{"scratch + rejected task_done -> reprompt acceptance, not a silent exit", "scratch", taskDoneReprompt, builderRepromptAcceptance},
+		{"scratch + budget exhausted -> blocked, not a silent exit", "scratch", taskDoneBlocked, builderBlockedAcceptance},
+		{"loop_cap + rejected task_done -> reprompt acceptance, not a silent exit", "loop_cap", taskDoneReprompt, builderRepromptAcceptance},
+		{"unknown_class + rejected task_done -> reprompt acceptance, not a silent exit", "unknown_class", taskDoneReprompt, builderRepromptAcceptance},
+		{"scratch + acceptance honors (no claim this turn) -> exit, no PR gate", "scratch", taskDoneHonor, builderExit},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := funnel.GoalResult{Done: true, Reason: tc.reason}
+			// prVerified/prRepromptsLeft are irrelevant whenever acceptance
+			// isn't Honor, and for the Honor+non-complete case the PR gate
+			// must not apply either (want builderExit regardless).
+			if got := builderDecide(result, tc.acceptance, false, 3); got != tc.want {
+				t.Errorf("builderDecide(%+v, acceptance=%d) = %d, want %d", result, tc.acceptance, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestBuilderPRVerifier confirms the pure PR check: true only when a PR exists,
 // false on miss or error (fail-closed), with no stop side effect.
 func TestBuilderPRVerifier(t *testing.T) {

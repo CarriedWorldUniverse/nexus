@@ -1575,14 +1575,31 @@ const (
 // goal-loop's LastFinalText (the actual posted turn output, not a
 // self-report) instead of a task_done summary.
 //
+// Live-reproduced 2026-07-05 08:19 (bounded residual, NET-27 follow-up): a
+// model can call task_done mid-turn (REJECTED — not met, reprompt budget
+// remains, ctx stays LIVE since only an HONORED task_done cancels ctx) and
+// have that SAME turn's judge classify anything OTHER than
+// FilterClassComplete (scratch/loop_cap/unknown_class) once the tool round
+// finishes. The REJECTED task_done is still a live completion CLAIM this
+// gate exists to police — gating acceptance ONLY on reason=="complete" let
+// that claim's rejection get silently overridden by an unconditional exit
+// the moment the SAME turn's overall reply also happened to read as
+// "scratch". acceptance is now decided (in builderGoalLoop) for EVERY
+// Done && !Blocked result, not just "complete" — gate on shape
+// (Done && !Blocked), not on the reason string, because the gate itself
+// fails open when no criteria were ever captured, so over-gating a run
+// with no acceptance criteria is a no-op (identical behavior to before this
+// pass). Only the PR check remains reason=="complete"-scoped below: a
+// scratch/loop_cap/unknown_class turn never claimed a PR-worthy completion,
+// so there's still nothing to verify a PR against for those reasons.
+//
 //   - blocked                                       -> exit (escalated)
 //   - not done (intermediate goal_not_met)          -> continue (Pursue enqueued a continuation)
-//   - done, reason != "complete" (scratch/loop_cap/
-//     unknown_class)                                 -> exit (no acceptance/PR gate — no completion claim to verify)
-//   - done, reason "complete", acceptance says
-//     reprompt                                       -> reprompt acceptance (criteria not met, budget remains)
-//   - done, reason "complete", acceptance says
-//     blocked                                        -> exit BLOCKED (criteria never met, budget exhausted)
+//   - done, acceptance says reprompt                 -> reprompt acceptance (criteria not met, budget remains —
+//     regardless of reason: a rejected task_done this turn is a live claim
+//     even when the judge separately called the turn scratch/loop_cap/unknown_class)
+//   - done, acceptance says blocked                  -> exit BLOCKED (criteria never met, budget exhausted)
+//   - done, reason != "complete", acceptance honors  -> exit (no PR gate — no completion claim to verify a PR against)
 //   - done, reason "complete", acceptance honors
 //     (met / no criteria / verifier unavailable /
 //     verify errored — fail open), PR verified        -> exit (success)
@@ -1597,17 +1614,21 @@ func builderDecide(result funnel.GoalResult, acceptance taskDoneStep, prVerified
 	if !result.Done {
 		return builderContinue
 	}
-	if result.Reason != "complete" {
-		return builderExit
-	}
 	switch acceptance {
 	case taskDoneReprompt:
 		return builderRepromptAcceptance
 	case taskDoneBlocked:
 		return builderBlockedAcceptance
 	}
-	// acceptance == taskDoneHonor: met, or fail-open (no criteria captured /
-	// verifier unavailable / verify call errored).
+	// acceptance == taskDoneHonor: met, no criteria captured, verifier
+	// unavailable, or verify call errored (fail open) — including the case
+	// where this Done reason never carried any completion claim to verify
+	// in the first place (no task_done this turn, no criteria captured).
+	if result.Reason != "complete" {
+		// No PR gate for non-complete reasons — there's no completion
+		// claim to verify a PR against (NEX-468/471 unaffected).
+		return builderExit
+	}
 	if prVerified {
 		return builderExit
 	}
@@ -1661,11 +1682,21 @@ func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cf
 			return
 		}
 
-		// Acceptance gate (NET-27): only meaningful when the judge just
-		// classified this turn "complete" — that is the completion CLAIM
-		// this whole unit exists to double-check. gl.LastFinalText() is the
-		// turn's actual posted reply (what the judge itself just judged),
-		// not a task_done self-report — the live NET-27 failure was a judge
+		// Acceptance gate (NET-27, broadened by the 2026-07-05 08:19 bounded
+		// residual pass): gated on the RESULT SHAPE (Done && !Blocked), not
+		// on result.Reason == "complete". A rejected task_done mid-turn is a
+		// live completion CLAIM regardless of what the SAME turn's judge
+		// separately classified it as (complete/scratch/loop_cap/
+		// unknown_class) — restricting this to reason=="complete" let that
+		// claim's rejection get silently overridden the moment the judge
+		// happened to call the turn something else. gate.Decide fails open
+		// on its own (no criteria captured -> honor unconditionally), so
+		// gating every Done && !Blocked exit — rather than trying to guess
+		// which Reason values might carry a completion claim — is safe and
+		// behaviorally identical to before this pass for any run that never
+		// captured acceptance criteria. gl.LastFinalText() is the turn's
+		// actual posted reply (what the judge itself just judged), not a
+		// task_done self-report — the live NET-27 failure was a judge
 		// rating a one-line greeting "complete" against unsatisfiable
 		// criteria it never saw; feeding it the real output closes that gap.
 		// gate is the SAME builderAcceptanceGate builderOnTaskDone uses —
@@ -1673,7 +1704,7 @@ func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cf
 		// completion paths (see builderAcceptanceGate's doc comment).
 		acceptance := taskDoneHonor
 		var verdict funnel.AcceptanceVerdict
-		if result.Done && !result.Blocked && result.Reason == "complete" {
+		if result.Done && !result.Blocked {
 			acceptance, verdict = gate.Decide(ctx, gl.LastFinalText(), log)
 		}
 
@@ -1689,14 +1720,14 @@ func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cf
 		case builderContinue:
 			continue
 		case builderRepromptAcceptance:
-			log.Info("agentfunnel: judge complete but acceptance criteria not met — re-prompting",
-				"ticket", cfg.TicketID, "reason", verdict.Reason)
+			log.Info("agentfunnel: completion claimed but acceptance criteria not met — re-prompting",
+				"ticket", cfg.TicketID, "reason", verdict.Reason, "goal_loop_reason", result.Reason)
 			f.ReceiveSynthetic(bridle.InboxItem{
 				From:       "system",
 				Source:     "builder_acceptance_check",
 				ThreadRoot: cfg.ThreadRoot,
 				Content: fmt.Sprintf(
-					"[CONTINUATION] Your last reply was judged complete, but it does not satisfy the work item's "+
+					"[CONTINUATION] Your last reply claimed or implied completion, but it does not satisfy the work item's "+
 						"acceptance criteria (%s):\n%s\n\nRevise your work so the criteria above are genuinely met, "+
 						"then reply again. If you cannot meet them, say so explicitly and name the blocker.",
 					verdict.Reason, gate.criteria),
