@@ -95,6 +95,9 @@ func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "workers" {
 		os.Exit(runWorkersSubcommand(os.Args[2:]))
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "workitem" {
+		os.Exit(runWorkitemSubcommand(os.Args[2:]))
+	}
 	addr := flag.String("addr", ":7888", "broker listen address")
 	tokenEnv := flag.String("token-env", "NEXUS_TOKEN", "env var holding the shared bearer token")
 	staleAfter := flag.Duration("stale-after", 30*time.Second, "aspect becomes stale after this gap without heartbeat")
