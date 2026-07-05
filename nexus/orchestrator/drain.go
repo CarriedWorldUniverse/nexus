@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/workgraph"
@@ -64,12 +63,16 @@ func (o *Orchestrator) DrainOnce(ctx context.Context) (DrainReport, error) {
 // ErrAlreadyClaimed means an earlier pass (or a concurrent one) already has
 // this item, so it is skipped rather than double-dispatched.
 func (o *Orchestrator) dispatchOne(ctx context.Context, role string, wi workgraph.WorkItem, report *DrainReport) {
-	if err := o.Graph.Claim(ctx, wi.ID, o.claimAgent()); err != nil {
-		if errors.Is(err, workgraph.ErrAlreadyClaimed) {
-			report.Skipped = append(report.Skipped, wi.ID)
-			return
-		}
-		report.Errors = append(report.Errors, errf("claim %s: %v", wi.ID, err))
+	// Idempotent-dispatch guard = the item's status, NOT a Claim. In the
+	// sovereign ledger, assigning an item to a role (CreateWorkItem sets
+	// assignee_aspect=role) IS the claim — the orchestrator, a different
+	// identity, can never Claim it (confirmed live: ClaimIssue returns
+	// Aborted "already claimed by another agent" because assignee != actor).
+	// So dispatch only items still queued (ledger "To Do"); an item already
+	// dispatched/running (ledger "In Progress") is skipped — a second drain
+	// pass, or a worker mid-run, must not be double-dispatched.
+	if wi.Status != workgraph.StatusQueued {
+		report.Skipped = append(report.Skipped, wi.ID)
 		return
 	}
 

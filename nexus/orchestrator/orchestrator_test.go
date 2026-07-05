@@ -41,8 +41,8 @@ func (g *fakeGraph) addReady(id string, wi workgraph.WorkItem) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	wi.ID = id
-	wi.Status = workgraph.StatusReady
-	g.items[id] = &fakeItem{wi: wi, status: workgraph.StatusReady}
+	wi.Status = workgraph.StatusQueued
+	g.items[id] = &fakeItem{wi: wi, status: workgraph.StatusQueued}
 }
 
 func (g *fakeGraph) ListReady(_ context.Context, role, _ string) ([]workgraph.WorkItem, error) {
@@ -50,8 +50,10 @@ func (g *fakeGraph) ListReady(_ context.Context, role, _ string) ([]workgraph.Wo
 	defer g.mu.Unlock()
 	var out []workgraph.WorkItem
 	for _, it := range g.items {
-		if it.wi.Role == role && it.status == workgraph.StatusReady {
-			out = append(out, it.wi)
+		if it.wi.Role == role && (it.status == workgraph.StatusQueued || it.status == workgraph.StatusDispatched) {
+			wi := it.wi
+			wi.Status = it.status
+			out = append(out, wi)
 		}
 	}
 	return out, nil
@@ -112,8 +114,8 @@ func (g *fakeGraph) Rework(_ context.Context, rejectedID string, newSpec workgra
 	if item.Role == "" {
 		item.Role = old.wi.Role
 	}
-	item.Status = workgraph.StatusReady
-	g.items[newID] = &fakeItem{wi: item, status: workgraph.StatusReady}
+	item.Status = workgraph.StatusQueued
+	g.items[newID] = &fakeItem{wi: item, status: workgraph.StatusQueued}
 	return newID, nil
 }
 
@@ -250,10 +252,13 @@ func TestDrainOnceSkipsAlreadyDispatchedAcrossTwoPasses(t *testing.T) {
 		Roles:        []string{"builder"},
 	}
 
-	// Simulate ListReady still returning the item on a second pass (the
-	// live ledger's "In Progress" also matches ListReadyIssues per its
-	// README caveat) — Claim's atomicity must still prevent a second
-	// dispatch.
+	// Idempotency is STATUS-based (confirmed against the live sovereign
+	// ledger): the first pass dispatches wi-1 (queued) and transitions it to
+	// dispatched (In Progress). ListReady still returns it on the second pass
+	// (ledger's ready query includes In Progress for worker-resume), but
+	// dispatchOne skips it because its status is no longer queued — no
+	// double-dispatch, no Claim needed (assignment IS the claim in the
+	// ledger, so the orchestrator can't Claim anyway).
 	first, err := o.DrainOnce(context.Background())
 	if err != nil {
 		t.Fatalf("first DrainOnce: %v", err)
@@ -262,16 +267,12 @@ func TestDrainOnceSkipsAlreadyDispatchedAcrossTwoPasses(t *testing.T) {
 		t.Fatalf("first pass: expected 1 dispatched, got %d", len(first.Dispatched))
 	}
 
-	// Force the item back to "ready" in the fake to simulate the
-	// ListReadyIssues membership caveat, without resetting its claim.
-	graph.items["wi-1"].status = workgraph.StatusReady
-
 	second, err := o.DrainOnce(context.Background())
 	if err != nil {
 		t.Fatalf("second DrainOnce: %v", err)
 	}
 	if len(second.Dispatched) != 0 {
-		t.Fatalf("second pass: expected 0 dispatched (already claimed), got %d", len(second.Dispatched))
+		t.Fatalf("second pass: expected 0 dispatched (already In Progress), got %d", len(second.Dispatched))
 	}
 	if len(second.Skipped) != 1 || second.Skipped[0] != "wi-1" {
 		t.Fatalf("second pass: expected wi-1 skipped, got %v", second.Skipped)
@@ -360,8 +361,8 @@ func TestPreflightAuthFailureHoldsDrain(t *testing.T) {
 	if len(disp.calls) != 0 {
 		t.Fatalf("expected no dispatch on auth-hold, got %d calls", len(disp.calls))
 	}
-	if graph.items["wi-1"].status != workgraph.StatusReady {
-		t.Errorf("item status = %v, want unchanged (ready)", graph.items["wi-1"].status)
+	if graph.items["wi-1"].status != workgraph.StatusQueued {
+		t.Errorf("item status = %v, want unchanged (queued)", graph.items["wi-1"].status)
 	}
 	if alerter.count() != 1 {
 		t.Fatalf("expected 1 alert, got %d", alerter.count())

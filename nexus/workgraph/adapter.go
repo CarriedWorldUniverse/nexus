@@ -279,7 +279,12 @@ func (c *Client) ListReady(ctx context.Context, role, stream string) ([]WorkItem
 		if stream != "" && wi.StreamID != stream {
 			continue
 		}
-		wi.Status = StatusReady
+		// Preserve the item's REAL ledger status (queued for "To Do",
+		// dispatched for "In Progress") rather than flattening to
+		// StatusReady — the orchestrator dispatches only queued items and
+		// must skip already-running (In Progress) ones, which membership in
+		// ListReady alone can't distinguish (ledger's ready query includes
+		// In Progress for worker-resume). GetWorkItem already set wi.Status.
 		out = append(out, wi)
 	}
 	return out, nil
@@ -388,7 +393,13 @@ func (c *Client) Rework(ctx context.Context, rejectedID string, newSpec WorkItem
 func (c *Client) Claim(ctx context.Context, id, agent string) error {
 	_, err := c.issue.ClaimIssue(c.ctx(ctx), &cwbv1.ClaimIssueRequest{Key: id, Actor: agent})
 	if err != nil {
-		if code := status.Code(err); code == codes.FailedPrecondition || code == codes.AlreadyExists {
+		// The live sovereign ledger returns codes.Aborted ("already claimed
+		// by another agent") for a claim conflict — confirmed by the
+		// orchestrator live-integration probe (unit 1's e2e never exercised
+		// the conflict path, so the original FailedPrecondition/AlreadyExists
+		// guess was untested). Match all three plus the message.
+		if code := status.Code(err); code == codes.Aborted || code == codes.FailedPrecondition || code == codes.AlreadyExists ||
+			strings.Contains(strings.ToLower(status.Convert(err).Message()), "already claimed") {
 			return ErrAlreadyClaimed
 		}
 		return fmt.Errorf("workgraph.Claim: %w", err)
