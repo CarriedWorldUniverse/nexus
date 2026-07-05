@@ -18,6 +18,7 @@ import (
 type issueClient interface {
 	CreateIssue(ctx context.Context, in *cwbv1.CreateIssueRequest, opts ...grpc.CallOption) (*cwbv1.CreateIssueResponse, error)
 	GetIssue(ctx context.Context, in *cwbv1.GetIssueRequest, opts ...grpc.CallOption) (*cwbv1.GetIssueResponse, error)
+	UpdateIssue(ctx context.Context, in *cwbv1.UpdateIssueRequest, opts ...grpc.CallOption) (*cwbv1.UpdateIssueResponse, error)
 	TransitionIssue(ctx context.Context, in *cwbv1.TransitionIssueRequest, opts ...grpc.CallOption) (*cwbv1.TransitionIssueResponse, error)
 	CommentIssue(ctx context.Context, in *cwbv1.CommentIssueRequest, opts ...grpc.CallOption) (*cwbv1.CommentIssueResponse, error)
 	ListComments(ctx context.Context, in *cwbv1.ListCommentsRequest, opts ...grpc.CallOption) (*cwbv1.ListCommentsResponse, error)
@@ -88,7 +89,16 @@ func New(conn grpc.ClientConnInterface, org, subject, project string) *Client {
 // (project creation in particular reads organisation from this context, not
 // the request body — see cwb-proto's CreateProjectRequest comment).
 func (c *Client) ctx(ctx context.Context) context.Context {
-	ctx = metadata.AppendToOutgoingContext(ctx, "cwb-subject", c.Subject, "cwb-org", c.Org)
+	return c.ctxAs(ctx, c.Subject)
+}
+
+// ctxAs is ctx but with the cwb-subject overridden. ListReady needs this:
+// the live ledger's ListReadyIssues filters `assignee_aspect = <caller's
+// cwb-subject>` (see README.md's "ready is aspect-scoped" note), so querying
+// "as" a role means presenting that role as cwb-subject for that one call,
+// not c.Subject (the adapter's own accountable identity).
+func (c *Client) ctxAs(ctx context.Context, subject string) context.Context {
+	ctx = metadata.AppendToOutgoingContext(ctx, "cwb-subject", subject, "cwb-org", c.Org)
 	if len(c.Scopes) > 0 {
 		ctx = metadata.AppendToOutgoingContext(ctx, "cwb-scopes", strings.Join(c.Scopes, " "))
 	}

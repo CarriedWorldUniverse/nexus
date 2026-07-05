@@ -73,7 +73,7 @@ func TestLiveWorkGraph(t *testing.T) {
 		t.Fatalf("create B (depends_on A): %v", err)
 	}
 
-	ready, err := c.ListReady(ctx, "")
+	ready, err := c.ListReady(ctx, "builder", "")
 	if err != nil {
 		t.Fatalf("ListReady (before A done): %v", err)
 	}
@@ -85,7 +85,7 @@ func TestLiveWorkGraph(t *testing.T) {
 		t.Fatalf("transition A done: %v", err)
 	}
 
-	ready, err = c.ListReady(ctx, "")
+	ready, err = c.ListReady(ctx, "builder", "")
 	if err != nil {
 		t.Fatalf("ListReady (after A done): %v", err)
 	}

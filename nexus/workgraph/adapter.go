@@ -49,12 +49,17 @@ func (c *Client) CreateWorkItem(ctx context.Context, wi WorkItem) (string, error
 		Type:             "Task",
 		Summary:          summarize(wi),
 		Description:      wi.TaskSpec,
-		DefinitionOfDone: strings.Join(wi.AcceptanceCriteria, "\n"),
+		DefinitionOfDone: formatDoD(wi.AcceptanceCriteria),
 		ParentKey:        wi.StreamID,
 		Reporter:         c.Subject,
 	}
 	if wi.Role != "" {
 		req.Skills = []string{wi.Role}
+		// ledger's ListReadyIssues is aspect-assigned (assignee_aspect =
+		// caller's cwb-subject), not skills/label-driven — the pool model
+		// wants "ready for role X, claimable by any worker of that role", so
+		// the role IS the assignee_aspect (see README.md / ListReady).
+		req.AssigneeAspect = wi.Role
 	}
 	resp, err := c.issue.CreateIssue(c.ctx(ctx), req)
 	if err != nil {
@@ -125,7 +130,7 @@ func (c *Client) GetWorkItem(ctx context.Context, id string) (WorkItem, error) {
 	wi := WorkItem{
 		ID:                 issue.GetKey(),
 		TaskSpec:           issue.GetDescription(),
-		AcceptanceCriteria: splitNonEmpty(issue.GetDefinitionOfDone()),
+		AcceptanceCriteria: parseDoD(issue.GetDefinitionOfDone()),
 		StreamID:           issue.GetParentKey(),
 		Status:             ledgerToStatus[issue.GetStatus()],
 	}
@@ -182,20 +187,86 @@ func commentBody(payloadJSON string) string {
 	return p.Body
 }
 
-func splitNonEmpty(s string) []string {
-	if s == "" {
-		return nil
+// dodUnticked / dodTicked are the checklist-line markers the live ledger's
+// definition_of_done parser expects (confirmed against the real ledger:
+// TransitionIssue to "Done" rejects with "definition of done has unticked
+// items" unless every line is ticked). workgraph writes acceptance_criteria
+// as an unticked checklist on create and ticks every line just before a Done
+// transition (see tickDoD) — the adapter's contract is "the ledger's DoD gate
+// passes once RecordResult(verdict=done)/Transition(..., StatusDone) says the
+// acceptance criteria were met", not a per-item completion API.
+const (
+	dodUnticked = "- [ ] "
+	dodTicked   = "- [x] "
+)
+
+func formatDoD(criteria []string) string {
+	if len(criteria) == 0 {
+		return ""
 	}
-	return strings.Split(s, "\n")
+	lines := make([]string, len(criteria))
+	for i, c := range criteria {
+		lines[i] = dodUnticked + c
+	}
+	return strings.Join(lines, "\n")
 }
 
-// ListReady returns the work items the ledger reports as ready (all
-// depends_on satisfied), optionally filtered to one stream (epic subtree).
-// Each returned item's Status is forced to StatusReady — that is the
-// meaning of ListReadyIssues membership, regardless of the issue's stored
-// workflow state (see README.md).
-func (c *Client) ListReady(ctx context.Context, stream string) ([]WorkItem, error) {
-	resp, err := c.issue.ListReadyIssues(c.ctx(ctx), &cwbv1.ListReadyIssuesRequest{})
+// parseDoD recovers the plain acceptance_criteria strings from a
+// definition_of_done checklist (ticked or not) — GetWorkItem's fold back to
+// WorkItem.AcceptanceCriteria.
+func parseDoD(dod string) []string {
+	if dod == "" {
+		return nil
+	}
+	lines := strings.Split(dod, "\n")
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		l = strings.TrimPrefix(l, dodUnticked)
+		l = strings.TrimPrefix(l, dodTicked)
+		out = append(out, l)
+	}
+	return out
+}
+
+// tickDoD rewrites id's definition_of_done with every checklist line ticked,
+// required before a Done transition (see dodUnticked/dodTicked). A no-op
+// (skips the UpdateIssue call) when there's nothing unticked, e.g. an empty
+// DoD or one already ticked by an earlier call.
+func (c *Client) tickDoD(ctx context.Context, id string) error {
+	resp, err := c.issue.GetIssue(c.ctx(ctx), &cwbv1.GetIssueRequest{Key: id})
+	if err != nil {
+		return fmt.Errorf("get issue: %w", err)
+	}
+	dod := resp.GetIssue().GetDefinitionOfDone()
+	if !strings.Contains(dod, dodUnticked) {
+		return nil
+	}
+	ticked := strings.ReplaceAll(dod, dodUnticked, dodTicked)
+	if _, err := c.issue.UpdateIssue(c.ctx(ctx), &cwbv1.UpdateIssueRequest{
+		Key: id, DefinitionOfDone: ticked, Actor: defaultActor,
+	}); err != nil {
+		return fmt.Errorf("tick definition_of_done: %w", err)
+	}
+	return nil
+}
+
+// ListReady returns the work items ready for role: assigned to that role
+// (assignee_aspect), unblocked (all depends_on done), and past the ledger's
+// definition-of-ready gate — optionally filtered to one stream (epic
+// subtree). Each returned item's Status is forced to StatusReady — that is
+// the meaning of ListReadyIssues membership, regardless of the issue's
+// stored workflow state.
+//
+// role is required: the live ledger's ListReadyIssues filters
+// `assignee_aspect = <caller's cwb-subject>`, so this queries the ledger
+// "as" that role (see ctxAs) rather than as c.Subject — the pool model's
+// "ready for role X, claimable by any worker" maps onto ledger's
+// aspect-assignment primitive this way (see README.md).
+func (c *Client) ListReady(ctx context.Context, role, stream string) ([]WorkItem, error) {
+	if role == "" {
+		return nil, fmt.Errorf("workgraph.ListReady: role is required (ledger's ListReadyIssues is assignee_aspect-scoped)")
+	}
+	resp, err := c.issue.ListReadyIssues(c.ctxAs(ctx, role), &cwbv1.ListReadyIssuesRequest{Aspect: role})
 	if err != nil {
 		return nil, fmt.Errorf("workgraph.ListReady: %w", err)
 	}
@@ -215,11 +286,21 @@ func (c *Client) ListReady(ctx context.Context, stream string) ([]WorkItem, erro
 }
 
 // Transition moves a work item to status via ledger's TransitionIssue.
-// StatusRejected has no ledger mapping — use Rework instead.
+// StatusRejected has no ledger mapping — use Rework instead. Moving to
+// StatusDone first ticks every definition_of_done checklist line (see
+// tickDoD) — confirmed against the live ledger: TransitionIssue to "Done"
+// is rejected ("definition of done has unticked items") otherwise. This
+// adapter has no per-item DoD-completion API; reaching StatusDone at all is
+// the signal the acceptance criteria were met.
 func (c *Client) Transition(ctx context.Context, id string, s Status) error {
 	ledgerStatus, ok := statusToLedger[s]
 	if !ok {
 		return fmt.Errorf("workgraph.Transition: %q: %w", s, ErrNoLedgerStatus)
+	}
+	if s == StatusDone {
+		if err := c.tickDoD(ctx, id); err != nil {
+			return fmt.Errorf("workgraph.Transition: %w", err)
+		}
 	}
 	if _, err := c.issue.TransitionIssue(c.ctx(ctx), &cwbv1.TransitionIssueRequest{
 		Key: id, Status: ledgerStatus, Actor: defaultActor,

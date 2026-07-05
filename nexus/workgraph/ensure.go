@@ -129,7 +129,13 @@ func (c *Client) ensureWorkflow(ctx context.Context) error {
 	transitions := make([]*cwbv1.WorkflowTransition, len(workflowStates))
 	for i, s := range workflowStates {
 		states[i] = &cwbv1.WorkflowState{Name: s.name, Category: s.category, DodGate: s.dodGate}
-		to := make([]string, 0, len(names)-1)
+		// Includes a self-loop (name -> name): confirmed against the live
+		// ledger that a same-state Transition (e.g. Cancel(requeue=true) on
+		// an item that's still "To Do", never dispatched) is rejected as
+		// "not allowed by workflow" without one. Transition/Cancel are meant
+		// to be idempotent-safe, so every state permits holding itself.
+		to := make([]string, 0, len(names))
+		to = append(to, s.name)
 		for _, n := range names {
 			if n != s.name {
 				to = append(to, n)

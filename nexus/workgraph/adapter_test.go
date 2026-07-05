@@ -122,7 +122,7 @@ func TestListReady(t *testing.T) {
 	a, _ := c.CreateWorkItem(ctx, WorkItem{Role: "builder", TaskSpec: "A", AcceptanceCriteria: []string{"x"}})
 	b, _ := c.CreateWorkItem(ctx, WorkItem{Role: "builder", TaskSpec: "B", AcceptanceCriteria: []string{"x"}, DependsOn: []string{a}})
 
-	ready, err := c.ListReady(ctx, "")
+	ready, err := c.ListReady(ctx, "builder", "")
 	if err != nil {
 		t.Fatalf("ListReady: %v", err)
 	}
@@ -134,13 +134,88 @@ func TestListReady(t *testing.T) {
 		t.Fatalf("transition A done: %v", err)
 	}
 
-	ready, err = c.ListReady(ctx, "")
+	ready, err = c.ListReady(ctx, "builder", "")
 	if err != nil {
 		t.Fatalf("ListReady after A done: %v", err)
 	}
 	if len(ready) != 1 || ready[0].ID != b {
 		t.Fatalf("expected only B ready, got %v", refIDs(ready))
 	}
+}
+
+func TestListReadyRequiresRole(t *testing.T) {
+	c, _ := newTestClient()
+	ctx := context.Background()
+	_, _ = c.CreateWorkItem(ctx, WorkItem{Role: "builder", TaskSpec: "A", AcceptanceCriteria: []string{"x"}})
+
+	if _, err := c.ListReady(ctx, "", ""); err == nil {
+		t.Fatalf("expected an error querying ListReady with no role — ledger's ListReadyIssues is assignee_aspect-scoped")
+	}
+}
+
+func TestListReadyScopedToAssigneeAspect(t *testing.T) {
+	c, _ := newTestClient()
+	ctx := context.Background()
+	builderItem, _ := c.CreateWorkItem(ctx, WorkItem{Role: "builder", TaskSpec: "A", AcceptanceCriteria: []string{"x"}})
+	testerItem, _ := c.CreateWorkItem(ctx, WorkItem{Role: "tester", TaskSpec: "B", AcceptanceCriteria: []string{"x"}})
+
+	ready, err := c.ListReady(ctx, "builder", "")
+	if err != nil {
+		t.Fatalf("ListReady as builder: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != builderItem {
+		t.Fatalf("querying as builder must only surface builder-assigned items, got %v (tester item %s must not appear)", refIDs(ready), testerItem)
+	}
+
+	ready, err = c.ListReady(ctx, "tester", "")
+	if err != nil {
+		t.Fatalf("ListReady as tester: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != testerItem {
+		t.Fatalf("querying as tester must only surface tester-assigned items, got %v", refIDs(ready))
+	}
+}
+
+func TestListReadyExcludesUnassignedAndFailedDoR(t *testing.T) {
+	c, f := newTestClient()
+	ctx := context.Background()
+
+	// No Role -> no assignee_aspect -> never ready for anyone, even though
+	// nothing blocks it and it otherwise passes DoR.
+	unassigned, _ := c.CreateWorkItem(ctx, WorkItem{TaskSpec: "no role", AcceptanceCriteria: []string{"x"}})
+
+	ready, err := c.ListReady(ctx, "builder", "")
+	if err != nil {
+		t.Fatalf("ListReady: %v", err)
+	}
+	if containsIDTest(ready, unassigned) {
+		t.Fatalf("unassigned item %s must never appear in ListReady", unassigned)
+	}
+
+	// Directly violate the fake's definition-of-ready gate (empty DoD) to
+	// prove the fake enforces it, not just happens to pass because our own
+	// CreateWorkItem always fills it in.
+	f.mu.Lock()
+	f.issues[unassigned].assigneeAspect = "builder"
+	f.issues[unassigned].dod = ""
+	f.mu.Unlock()
+
+	ready, err = c.ListReady(ctx, "builder", "")
+	if err != nil {
+		t.Fatalf("ListReady: %v", err)
+	}
+	if containsIDTest(ready, unassigned) {
+		t.Fatalf("item with empty definition_of_done must fail DoR and never appear in ListReady")
+	}
+}
+
+func containsIDTest(items []WorkItem, id string) bool {
+	for _, it := range items {
+		if it.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func refIDs(items []WorkItem) []string {
@@ -158,7 +233,7 @@ func TestListReadyFiltersByStream(t *testing.T) {
 	_, _ = c.CreateWorkItem(ctx, WorkItem{Role: "builder", TaskSpec: "A", AcceptanceCriteria: []string{"x"}, StreamID: "NET-1"})
 	b, _ := c.CreateWorkItem(ctx, WorkItem{Role: "builder", TaskSpec: "B", AcceptanceCriteria: []string{"x"}, StreamID: "NET-2"})
 
-	ready, err := c.ListReady(ctx, "NET-2")
+	ready, err := c.ListReady(ctx, "builder", "NET-2")
 	if err != nil {
 		t.Fatalf("ListReady: %v", err)
 	}
@@ -188,6 +263,37 @@ func TestClaim(t *testing.T) {
 	}
 	if err := c.Claim(ctx, id, "agent-02"); !errors.Is(err, ErrAlreadyClaimed) {
 		t.Fatalf("expected ErrAlreadyClaimed, got %v", err)
+	}
+}
+
+func TestTransitionDoneTicksDefinitionOfDone(t *testing.T) {
+	c, f := newTestClient()
+	ctx := context.Background()
+	id, err := c.CreateWorkItem(ctx, WorkItem{Role: "builder", TaskSpec: "A", AcceptanceCriteria: []string{"builds", "tests pass"}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if got := f.issues[id].dod; got != "- [ ] builds\n- [ ] tests pass" {
+		t.Fatalf("dod after create = %q, want unticked checklist", got)
+	}
+
+	// The fake enforces the live ledger's DoD gate (see fake_test.go's
+	// TransitionIssue): this would fail with an unticked DoD if Transition
+	// didn't tick it first.
+	if err := c.Transition(ctx, id, StatusDone); err != nil {
+		t.Fatalf("Transition to done: %v", err)
+	}
+	if got := f.issues[id].dod; got != "- [x] builds\n- [x] tests pass" {
+		t.Fatalf("dod after Done transition = %q, want fully ticked", got)
+	}
+
+	wi, err := c.GetWorkItem(ctx, id)
+	if err != nil {
+		t.Fatalf("GetWorkItem: %v", err)
+	}
+	if len(wi.AcceptanceCriteria) != 2 || wi.AcceptanceCriteria[0] != "builds" || wi.AcceptanceCriteria[1] != "tests pass" {
+		t.Fatalf("AcceptanceCriteria after ticking = %v, want the plain (unmarked) strings back", wi.AcceptanceCriteria)
 	}
 }
 
