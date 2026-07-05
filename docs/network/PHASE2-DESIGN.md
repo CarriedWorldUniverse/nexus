@@ -154,3 +154,23 @@ AUDIT finding that reshapes this section: **nexus's CWB-client integration alrea
 7. Auth wiring (**almanac**-sourced secret) + CLI version knob + CI image rebuild (note: worker image is `PullNever` — CI must distribute images to nodes, not just push a registry)  *(infra)*
 8. Operator console v0: approval queue + fleet/graph status (§9a)  *(builder, after 2+5)*
 Each unit: bounded spec + acceptance criteria, gates per `ROLE-MODEL.md` §4. Built via the existing ticket-pipeline (shadow orchestrates) — the new network builds itself only after it exists.
+
+## M1 CORE RUNTIME BUILT 2026-07-05 — units 1,3,4,5,6 (PRs #397, #398, #399)
+The event-triggered orchestrator loop physically exists in code, fully unit-tested:
+- Unit 1 work-graph adapter on the sovereign ledger (#397) — verified live e2e.
+- Units 3+4 role-at-spawn + pool leasing (#398) — reconciled (Brief.Role→label + RolePrompt→text).
+- Unit 5 worker-status contract (heartbeat/table/`/api/admin/workers` requireAdmin).
+- Unit 6 orchestrator graph-drain (DrainOnce/RecordJobResult/OnJobDone-wake/PreflightAuth-hold/ReapStale-2nd-strike).
+- Integration PR #399 = the full stack composed + green (62 pkgs pass).
+
+**Verify-gate lesson held all the way through:** unit 1 caught ~9 real-ledger mismatches fakes missed; every unit built via builder→independent-verify→review→security→PR. The orchestrator layer caught the cross-unit Brief.Role semantic conflict neither builder could see.
+
+**LIVE-INTEGRATION FOLLOW-UPS before this runs against a real broker (documented, mechanism is complete + tested):**
+1. **Result channel** — dispatch.JobDone carries only Ticket+OK; a worker's rich verdict (reject reasons→rework) has no wired path to the orchestrator. RecordJobResult (full path) is exported+tested; needs a real result channel worker→orchestrator.
+2. **Alert delivery** — loki-alert-bridge is pull-only; Alerter is a pluggable seam (LogAlerter default). Needs a real sink.
+3. **Frontier auth source** — worker-status auth_ok reports session-JWT health; the almanac-sourced CLAUDE token (§6/§7) is a separate unit (this is build-order unit 7).
+4. **Skill-gating activation** — the gating primitive is built; needs per-worker MCP-client wiring (none exists for any provider yet).
+5. **Pool aspect row** — MintDerivedCredential needs a `pool` aspect provisioned in the roster for live leasing.
+6. **RoleResolver** — the docs/network/roles/*.yaml → resolved-prompt transform is a seam (interface only); needs an impl.
+
+**REMAINING M1 units:** 2 (document register on ledger+cairn), 7 (auth wiring almanac-sourced + CLI version knob + CI image rebuild — covers follow-up #3), 8 (operator console v0 — reads #397's register + #399's /api/admin/workers). The core loop is done; these are the surfaces + the live-wiring around it.
