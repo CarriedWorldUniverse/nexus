@@ -35,29 +35,60 @@ func TestHarnessOpenPR(t *testing.T) {
 	}
 }
 
-// TestBuilderDecide covers the NEX-477 builder goal-loop decision matrix: when
-// to keep pursuing, when to push back for a missing PR, and when to exit.
+// TestBuilderDecide covers the NEX-477 builder goal-loop decision matrix:
+// when to keep pursuing, when to push back for missing acceptance or a
+// missing PR, and when to exit. taskDoneHonor is the "acceptance gate not
+// applicable or already passed" value passed for every case that predates
+// NET-27 (no criteria captured, verifier unavailable, or already met) — see
+// TestBuilderDecide_Acceptance below for the acceptance-specific matrix.
 func TestBuilderDecide(t *testing.T) {
 	cases := []struct {
 		name            string
 		result          funnel.GoalResult
+		acceptance      taskDoneStep
 		prVerified      bool
 		prRepromptsLeft int
 		want            builderStep
 	}{
-		{"blocked exits", funnel.GoalResult{Blocked: true, Reason: "blocked"}, false, 3, builderExit},
-		{"intermediate goal_not_met continues", funnel.GoalResult{Done: false, Reason: "goal_not_met"}, false, 3, builderContinue},
-		{"complete with PR exits", funnel.GoalResult{Done: true, Reason: "complete"}, true, 3, builderExit},
-		{"complete no PR reprompts", funnel.GoalResult{Done: true, Reason: "complete"}, false, 3, builderRepromptPR},
-		{"complete no PR exhausted exits", funnel.GoalResult{Done: true, Reason: "complete"}, false, 0, builderExit},
-		{"scratch no PR exits", funnel.GoalResult{Done: true, Reason: "scratch"}, false, 3, builderExit},
-		{"loop_cap no PR exits", funnel.GoalResult{Done: true, Reason: "loop_cap"}, false, 3, builderExit},
-		{"blocked short-circuits before PR", funnel.GoalResult{Blocked: true, Done: true, Reason: "complete"}, true, 3, builderExit},
+		{"blocked exits", funnel.GoalResult{Blocked: true, Reason: "blocked"}, taskDoneHonor, false, 3, builderExit},
+		{"intermediate goal_not_met continues", funnel.GoalResult{Done: false, Reason: "goal_not_met"}, taskDoneHonor, false, 3, builderContinue},
+		{"complete with PR exits", funnel.GoalResult{Done: true, Reason: "complete"}, taskDoneHonor, true, 3, builderExit},
+		{"complete no PR reprompts", funnel.GoalResult{Done: true, Reason: "complete"}, taskDoneHonor, false, 3, builderRepromptPR},
+		{"complete no PR exhausted exits", funnel.GoalResult{Done: true, Reason: "complete"}, taskDoneHonor, false, 0, builderExit},
+		{"scratch no PR exits", funnel.GoalResult{Done: true, Reason: "scratch"}, taskDoneHonor, false, 3, builderExit},
+		{"loop_cap no PR exits", funnel.GoalResult{Done: true, Reason: "loop_cap"}, taskDoneHonor, false, 3, builderExit},
+		{"blocked short-circuits before PR", funnel.GoalResult{Blocked: true, Done: true, Reason: "complete"}, taskDoneHonor, true, 3, builderExit},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := builderDecide(tc.result, tc.prVerified, tc.prRepromptsLeft); got != tc.want {
-				t.Errorf("builderDecide(%+v, pr=%v, left=%d) = %d, want %d", tc.result, tc.prVerified, tc.prRepromptsLeft, got, tc.want)
+			if got := builderDecide(tc.result, tc.acceptance, tc.prVerified, tc.prRepromptsLeft); got != tc.want {
+				t.Errorf("builderDecide(%+v, acceptance=%d, pr=%v, left=%d) = %d, want %d", tc.result, tc.acceptance, tc.prVerified, tc.prRepromptsLeft, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuilderDecide_Acceptance covers NET-27: the judge-complete exit path
+// must be gated on acceptance criteria exactly like task_done is, and the
+// acceptance check takes priority over the PR check (no point opening/
+// verifying a PR for output that doesn't meet the DoD yet).
+func TestBuilderDecide_Acceptance(t *testing.T) {
+	complete := funnel.GoalResult{Done: true, Reason: "complete"}
+	cases := []struct {
+		name       string
+		acceptance taskDoneStep
+		prVerified bool
+		want       builderStep
+	}{
+		{"judge-complete + criteria met (honor) + PR verified exits", taskDoneHonor, true, builderExit},
+		{"judge-complete + criteria not met, budget remains -> reprompt acceptance (not PR)", taskDoneReprompt, true, builderRepromptAcceptance},
+		{"judge-complete + criteria never met, budget exhausted -> blocked (not PR)", taskDoneBlocked, true, builderBlockedAcceptance},
+		{"acceptance reprompt wins even when PR already verified", taskDoneReprompt, true, builderRepromptAcceptance},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := builderDecide(complete, tc.acceptance, tc.prVerified, 3); got != tc.want {
+				t.Errorf("builderDecide(complete, acceptance=%d, pr=%v) = %d, want %d", tc.acceptance, tc.prVerified, got, tc.want)
 			}
 		})
 	}

@@ -50,6 +50,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -152,14 +153,7 @@ func main() {
 		}
 		spawnPolicyFragment = &frag
 	}
-	var acceptanceCriteria string
-	if *acceptanceFile != "" {
-		raw, err := os.ReadFile(*acceptanceFile)
-		if err != nil {
-			fail(log, "read acceptance-file", err)
-		}
-		acceptanceCriteria = strings.TrimSpace(string(raw))
-	}
+	acceptanceCriteria := readAcceptanceCriteriaFile(*acceptanceFile, log)
 
 	// Boot credential: a normal aspect presents a keyfile (-k); a
 	// spawned hand (NEX-571 Task D) presents a broker-minted session JWT
@@ -658,8 +652,18 @@ func main() {
 		log,
 	)
 	var funnelObsHook funnel.ObservabilityHook = obsHook
+	// realOutputTracker captures the CURRENT turn's streamed model text so
+	// the verified-task_done gate can judge what the model actually
+	// produced, not just its task_done self-report (review finding on
+	// Unit B pass 1 — see builderOnTaskDone/verificationInput). Declared
+	// here (rather than where it's read, near onTaskDone below) because it
+	// must be wrapped into funnelObsHook BEFORE funnel.New so every turn's
+	// events reach it.
+	var realOutputTracker *builderRealOutputTracker
 	if *builderMode {
 		funnelObsHook = progressObservabilityHook{next: obsHook, progress: recordBuilderProgress}
+		realOutputTracker = &builderRealOutputTracker{next: funnelObsHook}
+		funnelObsHook = realOutputTracker
 	}
 
 	// M1 Unit 5 — worker-status heartbeat (PHASE2-DESIGN §5). The
@@ -756,21 +760,42 @@ func main() {
 	// funnelPtr is set).
 	var funnelPtr *funnel.Funnel
 
-	// Verified task_done (Unit B — NET-22/23/24): builds the same judge
-	// this aspect's output filter uses (buildAcceptanceVerifier mirrors
-	// buildAgentFunnelFilter's Spec exactly — one judge credential drives
-	// both). builderOnTaskDone gates completion on it when the dispatched
-	// work item carried acceptance criteria (-acceptance-file); a nil
-	// verifier or empty criteria falls through to today's unconditional
-	// honor. See builderOnTaskDone's doc comment for the full decision
-	// matrix (met/not-met/reprompt/blocked/fail-open).
+	// Verified task_done + goal-loop completion (Unit B — NET-22/23/24/27):
+	// builds the same judge this aspect's output filter uses
+	// (buildAcceptanceVerifier mirrors buildAgentFunnelFilter's Spec
+	// exactly — one judge credential drives both), then wraps it in ONE
+	// builderAcceptanceGate shared by BOTH of a builder's completion paths:
+	//
+	//  1. the model calls task_done (builderOnTaskDone below), and
+	//  2. the goal-loop's own judge classifies a turn FilterClassComplete
+	//     with no task_done call at all (builderGoalLoop, wired further
+	//     down where the goalCfg/GoalLoop exist).
+	//
+	// Unit B's first pass only gated path 1. Live evidence 2026-07-05
+	// (NET-27) showed path 2 exiting completely ungated: a repo-less brief
+	// with deliberately unsatisfiable criteria ("contains the SHA-512 of a
+	// password you cannot know") "completed successfully" because the
+	// cheap judge that classifies FilterClassComplete only ever sees the
+	// task text, never the work item's acceptance criteria — it rated a
+	// one-line greeting substantive and the model never even called
+	// task_done. One shared gate (rather than two independent ones) means
+	// a builder racing both paths in the same turn is judged once, against
+	// one reprompt budget — see builderAcceptanceGate's doc comment.
+	var acceptanceGate *builderAcceptanceGate
 	if *builderMode {
 		acceptanceVerifier := buildAcceptanceVerifier(provider, bridle.ProviderID(res.Provider), judgeProviderOverride, judgeModelOverride, judgeEnv, res.Model, log, obsHook)
 		var verify taskDoneVerifyFn
 		if acceptanceVerifier != nil {
 			verify = acceptanceVerifier.Verify
 		}
-		onTaskDone = builderOnTaskDone(stop, log, res.AspectName, acceptanceCriteria, verify,
+		acceptanceGate = newBuilderAcceptanceGate(acceptanceCriteria, verify)
+		onTaskDone = builderOnTaskDone(stop, log, res.AspectName, acceptanceGate,
+			func() string {
+				if realOutputTracker == nil {
+					return ""
+				}
+				return realOutputTracker.snapshot()
+			},
 			func() *funnel.Funnel { return funnelPtr },
 			func() int64 { return seedBrief.ThreadRoot },
 			wsClient, os.Getenv("CW_DISPATCH_RUN_ID"))
@@ -988,7 +1013,8 @@ func main() {
 		}
 		verifyPR := builderPRVerifier(log, res.AspectName, *repoFlag, *ticketFlag, *branchFlag)
 		openPR := builderPROpener(log, *repoFlag, *ticketFlag, *branchFlag)
-		go builderGoalLoop(ctx, f, log, goalCfg, verifyPR, openPR, stop)
+		go builderGoalLoop(ctx, f, log, goalCfg, verifyPR, openPR, stop,
+			acceptanceGate, wsClient, os.Getenv("CW_DISPATCH_RUN_ID"))
 	} else {
 		var onComplete func() bool
 		if *builderMode {
@@ -1123,8 +1149,7 @@ const builderDoneSentinel = "<<TASK_COMPLETE>>"
 // MaxTurns and -builder-timeout remain the outer backstops.
 const builderAcceptanceRepromptCap = 3
 
-// taskDoneStep is taskDoneDecide's verdict — see builderOnTaskDone for how
-// each maps to an action (honor/reprompt/block).
+// taskDoneStep is builderAcceptanceGate.Decide's verdict.
 type taskDoneStep int
 
 const (
@@ -1133,10 +1158,10 @@ const (
 	taskDoneBlocked                      // not met, budget exhausted — exit BLOCKED, never a silent success
 )
 
-// taskDoneDecide is the pure decision core of verified task_done (Unit B —
-// NET-22/23/24). Pulled out of builderOnTaskDone (which does the judge call
-// + funnel/wsClient I/O) so the decision matrix is unit-testable without
-// mocking any of that:
+// taskDoneDecide is the pure decision core of verified task_done/goal-loop
+// completion (Unit B — NET-22/23/24/27). Pulled out of builderAcceptanceGate
+// (which does the judge call + the shared-budget bookkeeping) so the
+// decision matrix is unit-testable without mocking any of that:
 //
 //   - no criteria captured on this dispatch, or the verifier is unavailable
 //     (judge unbuildable), or the verify call itself errored -> honor.
@@ -1160,15 +1185,95 @@ func taskDoneDecide(hasCriteria bool, verifierAvailable bool, verifyErr error, m
 	return taskDoneBlocked
 }
 
+// taskDoneVerifyFn is the injectable shape of AcceptanceVerifier.Verify —
+// builderAcceptanceGate takes this instead of a concrete
+// *funnel.AcceptanceVerifier so tests can supply a fake judge without a real
+// bridle harness. nil means "no verifier available" (judge unbuildable at
+// startup).
+type taskDoneVerifyFn func(ctx context.Context, criteria, output string) (funnel.AcceptanceVerdict, error)
+
+// builderAcceptanceGate is the SINGLE arbiter for verified completion,
+// shared between the two independent exit paths a builder-mode process can
+// take:
+//
+//  1. the model calls the task_done tool (CommsRunner.runTaskDone ->
+//     builderOnTaskDone below), and
+//  2. the goal-loop's own cheap judge classifies a turn FilterClassComplete
+//     with no task_done call at all (builderGoalLoop/builderDecide).
+//
+// A prior pass gated ONLY path 1 — live evidence 2026-07-05 (NET-27) showed
+// path 2 exiting ungated (a judge that never sees acceptance criteria
+// declaring victory on a one-line greeting against unsatisfiable criteria).
+// Wiring two INDEPENDENT gates back in would let a builder that races both
+// paths (e.g. calls task_done mid-turn while the SAME turn's judge is also
+// about to rule complete) get judged twice against two separate reprompt
+// budgets — burning 2x the intended budget, or worse, disagreeing (one path
+// honors while the other blocks). This type holds ONE decision + ONE
+// mutex-guarded reprompt budget so whichever path fires first — or both, in
+// a race — consumes the same shared budget and reaches the same verdict for
+// the same output.
+type builderAcceptanceGate struct {
+	mu            sync.Mutex
+	criteria      string
+	hasCriteria   bool
+	verify        taskDoneVerifyFn
+	repromptsLeft int
+}
+
+// newBuilderAcceptanceGate constructs the shared gate. verify may be nil
+// (judge unbuildable at startup) — Decide then always fails open via
+// taskDoneDecide's verifierAvailable=false branch, exactly like an empty
+// criteria dispatch.
+func newBuilderAcceptanceGate(criteria string, verify taskDoneVerifyFn) *builderAcceptanceGate {
+	return &builderAcceptanceGate{
+		criteria:      criteria,
+		hasCriteria:   strings.TrimSpace(criteria) != "",
+		verify:        verify,
+		repromptsLeft: builderAcceptanceRepromptCap,
+	}
+}
+
+// Decide runs ONE verification of output — the REAL posted turn output,
+// never a bare self-report (NET-24: a task_done summary can claim success
+// while the model produced nothing matching the required criteria) —
+// against the gate's criteria, and returns the shared decision, consuming
+// one unit of the SHARED reprompt budget on taskDoneReprompt. The mutex
+// makes this safe even if both completion paths fire close together (task_done
+// mid-turn racing the same turn's judge-complete classification).
+func (g *builderAcceptanceGate) Decide(ctx context.Context, output string, log *slog.Logger) (taskDoneStep, funnel.AcceptanceVerdict) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var verdict funnel.AcceptanceVerdict
+	var verr error
+	if g.hasCriteria && g.verify != nil {
+		verdict, verr = g.verify(ctx, g.criteria, output)
+		if verr != nil {
+			log.Warn("agentfunnel: acceptance verification errored — failing open", "err", verr)
+		}
+	}
+	step := taskDoneDecide(g.hasCriteria, g.verify != nil, verr, verdict.Met, g.repromptsLeft)
+	if step == taskDoneReprompt {
+		g.repromptsLeft--
+	}
+	return step, verdict
+}
+
 // builderOnTaskDone returns the CommsRunner/funnel completion callback for
 // builder mode. Live evidence 2026-07-05 (NET-24): keel-builder called
 // task_done with a confabulated summary ("0 conflicts, 100% memory match")
 // and never produced the required token — the Job "completed successfully"
-// because task_done trusted the model's self-report unconditionally. When
-// criteria is non-empty and verifier is non-nil, this runs ONE cheap-judge
-// verification of the model's task_done claim against criteria before
-// honoring completion (taskDoneDecide above is the pure decision matrix);
-// when either is unavailable it honors task_done exactly as before this fix.
+// because task_done trusted the model's self-report unconditionally. gate
+// runs ONE cheap-judge verification (shared with the goal-loop's own exit
+// path — see builderAcceptanceGate) before honoring completion.
+//
+// realOutputFor returns the actual text the model streamed THIS turn (see
+// builderRealOutputTracker) — the review finding behind this pass: verifying
+// only args.Summary lets a model write "posted CONVERGED-BETA-OK" in the
+// tool-call summary without ever having produced it. The real output, when
+// available, is folded in as the authoritative signal alongside the
+// self-report; an empty real-output snapshot (tracker not wired, or nothing
+// streamed yet at the moment task_done fired) degrades to summary-only,
+// unchanged from before this pass.
 //
 // funnelFor/threadRootFor are late-bound accessors (rather than direct
 // values) because builderOnTaskDone is constructed before funnel.New and
@@ -1176,35 +1281,19 @@ func taskDoneDecide(hasCriteria bool, verifierAvailable bool, verifyErr error, m
 // can actually fire (Deliberate only runs after the funnel and inbox seed
 // are both up), so the indirection just avoids a construction-order
 // dependency, not a real race.
-// taskDoneVerifyFn is the injectable shape of AcceptanceVerifier.Verify —
-// builderOnTaskDone takes this instead of a concrete *funnel.AcceptanceVerifier
-// so tests can supply a fake judge without a real bridle harness. nil means
-// "no verifier available" (judge unbuildable at startup).
-type taskDoneVerifyFn func(ctx context.Context, criteria, output string) (funnel.AcceptanceVerdict, error)
-
-func builderOnTaskDone(stop context.CancelFunc, log *slog.Logger, aspect string, criteria string,
-	verify taskDoneVerifyFn, funnelFor func() *funnel.Funnel, threadRootFor func() int64,
+func builderOnTaskDone(stop context.CancelFunc, log *slog.Logger, aspect string, gate *builderAcceptanceGate,
+	realOutputFor func() string, funnelFor func() *funnel.Funnel, threadRootFor func() int64,
 	wsClient *wsasp.Client, runID string) func(string) {
-	repromptsLeft := builderAcceptanceRepromptCap
-	hasCriteria := strings.TrimSpace(criteria) != ""
 	return func(summary string) {
-		var verdict funnel.AcceptanceVerdict
-		var verr error
-		if hasCriteria && verify != nil {
-			verdict, verr = verify(context.Background(), criteria, summary)
-			if verr != nil {
-				log.Warn("agentfunnel: task_done verification errored — failing open (honoring task_done)",
-					"aspect", aspect, "err", verr)
-			}
-		}
-		switch taskDoneDecide(hasCriteria, verify != nil, verr, verdict.Met, repromptsLeft) {
+		output := verificationInput(summary, realOutputFor)
+		step, verdict := gate.Decide(context.Background(), output, log)
+		switch step {
 		case taskDoneHonor:
-			log.Info("agentfunnel: builder task_done — exiting", "aspect", aspect, "summary", summary, "verified", hasCriteria && verify != nil && verr == nil)
+			log.Info("agentfunnel: builder task_done — exiting", "aspect", aspect, "summary", summary, "verified", gate.hasCriteria && gate.verify != nil)
 			stop()
 		case taskDoneReprompt:
-			repromptsLeft--
 			log.Info("agentfunnel: task_done rejected — acceptance criteria not met, re-prompting",
-				"aspect", aspect, "reason", verdict.Reason, "reprompts_left", repromptsLeft)
+				"aspect", aspect, "reason", verdict.Reason)
 			if f := funnelFor(); f != nil {
 				f.ReceiveSynthetic(bridle.InboxItem{
 					From:       "system",
@@ -1214,7 +1303,7 @@ func builderOnTaskDone(stop context.CancelFunc, log *slog.Logger, aspect string,
 						"[CONTINUATION] Your task_done was rejected: the acceptance criteria are not met (%s). "+
 							"ACCEPTANCE CRITERIA:\n%s\n\nKeep working and only call task_done again once you have "+
 							"genuinely satisfied these criteria — do not re-claim completion without new work to back it up.",
-						verdict.Reason, criteria),
+						verdict.Reason, gate.criteria),
 				})
 			}
 		case taskDoneBlocked:
@@ -1228,6 +1317,23 @@ func builderOnTaskDone(stop context.CancelFunc, log *slog.Logger, aspect string,
 			stop()
 		}
 	}
+}
+
+// verificationInput combines a model's self-report (summary — the
+// task_done tool's free-text argument) with the real output streamed this
+// turn (realOutputFor, when non-empty), labeling the real output as
+// authoritative. Isolated as its own function so the "which signal wins"
+// policy is stated once and unit-testable without a gate/harness.
+func verificationInput(summary string, realOutputFor func() string) string {
+	var real string
+	if realOutputFor != nil {
+		real = strings.TrimSpace(realOutputFor())
+	}
+	if real == "" {
+		return summary
+	}
+	return "AGENT SELF-REPORT (task_done summary — may be inaccurate or confabulated):\n" + summary +
+		"\n\nACTUAL TURN OUTPUT (authoritative — judge against THIS, not the self-report above):\n" + real
 }
 
 // builderPRVerifier returns a pure check: does a PR exist for the builder branch?
@@ -1445,31 +1551,67 @@ const builderPRRepromptCap = 3
 type builderStep int
 
 const (
-	builderContinue   builderStep = iota // intermediate goal_not_met — keep pursuing
-	builderExit                          // terminal: verified-complete, blocked, or exhausted
-	builderRepromptPR                    // judge says complete but no PR — push back for it
+	builderContinue           builderStep = iota // intermediate goal_not_met — keep pursuing
+	builderExit                                  // terminal: verified-complete, blocked, or exhausted
+	builderRepromptPR                            // judge says complete but no PR — push back for it
+	builderRepromptAcceptance                    // judge says complete but acceptance criteria not met — push back with the criteria
+	builderBlockedAcceptance                     // acceptance criteria never met, reprompt budget exhausted — honest failure exit
 )
 
-// builderDecide maps a GoalLoop result plus a PR-verification outcome to the
-// builder's next step. Pure (no funnel, no I/O) so it is unit-testable.
+// builderDecide maps a GoalLoop result plus the acceptance/PR-verification
+// outcomes to the builder's next step. Pure (no funnel, no I/O) so it is
+// unit-testable.
 //
-//   - blocked                                  -> exit (escalated)
-//   - not done (intermediate goal_not_met)     -> continue (Pursue enqueued a continuation)
-//   - done + PR verified                       -> exit (success)
-//   - done, reason "complete", no PR, budget   -> reprompt for the PR
-//   - any other done (scratch / loop_cap / no
-//     PR with budget exhausted)                -> exit
-func builderDecide(result funnel.GoalResult, prVerified bool, prRepromptsLeft int) builderStep {
+// Live evidence 2026-07-05 (NET-27): a repo-less brief with deliberately
+// unsatisfiable acceptance criteria ("contains the SHA-512 of a password
+// you cannot know") exited via THIS function's judge-complete branch with a
+// one-line greeting — the cheap judge that classifies FilterClassComplete
+// only ever sees the task text, never the work item's acceptance criteria,
+// so it rated the greeting substantive and complete. builderOnTaskDone's
+// verified-task_done gate (Unit B pass 1) never fired because the model
+// never called task_done at all — it just replied, and the judge alone
+// declared victory. acceptance (below) closes that second exit path with
+// the SAME taskDoneDecide matrix builderOnTaskDone uses, run against the
+// goal-loop's LastFinalText (the actual posted turn output, not a
+// self-report) instead of a task_done summary.
+//
+//   - blocked                                       -> exit (escalated)
+//   - not done (intermediate goal_not_met)          -> continue (Pursue enqueued a continuation)
+//   - done, reason != "complete" (scratch/loop_cap/
+//     unknown_class)                                 -> exit (no acceptance/PR gate — no completion claim to verify)
+//   - done, reason "complete", acceptance says
+//     reprompt                                       -> reprompt acceptance (criteria not met, budget remains)
+//   - done, reason "complete", acceptance says
+//     blocked                                        -> exit BLOCKED (criteria never met, budget exhausted)
+//   - done, reason "complete", acceptance honors
+//     (met / no criteria / verifier unavailable /
+//     verify errored — fail open), PR verified        -> exit (success)
+//   - done, reason "complete", acceptance honors,
+//     no PR, budget                                   -> reprompt for the PR
+//   - done, reason "complete", acceptance honors,
+//     no PR, budget exhausted                         -> exit
+func builderDecide(result funnel.GoalResult, acceptance taskDoneStep, prVerified bool, prRepromptsLeft int) builderStep {
 	if result.Blocked {
 		return builderExit
 	}
 	if !result.Done {
 		return builderContinue
 	}
+	if result.Reason != "complete" {
+		return builderExit
+	}
+	switch acceptance {
+	case taskDoneReprompt:
+		return builderRepromptAcceptance
+	case taskDoneBlocked:
+		return builderBlockedAcceptance
+	}
+	// acceptance == taskDoneHonor: met, or fail-open (no criteria captured /
+	// verifier unavailable / verify call errored).
 	if prVerified {
 		return builderExit
 	}
-	if result.Reason == "complete" && prRepromptsLeft > 0 {
+	if prRepromptsLeft > 0 {
 		return builderRepromptPR
 	}
 	return builderExit
@@ -1480,11 +1622,14 @@ func builderDecide(result funnel.GoalResult, prVerified bool, prRepromptsLeft in
 // the inbox and then idles when the judge rules goal_not_met — GoalLoop posts
 // the progress reply (ShouldPost) AND enqueues a continuation so the builder
 // keeps working toward the DoD until it is met, blocked, or capped. Completion
-// is gated on the PR actually existing (NEX-468/471): if the judge rules
-// complete but no PR is found, the builder is re-prompted to open it rather
-// than exiting empty-handed. The -builder-timeout goroutine remains the
-// wall-clock backstop.
-func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cfg funnel.GoalConfig, verifyPR func() bool, openPR func() (string, bool), stop context.CancelFunc) {
+// is gated TWICE (NET-22/23/24/27): acceptance criteria (when the work item
+// carried any — same judge/gate builderOnTaskDone uses, run here against the
+// judge-classified-complete turn's actual output) AND the PR actually
+// existing (NEX-468/471, when the brief names a repo). Either gate can push
+// back a bounded re-prompt before the builder is allowed to exit; the
+// -builder-timeout goroutine remains the wall-clock backstop.
+func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cfg funnel.GoalConfig, verifyPR func() bool, openPR func() (string, bool), stop context.CancelFunc,
+	gate *builderAcceptanceGate, wsClient *wsasp.Client, runID string) {
 	gl := funnel.NewGoalLoop(f, cfg)
 	prRepromptsLeft := builderPRRepromptCap
 	for {
@@ -1499,14 +1644,74 @@ func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cf
 			log.Warn("agentfunnel: builder goal-loop pursue", "err", err)
 			return
 		}
+
+		// Review finding #3 (Unit B fix pass 2) — dual-arbiter race: a
+		// builder can call task_done mid-turn (canceling ctx via stop())
+		// AND have that SAME turn's judge classify FilterClassComplete, so
+		// Pursue can return a normal (non-error) Done result even though
+		// completion was ALREADY decided by the task_done path a moment
+		// ago. Without this check the goal-loop below would call
+		// gate.Decide a second time for output the task_done path already
+		// judged — burning an extra unit of the SHARED reprompt budget, or
+		// worse, sending its own terminal SendDispatchStatus after
+		// task_done's callback already did. Once ctx is canceled, someone
+		// else (task_done, the idle monitor, JWT expiry, …) has already
+		// made the terminal call — this loop has nothing left to decide.
+		if ctx.Err() != nil {
+			return
+		}
+
+		// Acceptance gate (NET-27): only meaningful when the judge just
+		// classified this turn "complete" — that is the completion CLAIM
+		// this whole unit exists to double-check. gl.LastFinalText() is the
+		// turn's actual posted reply (what the judge itself just judged),
+		// not a task_done self-report — the live NET-27 failure was a judge
+		// rating a one-line greeting "complete" against unsatisfiable
+		// criteria it never saw; feeding it the real output closes that gap.
+		// gate is the SAME builderAcceptanceGate builderOnTaskDone uses —
+		// one shared decision + one shared reprompt budget across both
+		// completion paths (see builderAcceptanceGate's doc comment).
+		acceptance := taskDoneHonor
+		var verdict funnel.AcceptanceVerdict
+		if result.Done && !result.Blocked && result.Reason == "complete" {
+			acceptance, verdict = gate.Decide(ctx, gl.LastFinalText(), log)
+		}
+
 		prVerified := false
-		if result.Done && !result.Blocked {
-			// Only spend a gh call when the loop thinks it is finished.
+		if result.Done && !result.Blocked && acceptance == taskDoneHonor {
+			// Only spend a gh call once acceptance (if applicable) already
+			// passed — no point checking for a PR on output that doesn't
+			// even meet the DoD yet.
 			prVerified = verifyPR()
 		}
-		switch builderDecide(result, prVerified, prRepromptsLeft) {
+
+		switch builderDecide(result, acceptance, prVerified, prRepromptsLeft) {
 		case builderContinue:
 			continue
+		case builderRepromptAcceptance:
+			log.Info("agentfunnel: judge complete but acceptance criteria not met — re-prompting",
+				"ticket", cfg.TicketID, "reason", verdict.Reason)
+			f.ReceiveSynthetic(bridle.InboxItem{
+				From:       "system",
+				Source:     "builder_acceptance_check",
+				ThreadRoot: cfg.ThreadRoot,
+				Content: fmt.Sprintf(
+					"[CONTINUATION] Your last reply was judged complete, but it does not satisfy the work item's "+
+						"acceptance criteria (%s):\n%s\n\nRevise your work so the criteria above are genuinely met, "+
+						"then reply again. If you cannot meet them, say so explicitly and name the blocker.",
+					verdict.Reason, gate.criteria),
+			})
+			continue
+		case builderBlockedAcceptance:
+			log.Error("agentfunnel: ESCALATION acceptance criteria never met — reprompt budget exhausted",
+				"ticket", cfg.TicketID, "reason", verdict.Reason)
+			if wsClient != nil {
+				if serr := wsClient.SendDispatchStatus(context.Background(), runID, "failed", "acceptance_criteria_not_met", time.Now().UTC()); serr != nil {
+					log.Warn("agentfunnel: blocked status enqueue failed", "run_id", runID, "err", serr)
+				}
+			}
+			stop()
+			return
 		case builderRepromptPR:
 			// The agent ruled itself done but no PR exists. If the work is
 			// already pushed, the harness opens the PR itself (NEX-528) rather
@@ -1805,6 +2010,28 @@ func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.Provider
 		ObsHook:           obsHook,
 		Logger:            log,
 	})
+}
+
+// readAcceptanceCriteriaFile reads path (the -acceptance-file flag) and
+// returns its trimmed contents, or "" for an empty path OR an unreadable
+// file. Unlike -role-file/-policy-fragment-file (which fail() the process
+// on a read error), an unreadable acceptance file WARNS and falls open
+// (empty criteria) rather than crashing. Review finding: a ConfigMap-mount
+// race (the volume not yet materialized when agentfunnel starts) is a real,
+// recoverable class of failure for k8s-mounted files, and this file's
+// entire purpose is a fail-OPEN verification gate — crashing the builder
+// over a missing acceptance.md would be exactly backwards (turning an
+// optional stricter check into a hard startup dependency).
+func readAcceptanceCriteriaFile(path string, log *slog.Logger) string {
+	if path == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		log.Warn("agentfunnel: acceptance-file unreadable — proceeding with no acceptance criteria (fail open)", "path", path, "err", err)
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
 }
 
 // buildAcceptanceVerifier constructs the verified-task_done judge (Unit B —

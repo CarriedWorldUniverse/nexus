@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
@@ -14,7 +17,8 @@ import (
 // task_done unconditionally, exactly like before Unit B.
 func TestBuilderOnTaskDoneCancels(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	onDone := builderOnTaskDone(cancel, slog.Default(), "anvil", "", nil,
+	gate := newBuilderAcceptanceGate("", nil)
+	onDone := builderOnTaskDone(cancel, slog.Default(), "anvil", gate, nil,
 		func() *funnel.Funnel { return nil }, func() int64 { return 0 }, nil, "")
 
 	onDone("PR opened")
@@ -24,6 +28,40 @@ func TestBuilderOnTaskDoneCancels(t *testing.T) {
 	default:
 		t.Fatal("OnTaskDone did not cancel the context")
 	}
+}
+
+// TestVerificationInput covers the review-finding fix (Unit B fix pass 2):
+// the verifier must see the REAL posted turn output, not just a task_done
+// self-report — a model that writes "posted CONVERGED-BETA-OK" as its OWN
+// summary text without ever having produced it must not pass on the
+// self-report alone. When realOutputFor yields non-empty text it is
+// included and labeled authoritative; empty degrades to summary-only
+// (tracker not wired, or nothing streamed yet at the moment task_done fired).
+func TestVerificationInput(t *testing.T) {
+	t.Run("empty real output degrades to summary only", func(t *testing.T) {
+		got := verificationInput("0 conflicts, 100% memory match", func() string { return "" })
+		if got != "0 conflicts, 100% memory match" {
+			t.Errorf("got %q, want the bare summary unchanged", got)
+		}
+	})
+	t.Run("nil realOutputFor degrades to summary only", func(t *testing.T) {
+		got := verificationInput("summary text", nil)
+		if got != "summary text" {
+			t.Errorf("got %q, want the bare summary unchanged", got)
+		}
+	})
+	t.Run("non-empty real output is included and labeled authoritative", func(t *testing.T) {
+		got := verificationInput("0 conflicts, 100% memory match", func() string { return "hello there" })
+		if !strings.Contains(got, "0 conflicts, 100% memory match") {
+			t.Errorf("combined input lost the self-report: %q", got)
+		}
+		if !strings.Contains(got, "hello there") {
+			t.Errorf("combined input lost the real output: %q", got)
+		}
+		if !strings.Contains(got, "authoritative") {
+			t.Errorf("combined input does not mark the real output authoritative: %q", got)
+		}
+	})
 }
 
 // TestTaskDoneDecide covers Unit B's verified-task_done decision matrix
@@ -70,7 +108,8 @@ func TestBuilderOnTaskDoneVerified(t *testing.T) {
 		verify := func(context.Context, string, string) (funnel.AcceptanceVerdict, error) {
 			return funnel.AcceptanceVerdict{Met: true, Reason: "token present"}, nil
 		}
-		onDone := builderOnTaskDone(cancel, slog.Default(), "plumb", "criteria text", verify,
+		gate := newBuilderAcceptanceGate("criteria text", verify)
+		onDone := builderOnTaskDone(cancel, slog.Default(), "plumb", gate, nil,
 			func() *funnel.Funnel { return nil }, func() int64 { return 0 }, nil, "")
 		onDone("CONVERGED-ALPHA-OK")
 		if ctx.Err() == nil {
@@ -83,7 +122,8 @@ func TestBuilderOnTaskDoneVerified(t *testing.T) {
 		verify := func(context.Context, string, string) (funnel.AcceptanceVerdict, error) {
 			return funnel.AcceptanceVerdict{Met: false, Reason: "required token missing"}, nil
 		}
-		onDone := builderOnTaskDone(cancel, slog.Default(), "keel", "criteria text", verify,
+		gate := newBuilderAcceptanceGate("criteria text", verify)
+		onDone := builderOnTaskDone(cancel, slog.Default(), "keel", gate, nil,
 			func() *funnel.Funnel { return nil }, func() int64 { return 0 }, nil, "")
 
 		for i := 0; i < builderAcceptanceRepromptCap; i++ {
@@ -104,7 +144,8 @@ func TestBuilderOnTaskDoneVerified(t *testing.T) {
 		verify := func(context.Context, string, string) (funnel.AcceptanceVerdict, error) {
 			return funnel.AcceptanceVerdict{}, errors.New("judge subprocess crashed")
 		}
-		onDone := builderOnTaskDone(cancel, slog.Default(), "anvil", "criteria text", verify,
+		gate := newBuilderAcceptanceGate("criteria text", verify)
+		onDone := builderOnTaskDone(cancel, slog.Default(), "anvil", gate, nil,
 			func() *funnel.Funnel { return nil }, func() int64 { return 0 }, nil, "")
 		onDone("summary")
 		if ctx.Err() == nil {
@@ -114,13 +155,111 @@ func TestBuilderOnTaskDoneVerified(t *testing.T) {
 
 	t.Run("nil verify func fails open even with criteria", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-		onDone := builderOnTaskDone(cancel, slog.Default(), "anvil", "criteria text", nil,
+		gate := newBuilderAcceptanceGate("criteria text", nil)
+		onDone := builderOnTaskDone(cancel, slog.Default(), "anvil", gate, nil,
 			func() *funnel.Funnel { return nil }, func() int64 { return 0 }, nil, "")
 		onDone("summary")
 		if ctx.Err() == nil {
 			t.Fatal("nil verifier must fail open (exit)")
 		}
 	})
+
+	t.Run("real output overrides a confabulated self-report", func(t *testing.T) {
+		// NET-24 exact shape: the model's task_done summary claims success
+		// ("0 conflicts, 100% memory match") but the judge sees the REAL
+		// turn output too (via realOutputFor) and that's what actually
+		// determines the verdict — here the real output DOES contain the
+		// required token even though the summary is generic, so it must honor.
+		ctx, cancel := context.WithCancel(context.Background())
+		var gotOutput string
+		verify := func(_ context.Context, _ string, output string) (funnel.AcceptanceVerdict, error) {
+			gotOutput = output
+			met := strings.Contains(output, "CONVERGED-ALPHA-OK")
+			return funnel.AcceptanceVerdict{Met: met, Reason: "token check"}, nil
+		}
+		gate := newBuilderAcceptanceGate("must contain CONVERGED-ALPHA-OK", verify)
+		onDone := builderOnTaskDone(cancel, slog.Default(), "plumb", gate,
+			func() string { return "the real streamed reply: CONVERGED-ALPHA-OK" },
+			func() *funnel.Funnel { return nil }, func() int64 { return 0 }, nil, "")
+		onDone("0 conflicts, 100% memory match")
+		if ctx.Err() == nil {
+			t.Fatal("real output contains the token — must honor (exit)")
+		}
+		if !strings.Contains(gotOutput, "CONVERGED-ALPHA-OK") {
+			t.Errorf("verifier did not see the real output: %q", gotOutput)
+		}
+		if !strings.Contains(gotOutput, "0 conflicts, 100% memory match") {
+			t.Errorf("verifier lost the self-report entirely: %q", gotOutput)
+		}
+	})
+}
+
+// TestBuilderAcceptanceGate_SharedBudgetAcrossPaths is the regression test
+// for review finding #3: task_done and the goal-loop's judge-complete exit
+// must share ONE arbiter with ONE reprompt budget — a builder that races
+// both paths (calls task_done mid-turn while the SAME turn's judge is also
+// about to rule complete) must not get 2x the intended reprompt budget.
+func TestBuilderAcceptanceGate_SharedBudgetAcrossPaths(t *testing.T) {
+	calls := 0
+	verify := func(context.Context, string, string) (funnel.AcceptanceVerdict, error) {
+		calls++
+		return funnel.AcceptanceVerdict{Met: false, Reason: "not there yet"}, nil
+	}
+	gate := newBuilderAcceptanceGate("criteria", verify)
+
+	// Simulate the two call sites interleaving: task_done fires (path 1),
+	// then the goal-loop's own judge-complete check fires (path 2) on the
+	// SAME gate — as they would when both share one builderAcceptanceGate
+	// constructed once in main() and passed to both builderOnTaskDone and
+	// builderGoalLoop.
+	steps := []taskDoneStep{}
+	for i := 0; i < builderAcceptanceRepromptCap+2; i++ {
+		var step taskDoneStep
+		if i%2 == 0 {
+			step, _ = gate.Decide(context.Background(), "task_done path output", slog.Default())
+		} else {
+			step, _ = gate.Decide(context.Background(), "goal-loop path output", slog.Default())
+		}
+		steps = append(steps, step)
+	}
+	if calls != builderAcceptanceRepromptCap+2 {
+		t.Fatalf("expected every Decide call to invoke verify (fail-open needs a fresh read each time), got %d calls", calls)
+	}
+	blockedAt := -1
+	for i, s := range steps {
+		if s == taskDoneBlocked {
+			blockedAt = i
+			break
+		}
+	}
+	if blockedAt != builderAcceptanceRepromptCap {
+		t.Fatalf("shared budget must exhaust after exactly %d reprompts regardless of which path called Decide; blocked at index %d, steps=%v",
+			builderAcceptanceRepromptCap, blockedAt, steps)
+	}
+}
+
+// TestReadAcceptanceCriteriaFile covers review finding #4: an unreadable
+// -acceptance-file (e.g. a ConfigMap-mount race — the volume not yet
+// materialized) must WARN and fail open (empty criteria), never crash the
+// process the way -role-file/-policy-fragment-file's fail() does.
+func TestReadAcceptanceCriteriaFile(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	if got := readAcceptanceCriteriaFile("", log); got != "" {
+		t.Errorf("empty path: got %q, want empty", got)
+	}
+	if got := readAcceptanceCriteriaFile("/nonexistent/path/acceptance.md", log); got != "" {
+		t.Errorf("unreadable path must fail open (empty), got %q", got)
+	}
+
+	dir := t.TempDir()
+	path := dir + "/acceptance.md"
+	if err := os.WriteFile(path, []byte("  - must contain X  \n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := readAcceptanceCriteriaFile(path, log); got != "- must contain X" {
+		t.Errorf("got %q, want trimmed file contents", got)
+	}
 }
 
 func TestBuilderReplyTopicOnlyAppliesInBuilderMode(t *testing.T) {

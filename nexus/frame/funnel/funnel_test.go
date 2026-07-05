@@ -471,15 +471,23 @@ func TestDeliberate_DoneSentinelFiresOnTaskDone(t *testing.T) {
 		return f
 	}
 
-	// Sentinel present → OnTaskDone fires.
+	// Sentinel present → OnTaskDone fires with the REAL finalText (Unit B
+	// verified-task_done review finding: a hardcoded placeholder string
+	// like "done (reply sentinel)" would always fail an acceptance-criteria
+	// check downstream, since it can never contain a required token —
+	// OnTaskDone's argument must be the actual reply, not a label for it).
 	fired := false
-	f := mkFunnel(t, "work finished <<TASK_COMPLETE>>", "<<TASK_COMPLETE>>", func(string) { fired = true })
+	var gotArg string
+	f := mkFunnel(t, "work finished <<TASK_COMPLETE>>", "<<TASK_COMPLETE>>", func(s string) { fired = true; gotArg = s })
 	f.Receive(bridle.InboxItem{From: "operator", Content: "go"})
 	if _, err := f.Deliberate(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
 	if !fired {
 		t.Error("OnTaskDone should fire when the reply contains the sentinel")
+	}
+	if gotArg != "work finished <<TASK_COMPLETE>>" {
+		t.Errorf("OnTaskDone arg = %q, want the real finalText (not a hardcoded placeholder)", gotArg)
 	}
 
 	// Sentinel absent → OnTaskDone does not fire.
