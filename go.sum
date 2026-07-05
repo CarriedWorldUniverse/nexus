@@ -10,6 +10,8 @@ github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603092700-bad238fd9d58 h1
 github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603092700-bad238fd9d58/go.mod h1:mYs7BzEiFdFx5hDaahzRutND9gjxixt++t/S+XbQQvA=
 github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260611212122-c2fe7a68f6af h1:BjOsxAnHfNwDhycSpgodoVV+KrGqbFjOkoCqByc7Oo0=
 github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260611212122-c2fe7a68f6af/go.mod h1:SBXfS7WeuwK80SZrysL1YC0oDrNlNYoXqgWKkeK80wE=
+github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260613191908-362c19c9dfd7 h1:L3fcQpEUvRAsRaKqGGOvIBUXKa+ErQ50Tha9i88Cz0g=
+github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260613191908-362c19c9dfd7/go.mod h1:SBXfS7WeuwK80SZrysL1YC0oDrNlNYoXqgWKkeK80wE=
 github.com/CarriedWorldUniverse/ledger v0.1.4 h1:gtu/8E1f2yRXMubTaS5IiG6mUmjYuuHObWZJos+2OGA=
 github.com/CarriedWorldUniverse/ledger v0.1.4/go.mod h1:2aeFr46SOJ19rDnwsSwGJA9CZqNrtYXY1BQ6vfzMEog=
 github.com/anthropics/anthropic-sdk-go v1.38.0 h1:bA4DcK+91gorIX+5VTONnynyt9LRU4nnN6rRQ+j/NIg=
