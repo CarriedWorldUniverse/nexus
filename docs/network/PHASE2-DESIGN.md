@@ -210,3 +210,14 @@ Line `builder/li1-orchestrator-wiring` (off m1-unit8-console). The orchestrator 
 2. Deploy as a CONTROLLED instance (a one-shot Job or a scoped test broker, SA nexus-broker) with: ORCHESTRATOR_ENABLE, WORKGRAPH_LEDGER_ADDR=ledger.cwb.svc:8081 + mesh cert, CW_K8S_NAMESPACE (a scratch ns to contain Jobs), CW_BUILDER_IMAGE. Keep it away from the live nexus-control's queue/session slots.
 3. Seed a work-item → the drain dispatches → a real agentfunnel Job spawns for pool.sub-1.
 Risk: a standing second broker spawning Jobs on the live cluster; prefer a one-shot or a scratch namespace, and watch it. This is the point to confirm the approach before executing.
+
+## ★ REAL DISPATCH ACHIEVED 2026-07-05 — the pipeline ran end-to-end on live infra ★
+Deployed the M1 broker (image localhost/nexus-broker:m1, built from the li1 line) as a controlled one-shot in scratch namespace m1-scratch (SA m1-broker w/ job-create, sqld native sidecar, self-signed serving cert, cwb mesh cert for the ledger, ORCHESTRATOR_ENABLE, WORKGRAPH→ledger.cwb.svc:8081). Boot logs: "orchestrator: provisioned pool aspect row" (ensurePoolAspect worked live), "orchestrator ENABLED roles=[builder]", "drain loop started". Seeded queued builder work-item NET-15 in the sovereign ledger.
+
+**The orchestrator then did a REAL dispatch:** drain pass → `dispatched=[NET-15]` → `runner: builder job created agent=pool.sub-1 ticket=NET-15 job=builder-pool-sub-1-run-be783ae4...` → a real k8s Job `Running 0/1` with a worker pod spawned. Next drain: NET-15 in `skipped` (In Progress) — idempotency holding live. FULL PATH PROVEN: sovereign ledger (robo-dog) → orchestrator drain → pool lease → derived-credential mint → real k8s Job.
+
+Two live-config things surfaced (fixed inline): broker needs `nexus identity init` (added an init container) + `CW_NODE_IP` set (empty → k8s rejects the Job's hostAlias). Both are deployment config, not code.
+
+**Remaining for a worker to FULLY RUN (beyond dispatch):** the worker pod pends on a missing `nexus-builder-work` PVC (builder work volume, normally provisioned in nexus ns) — provision the builder PVCs + get the old nexus-builder:dev (or an M1 worker image) to connect back to the broker WS + run the bridle loop + report a result (the result-channel item). That's the next milestone: a work-item fully EXECUTED, not just dispatched.
+
+Scratch instance torn down after the proof (one-shot). Reproducible: the deployment yaml + steps are in the session log; the li1 line (ensurePoolAspect, the Claim/status-guard fixes) is the durable code.
