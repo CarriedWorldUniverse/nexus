@@ -118,6 +118,85 @@ the Jira-snapshot path it drains today — see "Reuse, don't rebuild" in the
 build spec; that rewiring is left to the operator/a later ticket, not done
 by this unit, which only had to ship `DrainOnce` as a callable package).
 
+## Live wiring (`li1-orchestrator-wiring`)
+
+The process wiring this README describes above as "left to the caller" is
+now done, in `nexus/cmd/nexus/main.go` (see `orchestrator_wiring.go` beside
+it) — **strictly additive and env-gated**: with none of the env below set,
+the broker constructs nothing described in this section and behaves exactly
+as it did before this wiring existed (`Config.DocRegister` stays `nil`, no
+`Orchestrator` is built, `runner.OnJobDoneHook` stays `nil`). Every
+construction step is also **fail-soft**: a bad ledger address, missing TLS
+material, or a disabled prerequisite is logged and the whole optional
+subsystem is skipped — the broker still boots and serves chat/dispatch.
+
+### Env vars
+
+| Var | Effect |
+|---|---|
+| `WORKGRAPH_LEDGER_ADDR` | sovereign-ledger gRPC address. Unset -> the orchestrator is never started (nothing to drain). |
+| `WORKGRAPH_ORG` | cwb-org presented to the ledger (default `workgraph.DefaultOrg`, `"carriedworld"`). |
+| `WORKGRAPH_SUBJECT` | cwb-subject presented to the ledger (default `"nexus-orchestrator"`). |
+| `WORKGRAPH_PROJECT` | ledger project key work items live under (default `workgraph.DefaultProject`, `"NET"`). |
+| `WORKGRAPH_TLS_CERT` / `WORKGRAPH_TLS_KEY` / `WORKGRAPH_TLS_CA` | mTLS material for the ledger dial (see `workgraph.DialCreds`). |
+| `WORKGRAPH_DEV_INSECURE=1` | dial the ledger without mTLS (local dev only). |
+| `ORCHESTRATOR_ENABLE=1` | explicit opt-in. Required in addition to a working workgraph client and a live dispatch `Runner` (the in-cluster k8s client must have wired successfully at boot) — any one missing skips the whole subsystem. |
+| `ORCHESTRATOR_ROLES` | comma-separated role labels the pool serves (default `builder,tester,reviewer,security-reviewer`). |
+| `ORCHESTRATOR_STALE_AFTER` | `time.ParseDuration` string overriding `Orchestrator.StaleAfter` (default: this package's own 5m). |
+| `ORCHESTRATOR_DRAIN_INTERVAL` | `time.ParseDuration` string for the cadence-fallback ticker (default 30s). |
+| `DOCREGISTER_ENABLE=1` / `DOCREGISTER_CAIRN_DIR` | either enables `nexus/docregister` — `DOCREGISTER_CAIRN_DIR` (a git working-copy directory the process can commit into) is required either way; see `docregister/README.md`. |
+| `DOCREGISTER_CAIRN_AUTHOR` | optional `"Name <email>"` passed to `GitCairnContent.Author`. |
+
+### What actually gets wired
+
+1. `Config.DocRegister` is set to a `docregister.Register{Store:
+   docregister.NewSQLStore(db), Content: &docregister.GitCairnContent{...}}`
+   when the docregister env above is present — `broker.New` migrates its
+   store and mounts `/api/docs/*` (workbench) and `/api/admin/docs/*`
+   (verdicts) itself, unchanged from how it already handles a non-nil
+   `Config.DocRegister`.
+2. A `workgraph.Client` dials the ledger when `WORKGRAPH_LEDGER_ADDR` is
+   set (best-effort `EnsureProject` on construction, bounded to 10s so an
+   unreachable ledger can never hang broker startup — a failure here is
+   logged, not fatal; `DrainOnce`'s own calls surface the same error
+   repeatedly if the project truly isn't usable).
+3. When that client is non-nil, `ORCHESTRATOR_ENABLE=1` is set, and the
+   dispatch `Runner` initialised successfully (it satisfies `Dispatcher`
+   directly via `SubmitPoolItem` — no adapter needed), `main.go` builds an
+   `Orchestrator{Graph, Dispatcher: runner, WorkerStatus, Roles, Alerter:
+   LogAlerter}`, wires `runner.OnJobDoneHook = orch.OnJobDoneHook()` (the
+   event wake), and starts a `time.Ticker`-driven goroutine calling
+   `orch.DrainOnce(ctx)` on `ORCHESTRATOR_DRAIN_INTERVAL` cadence (the
+   cadence-fallback wake this README's "Wake / cadence / poke triggers"
+   section describes) — logging each pass's `DrainReport` summary. The
+   goroutine returns promptly on `ctx` cancellation (broker shutdown).
+
+### Live-verify path
+
+```
+export WORKGRAPH_LEDGER_ADDR=ledger.cwb.svc:8080
+export WORKGRAPH_DEV_INSECURE=1   # or the WORKGRAPH_TLS_* trio for mTLS
+export ORCHESTRATOR_ENABLE=1
+export DOCREGISTER_CAIRN_DIR=/path/to/a/cairn-line-checkout
+# boot the broker as usual (nexus --addr ... --tls-cert ... --tls-key ...)
+```
+
+Then observe:
+
+- A `"orchestrator: drain loop started"` log line at boot, followed by a
+  `"orchestrator: drain pass"` line every `ORCHESTRATOR_DRAIN_INTERVAL`
+  (default 30s).
+- `GET /api/admin/workers` (requires admin auth) responding with the
+  `WorkerStatus` rows the orchestrator's `ReapStale` is reading.
+- `GET /api/docs` (broker-authenticated) responding once a document has
+  been created via `POST /api/docs`, per `docregister/README.md`'s API
+  surface.
+
+With none of the above env set, none of this is constructed — `go test
+./nexus/cmd/nexus/...` (the existing suite, untouched) proves the no-env
+path is unchanged; `orchestrator_wiring_test.go` in that package covers the
+env-gated construct/skip paths and the drain loop's ticker cadence directly.
+
 ## Reap + strike policy
 
 `ReapStale(ctx) ([]string, error)` scans `WorkerStatus.List` for rows

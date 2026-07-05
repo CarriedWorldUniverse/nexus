@@ -267,6 +267,13 @@ func main() {
 	knowledgeStore := knowledge.New(db, logger)
 	obsHub := observability.NewHub(500, nil)
 
+	// li1-orchestrator-wiring: M1 Unit 2 document register. Dark unless
+	// DOCREGISTER_ENABLE=1 (or DOCREGISTER_CAIRN_DIR is set) — nil leaves
+	// Config.DocRegister nil below, so the /api/docs endpoints stay
+	// dormant exactly as before this wiring existed. See
+	// orchestrator_wiring.go for the full env reference.
+	docRegisterStore := buildDocRegister(logger, db)
+
 	// NEX-144: bring up the ledger issue-tracker service alongside the
 	// broker. ledger.db lives parallel to broker's nexus.db in the
 	// resolved data directory; the broker mounts /healthz/ledger on its
@@ -550,6 +557,24 @@ func main() {
 		}
 	}
 
+	// li1-orchestrator-wiring: the M1 Unit 6 standing orchestrator.
+	// Fail-soft + fully env-gated — dark unless WORKGRAPH_LEDGER_ADDR AND
+	// ORCHESTRATOR_ENABLE=1 are both set, and dispatchRunner survived Init
+	// above (a Runner that can actually SubmitPoolItem). Any missing
+	// prerequisite or construction error is logged by the build* helpers
+	// and this block is a no-op — runner.OnJobDoneHook stays nil and no
+	// drain loop starts, exactly as before this wiring existed. See
+	// orchestrator_wiring.go for the env-var reference.
+	if dispatchRunner != nil {
+		workgraphClient := buildWorkgraphClient(logger)
+		if orch := buildOrchestrator(logger, workgraphClient, dispatchRunner, workerStatusStore); orch != nil {
+			dispatchRunner.OnJobDoneHook = orch.OnJobDoneHook()
+			drainInterval := orchestratorDrainInterval(logger)
+			go runDrainLoop(ctx, orch, drainInterval, logger)
+			logger.Info("orchestrator: drain loop started", "interval", drainInterval)
+		}
+	}
+
 	// Napping presence (roundtable spec component 1): per-aspect wake
 	// policies + Deployment-name overrides, comma-separated k=v lists.
 	// e.g. NEXUS_ASPECT_WAKE_POLICY="plumb=wake-on-mention,keel=always-on"
@@ -611,6 +636,10 @@ func main() {
 		// Task #218: broker-mediated credentials. Nil-safe — admin
 		// routes register only when non-nil, otherwise return 503.
 		Credentials: credentialStore,
+		// li1-orchestrator-wiring: M1 Unit 2 document register. nil
+		// (the default, no new env set) leaves the /api/docs endpoints
+		// dormant — unchanged behavior.
+		DocRegister: docRegisterStore,
 		// custodian M1: git credential.fetch routes here when configured
 		// (CUSTODIAN_GRPC_ADDR); nil = git stays local (no regression).
 		CustodianGit: custodianGit,
