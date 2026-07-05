@@ -60,7 +60,7 @@ type K8sIface interface {
 	EnsureKeyfileSecret(ctx context.Context, aspect string) error
 	EnsureHomeRepo(ctx context.Context, agent string) error
 	EnsureSharedReposPVC(ctx context.Context) error
-	PutBriefConfigMap(ctx context.Context, taskID, brief string) error
+	PutBriefConfigMap(ctx context.Context, taskID string, data map[string]string) error
 	CreateJob(ctx context.Context, job *batchv1.Job) (*batchv1.Job, error)
 	SetBriefOwner(ctx context.Context, taskID string, job *batchv1.Job) error
 	ListActiveJobs(ctx context.Context) (map[string]ActiveJob, error)
@@ -682,5 +682,9 @@ func provisionRun(ctx context.Context, k K8sIface, cfg JobConfig, b Brief, taskI
 		slog.Info("dispatch: skipping git credential grant; git credential name not configured",
 			"agent", b.Agent, "repo", b.Repo)
 	}
-	return k.PutBriefConfigMap(ctx, taskID, b.Task)
+	data, err := briefConfigMapData(b)
+	if err != nil {
+		return fmt.Errorf("provision: %w", err)
+	}
+	return k.PutBriefConfigMap(ctx, taskID, data)
 }

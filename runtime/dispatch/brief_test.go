@@ -3,7 +3,10 @@ package dispatch
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"testing"
+
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 )
 
 func TestParseBrief(t *testing.T) {
@@ -187,5 +190,100 @@ func TestBriefNewFields(t *testing.T) {
 	raw, _ := json.Marshal(bEmpty)
 	if bytes.Contains(raw, []byte("run_id")) {
 		t.Errorf("omitempty: run_id should be absent when zero, got %s", raw)
+	}
+}
+
+// TestBriefRoleAtSpawnFields is a table test of the M1 Unit 3 round-trip:
+// Role, WorkItemID, SkillAllowlist, PolicyFragment, and Personality must
+// survive a JSON marshal/unmarshal (the !dispatch header ⇄ ConfigMap
+// path) unchanged, and must be entirely absent from the wire format when
+// the brief carries none of them — the additive/back-compat invariant.
+func TestBriefRoleAtSpawnFields(t *testing.T) {
+	frag := &funnel.ToolPolicy{
+		DefaultAllow:   false,
+		Tools:          map[string]bool{"write": false},
+		WritePathAllow: []string{"tests/"},
+	}
+	b := Brief{
+		Agent:          "anvil",
+		Ticket:         "NEX-999",
+		Thread:         "NEX-999",
+		Role:           "you are a tester. write and run tests only.",
+		WorkItemID:     "work-item-42",
+		SkillAllowlist: []string{"test-run", "bash", "read"},
+		PolicyFragment: frag,
+		Personality:    "anvil",
+	}
+	data, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Brief
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Role != b.Role {
+		t.Errorf("Role: got %q, want %q", got.Role, b.Role)
+	}
+	if got.WorkItemID != b.WorkItemID {
+		t.Errorf("WorkItemID: got %q, want %q", got.WorkItemID, b.WorkItemID)
+	}
+	if len(got.SkillAllowlist) != 3 || got.SkillAllowlist[0] != "test-run" {
+		t.Errorf("SkillAllowlist: got %v", got.SkillAllowlist)
+	}
+	if got.PolicyFragment == nil || got.PolicyFragment.DefaultAllow != false || !reflect.DeepEqual(got.PolicyFragment.WritePathAllow, frag.WritePathAllow) {
+		t.Errorf("PolicyFragment: got %+v, want %+v", got.PolicyFragment, frag)
+	}
+	if got.Personality != b.Personality {
+		t.Errorf("Personality: got %q, want %q", got.Personality, b.Personality)
+	}
+
+	// Additive/back-compat: a brief with none of these set must emit none
+	// of these keys on the wire (existing !dispatch consumers unaffected).
+	bEmpty2 := Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "NEX-1"}
+	raw2, _ := json.Marshal(bEmpty2)
+	for _, key := range []string{"role", "work_item_id", "skill_allowlist", "policy_fragment", "personality"} {
+		if bytes.Contains(raw2, []byte(`"`+key+`"`)) {
+			t.Errorf("omitempty: %q should be absent when zero, got %s", key, raw2)
+		}
+	}
+}
+
+// TestBriefConfigMapData is a table test of briefConfigMapData: the
+// ConfigMap Data map that becomes -brief-file plus the role-at-spawn
+// overlay files (role.md, policy.json). An empty Brief reproduces
+// exactly today's single-key ConfigMap.
+func TestBriefConfigMapData(t *testing.T) {
+	tests := []struct {
+		name string
+		b    Brief
+		want map[string]string
+	}{
+		{
+			name: "no overlay reproduces today's single-key ConfigMap",
+			b:    Brief{Task: "do the thing"},
+			want: map[string]string{"brief.md": "do the thing"},
+		},
+		{
+			name: "role adds role.md",
+			b:    Brief{Task: "do the thing", Role: "you are a builder"},
+			want: map[string]string{"brief.md": "do the thing", "role.md": "you are a builder"},
+		},
+		{
+			name: "policy fragment adds policy.json",
+			b:    Brief{Task: "do the thing", PolicyFragment: &funnel.ToolPolicy{DefaultAllow: false}},
+			want: map[string]string{"brief.md": "do the thing", "policy.json": `{"default_allow":false}`},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := briefConfigMapData(tc.b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("briefConfigMapData() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

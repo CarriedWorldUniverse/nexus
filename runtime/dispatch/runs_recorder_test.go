@@ -112,7 +112,7 @@ type fakeLogK8s struct {
 func (f *fakeLogK8s) EnsureKeyfileSecret(context.Context, string) error { return nil }
 func (f *fakeLogK8s) EnsureHomeRepo(context.Context, string) error      { return nil }
 func (f *fakeLogK8s) EnsureSharedReposPVC(context.Context) error        { return nil }
-func (f *fakeLogK8s) PutBriefConfigMap(context.Context, string, string) error {
+func (f *fakeLogK8s) PutBriefConfigMap(context.Context, string, map[string]string) error {
 	return nil
 }
 func (f *fakeLogK8s) CreateJob(context.Context, *batchv1.Job) (*batchv1.Job, error) {

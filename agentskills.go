@@ -116,3 +116,40 @@ func Get(name string) (string, bool) {
 	}
 	return "", false
 }
+
+// FilterAllowlist scopes skills to a role's SkillAllowlist — the
+// skill-gating primitive for role-at-spawn (M1 Unit 3, ROLE-MODEL.md §9
+// "least privilege"). An empty allow list is the back-compat no-op: every
+// skill passes through unfiltered (today's ungated behavior). A non-empty
+// allow list keeps only skills whose Name is in it, in the input order.
+func FilterAllowlist(skills []Skill, allow []string) []Skill {
+	if len(allow) == 0 {
+		return skills
+	}
+	want := make(map[string]bool, len(allow))
+	for _, name := range allow {
+		want[name] = true
+	}
+	out := make([]Skill, 0, len(skills))
+	for _, s := range skills {
+		if want[s.Name] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// AllowedName reports whether name is permitted under a role's
+// SkillAllowlist — the get_skill-side counterpart to FilterAllowlist. An
+// empty allow list permits every name (back-compat: all skills).
+func AllowedName(name string, allow []string) bool {
+	if len(allow) == 0 {
+		return true
+	}
+	for _, a := range allow {
+		if a == name {
+			return true
+		}
+	}
+	return false
+}

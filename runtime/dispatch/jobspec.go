@@ -119,6 +119,12 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	if spawn {
 		labels["nexus.dispatch/lineage"] = dnsLabelPart(b.SpawnParent)
 	}
+	if b.WorkItemID != "" {
+		labels["nexus.dispatch/work-item"] = dnsLabelPart(b.WorkItemID)
+	}
+	if b.Personality != "" {
+		labels["nexus.dispatch/personality"] = dnsLabelPart(b.Personality)
+	}
 	annotations := map[string]string{}
 	if b.Thread != "" {
 		annotations["nexus.dispatch/thread"] = b.Thread
@@ -136,6 +142,21 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		// entrypoint moves HOME to the per-agent home worktree, so pin
 		// CODEX_HOME to the auth location, HOME-independent.
 		{Name: "CODEX_HOME", Value: "/root/.codex"},
+	}
+	// Role-at-spawn metadata (M1 Unit 3). WorkItemID/Personality are
+	// informational (log correlation / accountability, mirroring
+	// CW_NEXUS_ID). SkillAllowlist scopes nexus-skills-mcp's
+	// search_skills/get_skill surface to this spawn's role — the
+	// skill-gating primitive (ROLE-MODEL §9). All empty by default →
+	// no env injected → unchanged behavior.
+	if b.WorkItemID != "" {
+		env = append(env, corev1.EnvVar{Name: "CW_WORK_ITEM_ID", Value: b.WorkItemID})
+	}
+	if b.Personality != "" {
+		env = append(env, corev1.EnvVar{Name: "CW_PERSONALITY", Value: b.Personality})
+	}
+	if len(b.SkillAllowlist) > 0 {
+		env = append(env, corev1.EnvVar{Name: "CW_SKILL_ALLOWLIST", Value: strings.Join(b.SkillAllowlist, ",")})
 	}
 	if spawn {
 		// Derived hand credential (NEX-571 Task B/C): the broker-signed
@@ -275,6 +296,17 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	}
 }
 
+// briefDir is the mount path of the "brief" ConfigMap volume (declared in
+// BuildJob's volumeMounts). Role-at-spawn overlay files (role.md,
+// policy.json) land here as extra keys of the SAME ConfigMap — the
+// ConfigMap volume mounts every Data key as a file, so no new volume is
+// needed. See briefConfigMapData in runner.go.
+const (
+	briefDir                = "/etc/dispatch"
+	briefRoleFileName       = "role.md"
+	briefPolicyFragmentName = "policy.json"
+)
+
 // builderArgs assembles the agentfunnel command line. Ticket dispatches
 // authenticate with the mounted keyfile; hand briefs (spawn) carry no
 // keyfile — their identity is the CW_SESSION_JWT env injected above.
@@ -283,9 +315,9 @@ func builderArgs(b Brief, cfg JobConfig, spawn bool) []string {
 	if !spawn {
 		args = append(args, "-k", "/etc/nexus/keyfile.json")
 	}
-	return append(args,
+	args = append(args,
 		"-builder",
-		"-brief-file", "/etc/dispatch/brief.md",
+		"-brief-file", briefDir+"/brief.md",
 		"-reply-topic", b.Thread,
 		"-builder-timeout", cfg.BriefTimeout,
 		"-builder-idle-timeout", cfg.IdleTimeout,
@@ -293,6 +325,16 @@ func builderArgs(b Brief, cfg JobConfig, spawn bool) []string {
 		"-ticket", b.Ticket,
 		"-branch", b.Branch,
 	)
+	// Role-at-spawn overlay (M1 Unit 3): only passed when the brief
+	// carries them, so an empty Role/PolicyFragment reproduces today's
+	// exact agentfunnel invocation (no -role-file/-policy-fragment-file).
+	if b.Role != "" {
+		args = append(args, "-role-file", briefDir+"/"+briefRoleFileName)
+	}
+	if b.PolicyFragment != nil {
+		args = append(args, "-policy-fragment-file", briefDir+"/"+briefPolicyFragmentName)
+	}
+	return args
 }
 
 func activeDeadlineSeconds(timeout string) int64 {

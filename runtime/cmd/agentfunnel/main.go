@@ -111,10 +111,40 @@ func main() {
 	branchFlag := flag.String("branch", "", "builder mode: dispatched branch (defaults to builder/<ticket>)")
 	drainMode := flag.Bool("drain", false, "drain/one-shot mode: run ONE autonomous orchestrate drain over shadow's queue (claude -p with the materialised MCPs + gh bridged), then exit. No builder worktree/PR-verify coupling — used by the heartbeat CronJob.")
 	drainPrompt := flag.String("drain-prompt", defaultDrainPrompt, "drain mode: the orchestrate drain instruction handed to claude -p")
+	roleFile := flag.String("role-file", "", "builder mode: path to the resolved role system-prompt text for this spawn (role-at-spawn overlay; optional — dispatch.Brief.Role written by BuildJob when a Role is set). composeSystemPrompt prepends its contents above the (thin) personality.")
+	policyFragmentFile := flag.String("policy-fragment-file", "", "builder mode: path to a spawn-supplied funnel.ToolPolicy JSON overlay applied over -policy for this spawn (role-at-spawn overlay; optional — dispatch.Brief.PolicyFragment written by BuildJob when set).")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
+
+	// Role-at-spawn overlay (M1 Unit 3): read here, before both the tool
+	// policy load and composeSystemPrompt need them. A missing/malformed
+	// file at a NON-empty path fails fast (same posture as -policy) —
+	// BuildJob only ever passes these flags when the ConfigMap key it
+	// names actually exists, so a read failure here means a real bug.
+	// Empty flags (the default) leave both zero values → no overlay,
+	// exactly matching pre-role-at-spawn behavior.
+	var spawnRolePrompt string
+	if *roleFile != "" {
+		raw, err := os.ReadFile(*roleFile)
+		if err != nil {
+			fail(log, "read role-file", err)
+		}
+		spawnRolePrompt = strings.TrimSpace(string(raw))
+	}
+	var spawnPolicyFragment *funnel.ToolPolicy
+	if *policyFragmentFile != "" {
+		raw, err := os.ReadFile(*policyFragmentFile)
+		if err != nil {
+			fail(log, "read policy-fragment-file", err)
+		}
+		var frag funnel.ToolPolicy
+		if err := json.Unmarshal(raw, &frag); err != nil {
+			fail(log, "parse policy-fragment-file", err)
+		}
+		spawnPolicyFragment = &frag
+	}
 
 	// Boot credential: a normal aspect presents a keyfile (-k); a
 	// spawned hand (NEX-571 Task D) presents a broker-minted session JWT
@@ -357,12 +387,14 @@ func main() {
 	// Threaded into every newBindingHarness call below so the P3b/P3c
 	// permission hook enforces it on native-API providers.
 	//
-	// Tier B (follow-on): store the per-aspect policy centrally in the
-	// Nexus and deliver it via keyfile.ValidationResult — mirroring the
-	// existing res.MCPProfile field (keyfile.go ValidationResult.MCPProfile,
-	// the NEX-169 resolved MCP-server blob). That removes the on-host file
-	// and makes the policy Nexus-authoritative like provider/model.
-	policy, err := loadToolPolicy(*policyPath)
+	// Tier B (role-at-spawn, M1 Unit 3): a spawn-supplied PolicyFragment
+	// (dispatch.Brief.PolicyFragment, delivered via -policy-fragment-file)
+	// overlays the static -policy file per-spawn rather than per-aspect —
+	// see applyPolicyFragment. Computed ONCE here, same as the static file
+	// always was; every newBindingHarness call below (incl. the binding
+	// refresh loop at re-validate) re-registers this SAME policy value
+	// unchanged, so the refresh loop cannot clobber the spawn overlay.
+	policy, err := loadToolPolicy(*policyPath, spawnPolicyFragment)
 	if err != nil {
 		fail(log, "load tool policy", err)
 	}
@@ -671,7 +703,7 @@ func main() {
 		fail(log, "build tool runner", err)
 	}
 
-	systemPrompt := composeSystemPrompt(res)
+	systemPrompt := composeSystemPrompt(res, spawnRolePrompt)
 	// Parse the validate response's mcp_profile into the funnel's MCP server
 	// list so non-claude-code providers (openai, codex) receive the servers
 	// in their TurnRequest. Empty/unparsed → keep MCP non-nil-but-empty,
@@ -925,16 +957,29 @@ func emitBuilderAccepted(ctx context.Context, wsClient *wsasp.Client, log *slog.
 // nexus/frame/embed_personality_test.go's
 // TestEmbed_ComposedDoesNotDoubleBakeCentral).
 //
+// rolePrompt is the role-at-spawn overlay (M1 Unit 3, dispatch.Brief.Role,
+// read from -role-file): the resolved system-prompt text for this
+// work-item's assigned role. It is inserted ABOVE the (thin) personality —
+// after central (org-wide base knowledge always applies first) but before
+// aspect/personality (decoration) — per PHASE2-DESIGN §3 / ROLE-MODEL.md
+// §3 ("capability = role + task spec + base knowledge; personality is
+// decoration"). Empty rolePrompt (the default — no Role on the brief) is
+// dropped from the join exactly like any other empty section, reproducing
+// today's prompt exactly.
+//
 // Empty sections are dropped from the join. Returns "" only when
 // every section is empty (legacy / pre-Part-9 Nexus + unprovisioned
 // aspect).
-func composeSystemPrompt(res *keyfile.ValidationResult) string {
+func composeSystemPrompt(res *keyfile.ValidationResult, rolePrompt string) string {
 	if res == nil {
 		return ""
 	}
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 5)
 	if res.CentralNexusMD != "" {
 		parts = append(parts, res.CentralNexusMD)
+	}
+	if rolePrompt != "" {
+		parts = append(parts, rolePrompt)
 	}
 	if res.Personality.Composed != "" {
 		parts = append(parts, res.Personality.Composed)
@@ -1416,29 +1461,71 @@ func newBindingHarness(provider bridle.Provider, providerName string, esc *funne
 
 // loadToolPolicy resolves the per-aspect tool permission policy.
 //
-// Tier A (this function): an empty path returns the permissive default
+// Tier A (base): an empty path returns the permissive default
 // (DefaultAllow=true) so unconfigured aspects behave exactly as they did
 // before the -policy flag existed. A non-empty path is read and
 // JSON-decoded into a funnel.ToolPolicy; a missing or malformed file
 // returns a wrapped error so startup fails fast rather than silently
 // running permissive — a misconfigured policy must be loud.
 //
-// Tier B (follow-on): the Nexus stores the per-aspect policy and delivers
-// it through keyfile.ValidationResult, mirroring the existing MCPProfile
-// field, removing the need for an on-host file.
-func loadToolPolicy(path string) (funnel.ToolPolicy, error) {
-	if path == "" {
-		return funnel.ToolPolicy{DefaultAllow: true}, nil
+// Tier B (role-at-spawn, M1 Unit 3): fragment, when non-nil, is a
+// spawn-supplied ToolPolicy overlay (dispatch.Brief.PolicyFragment,
+// delivered via -policy-fragment-file) applied over the Tier-A base by
+// applyPolicyFragment. This is the "Tier B" the original comment
+// recorded as a follow-on — delivered per-spawn (via the brief) rather
+// than centrally in the Nexus/ValidationResult, which was the other
+// option considered (see README.md). A nil fragment is a total no-op:
+// loadToolPolicy("", nil) and loadToolPolicy(path, nil) behave exactly
+// as before this change.
+func loadToolPolicy(path string, fragment *funnel.ToolPolicy) (funnel.ToolPolicy, error) {
+	base := funnel.ToolPolicy{DefaultAllow: true}
+	if path != "" {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return funnel.ToolPolicy{}, fmt.Errorf("read tool policy %q: %w", path, err)
+		}
+		var p funnel.ToolPolicy
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return funnel.ToolPolicy{}, fmt.Errorf("parse tool policy %q: %w", path, err)
+		}
+		base = p
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return funnel.ToolPolicy{}, fmt.Errorf("read tool policy %q: %w", path, err)
+	return applyPolicyFragment(base, fragment), nil
+}
+
+// applyPolicyFragment overlays a spawn-supplied PolicyFragment onto the
+// Tier-A base policy. Precedence, field by field:
+//
+//   - DefaultAllow always takes the fragment's value when a fragment is
+//     present — presence of any fragment means the role made an explicit
+//     decision about it (it isn't an optional sub-field like the others).
+//   - Tools/Escalate/BashDeny/WritePathAllow: a field the fragment sets
+//     (a non-nil map/slice — including an explicit empty one, e.g. an
+//     empty write_path_allow for a read-only role) REPLACES the base
+//     field outright. A field the fragment OMITS (nil, the Go zero value
+//     for an absent JSON key) leaves the base field untouched.
+//
+// A nil fragment returns base unchanged — the total no-op that preserves
+// today's static-file-only behavior.
+func applyPolicyFragment(base funnel.ToolPolicy, fragment *funnel.ToolPolicy) funnel.ToolPolicy {
+	if fragment == nil {
+		return base
 	}
-	var p funnel.ToolPolicy
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return funnel.ToolPolicy{}, fmt.Errorf("parse tool policy %q: %w", path, err)
+	out := base
+	out.DefaultAllow = fragment.DefaultAllow
+	if fragment.Tools != nil {
+		out.Tools = fragment.Tools
 	}
-	return p, nil
+	if fragment.Escalate != nil {
+		out.Escalate = fragment.Escalate
+	}
+	if fragment.BashDeny != nil {
+		out.BashDeny = fragment.BashDeny
+	}
+	if fragment.WritePathAllow != nil {
+		out.WritePathAllow = fragment.WritePathAllow
+	}
+	return out
 }
 
 // policySource renders a human label for the policy origin in log lines.

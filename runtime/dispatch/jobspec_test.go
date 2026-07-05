@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -278,4 +279,76 @@ func TestBuildJob_TTLAndRunUUIDName(t *testing.T) {
 	if !strings.HasSuffix(job.Name, "-run-550e8400e29b41d4a716") {
 		t.Fatalf("job name should include a long UUID-derived suffix, got %q", job.Name)
 	}
+}
+
+// TestBuildJob_RoleAtSpawn is a table test of the M1 Unit 3 threading: an
+// empty Brief (no Role/SkillAllowlist/PolicyFragment/WorkItemID/
+// Personality) must reproduce today's exact Job args/env/labels, and
+// each field, when set, must surface at its documented touchpoint.
+func TestBuildJob_RoleAtSpawn(t *testing.T) {
+	cfg := JobConfig{Namespace: "nexus", Image: "img", BrokerHost: "broker.example"}
+
+	t.Run("empty brief: no role-at-spawn args/env/labels", func(t *testing.T) {
+		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		if contains(c.Args, "-role-file") || contains(c.Args, "-policy-fragment-file") {
+			t.Errorf("empty brief must not pass role-at-spawn flags: %v", c.Args)
+		}
+		for _, name := range []string{"CW_WORK_ITEM_ID", "CW_PERSONALITY", "CW_SKILL_ALLOWLIST"} {
+			for _, e := range c.Env {
+				if e.Name == name {
+					t.Errorf("empty brief must not set env %s", name)
+				}
+			}
+		}
+		job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t1", "codex-cli")
+		if _, ok := job.Labels["nexus.dispatch/work-item"]; ok {
+			t.Error("empty brief must not set the work-item label")
+		}
+		if _, ok := job.Labels["nexus.dispatch/personality"]; ok {
+			t.Error("empty brief must not set the personality label")
+		}
+	})
+
+	t.Run("role sets -role-file pointing at the brief ConfigMap mount", func(t *testing.T) {
+		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", Role: "you are a builder"}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		if !argValueEquals(c.Args, "-role-file", "/etc/dispatch/role.md") {
+			t.Errorf("args missing -role-file /etc/dispatch/role.md: %v", c.Args)
+		}
+	})
+
+	t.Run("policy fragment sets -policy-fragment-file", func(t *testing.T) {
+		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", PolicyFragment: &funnel.ToolPolicy{DefaultAllow: false}}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		if !argValueEquals(c.Args, "-policy-fragment-file", "/etc/dispatch/policy.json") {
+			t.Errorf("args missing -policy-fragment-file /etc/dispatch/policy.json: %v", c.Args)
+		}
+	})
+
+	t.Run("skill allowlist becomes CW_SKILL_ALLOWLIST env", func(t *testing.T) {
+		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", SkillAllowlist: []string{"test-run", "bash"}}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		if !envValueEquals(c.Env, "CW_SKILL_ALLOWLIST", "test-run,bash") {
+			t.Errorf("env missing CW_SKILL_ALLOWLIST=test-run,bash: %v", c.Env)
+		}
+	})
+
+	t.Run("work item id becomes label and env", func(t *testing.T) {
+		job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", WorkItemID: "work-item-42"}, cfg, "t1", "codex-cli")
+		if job.Labels["nexus.dispatch/work-item"] != "work-item-42" {
+			t.Errorf("label nexus.dispatch/work-item = %q", job.Labels["nexus.dispatch/work-item"])
+		}
+		c := job.Spec.Template.Spec.Containers[0]
+		if !envValueEquals(c.Env, "CW_WORK_ITEM_ID", "work-item-42") {
+			t.Errorf("env missing CW_WORK_ITEM_ID=work-item-42: %v", c.Env)
+		}
+	})
+
+	t.Run("personality becomes label and env", func(t *testing.T) {
+		job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", Personality: "anvil"}, cfg, "t1", "codex-cli")
+		if job.Labels["nexus.dispatch/personality"] != "anvil" {
+			t.Errorf("label nexus.dispatch/personality = %q", job.Labels["nexus.dispatch/personality"])
+		}
+		c := job.Spec.Template.Spec.Containers[0]
+		if !envValueEquals(c.Env, "CW_PERSONALITY", "anvil") {
+			t.Errorf("env missing CW_PERSONALITY=anvil: %v", c.Env)
+		}
+	})
 }

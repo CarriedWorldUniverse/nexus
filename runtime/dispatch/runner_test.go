@@ -94,7 +94,9 @@ func (f *fakeK8s) EnsureSharedReposPVC(_ context.Context) error {
 	return nil
 }
 
-func (f *fakeK8s) PutBriefConfigMap(_ context.Context, taskID, _ string) error { return nil }
+func (f *fakeK8s) PutBriefConfigMap(_ context.Context, taskID string, _ map[string]string) error {
+	return nil
+}
 
 func (f *fakeK8s) CreateJob(_ context.Context, job *batchv1.Job) (*batchv1.Job, error) {
 	if f.createErr != nil {
