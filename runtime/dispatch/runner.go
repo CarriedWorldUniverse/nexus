@@ -130,6 +130,16 @@ type Runner struct {
 	// wires this to the aspects store's provider column for the parent.
 	HandProvider func(ctx context.Context, parent string) string
 
+	// OnJobDoneHook, when set, is called at the end of every OnJobDone
+	// invocation (after the existing free-agent/drain/completion-post
+	// behavior runs unchanged) — the M1 Unit 6 orchestrator's wake wiring
+	// (PHASE2-DESIGN §2 "wake triggers: OnJobDone completion hook").
+	// nil is the default and reproduces OnJobDone's exact prior behavior;
+	// this field only ever ADDS a caller shape, never replaces one. Called
+	// synchronously, outside r.mu — implementations that need to be
+	// non-blocking should hand off internally (e.g. go func()).
+	OnJobDoneHook func(JobDone)
+
 	mu        sync.Mutex
 	ctx       context.Context   // stored at Init for background callbacks (OnJobDone)
 	agentBusy map[string]string // agent name → runID of its active run
@@ -431,6 +441,12 @@ func (r *Runner) OnJobDone(done JobDone) {
 	r.post(done.Thread, r.completionSummary(run, done))
 
 	r.launchPending(r.ctx, pending)
+
+	// M1 Unit 6 orchestrator wake (PHASE2-DESIGN §2): fires after every
+	// existing OnJobDone behavior above, never in place of it.
+	if r.OnJobDoneHook != nil {
+		r.OnJobDoneHook(done)
+	}
 }
 
 func (r *Runner) completionSummary(run *Run, done JobDone) string {

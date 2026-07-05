@@ -38,6 +38,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/workerstatus"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 	"k8s.io/client-go/kubernetes"
 )
@@ -262,6 +263,7 @@ func main() {
 	chatStore := chat.NewSQLStore(db)
 	runsStore := runs.NewSQLStore(db)
 	conveneStore := convene.NewSQLStore(db)
+	workerStatusStore := workerstatus.NewSQLStore(db)
 	knowledgeStore := knowledge.New(db, logger)
 	obsHub := observability.NewHub(500, nil)
 
@@ -566,6 +568,7 @@ func main() {
 		ChatStore:          chatStore,
 		RunsStore:          runsStore,
 		ConveneStore:       conveneStore,
+		WorkerStatusStore:  workerStatusStore,
 		SQLDB:              db,
 		ActivityLogDir:     activityLogDir,
 		K8sReader:          k8sReader,

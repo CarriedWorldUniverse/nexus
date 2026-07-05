@@ -35,6 +35,15 @@ and a tool-policy fragment applied at boot. See "Role-at-spawn" below.
   ticket dedupe. `role` here is the short role LABEL (e.g. `"builder"`), not
   prompt text — see "Role-at-spawn" below for the distinction from
   `Brief.RolePrompt`.
+- **`SubmitPoolItem(ctx, PoolItem)` (M1 Unit 6)** is `SubmitPool`'s
+  superset: identical lease/queue/idempotency mechanics, but `PoolItem`
+  additionally carries `RolePrompt`/`SkillAllowlist`/`PolicyFragment`
+  through into the leased Brief — `SubmitPool` itself has no room for
+  those (only 4 strings), so `nexus/orchestrator`'s graph-drain (the
+  production caller that resolves a role label to its overlay) dispatches
+  through `SubmitPoolItem` instead. `SubmitPool` is now one line of sugar
+  calling `SubmitPoolItem` with a zero-value overlay — byte-for-byte the
+  same behavior as before this addition.
 - Slots are derived identities minted through the same
   `MintHandCredential` seam a hand spawn uses (`aspects.DerivedName`,
   `IsDerivedName`, broker-signed session JWT) — no keyfile, no new crypto.
@@ -102,6 +111,18 @@ disjoint keys (a real aspect name, `<aspect>.<word>`, or `pool.sub-N`), so:
 
 See `pool_test.go`'s `TestNamedDispatchCoexistsWithPoolLeasing` for the test
 that exercises this directly.
+
+## `OnJobDoneHook` (M1 Unit 6 wake wiring)
+
+`Runner.OnJobDoneHook func(JobDone)` is an additive, optional field
+(nil by default): `OnJobDone` calls it at the very end, strictly AFTER the
+existing free-agent/drain/completion-post behavior documented above runs
+unchanged — it only ADDS a caller shape, never replaces one. This is the
+seam `nexus/orchestrator` wires its graph-drain wake into
+(`runner.OnJobDoneHook = orch.OnJobDoneHook()`) — see
+`nexus/orchestrator/README.md` "OnJobDone wake wiring" for what the hook
+does and its documented gap (`JobDone` carries no full verdict, only an
+OK bool).
 
 ## Pool live-verify path (not run by this unit — documented for the operator)
 

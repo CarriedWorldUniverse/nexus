@@ -92,6 +92,12 @@ const defaultDrainPrompt = `You are shadow, woken for ONE autonomous orchestrate
 Hard rules: one ticket per builder; never bundle tickets in a dispatch; transition-on-dispatch is mandatory; when in doubt about a merge, ESCALATE; if it isn't in Jira/git/the run log, it didn't happen.`
 
 func main() {
+	// processStartedAt anchors the M1 Unit 5 worker.status heartbeat's
+	// `started_at` field — stable across every heartbeat this process
+	// emits (the worker_status store treats a zero StartedAt on later
+	// upserts as "don't overwrite," so this is really only read once,
+	// at the first emit).
+	processStartedAt := time.Now().UTC()
 	keyfilePath := flag.String("k", "", "path to the aspect keyfile (required)")
 	cursorDir := flag.String("cursor-dir", "", "directory for the Lock 6 message-cursor file (defaults to <cwd>/cursor)")
 	contextMode := flag.String("context-mode", string(schemas.ContextThread), "context mode: global, thread, or stateless (Nexus does not yet ship context_mode in the validation response)")
@@ -624,6 +630,41 @@ func main() {
 		funnelObsHook = progressObservabilityHook{next: obsHook, progress: recordBuilderProgress}
 	}
 
+	// M1 Unit 5 — worker-status heartbeat (PHASE2-DESIGN §5). The
+	// turnMetricsTracker wraps whichever observability hook is already
+	// wired above (transparent decorator — every call still reaches
+	// obsforward/progress reporting unchanged) and additionally counts
+	// main-deliberation turns + cumulative tokens for the heartbeat
+	// shape. statusEmitter is constructed just below; the tracker's
+	// onMainTurnEnd callback closes over the pointer so a turn boundary
+	// fires an Emit ("each turn boundary" per the build spec) without a
+	// circular-construction ordering problem.
+	var statusEmitter *workerStatusEmitter
+	metricsTracker := newTurnMetricsTracker(funnelObsHook, func() {
+		if statusEmitter != nil {
+			statusEmitter.Emit(ctx, "running")
+		}
+	})
+	funnelObsHook = metricsTracker
+
+	statusEmitter = newWorkerStatusEmitter(
+		wsClient,
+		res.AspectName,
+		os.Getenv("CW_ROLE"),
+		os.Getenv("CW_PERSONALITY"),
+		os.Getenv("CW_WORK_ITEM_ID"),
+		detectCLIVersion(*claudePath, log),
+		os.Getenv("CW_IMAGE_TAG"),
+		processStartedAt,
+		func() funnel.Binding { return *bindingCache.Load() },
+		func() (bool, time.Time) {
+			snap := state.Snapshot()
+			return snap.JWT != "" && time.Until(snap.Expires) > 0, snap.Expires
+		},
+		metricsTracker,
+		log,
+	)
+
 	// NEX-293: fetch the per-aspect admin model_config overrides
 	// before constructing the filter. agentfunnel runs out-of-process
 	// so it doesn't have direct access to the broker's credentials
@@ -823,6 +864,14 @@ func main() {
 		"system_prompt_bytes", len(systemPrompt),
 		"central_version", res.CentralVersion,
 		"personality_version", res.Personality.Version)
+
+	// M1 Unit 5: boot heartbeat (spawning->running — by the time we reach
+	// here validation/funnel/wsasp setup is done and the loop is about to
+	// start, so "running" is the accurate boot state) plus the ~60s
+	// wall-clock ticker for the remainder of this process's life.
+	statusEmitter.Emit(ctx, "running")
+	statusEmitter.StartHeartbeat(ctx, heartbeatInterval)
+
 	if *builderMode {
 		log.Info("agentfunnel: builder liveness configured",
 			"idle_timeout", *builderIdleTimeout,

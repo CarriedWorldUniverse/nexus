@@ -767,6 +767,24 @@ func (c *Client) SendDispatchStatus(ctx context.Context, runID, status, reason s
 	return nil
 }
 
+// SendWorkerStatus emits the M1 Unit 5 worker-status heartbeat
+// (PHASE2-DESIGN §5) over the normal aspect WebSocket. Unlike
+// SendDispatchStatus, this uses SendBestEffort (no durable queue): a
+// heartbeat that misses one tick because the WS happens to be down is
+// harmless — the next ~60s tick (or the next turn boundary) supersedes
+// it — whereas queuing every dropped heartbeat behind a reconnect would
+// eventually deliver a burst of stale snapshots. Best-effort by design
+// per the build spec: a failed emit must never block or crash the
+// worker's real work, so callers should log-and-continue on error, not
+// retry or escalate.
+func (c *Client) SendWorkerStatus(ctx context.Context, p frames.WorkerStatusPayload) error {
+	env, err := frames.New(frames.KindWorkerStatus, p)
+	if err != nil {
+		return err
+	}
+	return c.SendBestEffort(ctx, env)
+}
+
 // CursorFileForAspect returns a default cursor-file path under the
 // aspect home directory (`<home>/cursor`). Convenience for callers
 // that don't want to hand-pick a path.

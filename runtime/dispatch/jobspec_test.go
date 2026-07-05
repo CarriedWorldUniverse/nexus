@@ -293,7 +293,7 @@ func TestBuildJob_RoleAtSpawn(t *testing.T) {
 		if contains(c.Args, "-role-file") || contains(c.Args, "-policy-fragment-file") {
 			t.Errorf("empty brief must not pass role-at-spawn flags: %v", c.Args)
 		}
-		for _, name := range []string{"CW_WORK_ITEM_ID", "CW_PERSONALITY", "CW_SKILL_ALLOWLIST"} {
+		for _, name := range []string{"CW_ROLE", "CW_WORK_ITEM_ID", "CW_PERSONALITY", "CW_SKILL_ALLOWLIST"} {
 			for _, e := range c.Env {
 				if e.Name == name {
 					t.Errorf("empty brief must not set env %s", name)
@@ -327,6 +327,13 @@ func TestBuildJob_RoleAtSpawn(t *testing.T) {
 		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", SkillAllowlist: []string{"test-run", "bash"}}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
 		if !envValueEquals(c.Env, "CW_SKILL_ALLOWLIST", "test-run,bash") {
 			t.Errorf("env missing CW_SKILL_ALLOWLIST=test-run,bash: %v", c.Env)
+		}
+	})
+
+	t.Run("role label becomes CW_ROLE env (M1 Unit 5 heartbeat source)", func(t *testing.T) {
+		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", Role: "builder"}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		if !envValueEquals(c.Env, "CW_ROLE", "builder") {
+			t.Errorf("env missing CW_ROLE=builder: %v", c.Env)
 		}
 	})
 

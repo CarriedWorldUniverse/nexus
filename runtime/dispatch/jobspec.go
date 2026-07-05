@@ -135,6 +135,13 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		{Name: "CW_DISPATCH_RUN_ID", Value: b.RunID},
 		{Name: "CW_DISPATCH_PARENT_RUN_ID", Value: b.ParentRunID},
 		{Name: "CW_IDLE_TIMEOUT", Value: cfg.IdleTimeout},
+		// CW_IMAGE_TAG carries this Job's own image ref into the pod so
+		// the M1 Unit 5 worker.status heartbeat can report `image_tag`
+		// without re-deriving it. Best-effort/informational — the §7 CI
+		// version-knob work (a distinct build unit) is what makes this
+		// value meaningfully track a pinned CLI version; today it's
+		// whatever cfg.Image already resolves to.
+		{Name: "CW_IMAGE_TAG", Value: cfg.Image},
 		{Name: "CW_AGENT_HOME_REPO", Value: homeRepoMountPath},
 		{Name: "CW_AGENT_HOME_WORKDIR", Value: homeWorkMountPath},
 		{Name: "CW_SHARED_REPOS_DIR", Value: sharedReposMountPath},
@@ -149,6 +156,14 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	// search_skills/get_skill surface to this spawn's role — the
 	// skill-gating primitive (ROLE-MODEL §9). All empty by default →
 	// no env injected → unchanged behavior.
+	if b.Role != "" {
+		// CW_ROLE carries the role LABEL (M1 Unit 4's pool leases stamp
+		// this — see pool.go) into the worker process so the M1 Unit 5
+		// worker.status heartbeat can populate its `role` field without
+		// re-plumbing a new brief-file/flag path. Informational, same
+		// posture as CW_WORK_ITEM_ID/CW_PERSONALITY below.
+		env = append(env, corev1.EnvVar{Name: "CW_ROLE", Value: b.Role})
+	}
 	if b.WorkItemID != "" {
 		env = append(env, corev1.EnvVar{Name: "CW_WORK_ITEM_ID", Value: b.WorkItemID})
 	}

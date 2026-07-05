@@ -36,6 +36,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
+	"github.com/CarriedWorldUniverse/nexus/nexus/workerstatus"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 	"k8s.io/client-go/kubernetes"
@@ -126,6 +127,16 @@ type Config struct {
 	// RunsStore powers the persisted dispatch run spine. When configured,
 	// New migrates it and adapts it into dispatch.Runner.Recorder.
 	RunsStore runs.Store
+
+	// WorkerStatusStore powers the M1 Unit 5 fleet-status spine
+	// (PHASE2-DESIGN §5). When configured, New migrates it, the
+	// worker.status frame handler (dispatch_status.go) upserts into it,
+	// and GET /api/admin/workers reads the consolidated fleet from it.
+	// nil = the worker.status frame handler and the /api/admin/workers
+	// route are both inert (frame dropped with a warn log; route not
+	// registered — same "config gates the surface" convention as
+	// RunsStore/ConveneStore below).
+	WorkerStatusStore workerstatus.Store
 
 	// ConveneStore persists !convene roundtables (roundtable spec
 	// component 3). When configured, New migrates it; the !convene chat
@@ -560,6 +571,11 @@ func New(cfg Config, r *roster.Roster) *Broker {
 	if cfg.ConveneStore != nil {
 		if err := cfg.ConveneStore.Migrate(context.Background()); err != nil {
 			b.log.Warn("convene store migration failed", "err", err)
+		}
+	}
+	if cfg.WorkerStatusStore != nil {
+		if err := cfg.WorkerStatusStore.Migrate(context.Background()); err != nil {
+			b.log.Warn("worker status store migration failed", "err", err)
 		}
 	}
 	return b

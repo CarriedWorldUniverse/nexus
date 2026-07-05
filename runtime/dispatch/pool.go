@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 )
 
 // poolParentName is the synthetic parent identity pool slots derive
@@ -79,6 +80,31 @@ func (r *Runner) tryLeasePoolSlot() string {
 	return ""
 }
 
+// PoolItem is SubmitPoolItem's payload: SubmitPool's basic (role, task,
+// workItemID, thread) shape, plus the role-at-spawn overlay fields (M1 Unit
+// 3, PHASE2-DESIGN §3) a caller may have already resolved for role —
+// carried straight into the leased Brief. Added for M1 Unit 6 (the
+// orchestrator's graph-drain, PHASE2-DESIGN §2): SubmitPool's original
+// 4-string signature has no way to carry RolePrompt/SkillAllowlist/
+// PolicyFragment through to the spawned worker, so this is the superset a
+// role-aware dispatcher uses instead. All the overlay fields are optional —
+// a zero-value PoolItem{Role, Task, WorkItemID, Thread} dispatches exactly
+// like SubmitPool.
+type PoolItem struct {
+	Role       string
+	Task       string
+	WorkItemID string
+	Thread     string
+
+	// RolePrompt/SkillAllowlist/PolicyFragment mirror Brief's role-at-spawn
+	// fields (M1 Unit 3) — see brief.go. Empty/nil reproduces SubmitPool's
+	// exact behavior (no role overlay, all skills, static -policy file
+	// only).
+	RolePrompt     string
+	SkillAllowlist []string
+	PolicyFragment *funnel.ToolPolicy
+}
+
 // SubmitPool dispatches a role-based work item onto the shared pool
 // instead of a named agent. It leases the first free pool slot
 // (pool.sub-1..N) as a derived identity of the synthetic pool parent —
@@ -94,7 +120,21 @@ func (r *Runner) tryLeasePoolSlot() string {
 // workItemID doubles as Brief.Ticket, the idempotency key: resubmitting
 // the same work item while it is active or queued is a no-op / returns
 // the existing run, exactly like Submit's ticket dedupe.
+//
+// SubmitPool is PoolItem-free sugar over SubmitPoolItem for callers that
+// have no role-at-spawn overlay to carry (e.g. today's !dispatch-adjacent
+// callers) — see SubmitPoolItem for the role-prompt/skill-allowlist/
+// policy-fragment superset the M1 Unit 6 orchestrator uses.
 func (r *Runner) SubmitPool(ctx context.Context, role, task, workItemID, thread string) (string, error) {
+	return r.SubmitPoolItem(ctx, PoolItem{Role: role, Task: task, WorkItemID: workItemID, Thread: thread})
+}
+
+// SubmitPoolItem is SubmitPool's superset: identical lease/queue/
+// idempotency mechanics, but item additionally carries the role-at-spawn
+// overlay (RolePrompt/SkillAllowlist/PolicyFragment) into the leased
+// Brief — see PoolItem.
+func (r *Runner) SubmitPoolItem(ctx context.Context, item PoolItem) (string, error) {
+	role, task, workItemID, thread := item.Role, item.Task, item.WorkItemID, item.Thread
 	if strings.TrimSpace(role) == "" {
 		return "", fmt.Errorf("pool: role required")
 	}
@@ -112,12 +152,15 @@ func (r *Runner) SubmitPool(ctx context.Context, role, task, workItemID, thread 
 	}
 
 	b := Brief{
-		SpawnParent: poolParentName,
-		Role:        role,
-		WorkItemID:  workItemID,
-		Ticket:      workItemID,
-		Thread:      thread,
-		Task:        task,
+		SpawnParent:    poolParentName,
+		Role:           role,
+		WorkItemID:     workItemID,
+		Ticket:         workItemID,
+		Thread:         thread,
+		Task:           task,
+		RolePrompt:     item.RolePrompt,
+		SkillAllowlist: item.SkillAllowlist,
+		PolicyFragment: item.PolicyFragment,
 	}
 
 	r.mu.Lock()

@@ -1,0 +1,95 @@
+package orchestrator
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/CarriedWorldUniverse/nexus/nexus/workgraph"
+	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
+)
+
+// DrainOnce is one stateless graph-drain pass (PHASE2-DESIGN §2 "Body"):
+//
+//  1. ReapStale — requeue any work item whose worker's heartbeat has gone
+//     stale (runs every pass, see README.md).
+//  2. PreflightAuth (AuthProbe) — if configured and it fails, HOLD: dispatch
+//     nothing, alert, return (Held=true, nil error). See README.md
+//     "Auth-hold".
+//  3. For each role in o.Roles: workgraph.ListReady(role, o.Stream) → for
+//     each ready item, workgraph.Claim it (the idempotent-dispatch guard —
+//     an item another pass already claimed is skipped, never
+//     double-dispatched), resolve the role overlay (o.Resolver, optional),
+//     dispatch.SubmitPoolItem, then workgraph.Transition(id, dispatched) on
+//     a successful submit.
+//
+// DrainOnce reads all state fresh from Graph/WorkerStatus every call — see
+// package doc "Stateless". A per-item error is recorded in
+// DrainReport.Errors and does not abort the rest of the pass; only a
+// ListReady failure for a role (an infrastructure-level failure, not a
+// per-item one) returns early with an error.
+func (o *Orchestrator) DrainOnce(ctx context.Context) (DrainReport, error) {
+	report := DrainReport{}
+
+	reaped, err := o.ReapStale(ctx)
+	report.Reaped = reaped
+	if err != nil {
+		report.Errors = append(report.Errors, errf("reap: %v", err))
+	}
+
+	if o.AuthProbe != nil {
+		if probeErr := o.AuthProbe(ctx); probeErr != nil {
+			o.alert(ctx, "orchestrator-auth-preflight-failed",
+				fmt.Sprintf("drain held, nothing dispatched: %v", probeErr))
+			report.Held = true
+			report.HoldReason = probeErr.Error()
+			return report, nil
+		}
+	}
+
+	for _, role := range o.Roles {
+		items, err := o.Graph.ListReady(ctx, role, o.Stream)
+		if err != nil {
+			return report, fmt.Errorf("orchestrator: DrainOnce: list ready for role %q: %w", role, err)
+		}
+		for _, wi := range items {
+			o.dispatchOne(ctx, role, wi, &report)
+		}
+	}
+	return report, nil
+}
+
+// dispatchOne claims + dispatches a single ready item, recording the
+// outcome on report. Claim's atomicity is the idempotent-dispatch guard:
+// ErrAlreadyClaimed means an earlier pass (or a concurrent one) already has
+// this item, so it is skipped rather than double-dispatched.
+func (o *Orchestrator) dispatchOne(ctx context.Context, role string, wi workgraph.WorkItem, report *DrainReport) {
+	if err := o.Graph.Claim(ctx, wi.ID, o.claimAgent()); err != nil {
+		if errors.Is(err, workgraph.ErrAlreadyClaimed) {
+			report.Skipped = append(report.Skipped, wi.ID)
+			return
+		}
+		report.Errors = append(report.Errors, errf("claim %s: %v", wi.ID, err))
+		return
+	}
+
+	rolePrompt, skills, policy := o.resolve(role)
+	item := dispatch.PoolItem{
+		Role:           role,
+		Task:           wi.TaskSpec,
+		WorkItemID:     wi.ID,
+		RolePrompt:     rolePrompt,
+		SkillAllowlist: skills,
+		PolicyFragment: policy,
+	}
+	if _, err := o.Dispatcher.SubmitPoolItem(ctx, item); err != nil {
+		report.Errors = append(report.Errors, errf("submit %s: %v", wi.ID, err))
+		return
+	}
+
+	if err := o.Graph.Transition(ctx, wi.ID, workgraph.StatusDispatched); err != nil {
+		report.Errors = append(report.Errors, errf("transition %s to dispatched: %v", wi.ID, err))
+		return
+	}
+	report.Dispatched = append(report.Dispatched, wi.ID)
+}
