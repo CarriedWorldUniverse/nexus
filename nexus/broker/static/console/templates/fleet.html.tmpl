@@ -1,0 +1,34 @@
+{{/* Fleet + graph status pane. All fields auto-escaped by html/template. */}}
+<h2>Fleet status</h2>
+{{if not .WorkersConfigured}}
+  <p class="empty">Worker status store not configured on this broker.</p>
+{{else if not .Workers}}
+  <p class="empty">No workers have reported in.</p>
+{{else}}
+<table class="fleet-table">
+  <thead>
+    <tr>
+      <th>Agent</th><th>Role</th><th>State</th><th>Work item</th>
+      <th>Last heartbeat</th><th>Auth</th><th>CLI</th>
+    </tr>
+  </thead>
+  <tbody>
+  {{range .Workers}}
+    <tr>
+      <td>{{.Agent}}</td>
+      <td>{{.Role}}</td>
+      <td><span class="state-badge">{{.State}}</span></td>
+      <td>{{.WorkItemID}}</td>
+      <td>{{.LastHeartbeatDisplay}}</td>
+      <td>{{if .AuthOk}}ok{{else}}<span class="auth-bad">FAIL</span>{{end}}</td>
+      <td>{{.CLIVersion}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+
+<h2>Work graph</h2>
+<p class="graph-status-todo">
+  {{.GraphStatusNote}}
+</p>

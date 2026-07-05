@@ -830,6 +830,14 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	// belong to the Frame because the Frame IS the Nexus.
 	b.registerAdmin(mux)
 
+	// Operator console v0 (M1 Unit 8, PHASE2-DESIGN.md §9a). Registered
+	// unconditionally — every route it serves (shell, static assets,
+	// fragments) is requireAdmin-gated in registerConsole itself, and
+	// each pane degrades to a "not configured" placeholder when its
+	// backing config (DocRegister / WorkerStatusStore) is nil, same
+	// convention as the panes' own data endpoints.
+	b.registerConsole(mux)
+
 	// Embedder-supplied peer-service routes (NEX-144). cmd/nexus uses
 	// this hook to mount ledger.HealthzHandler at /healthz/ledger on the
 	// existing HTTPS listener. Invoked after the broker's own routes so

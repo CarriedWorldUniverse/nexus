@@ -16,6 +16,7 @@ require (
 	github.com/ncruces/go-sqlite3 v0.34.1
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/tursodatabase/libsql-client-go v0.0.0-20260528064733-9d5d30a29a60
+	github.com/yuin/goldmark v1.8.2
 	golang.org/x/crypto v0.52.0
 	google.golang.org/grpc v1.81.1
 	k8s.io/api v0.32.0
