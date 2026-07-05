@@ -44,6 +44,7 @@ import (
 	"github.com/yuin/goldmark"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/docregister"
+	"github.com/CarriedWorldUniverse/nexus/nexus/workerstatus"
 )
 
 // consoleStaticRawFS holds the console's static assets: the shell HTML,
@@ -198,11 +199,19 @@ func (b *Broker) handleConsoleApprovalsFragment(w http.ResponseWriter, r *http.R
 type consoleWorkerRow struct {
 	Agent                string
 	Role                 string
+	Personality          string
 	State                string
 	WorkItemID           string
+	Turns                int
+	TokensUsed           int
 	LastHeartbeatDisplay string
 	AuthOk               bool
 	CLIVersion           string
+	// StatusClass is a CSS hook the fleet template uses to color-code
+	// the state badge: "fresh" (state=running and heartbeat recent),
+	// "stale" (heartbeat older than consoleStaleAfter), or "terminal"
+	// (state reports a finished/failed run). See classifyWorkerStatus.
+	StatusClass string
 }
 
 type consoleFleetData struct {
@@ -237,20 +246,63 @@ func (b *Broker) handleConsoleFleetFragment(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].LastHeartbeat.After(rows[j].LastHeartbeat) })
+	now := time.Now()
 	out := make([]consoleWorkerRow, 0, len(rows))
 	for _, s := range rows {
 		out = append(out, consoleWorkerRow{
 			Agent:                s.Agent,
 			Role:                 s.Role,
+			Personality:          s.Personality,
 			State:                s.State,
 			WorkItemID:           s.WorkItemID,
+			Turns:                s.Turns,
+			TokensUsed:           s.TokensUsed,
 			LastHeartbeatDisplay: formatConsoleTimestamp(s.LastHeartbeat),
 			AuthOk:               s.AuthOk,
 			CLIVersion:           s.CLIVersion,
+			StatusClass:          classifyWorkerStatus(s, now),
 		})
 	}
 	data.Workers = out
 	b.renderConsoleFragment(w, "fleet.html.tmpl", data)
+}
+
+// consoleStaleAfter is the UI-facing "heartbeat looks stale" threshold
+// — a purely cosmetic signal for the operator (color the row, don't
+// hide it), distinct from the orchestrator's own reap threshold
+// (defaultStaleAfter, 5 minutes, in nexus/orchestrator/orchestrator.go)
+// which decides whether to actually requeue a work item. Spec calls
+// for "~2min" here.
+const consoleStaleAfter = 2 * time.Minute
+
+// consoleTerminalStates are the worker.status `state` values that mean
+// "this run is over" rather than "still going". Rows are normally
+// retired (deleted) on completion by runtime/dispatch/runner.go's
+// OnJobDone, so a terminal row surviving here usually means retirement
+// lagged or was skipped — still worth flagging distinctly from a
+// merely-stale-but-presumably-still-running row.
+var consoleTerminalStates = map[string]bool{
+	"done":      true,
+	"failed":    true,
+	"cancelled": true,
+	"canceled":  true,
+	"crashed":   true,
+	"error":     true,
+}
+
+// classifyWorkerStatus buckets one worker row into "fresh", "stale", or
+// "terminal" for the fleet pane's state-badge coloring. Terminal wins
+// over staleness (a done/failed row is never "just" stale); otherwise a
+// heartbeat older than consoleStaleAfter is stale, and anything else —
+// including the boot-time "spawning" state — is fresh.
+func classifyWorkerStatus(s workerstatus.Status, now time.Time) string {
+	if consoleTerminalStates[s.State] {
+		return "terminal"
+	}
+	if s.Stale(now, consoleStaleAfter) {
+		return "stale"
+	}
+	return "fresh"
 }
 
 func formatConsoleTimestamp(t time.Time) string {

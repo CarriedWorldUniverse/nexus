@@ -242,7 +242,8 @@ func TestConsole_ApprovalsFragmentEscapesDocTitle(t *testing.T) {
 func TestConsole_FleetFragmentRendersWorkers(t *testing.T) {
 	rig := newConsoleTestRig(t)
 	if err := rig.workers.Upsert(t.Context(), workerstatus.Status{
-		Agent: "anvil", Role: "builder", State: "running",
+		Agent: "anvil", Role: "builder", Personality: "anvil", State: "running",
+		Turns: 3, TokensUsed: 12345,
 		LastHeartbeat: time.Now(),
 	}); err != nil {
 		t.Fatalf("Upsert: %v", err)
@@ -259,5 +260,48 @@ func TestConsole_FleetFragmentRendersWorkers(t *testing.T) {
 	}
 	if !strings.Contains(body, "Work-graph status") {
 		t.Errorf("fleet fragment missing the documented graph-status TODO note; body=%s", body)
+	}
+	// The consolidated columns the operator asked for: turns + tokens.
+	if !strings.Contains(body, "<td>3</td>") {
+		t.Errorf("fleet fragment missing turns column value; body=%s", body)
+	}
+	if !strings.Contains(body, "<td>12345</td>") {
+		t.Errorf("fleet fragment missing tokens_used column value; body=%s", body)
+	}
+	// A fresh heartbeat (just now, state=running) must be classed "fresh".
+	if !strings.Contains(body, "state-fresh") {
+		t.Errorf("fleet fragment did not mark a fresh worker as state-fresh; body=%s", body)
+	}
+}
+
+// TestConsole_FleetFragmentClassifiesStaleAndTerminalWorkers exercises
+// the row-coloring cues the operator's panel is built around: a
+// heartbeat older than the console's ~2min threshold is "stale", and a
+// row whose state reports a finished run is "terminal" regardless of
+// heartbeat age.
+func TestConsole_FleetFragmentClassifiesStaleAndTerminalWorkers(t *testing.T) {
+	rig := newConsoleTestRig(t)
+	if err := rig.workers.Upsert(t.Context(), workerstatus.Status{
+		Agent: "stale-worker", Role: "builder", State: "running",
+		LastHeartbeat: time.Now().Add(-10 * time.Minute),
+	}); err != nil {
+		t.Fatalf("Upsert stale: %v", err)
+	}
+	if err := rig.workers.Upsert(t.Context(), workerstatus.Status{
+		Agent: "done-worker", Role: "builder", State: "done",
+		LastHeartbeat: time.Now(),
+	}); err != nil {
+		t.Fatalf("Upsert terminal: %v", err)
+	}
+
+	resp := rig.get(t, "/console/fragments/fleet", rig.adminToken)
+	defer resp.Body.Close()
+	body := bodyString(t, resp)
+
+	if !strings.Contains(body, "fleet-row-stale") {
+		t.Errorf("fleet fragment did not classify an old heartbeat as stale; body=%s", body)
+	}
+	if !strings.Contains(body, "fleet-row-terminal") {
+		t.Errorf("fleet fragment did not classify a done worker as terminal; body=%s", body)
 	}
 }

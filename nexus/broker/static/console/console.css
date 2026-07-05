@@ -125,6 +125,17 @@ table.fleet-table th, table.fleet-table td {
 
 .auth-bad { color: #a02020; font-weight: bold; }
 
+/* Fleet-row state cues: fresh (heartbeat recent, worker still going),
+   stale (heartbeat older than the console's ~2min threshold), terminal
+   (state reports a finished/failed run). Cosmetic only — the row's
+   data is shown regardless of class. */
+.state-badge.state-fresh { background: #dff5df; color: #1e5c1e; }
+.state-badge.state-stale { background: #fff6d6; color: #7a5b00; }
+.state-badge.state-terminal { background: #e6e6e6; color: #555; }
+
+tr.fleet-row-stale { opacity: 0.75; }
+tr.fleet-row-terminal { opacity: 0.55; }
+
 .graph-status-todo {
   color: #888;
   font-style: italic;

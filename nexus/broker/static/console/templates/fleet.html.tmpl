@@ -8,17 +8,21 @@
 <table class="fleet-table">
   <thead>
     <tr>
-      <th>Agent</th><th>Role</th><th>State</th><th>Work item</th>
+      <th>Agent</th><th>Role</th><th>Personality</th><th>State</th><th>Work item</th>
+      <th>Turns</th><th>Tokens</th>
       <th>Last heartbeat</th><th>Auth</th><th>CLI</th>
     </tr>
   </thead>
   <tbody>
   {{range .Workers}}
-    <tr>
+    <tr class="fleet-row-{{.StatusClass}}">
       <td>{{.Agent}}</td>
       <td>{{.Role}}</td>
-      <td><span class="state-badge">{{.State}}</span></td>
+      <td>{{.Personality}}</td>
+      <td><span class="state-badge state-{{.StatusClass}}">{{.State}}</span></td>
       <td>{{.WorkItemID}}</td>
+      <td>{{.Turns}}</td>
+      <td>{{.TokensUsed}}</td>
       <td>{{.LastHeartbeatDisplay}}</td>
       <td>{{if .AuthOk}}ok{{else}}<span class="auth-bad">FAIL</span>{{end}}</td>
       <td>{{.CLIVersion}}</td>
