@@ -47,10 +47,16 @@ type Dispatcher interface {
 }
 
 // WorkerStatusStore is the subset of nexus/workerstatus.Store this package
-// needs (a read-only List) — workerstatus.SQLStore satisfies this
-// structurally.
+// needs — workerstatus.SQLStore satisfies this structurally.
 type WorkerStatusStore interface {
 	List(ctx context.Context) ([]workerstatus.Status, error)
+	// Delete removes a worker's row. ReapStale uses this to retire rows it
+	// has confirmed are NOT bound to a genuinely in-flight work item (the
+	// item is queued/done/blocked/cancelled in the ledger, not dispatched)
+	// — a stale-but-harmless row (e.g. one JobDone should have retired,
+	// see runtime/dispatch/runner.go OnJobDone) is deleted as cleanup
+	// rather than re-examined, and mis-requeued, every future pass.
+	Delete(ctx context.Context, agent string) error
 }
 
 // Alerter is the fail-loud sink: PreflightAuth failure and a stale-worker

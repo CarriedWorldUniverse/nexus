@@ -506,6 +506,11 @@ func main() {
 		Cfg:                dispatchCfg,
 		MaxConc:            maxConc,
 		SpawnMaxConcurrent: spawnMaxConc,
+		// Retires a run's worker_status heartbeat row the moment its Job
+		// ends (see runtime/dispatch/runner.go OnJobDone / WorkerStatusRetirer
+		// doc) — the other half of the NET-30 reap<->cancel loop fix
+		// alongside nexus/orchestrator/reap.go's ledger-status recheck.
+		WorkerStatus: workerStatusStore,
 		// Hands authenticate with a broker-minted derived session JWT
 		// (no keyfile exists for <parent>.sub-N) — the mint sits beside
 		// the aspect-keyfile-<agent> seam ticket dispatches use.

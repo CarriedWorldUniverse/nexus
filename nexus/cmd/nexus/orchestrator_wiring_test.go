@@ -160,6 +160,8 @@ func (fakeWorkerStatus) List(ctx context.Context) ([]workerstatus.Status, error)
 	return nil, nil
 }
 
+func (fakeWorkerStatus) Delete(ctx context.Context, agent string) error { return nil }
+
 func TestBuildOrchestrator_NoEnv_ReturnsNil(t *testing.T) {
 	if got := buildOrchestrator(testLogger(t), nil, nil, nil); got != nil {
 		t.Fatalf("buildOrchestrator with no env = %v, want nil", got)

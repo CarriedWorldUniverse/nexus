@@ -139,6 +139,18 @@ func newRunner(fk *fakeK8s) *dispatch.Runner {
 	}
 }
 
+// fakeWorkerStatusRetirer satisfies dispatch.WorkerStatusRetirer, recording
+// every Delete call so OnJobDone's row-retirement can be asserted on.
+type fakeWorkerStatusRetirer struct {
+	deleted []string
+	err     error
+}
+
+func (f *fakeWorkerStatusRetirer) Delete(_ context.Context, agent string) error {
+	f.deleted = append(f.deleted, agent)
+	return f.err
+}
+
 // The worker runs AS the named agent: keyfile = aspect-keyfile-<agent>, job
 // named builder-<agent>-<run>, and the agent is marked busy.
 func TestRunnerRunsAsNamedAgent(t *testing.T) {
@@ -324,6 +336,41 @@ func TestRunnerOnJobDoneFreesAgentAndDrains(t *testing.T) {
 	if !r.AgentBusy("anvil") {
 		t.Error("anvil should be busy again with the drained NEX-2")
 	}
+}
+
+// OnJobDone retires the finished run's agent's worker_status row (NET-30,
+// 2026-07-05: rows were never deleted/closed on Job end, so a later stale
+// heartbeat check kept requeueing an already-finished — or already
+// cancelled — work item forever). WorkerStatus is keyed by run.Brief.Agent,
+// not JobDone.Agent (which the caller may leave empty).
+func TestRunnerOnJobDoneRetiresWorkerStatusRow(t *testing.T) {
+	fk := &fakeK8s{}
+	r := newRunner(fk)
+	ws := &fakeWorkerStatusRetirer{}
+	r.WorkerStatus = ws
+	_ = r.Init(context.Background())
+
+	_, _ = r.Submit(context.Background(), dispatch.Brief{Agent: "anvil-builder", Ticket: "NET-30", Thread: "t", Task: "a"})
+
+	r.OnJobDone(dispatch.JobDone{Ticket: "NET-30", Thread: "t", OK: true})
+
+	if len(ws.deleted) != 1 || ws.deleted[0] != "anvil-builder" {
+		t.Fatalf("expected worker_status row deleted for anvil-builder, got %v", ws.deleted)
+	}
+}
+
+// A nil WorkerStatus reproduces prior behavior exactly (no retirement
+// attempted, OnJobDone's other bookkeeping unaffected) — the default when a
+// Runner isn't wired with a store.
+func TestRunnerOnJobDoneNilWorkerStatusIsNoop(t *testing.T) {
+	fk := &fakeK8s{}
+	r := newRunner(fk)
+	_ = r.Init(context.Background())
+
+	_, _ = r.Submit(context.Background(), dispatch.Brief{Agent: "anvil-builder", Ticket: "NET-30", Thread: "t", Task: "a"})
+
+	// Must not panic with WorkerStatus unset.
+	r.OnJobDone(dispatch.JobDone{Ticket: "NET-30", Thread: "t", OK: true})
 }
 
 // Re-submitting an already-queued ticket is a no-op (no double-spawn on drain).

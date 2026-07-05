@@ -73,6 +73,18 @@ type Submitter interface {
 	Submit(ctx context.Context, b Brief) (string, error)
 }
 
+// WorkerStatusRetirer is the subset of nexus/workerstatus.Store's write API
+// OnJobDone needs to retire a finished run's heartbeat row —
+// workerstatus.SQLStore satisfies this structurally; no adapter required.
+// Row retirement (not just row content) matters here: leaving a
+// completed/cancelled run's row in place with a live-looking state is what
+// let the orchestrator's stale-heartbeat reaper requeue an already-finished
+// (or already-cancelled) work item forever (live-reproduced NET-30,
+// 2026-07-05) — see nexus/orchestrator/reap.go.
+type WorkerStatusRetirer interface {
+	Delete(ctx context.Context, agent string) error
+}
+
 // Runner is the broker-embedded dispatch engine.
 //
 // Each dispatch runs AS the named agent (brief.Agent): the Job mounts
@@ -139,6 +151,14 @@ type Runner struct {
 	// synchronously, outside r.mu — implementations that need to be
 	// non-blocking should hand off internally (e.g. go func()).
 	OnJobDoneHook func(JobDone)
+
+	// WorkerStatus, when set, is used by OnJobDone to retire (delete) the
+	// completed run's agent's worker_status row — a Job ending (success OR
+	// failure) means that heartbeat row no longer describes anything live.
+	// nil = no retirement (reproduces prior behavior: rows accumulate and
+	// go stale, see WorkerStatusRetirer doc). Best-effort: a delete failure
+	// is logged, never fatal to OnJobDone's other bookkeeping.
+	WorkerStatus WorkerStatusRetirer
 
 	mu        sync.Mutex
 	ctx       context.Context   // stored at Init for background callbacks (OnJobDone)
@@ -434,6 +454,26 @@ func (r *Runner) OnJobDone(done JobDone) {
 	if done.CompletedAt.IsZero() {
 		done.CompletedAt = time.Now()
 	}
+
+	// Retire the worker_status heartbeat row for the agent that just
+	// finished — keyed by run.Brief.Agent, the same identity agentBusy
+	// was just freed under (NOT done.Agent, which the caller may leave
+	// empty). Rows are keyed by agent name and re-leases REUSE names, so
+	// a stale, un-retired row here would otherwise be inherited by
+	// whichever run leases this agent next (or, worse, keep pointing the
+	// reaper at THIS run's now-finished work item forever — the NET-30
+	// loop). Best-effort: never lets a status-store hiccup block the
+	// bookkeeping/post/relaunch below.
+	if r.WorkerStatus != nil {
+		ctx := r.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := r.WorkerStatus.Delete(ctx, run.Brief.Agent); err != nil {
+			slog.Warn("dispatch: retire worker_status row failed", "agent", run.Brief.Agent, "err", err)
+		}
+	}
+
 	if r.Recorder != nil {
 		ctx := r.ctx
 		if ctx == nil {

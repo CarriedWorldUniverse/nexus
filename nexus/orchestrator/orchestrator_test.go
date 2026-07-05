@@ -66,7 +66,14 @@ func (g *fakeGraph) GetWorkItem(_ context.Context, id string) (workgraph.WorkIte
 	if !ok {
 		return workgraph.WorkItem{}, errors.New("fakeGraph: not found")
 	}
-	return it.wi, nil
+	// it.status (kept separately by Transition/Cancel, and by tests that
+	// poke it.status directly) is the current status — mirror ListReady's
+	// convention (real workgraph.Client.GetWorkItem always reflects the
+	// ledger's live status, so the fake must too, or ReapStale's ledger
+	// recheck sees stale/wrong data).
+	wi := it.wi
+	wi.Status = it.status
+	return wi, nil
 }
 
 func (g *fakeGraph) Transition(_ context.Context, id string, s workgraph.Status) error {
@@ -183,11 +190,31 @@ func (d *fakeDispatcher) SubmitPoolItem(_ context.Context, item dispatch.PoolIte
 // --- fakeWorkerStatus ---
 
 type fakeWorkerStatus struct {
-	rows []workerstatus.Status
+	mu      sync.Mutex
+	rows    []workerstatus.Status
+	deleted []string // agents Delete was called on, in order
 }
 
 func (s *fakeWorkerStatus) List(_ context.Context) ([]workerstatus.Status, error) {
-	return s.rows, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]workerstatus.Status, len(s.rows))
+	copy(out, s.rows)
+	return out, nil
+}
+
+func (s *fakeWorkerStatus) Delete(_ context.Context, agent string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deleted = append(s.deleted, agent)
+	kept := s.rows[:0]
+	for _, r := range s.rows {
+		if r.Agent != agent {
+			kept = append(kept, r)
+		}
+	}
+	s.rows = kept
+	return nil
 }
 
 // --- fakeAlerter ---
@@ -446,8 +473,13 @@ func TestReapStaleRequeuesAndSecondStrikeAlerts(t *testing.T) {
 		t.Fatalf("first strike should not alert, got %d alerts", alerter.count())
 	}
 
-	// Still stale on the next pass (same row, heartbeat never refreshed):
-	// second strike must alert.
+	// A normal drain pass between reap calls would redispatch the
+	// now-queued item (ListReady -> Claim -> Transition to dispatched) —
+	// simulate that here so pass 2 finds a genuinely in-flight item again.
+	// Still stale on that next pass (heartbeat never refreshed — the
+	// re-lease's worker is ALSO not heartbeating): second strike must
+	// alert.
+	graph.items["wi-1"].status = workgraph.StatusDispatched
 	reaped2, err := o.ReapStale(context.Background())
 	if err != nil {
 		t.Fatalf("ReapStale (2nd): %v", err)
@@ -463,6 +495,7 @@ func TestReapStaleRequeuesAndSecondStrikeAlerts(t *testing.T) {
 func TestReapStaleRecoveryClearsStrike(t *testing.T) {
 	graph := newFakeGraph()
 	graph.addReady("wi-1", workgraph.WorkItem{Role: "builder", TaskSpec: "build"})
+	graph.items["wi-1"].status = workgraph.StatusDispatched
 
 	stale := time.Now().Add(-1 * time.Hour)
 	ws := &fakeWorkerStatus{rows: []workerstatus.Status{
@@ -492,6 +525,89 @@ func TestReapStaleRecoveryClearsStrike(t *testing.T) {
 	}
 	if alerter.count() != 0 {
 		t.Fatalf("strike should have reset on recovery, got %d alerts", alerter.count())
+	}
+}
+
+// TestReapStaleDoesNotRequeueCancelledItem is the live-reproduced NET-30
+// (2026-07-05) failure: a work item is CANCELLED in the ledger, but its
+// finished worker's worker_status row is still present (never retired) and
+// stale. ReapStale must NOT requeue a cancelled item — before this fix, it
+// trusted the stale row alone and requeued it every pass, forever. It must
+// also clean up the now-confirmed-harmless row so it stops being examined.
+func TestReapStaleDoesNotRequeueCancelledItem(t *testing.T) {
+	graph := newFakeGraph()
+	graph.addReady("NET-30", workgraph.WorkItem{Role: "builder", TaskSpec: "build"})
+	graph.items["NET-30"].status = workgraph.StatusCancelled
+
+	old := time.Now().Add(-1 * time.Hour)
+	ws := &fakeWorkerStatus{rows: []workerstatus.Status{
+		{Agent: "anvil-builder", WorkItemID: "NET-30", LastHeartbeat: old},
+	}}
+	o := &Orchestrator{
+		Graph:        graph,
+		Dispatcher:   &fakeDispatcher{},
+		WorkerStatus: ws,
+		StaleAfter:   5 * time.Minute,
+	}
+
+	reaped, err := o.ReapStale(context.Background())
+	if err != nil {
+		t.Fatalf("ReapStale: %v", err)
+	}
+	if len(reaped) != 0 {
+		t.Fatalf("expected nothing reaped for a cancelled item, got %v", reaped)
+	}
+	if graph.items["NET-30"].status != workgraph.StatusCancelled {
+		t.Errorf("status = %v, want unchanged (cancelled)", graph.items["NET-30"].status)
+	}
+	if len(graph.cancels) != 0 {
+		t.Fatalf("expected Cancel(requeue=true) never called, got %v", graph.cancels)
+	}
+	if len(ws.deleted) != 1 || ws.deleted[0] != "anvil-builder" {
+		t.Fatalf("expected the stale-but-harmless row cleaned up, deleted=%v", ws.deleted)
+	}
+
+	// Confirm the loop is actually broken: a SECOND pass over the (now
+	// row-less) store finds nothing to reap either.
+	reaped2, err := o.ReapStale(context.Background())
+	if err != nil {
+		t.Fatalf("ReapStale (2nd pass): %v", err)
+	}
+	if len(reaped2) != 0 {
+		t.Fatalf("expected nothing reaped on the second pass either, got %v", reaped2)
+	}
+}
+
+// TestReapStaleDedupesTwoStaleRowsForSameItem covers the other live-observed
+// symptom: two finished runs of the SAME work item each left a stale row
+// (`reaped="[NET-30 NET-30]"` in the live log) — at most one
+// Cancel(requeue=true) per work item per pass.
+func TestReapStaleDedupesTwoStaleRowsForSameItem(t *testing.T) {
+	graph := newFakeGraph()
+	graph.addReady("wi-1", workgraph.WorkItem{Role: "builder", TaskSpec: "build"})
+	graph.items["wi-1"].status = workgraph.StatusDispatched
+
+	old := time.Now().Add(-1 * time.Hour)
+	ws := &fakeWorkerStatus{rows: []workerstatus.Status{
+		{Agent: "anvil-builder", WorkItemID: "wi-1", LastHeartbeat: old},
+		{Agent: "birch-builder", WorkItemID: "wi-1", LastHeartbeat: old},
+	}}
+	o := &Orchestrator{
+		Graph:        graph,
+		Dispatcher:   &fakeDispatcher{},
+		WorkerStatus: ws,
+		StaleAfter:   5 * time.Minute,
+	}
+
+	reaped, err := o.ReapStale(context.Background())
+	if err != nil {
+		t.Fatalf("ReapStale: %v", err)
+	}
+	if len(reaped) != 1 || reaped[0] != "wi-1" {
+		t.Fatalf("expected exactly one reap entry for wi-1, got %v", reaped)
+	}
+	if len(graph.cancels) != 1 {
+		t.Fatalf("expected exactly one Cancel(requeue=true) call, got %v", graph.cancels)
 	}
 }
 
