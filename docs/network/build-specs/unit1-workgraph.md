@@ -47,3 +47,14 @@ The sovereign ledger is FRESH (empty — no orgs/projects). Bootstrap: create (i
 3. The live e2e (env-gated) passes against the sovereign ledger — create→link→ListReady→transition→ready→cancel-requeue verified with real RPCs.
 4. A package README documenting the work_item↔Issue mapping + the EnsureProject bootstrap.
 5. No transient/runtime state written to ledger (durable graph only).
+
+## Build log — verify gate caught 7 real bugs the fake tests missed (2026-07-05)
+Builder delivered unit-1: 12 fake-ledger tests green, clean build. But the **live e2e against the real sovereign ledger** (which fakes can't exercise) surfaced 7 real-ledger-API mismatches the fakes passed right over:
+1. adapter attached NO `cwb-scopes` → every authorized RPC failed (fakes don't enforce scope). Fixed: Scopes field default `issue:admin`, asserted on the mesh-direct path.
+2. `isNotFound`/`isAlreadyExists` matched clean gRPC codes, but ledger returns `codes.Internal` + message ("not found" / "UNIQUE constraint failed"). Fixed: match by message too.
+3. fresh-ledger org bootstrap needs CreateOrg → CreateUser(kind="ai", NOT "agent") → AddMember(role="owner"), membership ensured ALWAYS not only on first create.
+4. issue Type must be "Task" (capitalized; ledger wants Epic|Story|Task|Subtask|Bug).
+5. adminClient interface widened for CreateUser/AddMember.
+6-7. (remaining, handed back) ledger `ListReadyIssues` is ASPECT-ASSIGNED (`WHERE assignee_aspect = caller AND status IN (To Do,In Progress) AND DoR AND NOT blocked`) — pool's role-based "claimable by any" must map onto this (CreateWorkItem sets assignee_aspect=role; workers query as their role + ClaimIssue). Plus the fakes must be upgraded to ENFORCE these behaviors so they stop giving false greens.
+
+**LESSON (load-bearing for the whole network):** the verify gate against the REAL dependency is non-negotiable — fake-only tests gave a 100% false green while the real ledger rejected every single call. This is the ROLE-MODEL's mandatory verify/gate design proving itself on the first real build. Bakes into every unit: builder self-verify is not enough; an env-gated live e2e against the actual pillar is required before a unit passes.
