@@ -21,6 +21,12 @@ CTX="$(mktemp -d)"
 echo "==> building nexus broker (GOARCH=${ARCH}) from ${NEXUS_SRC}"
 ( cd "$NEXUS_SRC" && CGO_ENABLED=0 GOARCH="${ARCH}" go build -o "${CTX}/nexus" ./nexus/cmd/nexus )
 
+# cw CLI: the broker shells out to it for scoped git-credential grants
+# (runner.provisionRun) — a repo dispatch fails without it on PATH.
+CW_SRC="${CW_SRC:-/tmp/cw-src}"
+[ -d "$CW_SRC" ] || git clone --depth 1 https://github.com/CarriedWorldUniverse/cw "$CW_SRC"
+( cd "$CW_SRC" && CGO_ENABLED=0 GOARCH="${ARCH}" go build -o "${CTX}/cw" ./cmd/cw )
+
 cp "$(dirname "$0")/Dockerfile" "${CTX}/Dockerfile"
 echo "==> podman build ${IMG} (linux/${ARCH})"
 ( cd "$CTX" && podman build --platform "linux/${ARCH}" -t "$IMG" . )
