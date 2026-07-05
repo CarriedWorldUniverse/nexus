@@ -29,6 +29,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/convene"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/cwb/custodian"
+	"github.com/CarriedWorldUniverse/nexus/nexus/docregister"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
@@ -143,6 +144,16 @@ type Config struct {
 	// path records a row and convene.close / convenes.list operate on it.
 	// nil → !convene is rejected (no record spine).
 	ConveneStore convene.Store
+
+	// DocRegister powers the M1 Unit 2 document register (PHASE2-DESIGN.md
+	// §9): specs/plans/designs/reports as first-class, lifecycle-managed,
+	// operator-approvable docs — the operator+shadow shared workbench. When
+	// configured, New migrates its Store and registerDocRegister wires the
+	// workbench (broker-authenticated: create/get/list/submit/revise) and
+	// verdict (requireAdmin: approve/approve-with-changes/reject/supersede)
+	// routes. nil = the /api/docs/* and /api/admin/docs/* surfaces are not
+	// registered (pre-Unit-2 boot, or a deployment that doesn't need it).
+	DocRegister *docregister.Register
 
 	// SQLDB is the broker's sqld connection (shared by the chat/runs/aspects
 	// stores). env.health pings it to report sqld reachability — sqld lives in
@@ -578,6 +589,11 @@ func New(cfg Config, r *roster.Roster) *Broker {
 			b.log.Warn("worker status store migration failed", "err", err)
 		}
 	}
+	if cfg.DocRegister != nil && cfg.DocRegister.Store != nil {
+		if err := cfg.DocRegister.Store.Migrate(context.Background()); err != nil {
+			b.log.Warn("docregister store migration failed", "err", err)
+		}
+	}
 	return b
 }
 
@@ -660,6 +676,11 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	mux.Handle("GET /api/aspects", b.auth(http.HandlerFunc(b.handleList)))
 	// Image attach (NEX-538): operator-gated upload, capability-URL serve.
 	mux.Handle("POST /api/images", b.auth(http.HandlerFunc(b.handleImageUpload)))
+	// Document register workbench (M1 Unit 2, PHASE2-DESIGN.md §9):
+	// broker-authenticated create/get/list/revise/submit. Verdicts
+	// (approve/approve-with-changes/reject/supersede) are requireAdmin —
+	// see registerDocRegisterVerdicts, wired via registerAdmin below.
+	b.registerDocRegisterWorkbench(mux)
 	mux.HandleFunc("GET /api/images/{id}", b.handleImageGet)
 	mux.HandleFunc("GET /health", b.handleHealth)
 	// Auth mode probe — SPA reads this on load to decide whether to

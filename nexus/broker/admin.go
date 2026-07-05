@@ -274,6 +274,15 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 		mux.Handle("PUT /api/admin/aspects/{name}/mcp_profile",
 			b.requireAdmin(http.HandlerFunc(b.handleAdminMCPProfileSet)))
 	}
+
+	// Document register verdicts (M1 Unit 2, PHASE2-DESIGN.md §9):
+	// approve/approve-with-changes/reject/supersede. requireAdmin —
+	// operator-only, separate from the broker-authenticated workbench
+	// (create/get/list/revise/submit, registered outside registerAdmin —
+	// see registerDocRegisterWorkbench). Gated on DocRegister being
+	// configured, same "config gates the surface" convention as the rest
+	// of this function.
+	b.registerDocRegisterVerdicts(mux)
 }
 
 // handleAdminShutdown kicks off a graceful shutdown. Long-running by
