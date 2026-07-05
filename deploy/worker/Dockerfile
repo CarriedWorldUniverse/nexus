@@ -65,7 +65,7 @@ RUN npm config set prefix /root/.npm-global && npm i -g @openai/codex && codex -
 ARG CLAUDE_CODE_VERSION=latest
 RUN npm i -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
  && claude --version \
- && claude config set -g autoUpdaterStatus disabled
+ && (claude config set -g autoUpdaterStatus disabled || true)  # -g dropped in newer CLIs; autoupdater is irrelevant in a one-shot Job image
 
 # Provider CLI: Antigravity (agy) — a dependency-free Go binary; the installer
 # drops it into /root/.local/bin. The binary install is auth-free; agy's runtime
