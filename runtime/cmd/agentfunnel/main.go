@@ -576,6 +576,24 @@ func main() {
 		fail(log, "wsasp.NewClient", err)
 	}
 
+	// M1 Unit 5 fix (root cause): wsClient.Run(ctx) — the call that actually
+	// dials + registers the WS connection — used to be the LAST statement in
+	// this function, invoked only after the entire funnel/filter/tool-runner
+	// setup below (hundreds of lines) and after the boot heartbeat had
+	// already been Emit()'d. Since Emit()/SendWorkerStatus route through
+	// wsasp.Client.SendBestEffort, which requires the connection to already
+	// be up, that meant the boot heartbeat ("running" or "spawning") was
+	// GUARANTEED to be dropped — Connected() is trivially false before Run()
+	// has ever been called — and every subsequent heartbeat raced the
+	// dial+register handshake for however long that took. Starting the dial
+	// loop here, as early as wsClient exists, gives it the whole span of the
+	// remaining setup (escalator, gateways, funnel construction, tool runner,
+	// etc.) to reach Ready() before the first heartbeat fires. wsClientRunErr
+	// carries Run's terminal error to the wait point that replaces the old
+	// blocking call (search for "wsClientRunErr" below).
+	wsClientRunErr := make(chan error, 1)
+	go func() { wsClientRunErr <- wsClient.Run(ctx) }()
+
 	// P3c: now that the wsasp client exists, build the operator-escalation
 	// requester for native providers and re-store the binding cache with
 	// an escalator-equipped harness. wsClient.Request blocks on the
@@ -979,7 +997,10 @@ func main() {
 		go deliberateLoop(ctx, f, log, onComplete)
 	}
 
-	if err := wsClient.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	// wsClient.Run(ctx) was started early (see wsClientRunErr above) so the
+	// boot heartbeat had a live, registered connection to land on; this wait
+	// preserves the old blocking call's terminal-error semantics exactly.
+	if err := <-wsClientRunErr; err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("agentfunnel: wsClient.Run", "err", err)
 		os.Exit(1)
 	}

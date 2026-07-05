@@ -179,6 +179,13 @@ func (r *Runner) SubmitPoolItem(ctx context.Context, item PoolItem) (string, err
 	}
 	b.SpawnParent = personality
 	b.Agent = name
+	// M1 Unit 5 gap: Personality was never stamped on the leased Brief —
+	// only SpawnParent/Agent — so jobspec.go's `if b.Personality != ""`
+	// guard never fired for pool dispatches: CW_PERSONALITY was never
+	// injected into the Job env, and the worker.status heartbeat's
+	// `personality` field was permanently empty for every pool-leased
+	// worker.
+	b.Personality = personality
 	run := r.reserve(b)
 	r.mu.Unlock()
 

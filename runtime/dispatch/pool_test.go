@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	batchv1 "k8s.io/api/batch/v1"
+
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 )
 
@@ -346,6 +348,82 @@ func TestSubmitPoolRejections(t *testing.T) {
 	}
 	if len(fk.jobs) != 0 {
 		t.Errorf("no jobs expected, got %v", fk.jobs)
+	}
+}
+
+// jobEnvValue returns the named env var's value from the builder
+// container of a captured Job, or ("", false) if absent.
+func jobEnvValue(job *batchv1.Job, name string) (string, bool) {
+	if job == nil || len(job.Spec.Template.Spec.Containers) == 0 {
+		return "", false
+	}
+	for _, v := range job.Spec.Template.Spec.Containers[0].Env {
+		if v.Name == name {
+			return v.Value, true
+		}
+	}
+	return "", false
+}
+
+// TestSubmitPool_JobEnvCarriesRoleWorkItemPersonality is the M1 Unit 5
+// regression test for the pool-lease gap: jobspec.go's BuildJob has always
+// translated Brief.Role/WorkItemID/Personality into CW_ROLE/CW_WORK_ITEM_ID/
+// CW_PERSONALITY, but SubmitPoolItem never stamped Brief.Personality (only
+// SpawnParent/Agent) — so CW_PERSONALITY was silently omitted from every
+// pool-leased worker's Job env, and the worker.status heartbeat's
+// `personality` field was permanently empty for pool workers. Covers both
+// the immediate-lease path (SubmitPoolItem) and the queued-drain path
+// (reserveQueued in runner.go), which each independently stamp Personality.
+func TestSubmitPool_JobEnvCarriesRoleWorkItemPersonality(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _ := newPoolFixture(fk)
+
+	// Immediate lease: personality "anvil" (first free in roster order).
+	if _, err := r.SubmitPool(context.Background(), "builder", "do work", "wi-1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(fk.jobObjs) != 1 {
+		t.Fatalf("jobs = %d, want 1", len(fk.jobObjs))
+	}
+	job := fk.jobObjs[0]
+	for name, want := range map[string]string{
+		"CW_ROLE":         "builder",
+		"CW_WORK_ITEM_ID": "wi-1",
+		"CW_PERSONALITY":  "anvil",
+	} {
+		if got, ok := jobEnvValue(job, name); !ok || got != want {
+			t.Errorf("immediate-lease job env %s = %q (present=%v), want %q", name, got, ok, want)
+		}
+	}
+
+	// Fill the remaining two slots so a 4th item queues, then complete one
+	// to drive the reserveQueued drain path (runner.go), which stamps
+	// Personality independently of SubmitPoolItem's immediate-lease path.
+	if _, err := r.SubmitPool(context.Background(), "builder", "do work", "wi-2", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.SubmitPool(context.Background(), "builder", "do work", "wi-3", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.SubmitPool(context.Background(), "builder", "do work", "wi-4", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(fk.jobObjs) != 3 {
+		t.Fatalf("jobs before drain = %d, want 3 (wi-4 queued)", len(fk.jobObjs))
+	}
+	r.OnJobDone(dispatch.JobDone{Ticket: "wi-1", OK: true})
+	if len(fk.jobObjs) != 4 {
+		t.Fatalf("jobs after drain = %d, want 4 (queued wi-4 launched)", len(fk.jobObjs))
+	}
+	drained := fk.jobObjs[3]
+	for name, want := range map[string]string{
+		"CW_ROLE":         "builder",
+		"CW_WORK_ITEM_ID": "wi-4",
+		"CW_PERSONALITY":  "anvil", // the freed slot, re-leased
+	} {
+		if got, ok := jobEnvValue(drained, name); !ok || got != want {
+			t.Errorf("queued-drain job env %s = %q (present=%v), want %q", name, got, ok, want)
+		}
 	}
 }
 

@@ -778,6 +778,23 @@ func (c *Client) SendDispatchStatus(ctx context.Context, runID, status, reason s
 // worker's real work, so callers should log-and-continue on error, not
 // retry or escalate.
 func (c *Client) SendWorkerStatus(ctx context.Context, p frames.WorkerStatusPayload) error {
+	// Ready(), not just SendBestEffort's bare Connected() check: Connected()
+	// flips true the instant the WS dial succeeds, which is BEFORE the
+	// register frame has even been sent (registration is driven off the
+	// wsclient Connected event by a separate goroutine — see
+	// ensureRegistered). A worker.status frame written to the wire in that
+	// window arrives at a broker-side wsConn whose registeredAs is still ""
+	// — handleWorkerStatusFrame (dispatch_status.go) drops any frame from
+	// an unregistered connection unconditionally. That gap is exactly the
+	// mechanism that made every M1 Unit 5 heartbeat vanish in production:
+	// SendBestEffort reported "sent" (no error) for a frame the broker had
+	// already silently discarded. Gating on Ready() (Connected() AND the
+	// register barrier closed) makes the failure visible to THIS caller
+	// (best-effort logs it and moves on) instead of invisible on the broker
+	// side.
+	if !c.Ready() {
+		return errNotConnected
+	}
 	env, err := frames.New(frames.KindWorkerStatus, p)
 	if err != nil {
 		return err

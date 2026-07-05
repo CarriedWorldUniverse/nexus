@@ -636,6 +636,11 @@ func (r *Runner) reserveQueued() []*Run {
 			if personality, name := r.tryLeaseWorkerSlot(b.Role); name != "" {
 				b.SpawnParent = personality
 				b.Agent = name
+				// See pool.go's SubmitPoolItem: Personality must be stamped
+				// here too, or a pool item that queued (all personalities
+				// busy at submit time) and later drains through this path
+				// launches with no CW_PERSONALITY env / heartbeat field.
+				b.Personality = personality
 				runs = append(runs, r.reserve(b))
 			} else {
 				kept = append(kept, b)
