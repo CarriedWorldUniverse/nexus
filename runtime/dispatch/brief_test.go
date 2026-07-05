@@ -194,10 +194,12 @@ func TestBriefNewFields(t *testing.T) {
 }
 
 // TestBriefRoleAtSpawnFields is a table test of the M1 Unit 3 round-trip:
-// Role, WorkItemID, SkillAllowlist, PolicyFragment, and Personality must
-// survive a JSON marshal/unmarshal (the !dispatch header ⇄ ConfigMap
+// RolePrompt, WorkItemID, SkillAllowlist, PolicyFragment, and Personality
+// must survive a JSON marshal/unmarshal (the !dispatch header ⇄ ConfigMap
 // path) unchanged, and must be entirely absent from the wire format when
 // the brief carries none of them — the additive/back-compat invariant.
+// Role (the M1 Unit 4 role LABEL, reconciled at Wave 2) round-trips the
+// same way; see TestBriefRoleLabelField for its dedicated coverage.
 func TestBriefRoleAtSpawnFields(t *testing.T) {
 	frag := &funnel.ToolPolicy{
 		DefaultAllow:   false,
@@ -208,7 +210,7 @@ func TestBriefRoleAtSpawnFields(t *testing.T) {
 		Agent:          "anvil",
 		Ticket:         "NEX-999",
 		Thread:         "NEX-999",
-		Role:           "you are a tester. write and run tests only.",
+		RolePrompt:     "you are a tester. write and run tests only.",
 		WorkItemID:     "work-item-42",
 		SkillAllowlist: []string{"test-run", "bash", "read"},
 		PolicyFragment: frag,
@@ -222,8 +224,8 @@ func TestBriefRoleAtSpawnFields(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Role != b.Role {
-		t.Errorf("Role: got %q, want %q", got.Role, b.Role)
+	if got.RolePrompt != b.RolePrompt {
+		t.Errorf("RolePrompt: got %q, want %q", got.RolePrompt, b.RolePrompt)
 	}
 	if got.WorkItemID != b.WorkItemID {
 		t.Errorf("WorkItemID: got %q, want %q", got.WorkItemID, b.WorkItemID)
@@ -242,10 +244,29 @@ func TestBriefRoleAtSpawnFields(t *testing.T) {
 	// of these keys on the wire (existing !dispatch consumers unaffected).
 	bEmpty2 := Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "NEX-1"}
 	raw2, _ := json.Marshal(bEmpty2)
-	for _, key := range []string{"role", "work_item_id", "skill_allowlist", "policy_fragment", "personality"} {
+	for _, key := range []string{"role", "role_prompt", "work_item_id", "skill_allowlist", "policy_fragment", "personality"} {
 		if bytes.Contains(raw2, []byte(`"`+key+`"`)) {
 			t.Errorf("omitempty: %q should be absent when zero, got %s", key, raw2)
 		}
+	}
+}
+
+// TestBriefRoleLabelField is a table test of the M1 Unit 4 round-trip
+// (reconciled at Wave 2, distinct from RolePrompt above): Role is the
+// short role LABEL a pool lease is stamped with, and must survive a JSON
+// marshal/unmarshal unchanged.
+func TestBriefRoleLabelField(t *testing.T) {
+	b := Brief{Agent: "anvil.pool-1", Ticket: "work-item-42", Thread: "work-item-42", Role: "builder"}
+	data, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Brief
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Role != b.Role {
+		t.Errorf("Role: got %q, want %q", got.Role, b.Role)
 	}
 }
 
@@ -265,8 +286,8 @@ func TestBriefConfigMapData(t *testing.T) {
 			want: map[string]string{"brief.md": "do the thing"},
 		},
 		{
-			name: "role adds role.md",
-			b:    Brief{Task: "do the thing", Role: "you are a builder"},
+			name: "role prompt adds role.md",
+			b:    Brief{Task: "do the thing", RolePrompt: "you are a builder"},
 			want: map[string]string{"brief.md": "do the thing", "role.md": "you are a builder"},
 		},
 		{

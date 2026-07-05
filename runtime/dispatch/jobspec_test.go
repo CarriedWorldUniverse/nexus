@@ -282,7 +282,7 @@ func TestBuildJob_TTLAndRunUUIDName(t *testing.T) {
 }
 
 // TestBuildJob_RoleAtSpawn is a table test of the M1 Unit 3 threading: an
-// empty Brief (no Role/SkillAllowlist/PolicyFragment/WorkItemID/
+// empty Brief (no RolePrompt/SkillAllowlist/PolicyFragment/WorkItemID/
 // Personality) must reproduce today's exact Job args/env/labels, and
 // each field, when set, must surface at its documented touchpoint.
 func TestBuildJob_RoleAtSpawn(t *testing.T) {
@@ -310,7 +310,7 @@ func TestBuildJob_RoleAtSpawn(t *testing.T) {
 	})
 
 	t.Run("role sets -role-file pointing at the brief ConfigMap mount", func(t *testing.T) {
-		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", Role: "you are a builder"}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", RolePrompt: "you are a builder"}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
 		if !argValueEquals(c.Args, "-role-file", "/etc/dispatch/role.md") {
 			t.Errorf("args missing -role-file /etc/dispatch/role.md: %v", c.Args)
 		}

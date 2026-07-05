@@ -111,7 +111,7 @@ func main() {
 	branchFlag := flag.String("branch", "", "builder mode: dispatched branch (defaults to builder/<ticket>)")
 	drainMode := flag.Bool("drain", false, "drain/one-shot mode: run ONE autonomous orchestrate drain over shadow's queue (claude -p with the materialised MCPs + gh bridged), then exit. No builder worktree/PR-verify coupling — used by the heartbeat CronJob.")
 	drainPrompt := flag.String("drain-prompt", defaultDrainPrompt, "drain mode: the orchestrate drain instruction handed to claude -p")
-	roleFile := flag.String("role-file", "", "builder mode: path to the resolved role system-prompt text for this spawn (role-at-spawn overlay; optional — dispatch.Brief.Role written by BuildJob when a Role is set). composeSystemPrompt prepends its contents above the (thin) personality.")
+	roleFile := flag.String("role-file", "", "builder mode: path to the resolved role system-prompt text for this spawn (role-at-spawn overlay; optional — dispatch.Brief.RolePrompt written by BuildJob when a RolePrompt is set). composeSystemPrompt prepends its contents above the (thin) personality.")
 	policyFragmentFile := flag.String("policy-fragment-file", "", "builder mode: path to a spawn-supplied funnel.ToolPolicy JSON overlay applied over -policy for this spawn (role-at-spawn overlay; optional — dispatch.Brief.PolicyFragment written by BuildJob when set).")
 	flag.Parse()
 
@@ -957,7 +957,7 @@ func emitBuilderAccepted(ctx context.Context, wsClient *wsasp.Client, log *slog.
 // nexus/frame/embed_personality_test.go's
 // TestEmbed_ComposedDoesNotDoubleBakeCentral).
 //
-// rolePrompt is the role-at-spawn overlay (M1 Unit 3, dispatch.Brief.Role,
+// rolePrompt is the role-at-spawn overlay (M1 Unit 3, dispatch.Brief.RolePrompt,
 // read from -role-file): the resolved system-prompt text for this
 // work-item's assigned role. It is inserted ABOVE the (thin) personality —
 // after central (org-wide base knowledge always applies first) but before

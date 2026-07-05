@@ -41,18 +41,28 @@ type Brief struct {
 
 	// --- Role-at-spawn (M1 Unit 3, PHASE2-DESIGN §3 / ROLE-MODEL.md) ---
 	// Stamps a spawned worker with its ROLE (system-prompt overlay),
-	// scoped skills, and tool policy at boot. All four fields are
+	// scoped skills, and tool policy at boot. All fields below are
 	// additive and optional: empty/nil reproduces today's behavior
 	// exactly (no role overlay, all skills, static -policy file only).
 
-	// Role is the RESOLVED role system-prompt text (not a role name/id)
-	// for this work-item's assigned role — e.g. the builder/tester/
-	// reviewer prompt from docs/network/roles/*.yaml. The orchestrator
-	// resolves the role name to this prompt text at dispatch time (the
-	// simplest delivery option per the build spec) and agentfunnel's
-	// composeSystemPrompt prepends it above the (thin) personality.
-	// Empty = no role overlay.
+	// Role is the role LABEL (short name — e.g. "builder", "tester",
+	// "reviewer") this spawn is dispatched under. Reconciled at Wave 2
+	// fold: M1 Unit 4's pool leases (pool.go) stamp this for
+	// accountability (completionSummary's "role=" line); it carries NO
+	// prompt text (see RolePrompt for that). Empty for named-agent
+	// dispatch outside the pool.
 	Role string `json:"role,omitempty"`
+
+	// RolePrompt is the RESOLVED role system-prompt text (not a role
+	// name/id) for this work-item's assigned role — e.g. the builder/
+	// tester/reviewer prompt from docs/network/roles/*.yaml. The
+	// orchestrator resolves the role name to this prompt text at
+	// dispatch time (the simplest delivery option per the build spec)
+	// and agentfunnel's composeSystemPrompt prepends it above the
+	// (thin) personality. Empty = no role overlay. (M1 Unit 3; renamed
+	// from Role at the Wave 2 fold to free that name for the Unit 4
+	// role LABEL above.)
+	RolePrompt string `json:"role_prompt,omitempty"`
 
 	// WorkItemID identifies the pool work-item this spawn serves
 	// (PHASE2-DESIGN §1/§3) — distinct from Ticket, which is the VCS/
@@ -85,14 +95,14 @@ type Brief struct {
 // briefConfigMapData builds the Data map for the "brief-<taskID>" ConfigMap
 // (mounted at /etc/dispatch — see BuildJob). brief.md always carries the
 // task text, unchanged from before role-at-spawn. role.md/policy.json are
-// added only when the brief carries a Role/PolicyFragment, and their paths
-// are only passed to agentfunnel (via -role-file/-policy-fragment-file in
-// builderArgs) when present — so an empty Role/PolicyFragment reproduces
-// today's ConfigMap and command line exactly.
+// added only when the brief carries a RolePrompt/PolicyFragment, and their
+// paths are only passed to agentfunnel (via -role-file/-policy-fragment-file
+// in builderArgs) when present — so an empty RolePrompt/PolicyFragment
+// reproduces today's ConfigMap and command line exactly.
 func briefConfigMapData(b Brief) (map[string]string, error) {
 	data := map[string]string{"brief.md": b.Task}
-	if b.Role != "" {
-		data[briefRoleFileName] = b.Role
+	if b.RolePrompt != "" {
+		data[briefRoleFileName] = b.RolePrompt
 	}
 	if b.PolicyFragment != nil {
 		raw, err := json.Marshal(b.PolicyFragment)

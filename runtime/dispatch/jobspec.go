@@ -326,9 +326,9 @@ func builderArgs(b Brief, cfg JobConfig, spawn bool) []string {
 		"-branch", b.Branch,
 	)
 	// Role-at-spawn overlay (M1 Unit 3): only passed when the brief
-	// carries them, so an empty Role/PolicyFragment reproduces today's
-	// exact agentfunnel invocation (no -role-file/-policy-fragment-file).
-	if b.Role != "" {
+	// carries them, so an empty RolePrompt/PolicyFragment reproduces
+	// today's exact agentfunnel invocation (no -role-file/-policy-fragment-file).
+	if b.RolePrompt != "" {
 		args = append(args, "-role-file", briefDir+"/"+briefRoleFileName)
 	}
 	if b.PolicyFragment != nil {

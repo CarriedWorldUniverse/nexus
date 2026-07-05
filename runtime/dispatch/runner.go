@@ -97,6 +97,13 @@ type Runner struct {
 	// applies on top.
 	SpawnMaxConcurrent int
 
+	// PoolSize caps concurrent leases of the role-based worker pool (M1
+	// Unit 4, pool.go, PHASE2-DESIGN §4); 0 = defaultPoolSize (3). This
+	// is a DISTINCT cap dimension from SpawnMaxConcurrent — pool slots
+	// never compete with (or borrow capacity from) a named aspect's hand
+	// cap. The global MaxConc still applies on top.
+	PoolSize int
+
 	// Audit stores spawn audit posts AS a named sender, returning the
 	// message id — used for the spawn audit-thread root (the !dispatch
 	// post-as-thread-root pattern, but originated broker-side). nil =
@@ -305,11 +312,25 @@ func (r *Runner) canRun(agent string) bool {
 	}
 	// Per-parent hand cap (NEX-571): a derived identity only starts
 	// while its base aspect has spare hand slots. Applies on submit AND
-	// on queue drain, so queued hands wait for a sibling to finish.
-	if base := aspects.BaseName(agent); base != agent && r.liveHands(base) >= r.spawnMaxConcurrent() {
+	// on queue drain, so queued hands wait for a sibling to finish. The
+	// pool base (M1 Unit 4, pool.go) uses its OWN cap dimension
+	// (poolSize, default 3) here — a distinct dimension from the
+	// per-aspect hand cap (spawnMaxConcurrent, default 4) so growing one
+	// never silently loosens or tightens the other.
+	if base := aspects.BaseName(agent); base != agent && r.liveHands(base) >= r.capForBase(base) {
 		return false
 	}
 	return true
+}
+
+// capForBase returns the live-hand cap that applies to base — the pool
+// cap (poolSize) for the pool identity, the generic per-aspect hand cap
+// (spawnMaxConcurrent) for everything else. Caller holds r.mu.
+func (r *Runner) capForBase(base string) int {
+	if base == poolParentName {
+		return r.poolSize()
+	}
+	return r.spawnMaxConcurrent()
 }
 
 // liveHands counts base's busy derived identities. Caller holds r.mu.
@@ -413,6 +434,21 @@ func (r *Runner) OnJobDone(done JobDone) {
 }
 
 func (r *Runner) completionSummary(run *Run, done JobDone) string {
+	// Pool-lease completion (M1 Unit 4): accountability is the slot
+	// identity + role + work item, not the builder branch/PR block or
+	// the hand-of-parent lineage line.
+	if run.Brief.SpawnParent == poolParentName {
+		status := "done"
+		if !done.OK {
+			status = "failed"
+		}
+		return strings.Join([]string{
+			"pool " + status + ": slot=" + run.Brief.Agent + " role=" + run.Brief.Role + " work_item=" + run.Brief.WorkItemID,
+			"duration: " + formatDuration(done.StartedAt, done.CompletedAt),
+			"turns: " + formatCount(r.countActivityTurns(done.Agent, done.StartedAt, done.CompletedAt)),
+		}, "\n")
+	}
+
 	// Hand completion (NEX-571): carry the lineage instead of the
 	// builder branch/PR block — hands do fan-out work in their parent's
 	// thread, not single-ticket PR runs.
@@ -563,6 +599,18 @@ func (r *Runner) reserveQueued() []*Run {
 	var runs []*Run
 	kept := make([]Brief, 0, len(r.queue))
 	for _, b := range r.queue {
+		// A queued pool work-item (pool.go) carries no Agent yet — any
+		// free slot will do, so it can't be checked via canRun(agent)
+		// like a fixed-identity brief. Lease whichever slot is free now.
+		if b.SpawnParent == poolParentName && b.Agent == "" {
+			if name := r.tryLeasePoolSlot(); name != "" {
+				b.Agent = name
+				runs = append(runs, r.reserve(b))
+			} else {
+				kept = append(kept, b)
+			}
+			continue
+		}
 		if r.canRun(b.Agent) {
 			runs = append(runs, r.reserve(b))
 		} else {
