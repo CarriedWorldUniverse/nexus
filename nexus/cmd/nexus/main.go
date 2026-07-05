@@ -258,6 +258,16 @@ func main() {
 	// the legacy master token until reconciled (deliberate graceful
 	// degrade; cleanup tracked separately).
 	tokenStore := broker.NewTokenStore()
+	// Wire the shared bearer as the legacy MASTER (admin) token. server.go
+	// only does this on its own nil-Tokens fallback branch — since main
+	// supplies this store, the master was never set here, so NEXUS_TOKEN
+	// resolved to nothing admin-shaped and every /api/admin caller (aspect
+	// mint, cw issue-git-permission) got 401/403 (found live, Phase 4
+	// NET-36). This restores the documented back-compat intent; the
+	// per-aspect-collision guard in TokenStore.lookup still demotes it if
+	// the value doubles as a registered aspect token. Proper split-admin
+	// auth is ticketed separately.
+	tokenStore.SetLegacyMaster(token)
 	aspectIDs := discoverAspectIDs(*aspectDir, logger)
 	if len(aspectIDs) > 0 {
 		if err := tokenStore.ReconcileAgentTokens(ctx, db, aspectIDs); err != nil {
