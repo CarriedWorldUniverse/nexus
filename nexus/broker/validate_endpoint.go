@@ -313,13 +313,13 @@ func (b *Broker) handleAspectValidate(w http.ResponseWriter, r *http.Request) {
 	// aspect constructs its native-API provider with the broker-held key
 	// (no key in start scripts/env). Best-effort: any miss falls back to
 	// the aspect's own process env.
-	// Resolve provider/judge/compact credentials by BASE name: a derived
-	// hand (`<parent>.sub-N`) has no aspects row of its own, so its provider
-	// credential + defaults live on the parent (see aspects/derived.go —
-	// "credentials resolve through BaseName"). BaseName is identity for a
-	// non-derived name, so this is safe for keyfile aspects too. Mirrors
-	// handleAspectResolve, which already does this.
-	credAspect := aspects.BaseName(sess.AspectName)
+	// Resolve provider/judge/compact credentials by the PERSONALITY: a pool
+	// worker `<personality>-<role>` (and a dotted hand `<parent>.sub-N`) has
+	// no aspects row of its own — its provider credential + defaults live on
+	// the personality/parent it resolves to (see aspects.PersonalityOf +
+	// aspects/lineage.go). PersonalityOf is identity for an ordinary keyfile
+	// aspect, so this is safe for those too. Mirrors handleAspectResolve.
+	credAspect := aspects.PersonalityOf(sess.AspectName)
 	providerEnv := resolveProviderEnv(r.Context(), v.Credentials, credAspect, sess.Provider, b.log)
 
 	// NEX-373: resolve the effective judge + compact config here and deliver
@@ -413,15 +413,16 @@ func (b *Broker) handleAspectResolve(w http.ResponseWriter, r *http.Request) {
 	// to provider/model.
 	//
 	// The MCP profile, however, is NOT served to derived identities
-	// (NEX-609): the parent's profile entries authenticate with the
-	// keyfile at /etc/nexus/keyfile.json, which hand Jobs deliberately
+	// (NEX-609) — nor to pool workers `<personality>-<role>`, for the same
+	// reason: the personality's profile entries authenticate with the
+	// keyfile at /etc/nexus/keyfile.json, which hand/worker Jobs deliberately
 	// do not mount (their credential is the CW_SESSION_JWT env). A
-	// served profile would make every hand turn spawn MCP servers that
+	// served profile would make every turn spawn MCP servers that
 	// slow-fail their auth before bridle skips them — and the one tool
 	// a hand must not have (spawn — no sub-of-sub) lives there too.
-	base := aspects.BaseName(aspectName)
+	base := aspects.PersonalityOf(aspectName)
 	var mcpProfile string
-	if !aspects.IsDerivedName(aspectName) {
+	if !aspects.IsDerivedName(aspectName) && !aspects.IsWorkerName(aspectName) {
 		var mcpErr error
 		mcpProfile, mcpErr = resolveMCPProfile(r.Context(), v.Credentials, base)
 		if mcpErr != nil {
