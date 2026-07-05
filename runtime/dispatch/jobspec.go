@@ -43,6 +43,31 @@ type JobConfig struct {
 	// Empty → not injected → agentfunnel default.
 	OllamaBaseURL   string
 	OllamaKeepAlive string
+
+	// ImageTagPin, when non-nil, is called once per BuildJob invocation to
+	// resolve the §7 CLI-version knob (PHASE2-DESIGN §7): a full image ref
+	// (e.g. "localhost/nexus-runner:cli-2.1.3") that REPLACES cfg.Image for
+	// this dispatch. Return "" for "no pin" — cfg.Image (the boot-configured
+	// default, "latest built") is used unchanged. Called at BUILD time (not
+	// read once at JobConfig-construction), so an operator pin/clear takes
+	// effect on the next dispatch without a broker restart, given a
+	// live-backed resolver — see cmd/nexus/main.go (CW_BUILDER_IMAGE_PIN_FILE)
+	// and README "CLI version knob". nil = no knob = today's fixed cfg.Image
+	// behavior, unchanged. PullNever (below) means the resolved tag must
+	// already be pre-loaded on the node — see Part C (CI image rebuild).
+	ImageTagPin func() string
+
+	// FrontierAuthFunc, when non-nil, is called once per BuildJob invocation
+	// to resolve the k8s Secret (name, key) delivering the frontier
+	// (claude-code) OAuth token (PHASE2-DESIGN §6). Injected as
+	// CLAUDE_CODE_OAUTH_TOKEN on claude-code-provider dispatch Jobs only.
+	// almanac is the source of truth for WHICH secret to trust (see
+	// nexus/cfgreconcile.FrontierAuth / runtime/dispatch.FrontierAuthConfig);
+	// the Secret itself is ALWAYS the actual delivery mechanism into the Job
+	// env — almanac only redirects the pointer. Returning ("", _) or a nil
+	// FrontierAuthFunc means no injection (today's behavior for anyone who
+	// hasn't wired this — e.g. every existing test's zero-value JobConfig).
+	FrontierAuthFunc func() (secretName, secretKey string)
 }
 
 const (
@@ -102,6 +127,21 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	codexProvider := provider == "codex-cli" || provider == "codex" || provider == "codexcli"
 	antigravityProvider := provider == "antigravity-cli" || provider == "antigravity" || provider == "agy"
 	ollamaProvider := provider == "ollama" || provider == "ollama-local"
+	// claude-code is the frontier CLI: it self-authenticates via
+	// CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`), never a keyfile
+	// env-var credential like codex/antigravity's mounted secrets — see
+	// the FrontierAuthFunc injection below (§6).
+	claudeCodeProvider := provider == "claude-code" || provider == "claudecode" ||
+		provider == "claude" || provider == "claude-api"
+	// §7 CLI-version knob: ImageTagPin overrides cfg.Image for this dispatch
+	// when set to a non-empty value; nil/empty = cfg.Image unchanged (the
+	// boot-configured "latest built" default).
+	image := cfg.Image
+	if cfg.ImageTagPin != nil {
+		if pin := cfg.ImageTagPin(); pin != "" {
+			image = pin
+		}
+	}
 	// The Job runs AS the named agent: keyfile = aspect-keyfile-<agent>, and
 	// the Job name + labels carry the agent + run id. A hand brief
 	// (SpawnParent set, NEX-571) runs as the DERIVED identity instead:
@@ -135,13 +175,12 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 		{Name: "CW_DISPATCH_RUN_ID", Value: b.RunID},
 		{Name: "CW_DISPATCH_PARENT_RUN_ID", Value: b.ParentRunID},
 		{Name: "CW_IDLE_TIMEOUT", Value: cfg.IdleTimeout},
-		// CW_IMAGE_TAG carries this Job's own image ref into the pod so
-		// the M1 Unit 5 worker.status heartbeat can report `image_tag`
-		// without re-deriving it. Best-effort/informational — the §7 CI
-		// version-knob work (a distinct build unit) is what makes this
-		// value meaningfully track a pinned CLI version; today it's
-		// whatever cfg.Image already resolves to.
-		{Name: "CW_IMAGE_TAG", Value: cfg.Image},
+		// CW_IMAGE_TAG carries this Job's own (possibly §7-pinned) image ref
+		// into the pod so the M1 Unit 5 worker.status heartbeat can report
+		// `image_tag` without re-deriving it — this is the resolved `image`
+		// (cfg.Image, or ImageTagPin's override when set), closing the loop
+		// described in the §7 build spec.
+		{Name: "CW_IMAGE_TAG", Value: image},
 		{Name: "CW_AGENT_HOME_REPO", Value: homeRepoMountPath},
 		{Name: "CW_AGENT_HOME_WORKDIR", Value: homeWorkMountPath},
 		{Name: "CW_SHARED_REPOS_DIR", Value: sharedReposMountPath},
@@ -218,6 +257,27 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	if cfg.LynxAIKey != "" {
 		env = append(env, corev1.EnvVar{Name: "LYNXAI_KEY", Value: cfg.LynxAIKey})
 	}
+	// Frontier auth (§6): inject CLAUDE_CODE_OAUTH_TOKEN via secretKeyRef
+	// for claude-code-provider dispatches only — the orchestrator drain Job
+	// and reviewer/security pods (frontier seats) all dispatch with this
+	// provider. Delivered via a k8s Secret either way (almanac, when
+	// configured, only redirects WHICH secret/key — see FrontierAuthFunc
+	// doc above). No FrontierAuthFunc / empty name → no injection, so a
+	// zero-value JobConfig (every pre-unit-7 test/deployment) reproduces
+	// today's exact env list.
+	if claudeCodeProvider && cfg.FrontierAuthFunc != nil {
+		if secretName, secretKey := cfg.FrontierAuthFunc(); secretName != "" && secretKey != "" {
+			env = append(env, corev1.EnvVar{
+				Name: "CLAUDE_CODE_OAUTH_TOKEN",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  secretKey,
+					},
+				},
+			})
+		}
+	}
 	volumeMounts := []corev1.VolumeMount{
 		{Name: "work", MountPath: "/work"},
 		{Name: "cache", MountPath: "/cache"},
@@ -253,7 +313,7 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	if codexProvider {
 		initContainers = append(initContainers, corev1.Container{
 			Name:            "codex-auth",
-			Image:           cfg.Image,
+			Image:           image,
 			ImagePullPolicy: corev1.PullNever,
 			Command:         []string{"sh", "-c", "mkdir -p /root/.codex && cp /codex-secret/auth.json /root/.codex/auth.json && chmod 600 /root/.codex/auth.json"},
 			VolumeMounts: []corev1.VolumeMount{
@@ -298,7 +358,7 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 					InitContainers: initContainers,
 					Containers: []corev1.Container{{
 						Name:            "builder",
-						Image:           cfg.Image,
+						Image:           image,
 						ImagePullPolicy: corev1.PullNever,
 						Args:            builderArgs(b, cfg, spawn),
 						Env:             env,

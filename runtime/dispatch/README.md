@@ -288,3 +288,71 @@ cluster). To observe the end-to-end effect on a real worker:
    `CW_SKILL_ALLOWLIST=test-run,bash,read` in its environment (as the Job
    sets it) and call `search_skills`/`get_skill` over its stdio MCP
    interface — confirm only the three allowed skills are ever returned.
+
+## CLI version knob + frontier auth (M1 Unit 7, PHASE2-DESIGN §6/§7)
+
+Two `JobConfig` seams, both additive (nil/unset = today's exact behavior),
+both **read fresh at every `BuildJob` call** rather than cached at
+`JobConfig` construction — see `jobspec.go`'s `ImageTagPin`/`FrontierAuthFunc`
+doc comments for the full contract:
+
+- **`ImageTagPin func() string`** (§7) — the ONE config knob that selects the
+  runner image tag per dispatch. Wired in `cmd/nexus/main.go`
+  (`imageTagPinFunc`) to re-read a `CW_BUILDER_IMAGE_PIN_FILE` file (a
+  ConfigMap volume mount, typically) on every call — see
+  `.github/workflows/README-runner-images.md` "The §7 CLI-version knob" for
+  the full pin/clear operator flow and why a FILE (not an env var) is what
+  makes "read at dispatch, no broker restart" true in a vanilla k8s
+  Deployment.
+- **`FrontierAuthFunc func() (secretName, secretKey string)`** (§6) —
+  resolves the k8s Secret injected as `CLAUDE_CODE_OAUTH_TOKEN` into every
+  claude-code-provider dispatch. Wired to `dispatch.FrontierAuthConfig.Get`,
+  a live pointer defaulting to the M0.3 `claude-oauth` secret; almanac
+  (`cfgreconcile.FrontierAuth`, when `ALMANAC_GRPC_ADDR` is set) can redirect
+  it without a broker restart. See `frontierauth.go` and
+  `nexus/cfgreconcile/frontierauth.go`.
+
+### Live-verify path
+
+**Image-tag knob (pin -> dispatch -> clear -> dispatch):**
+1. Deploy the broker with `CW_BUILDER_IMAGE_PIN_FILE=/etc/nexus-config/image-pin`
+   mounted from a ConfigMap key that starts empty (or absent).
+2. Dispatch a ticket; `kubectl get job <job> -o jsonpath='{.spec.template.spec.containers[0].image}'`
+   — confirm it matches `CW_BUILDER_IMAGE` (the default/"latest built" tag),
+   and `...env[?(@.name=="CW_IMAGE_TAG")].value` mirrors the same ref.
+3. `kubectl patch configmap nexus-broker-config --type merge -p
+   '{"data":{"image-pin":"localhost/nexus-runner:cli-BOGUS"}}'` (a
+   deliberately-bad/nonexistent tag). Wait one kubelet ConfigMap-sync period
+   (~60s, no broker restart).
+4. Dispatch again; confirm the new Job's `.spec.template.spec.containers[0].image`
+   is now `localhost/nexus-runner:cli-BOGUS` and the pod fails to schedule
+   (`ErrImageNeverPull` — expected, proves the pin took effect without
+   redeploying anything real).
+5. Clear the pin (`{"data":{"image-pin":""}}`); dispatch once more; confirm
+   the Job's image reverts to the default tag — no pod restart, no broker
+   restart, at any point in this sequence.
+
+**Frontier auth (kill the token -> PreflightAuth holds):**
+1. Confirm today's baseline: dispatch a claude-code-provider ticket (or a
+   pool item under a role that resolves to that provider); `kubectl get job
+   <job> -o jsonpath='{.spec.template.spec.containers[0].env}'` and confirm
+   `CLAUDE_CODE_OAUTH_TOKEN` is present with a `secretKeyRef` naming
+   `claude-oauth`/`CLAUDE_CODE_OAUTH_TOKEN` (or whatever almanac has
+   redirected it to — `kubectl logs` the broker for the
+   `"cfgreconcile: frontier-auth secret pointer synced from almanac"` line
+   if `ALMANAC_GRPC_ADDR` is set).
+2. `kubectl delete secret claude-oauth -n nexus` (or blank the key) to
+   simulate an expired/revoked credential.
+3. The **next** claude-code dispatch Job fails at the pod level (missing
+   secretKeyRef → `CreateContainerConfigError`) — that's the raw k8s-level
+   signal. The **orchestrator-level** fail-loud path (M1 Unit 6) is
+   `Orchestrator.AuthProbe`: wire an `AuthProbe` that actually calls `claude
+   setup-token`'s validation endpoint (or shells a lightweight `claude
+   --version`/whoami-style check against the token) — with that in place,
+   `DrainOnce` returns `Held: true` and alerts via the configured `Alerter`
+   (`orchestrator: ALERT` log line, or a chat-thread post — see
+   `nexus/orchestrator/README.md` "Auth-hold") the very next drain pass,
+   BEFORE any new dispatch, rather than one broken pod at a time.
+4. Restore the secret (`kubectl apply -f` the real one, or a fresh
+   `claude setup-token` re-mint); confirm the next drain pass's `AuthProbe`
+   succeeds and `Held` clears.

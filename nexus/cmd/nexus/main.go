@@ -422,6 +422,11 @@ func main() {
 	// cmd.Dir control vector for stolen aspect tokens).
 	aspectHomes := discoverAspectHomes(*aspectDir, logger)
 
+	// §6 frontier auth: the live secret-name/key pointer every claude-code
+	// dispatch reads at BuildJob time. Starts at the M0.3 claude-oauth
+	// default; cfgreconcile.FrontierAuth (registered below, when almanac is
+	// configured) can redirect it without a broker restart.
+	frontierAuthCfg := dispatch.NewFrontierAuthConfig()
 	dispatchCfg := dispatch.JobConfig{
 		Image:         os.Getenv("CW_BUILDER_IMAGE"),
 		Namespace:     envOrDefault("CW_K8S_NAMESPACE", "nexus"),
@@ -441,6 +446,19 @@ func main() {
 		// the fallback so one deployment env serves both.
 		OllamaBaseURL:   envOrDefault("CW_OLLAMA_BASE_URL", os.Getenv("OLLAMA_BASE_URL")),
 		OllamaKeepAlive: envOrDefault("CW_OLLAMA_KEEP_ALIVE", os.Getenv("OLLAMA_KEEP_ALIVE")),
+		// §7 CLI-version knob: CW_BUILDER_IMAGE_PIN_FILE names a file (a
+		// ConfigMap volume mount, typically) whose trimmed contents pin a
+		// full image ref for every dispatch — read fresh on each BuildJob
+		// call (not cached here), so `kubectl create/edit configmap` takes
+		// effect within the kubelet's ConfigMap sync period (no broker
+		// restart). Unset/missing/empty file → cfg.Image (today's "latest
+		// built" default) is used, unchanged behavior. See README "CLI
+		// version knob" for the live-verify path.
+		ImageTagPin: imageTagPinFunc(os.Getenv("CW_BUILDER_IMAGE_PIN_FILE")),
+		// §6 frontier auth: read live at dispatch time from frontierAuthCfg
+		// (defaults to the M0.3 claude-oauth secret; almanac can redirect it
+		// — see the cfgreconcile.FrontierAuth registration below).
+		FrontierAuthFunc: frontierAuthCfg.Get,
 	}
 	// Hand (spawn) Jobs carry no keyfile, so they can't pin the broker's
 	// self-signed / internal-CA cert the way ticket builders do (the cert is
@@ -781,6 +799,13 @@ func main() {
 		if credentialStore != nil {
 			recs = append(recs, cfgreconcile.NewNetworkDefaults(almanacReader, credentialStore, logger))
 		}
+		// §6 frontier auth: almanac SecureParameter (cwb/nexus/frontier-auth)
+		// can redirect which k8s Secret/key delivers CLAUDE_CODE_OAUTH_TOKEN
+		// into claude-code dispatch Jobs. Dark (almanacReader nil, this whole
+		// block skipped) → frontierAuthCfg stays at its claude-oauth default,
+		// which is still wired into dispatchCfg above — that's the "falls
+		// back to the k8s secret" path from the §7 build spec.
+		recs = append(recs, cfgreconcile.NewFrontierAuth(almanacReader, frontierAuthCfg, logger))
 		go cfgreconcile.RunAll(ctx, almanacInterval, logger, recs...)
 	}
 
@@ -1200,6 +1225,26 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// imageTagPinFunc builds dispatch.JobConfig.ImageTagPin (the §7 CLI-version
+// knob): when path is empty, returns nil (no knob — cfg.Image, "latest
+// built", is used for every dispatch, matching today's behavior exactly).
+// When path is set, returns a func that re-reads and trims the file's
+// contents on every call — a missing file or read error yields "" (no pin),
+// never a crash, so a mistyped/not-yet-mounted path degrades to the default
+// rather than failing dispatch.
+func imageTagPinFunc(path string) func() string {
+	if path == "" {
+		return nil
+	}
+	return func() string {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(b))
+	}
 }
 
 func reaper(ctx context.Context, r *roster.Roster, b *broker.Broker, staleAfter, every time.Duration, log *slog.Logger) {
