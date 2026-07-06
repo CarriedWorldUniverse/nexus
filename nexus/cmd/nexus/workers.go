@@ -24,14 +24,17 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/workerstatus"
 )
 
-// runWorkersSubcommand parses `nexus workers [--data-dir DIR] [--json]` and
+// runWorkersSubcommand parses `nexus workers [--data-dir DIR] [--json] [--role ROLE]` and
 // prints the consolidated worker_status fleet. Default renders a fixed-width
 // table; --json writes a pretty-printed JSON array of worker status objects
 // (same shape as GET /api/admin/workers) for programmatic consumption.
+// --role filters both output paths to rows whose Role matches exactly
+// (case-sensitive). Empty role = show all.
 func runWorkersSubcommand(args []string) int {
 	fs := flag.NewFlagSet("workers", flag.ContinueOnError)
 	dataDir := commonDataDirFlag(fs)
 	jsonOut := fs.Bool("json", false, "emit the fleet as a JSON array (one object per worker) instead of a table")
+	role := fs.String("role", "", "filter rows to workers whose role matches exactly (case-sensitive); empty = show all")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -52,11 +55,31 @@ func runWorkersSubcommand(args []string) int {
 		fmt.Fprintf(os.Stderr, "workers: %v\n", err)
 		return 1
 	}
+	if *role != "" {
+		rows = filterByRole(rows, *role)
+	}
 	if *jsonOut {
 		return printWorkerStatusJSON(os.Stdout, rows)
 	}
 	printWorkerStatusTable(os.Stdout, rows, time.Now())
 	return 0
+}
+
+// filterByRole returns a copy of rows containing only those whose Role
+// matches target exactly (case-sensitive). Empty target returns the
+// input unchanged (no-op filter) — callers can pass through a flag
+// default without branching.
+func filterByRole(rows []workerstatus.Status, target string) []workerstatus.Status {
+	if target == "" {
+		return rows
+	}
+	out := rows[:0:0] // pre-allocate empty slice of same length to avoid allocs when no matches
+	for _, r := range rows {
+		if r.Role == target {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // listWorkerStatusRows opens the workerstatus store against an already-open
