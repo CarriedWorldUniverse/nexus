@@ -48,6 +48,15 @@ ledger → dispatch → agentfunnel ──[composes context]──▶ bridle ─
 
 **Audit needed:** grep the funnel + bridle prompt path for non-determinism in the prefix (map iteration order, `time.Now()` in system text, re-rendered tool declarations). List every source and fix or move it out of the prefix.
 
+**Audit results (2026-07-06):**
+
+| Source | Verdict | Note |
+| --- | --- | --- |
+| `composeSystemPrompt` (`runtime/cmd/agentfunnel/main.go:1112`) | deterministic | no timestamps, no map iteration in the rendered text |
+| openai provider request assembly (`bridle` `provider/openai/openai.go:361`) | deterministic | serializes the already-built message/tool list; introduces no ordering of its own |
+| MCP tool listing → `mergeToolSurface` (`bridle` `run.go:834`, pre-fix) | **the one default-on breaker** | MCP servers reconnect + re-`ListTools` every `RunTurn` (`run.go:32-52`); each server's list order is server-dependent, so the merged surface reordered on every turn and busted the cached prefix from token 0. **Fixed** in bridle by sorting the merged surface by tool `Name` — see `fix/deterministic-tool-order`, merged as `e2c52f8` ([bridle#74](https://github.com/CarriedWorldUniverse/bridle/pull/74)). |
+| `hookAdditionalContext` (SessionStart/AutoRecall hooks) (`nexus/frame/funnel/funnel.go:1393-1394`, pre-fix) | breaks-cache-always when enabled | off by default; concatenates onto the SYSTEM prompt every turn a hook fires. **Fixed** behind `FUNNEL_PREFIX_STABLE=1`, which routes the hook block into the trailing per-turn user/delta zone instead (same zone as Inbox/continuation-brief, bridle `lowerRequest` `run.go:635-653`); default (unset) behavior unchanged. |
+
 ### 2. Tool-result eviction to a workspace
 
 **Problem:** big tool results (file reads, command output, grep dumps) sit in-window forever and get replayed every step. On repo work the worker re-reads the same file contents constantly.
@@ -58,6 +67,8 @@ ledger → dispatch → agentfunnel ──[composes context]──▶ bridle ─
 - **Re-read on demand:** the worker's existing `read_file`/`grep` tools already let it pull a body back when it actually needs it — so eviction is lossless, just deferred.
 
 **Cache interaction (critical):** eviction *edits* history → invalidates the prefix cache from the edit point. So sweeps are **batched and rare** (a checkpoint), never per-step. Do the sweep, accept one cache-cold step, then run append-only again.
+
+**The 85% pressure signal already exists, for free.** bridle's `ContextPolicy.PromptBudget` + `ContextBudgetWarning` (bridle `context.go:32,53`) is a warn-only, engine-agnostic check on the assembled prompt that fires today when the estimate meets/exceeds the configured budget (bridle `run.go:108-115`) — v1 just needs to set the budget to 85% of the model's window and listen for the warning as the sweep trigger, no new signal to build. The token estimate to reuse for both that budget check and the eviction thresholds is the existing char-based `estimateContextTokens` (`nexus/frame/funnel/funnel.go:2420`) — no new tokeniser dependency needed (answers the "tokeniser for thresholds" open question below).
 
 **Expected effect:** caps steady-state window on file-heavy runs; plausibly 2–5× fewer tokens/step late in a run; and directly guards the 30B model against the quality collapse that comes with a saturated window.
 
@@ -96,6 +107,6 @@ Each independently togglable so the measurement steps above isolate each mechani
 
 ## Open questions
 
-- **Does bridle expose an eviction seam?** v2 needs to edit the message list bridle holds (rewrite a tool result to a pointer). If bridle owns the list opaquely, that's the one scoped bridle change: a `RewriteMessage(id, newContent)` or a pre-turn `CompactHook`. Audit bridle's message API first.
-- **Tokeniser for thresholds.** "20k tokens" needs a cheap token count in Go without a full tokeniser dep — a chars/4 estimate is fine for a threshold (over-evicting slightly is harmless); confirm acceptable.
-- **Prefix stability in bridle's own framing.** Some providers/bridle adapters may inject their own per-turn scaffolding (a re-rendered tool block). The §1 audit must cover bridle's adapter, not just `composeSystemPrompt`.
+- **Does bridle expose an eviction seam?** — **RESOLVED.** bridle's `Harness` is stateless (bridle `harness.go:284`); funnel owns `sessionTail` itself (`nexus/frame/funnel/funnel.go:607`), so eviction is **funnel-local**: a sweep in `commitTurnState` (`funnel.go:1628`) that rewrites session-tail entries to file pointers in place before the next turn is assembled. bridle needs **no** `RewriteMessage`/`CompactHook` — funnel never needs bridle to mutate anything it's holding. Within-turn stubs (e.g. announcing "result written to file" mid-turn) can use bridle's existing `RegisterBeforeModelCall` hook (bridle `hooks.go:130`), which hands back a mutable `ProviderRequest` before the provider call.
+- **Tokeniser for thresholds.** "20k tokens" needs a cheap token count in Go without a full tokeniser dep — a chars/4 estimate is fine for a threshold (over-evicting slightly is harmless); confirm acceptable. **Answered above (§2):** reuse the existing char-based `estimateContextTokens` (`funnel.go:2420`) rather than adding a tokeniser.
+- **Prefix stability in bridle's own framing.** — **RESOLVED.** The distill/rewriter path (`buildAgentFunnelRewriter`, `runtime/cmd/agentfunnel/main.go:2326-2330`) is a **no-op on the openai/Ornith path** — it only activates for claude-code-flavored providers (which have a session jsonl to compress); it never touches history on the path this spec targets. The only history rewrite in play is funnel's own `compact()` at the 125k-token threshold (`funnel.go:1811`, `DefaultCompactionPolicy` at `funnel.go:79`). Consequence for §2: eviction sweeps and compaction both mutate `sessionTail`, so they **must be ordered** relative to each other — a compaction rotate must not run mid-sweep and discard freshly-written eviction pointers (and vice versa); serialize the two under the same lock funnel already holds in `commitTurnState`.

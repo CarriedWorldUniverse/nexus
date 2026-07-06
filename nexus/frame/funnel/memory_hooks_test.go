@@ -72,6 +72,39 @@ func TestDeliberate_SessionStartAdditionalContextInjectsAtTopOfTurn(t *testing.T
 	}
 }
 
+func TestDeliberate_SessionStartAdditionalContext_PrefixStableRoutesToUserMessage(t *testing.T) {
+	t.Setenv("FUNNEL_PREFIX_STABLE", "1")
+
+	engine := funnelhooks.New()
+	if err := engine.Register("SessionStart", "*", 0, testHookHandler(func(_ context.Context, _ map[string]any) (funnelhooks.Decision, error) {
+		return funnelhooks.Decision{AdditionalContext: "session memory"}, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	f, prov := newTestFunnel(t, bridle.ProviderResult{FinalText: "ack"})
+	f.cfg.Hooks = engine
+
+	if _, err := f.Deliberate(context.Background(), "hello"); err != nil {
+		t.Fatalf("Deliberate failed: %v", err)
+	}
+	// FUNNEL_PREFIX_STABLE=1: the hook block must NOT land on the system
+	// prompt (that would bust the cached prefix every turn it fires) —
+	// it must land in the trailing per-turn user/delta zone instead.
+	if strings.Contains(prov.last.AppendSystemPrompt, "session memory") {
+		t.Fatalf("FUNNEL_PREFIX_STABLE=1: hook context leaked into system prompt:\n%s", prov.last.AppendSystemPrompt)
+	}
+	gotInUserMessage := false
+	for _, m := range prov.last.Messages {
+		if strings.Contains(m.Content, "session memory") {
+			gotInUserMessage = true
+			break
+		}
+	}
+	if !gotInUserMessage {
+		t.Fatalf("FUNNEL_PREFIX_STABLE=1: hook context missing from trailing messages: %+v", prov.last.Messages)
+	}
+}
+
 func TestDeliberate_WriteMemoryHookCapturesExplicitMarker(t *testing.T) {
 	kg := &fakeKnowledgeGateway{}
 	f, _ := newTestFunnel(t, bridle.ProviderResult{FinalText: "Commonplace: release decision\nUse blue/green for NEX-509.\n---\nnormal reply"})
