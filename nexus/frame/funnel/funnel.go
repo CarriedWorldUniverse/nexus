@@ -36,6 +36,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,6 +81,84 @@ func DefaultCompactionPolicy() CompactionPolicy {
 		ThresholdTokens:  125_000,
 		MaxSummaryTokens: 4_096,
 	}
+}
+
+// Funnel v2 §2 — tool-result eviction to a workspace
+// (docs/network/FUNNEL-V2-DESIGN.md §2). Two thresholds, both env-
+// gated behind FUNNEL_WORKSPACE_EVICT=1 (rollout posture: env-gated,
+// additive, reversible — off unless explicitly flipped on):
+//
+//   - A single tool result over FUNNEL_EVICT_RESULT_TOKENS (~20k
+//     tokens) is written to a workspace file and replaced in-window
+//     with a short pointer stub (evictOversizeResults).
+//   - When bridle's engine-agnostic PromptBudget check fires a
+//     ContextBudgetWarning (~FUNNEL_CTX_SWEEP_PCT% of the model's
+//     window), older tool results are swept to file pointers oldest-
+//     first until the tail is back under budget (sweepContextPressure).
+//
+// Both mutate sessionTail, so — per §1's prefix-cache-safety
+// requirement — both run exactly once per turn from commitTurnState,
+// batched, never per tool-call step.
+const (
+	defaultEvictResultTokens   = 20_000
+	defaultCtxSweepPercent     = 85
+	defaultContextWindowTokens = 150_000
+
+	// evictionStubPrefix marks a sessionTail Content string as an
+	// already-evicted pointer (vs. a live tool result) so sweeps and
+	// re-checks don't re-evict or double-count it.
+	evictionStubPrefix = "«result written to "
+)
+
+// workspaceEvictionConfig is the resolved (env-gated) funnel v2 §2
+// policy. Resolved once in New() from process env so one toggle
+// governs the whole funnel instance, mirroring FUNNEL_TODOS' posture
+// (FUNNEL-V2-DESIGN.md "Rollout").
+type workspaceEvictionConfig struct {
+	enabled              bool
+	resultTokenThreshold int
+	sweepPercent         int
+	windowTokens         int
+}
+
+// resolveWorkspaceEviction reads the FUNNEL_WORKSPACE_EVICT /
+// FUNNEL_EVICT_RESULT_TOKENS / FUNNEL_CTX_SWEEP_PCT env vars.
+// windowTokens is Config.ContextWindowTokens (0 = use the default).
+func resolveWorkspaceEviction(windowTokens int) workspaceEvictionConfig {
+	c := workspaceEvictionConfig{
+		enabled:              os.Getenv("FUNNEL_WORKSPACE_EVICT") == "1",
+		resultTokenThreshold: defaultEvictResultTokens,
+		sweepPercent:         defaultCtxSweepPercent,
+		windowTokens:         windowTokens,
+	}
+	if v := os.Getenv("FUNNEL_EVICT_RESULT_TOKENS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.resultTokenThreshold = n
+		}
+	}
+	if v := os.Getenv("FUNNEL_CTX_SWEEP_PCT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
+			c.sweepPercent = n
+		}
+	}
+	if c.windowTokens <= 0 {
+		c.windowTokens = defaultContextWindowTokens
+	}
+	return c
+}
+
+// sweepBudgetTokens is the absolute token budget the context-pressure
+// sweep targets: sweepPercent% of the configured window. Also wired
+// onto bridle.TurnRequest.ContextPolicy.PromptBudget so bridle's
+// existing warn-only budget check (NEX-581) IS the sweep's trigger —
+// per the design's resolved open question, no new signal to build.
+// Zero when eviction is disabled, which leaves bridle's PromptBudget
+// check permanently off (PromptBudget 0 = "no budget, never warn").
+func (c workspaceEvictionConfig) sweepBudgetTokens() int {
+	if !c.enabled {
+		return 0
+	}
+	return c.windowTokens * c.sweepPercent / 100
 }
 
 // ContextMode selects how the funnel derives session ids for
@@ -416,6 +496,19 @@ type Config struct {
 	// Compaction
 	Compaction CompactionPolicy
 
+	// WorkspaceDir is where funnel v2 §2 tool-result eviction writes
+	// oversize tool results (docs/network/FUNNEL-V2-DESIGN.md §2).
+	// Empty defaults to AspectHome/.funnel-workspace. Only consulted
+	// when eviction is enabled (env FUNNEL_WORKSPACE_EVICT=1).
+	WorkspaceDir string
+
+	// ContextWindowTokens is the model's context window in tokens —
+	// the base the workspace-eviction context-pressure sweep budget is
+	// a percentage of (FUNNEL_CTX_SWEEP_PCT, default 85). Zero uses
+	// defaultContextWindowTokens. Only consulted when eviction is
+	// enabled.
+	ContextWindowTokens int
+
 	// MaxStepsPerTurn caps tool-call rounds inside a single bridle turn.
 	// 0 = unlimited (bridle's default).
 	MaxStepsPerTurn int
@@ -663,6 +756,16 @@ type Funnel struct {
 	// the WARN from firing once per Receive call while the inbox
 	// hovers near the threshold. Guarded by f.mu.
 	inboxWarnLatched bool
+
+	// workspaceEviction is the resolved funnel v2 §2 policy (env-gated,
+	// resolved once in New — see resolveWorkspaceEviction).
+	workspaceEviction workspaceEvictionConfig
+
+	// evictionSeq numbers workspace files written by eviction so
+	// concurrent/rapid evictions never collide on a filename. Not
+	// guarded by mu — atomic is cheaper than taking the funnel lock
+	// just to bump a counter.
+	evictionSeq atomic.Int64
 }
 
 // compactionFailureLimit caps how many consecutive compact() errors
@@ -765,11 +868,12 @@ func New(cfg Config) (*Funnel, error) {
 
 	resolver := NewSessionResolver(cfg.AspectID, cfg.ContextMode)
 	f := &Funnel{
-		cfg:           cfg,
-		log:           cfg.Logger,
-		resolver:      resolver,
-		sessionHandle: resolver.GlobalHandle(),
-		seenMsgIDs:    make(map[int64]struct{}),
+		cfg:               cfg,
+		log:               cfg.Logger,
+		resolver:          resolver,
+		sessionHandle:     resolver.GlobalHandle(),
+		seenMsgIDs:        make(map[int64]struct{}),
+		workspaceEviction: resolveWorkspaceEviction(cfg.ContextWindowTokens),
 	}
 	// Hydrate the seen-set from disk if a persistence file is configured.
 	// Best-effort: parse failure logs + continues with an empty set
@@ -1210,6 +1314,12 @@ type deliberateState struct {
 	// applies on the NEXT turn).
 	binding               Binding
 	hookAdditionalContext []string
+
+	// sawContextBudgetWarning is set by runMainTurn when bridle emitted
+	// a ContextBudgetWarning during this turn (assembled prompt met/
+	// exceeded workspaceEviction.sweepBudgetTokens()). commitTurnState
+	// reads it to decide whether to run the §2 context-pressure sweep.
+	sawContextBudgetWarning bool
 }
 
 // popHeadForTurn pops the next inbox head (FIFO), builds the trigger
@@ -1461,6 +1571,12 @@ func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, user
 		MaxSteps:           f.cfg.MaxStepsPerTurn,
 		Cwd:                f.cfg.AspectHome,
 		ProviderEnv:        providerEnv,
+		// Funnel v2 §2: wires bridle's engine-agnostic PromptBudget
+		// check to workspaceEviction's sweep budget so its warn-only
+		// ContextBudgetWarning (NEX-581) becomes the context-pressure
+		// sweep's trigger. 0 (eviction disabled) leaves the check
+		// permanently off.
+		ContextPolicy: bridle.ContextPolicy{PromptBudget: f.workspaceEviction.sweepBudgetTokens()},
 		// NEX-300 main-turn slice: per-aspect sampling + output
 		// overrides flow through to the wire. Nil pointers / zero
 		// values stay unset on the request → bridle providers fall
@@ -1507,6 +1623,16 @@ func (f *Funnel) runMainTurn(ctx context.Context, st *deliberateState, req bridl
 		f.cfg.ObservabilityHook.BeginTurn(st.turnID, "main", binding.Model, string(binding.Provider), st.triggerMsgID)
 	}
 	sink := f.buildTurnSink(st.trigger.MsgID)
+	// Funnel v2 §2: latch whether bridle's PromptBudget check fired a
+	// ContextBudgetWarning during this turn — commitTurnState reads
+	// this to decide whether to run the context-pressure sweep. Only
+	// wired when eviction is enabled (req.ContextPolicy.PromptBudget
+	// is 0 otherwise, so bridle never emits the warning anyway).
+	var budgetSink *contextBudgetSink
+	if f.workspaceEviction.enabled {
+		budgetSink = &contextBudgetSink{inner: sink}
+		sink = budgetSink
+	}
 	// Tag the context with the turn_id so the triage tool runner
 	// persists rows under the right turn. Required when Triage is
 	// wired; harmless otherwise.
@@ -1514,6 +1640,9 @@ func (f *Funnel) runMainTurn(ctx context.Context, st *deliberateState, req bridl
 	result, err := binding.Harness.RunTurn(turnCtx, req, f.cfg.Runner, sink)
 	if f.cfg.ObservabilityHook != nil {
 		f.cfg.ObservabilityHook.EndTurn()
+	}
+	if budgetSink != nil {
+		st.sawContextBudgetWarning = budgetSink.saw.Load()
 	}
 	// turn.end must fire whether the turn succeeded or errored — the
 	// Lock 5 spec promises every turn.start has a paired turn.end.
@@ -1652,6 +1781,21 @@ func (f *Funnel) commitTurnState(ctx context.Context, st *deliberateState, resul
 	f.sessionHandle.New = false
 	f.mu.Unlock()
 
+	// Funnel v2 §2 — tool-result eviction. Both passes are batched here
+	// (once per turn, never per tool-call step) so they satisfy §1's
+	// prefix-cache-safety requirement, and they run BEFORE the next
+	// turn's popHeadForTurn snapshots sessionTail for maybeCompact —
+	// so a compaction rotate never discards a pointer this turn just
+	// wrote (the "ordering vs compaction" open question in the design
+	// doc; Deliberate's single-caller guard is what makes this
+	// ordering safe without extra locking here).
+	if f.workspaceEviction.enabled {
+		f.evictOversizeResults(len(result.SessionDelta))
+		if st.sawContextBudgetWarning {
+			f.sweepContextPressure()
+		}
+	}
+
 	// Post-turn hook — distills the just-completed turn's tail in
 	// claude-code's session jsonl before we hit --resume on the next
 	// turn. Synchronous; the rewriter's atomic temp-rename is safe
@@ -1688,6 +1832,182 @@ func (f *Funnel) commitTurnState(ctx context.Context, st *deliberateState, resul
 			"old_session", oldID, "new_session", newID,
 			"discarded_tail_events", oldTail, "discarded_tokens", oldTokens)
 	}
+}
+
+// evictOversizeResults implements funnel v2 §2's first eviction rule:
+// a single tool result over workspaceEviction.resultTokenThreshold
+// (~20k tokens) is written to a workspace file and replaced in-window
+// with a short pointer stub. Scoped to the newCount entries this
+// turn's commitTurnState just appended (result.SessionDelta) — a
+// single batched pass per turn, never per tool-call step, per §1's
+// prefix-cache-safety requirement.
+func (f *Funnel) evictOversizeResults(newCount int) {
+	if newCount <= 0 {
+		return
+	}
+	type candidate struct {
+		idx     int
+		content string
+	}
+	f.mu.Lock()
+	start := len(f.sessionTail) - newCount
+	if start < 0 {
+		start = 0
+	}
+	var candidates []candidate
+	for i := start; i < len(f.sessionTail); i++ {
+		ev := f.sessionTail[i]
+		if ev.Role != bridle.RoleTool || ev.Content == "" || isEvictionStub(ev.Content) {
+			continue
+		}
+		// Reuses estimateContextTokens (funnel.go) for the per-result
+		// estimate too — passing the content as the "user message" arg
+		// with an empty tail/inbox collapses it to the same chars/4
+		// heuristic the design doc calls out reusing, with no second
+		// estimator to keep in sync.
+		if estimateContextTokens(nil, nil, ev.Content) <= f.workspaceEviction.resultTokenThreshold {
+			continue
+		}
+		candidates = append(candidates, candidate{i, ev.Content})
+	}
+	f.mu.Unlock()
+
+	for _, c := range candidates {
+		f.evictSessionTailEntry(c.idx, c.content)
+	}
+}
+
+// sweepContextPressure implements funnel v2 §2's second eviction rule:
+// once a turn's bridle call has warned that the assembled prompt met
+// workspaceEviction.sweepBudgetTokens() (~85% of the model's window),
+// rewrite tool results to workspace pointers — oldest first — until
+// the tail's estimated token count is back under that same budget. A
+// single batched pass per turn (never per-step), called once from
+// commitTurnState after this turn's own append lands.
+func (f *Funnel) sweepContextPressure() {
+	budget := f.workspaceEviction.sweepBudgetTokens()
+	if budget <= 0 {
+		return
+	}
+	for {
+		f.mu.Lock()
+		if estimateContextTokens(f.sessionTail, nil, "") < budget {
+			f.mu.Unlock()
+			return
+		}
+		idx, content := -1, ""
+		for i := range f.sessionTail {
+			ev := f.sessionTail[i]
+			if ev.Role == bridle.RoleTool && ev.Content != "" && !isEvictionStub(ev.Content) {
+				idx, content = i, ev.Content
+				break
+			}
+		}
+		f.mu.Unlock()
+		if idx == -1 {
+			// Nothing left worth evicting (tail is all-stub or has no
+			// tool results). Give up rather than spin — compaction is
+			// the backstop for a tail that's oversized for other
+			// reasons (long assistant turns, e.g.).
+			return
+		}
+		if !f.evictSessionTailEntry(idx, content) {
+			// Write failed (already logged); don't loop forever
+			// retrying the same failure.
+			return
+		}
+	}
+}
+
+// evictSessionTailEntry writes a sessionTail entry's content to a
+// workspace file and swaps its Content for the pointer stub. The
+// write happens outside f.mu (disk I/O must not hold the lock other
+// goroutines need for Receive's concurrent inbox path); the entry is
+// re-matched by its original content before the swap as a defensive
+// check against the tail having moved between the snapshot and this
+// call. Returns false (logged) on write failure so callers can stop
+// rather than retry the same failure forever.
+func (f *Funnel) evictSessionTailEntry(idx int, content string) bool {
+	stub, err := f.writeEvictedResult(content)
+	if err != nil {
+		f.log.Warn("funnel: workspace eviction write failed; leaving result in-window",
+			"aspect", f.cfg.AspectID, "err", err)
+		return false
+	}
+	f.mu.Lock()
+	if idx < len(f.sessionTail) && f.sessionTail[idx].Content == content {
+		f.sessionTail[idx].Content = stub
+	}
+	f.mu.Unlock()
+	return true
+}
+
+// writeEvictedResult writes content to a fresh file in the funnel's
+// workspace directory and renders the in-window pointer stub that
+// replaces it: `«result written to <path> (N lines); first 10 lines:
+// ...»` (FUNNEL-V2-DESIGN.md §2).
+func (f *Funnel) writeEvictedResult(content string) (string, error) {
+	dir := f.workspaceDir()
+	// Tool results can carry sensitive output (file contents, command
+	// output, secrets a tool call happened to touch) — owner-only
+	// perms, not the world-readable defaults.
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", fmt.Errorf("funnel: workspace mkdir %s: %w", dir, err)
+	}
+	seq := f.evictionSeq.Add(1)
+	path := filepath.Join(dir, fmt.Sprintf("tool-result-%06d.txt", seq))
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return "", fmt.Errorf("funnel: workspace write %s: %w", path, err)
+	}
+	lines := strings.Split(content, "\n")
+	previewN := 10
+	if len(lines) < previewN {
+		previewN = len(lines)
+	}
+	preview := make([]string, previewN)
+	for i := 0; i < previewN; i++ {
+		preview[i] = truncateEvictionPreviewLine(lines[i])
+	}
+	return renderEvictionStub(path, len(lines), preview), nil
+}
+
+// evictionPreviewLineCap bounds each preview line's length. Without a
+// per-line cap, a single-line result with no "\n" at all (minified
+// JSON, base64, a long stack trace) would make "first 10 lines"
+// degenerate into "the whole result" — defeating the eviction it's
+// supposed to shrink.
+const evictionPreviewLineCap = 200
+
+func truncateEvictionPreviewLine(line string) string {
+	if len(line) <= evictionPreviewLineCap {
+		return line
+	}
+	return line[:evictionPreviewLineCap] + "…"
+}
+
+// workspaceDir resolves the directory oversize tool results are
+// written to: Config.WorkspaceDir if set, else AspectHome/.funnel-
+// workspace (the design doc's "the builder already has a per-run home
+// repo — reuse it").
+func (f *Funnel) workspaceDir() string {
+	if f.cfg.WorkspaceDir != "" {
+		return f.cfg.WorkspaceDir
+	}
+	return filepath.Join(f.cfg.AspectHome, ".funnel-workspace")
+}
+
+// renderEvictionStub formats the in-window pointer stub that replaces
+// an evicted tool result's Content.
+func renderEvictionStub(path string, lineCount int, previewLines []string) string {
+	return fmt.Sprintf("%s%s (%d lines); first %d lines:\n%s»",
+		evictionStubPrefix, path, lineCount, len(previewLines), strings.Join(previewLines, "\n"))
+}
+
+// isEvictionStub reports whether content is already a pointer stub
+// (vs. a live tool result), so eviction passes don't re-evict or
+// double-count already-evicted entries.
+func isEvictionStub(content string) bool {
+	return strings.HasPrefix(content, evictionStubPrefix)
 }
 
 // judgeTurn runs the post-hoc output filter on the natural reply,
@@ -2032,6 +2352,26 @@ func (f *Funnel) buildTurnSink(replyTo int64) bridle.EventSink {
 			aspectID: f.cfg.AspectID,
 		},
 		sink,
+	}
+}
+
+// contextBudgetSink wraps a turn's real EventSink and latches whether
+// a bridle.ContextBudgetWarning fired during the turn — the funnel v2
+// §2 context-pressure sweep's trigger. atomic.Bool because streaming
+// providers may emit from a reader goroutine distinct from the
+// RunTurn caller; every other event still flows through to inner
+// unchanged.
+type contextBudgetSink struct {
+	inner bridle.EventSink
+	saw   atomic.Bool
+}
+
+func (s *contextBudgetSink) Emit(ev bridle.Event) {
+	if _, ok := ev.(bridle.ContextBudgetWarning); ok {
+		s.saw.Store(true)
+	}
+	if s.inner != nil {
+		s.inner.Emit(ev)
 	}
 }
 
