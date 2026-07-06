@@ -111,11 +111,18 @@ func heartbeatAge(r workerstatus.Status, now time.Time) string {
 // an unexpectedly long field (e.g. a work_item_id ticket slug). Truncated
 // values get a trailing "…" marker so it's visibly not the whole string.
 func truncateCell(s string, max int) string {
-	if len(s) <= max {
+	if max <= 0 {
+		return ""
+	}
+	// Rune-safe: count Unicode runes, not bytes, so multi-byte UTF-8 never
+	// gets corrupted at the truncation boundary. (Cherry-picked from PR #402
+	// — the pool pipeline's first real ticket, built by anvil-builder.)
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	if max <= 1 {
-		return s[:max]
+	if max == 1 {
+		return string(runes[0])
 	}
-	return s[:max-1] + "…"
+	return string(runes[:max-1]) + "…"
 }
