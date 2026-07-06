@@ -294,6 +294,18 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 			})
 		}
 	}
+	// Sandbox marker for the claude-code CLI: the worker container runs as
+	// root, and claude-code refuses `--dangerously-skip-permissions` under
+	// root ("cannot be used with root/sudo privileges") — which is exactly
+	// how the claudecode provider invokes it headless. IS_SANDBOX=1 tells
+	// the CLI it is in a contained env and allows the bypass (confirmed live
+	// 2026-07-06 in the pool worker: the same invocation that exit-1'd as
+	// root replies normally with this set). The pod IS the sandbox: no
+	// interactive user, ephemeral, network-scoped. Set for the claude-code
+	// tier only — Ornith (openai provider) never spawns the CLI.
+	if claudeCodeProvider {
+		env = append(env, corev1.EnvVar{Name: "IS_SANDBOX", Value: "1"})
+	}
 	volumeMounts := []corev1.VolumeMount{
 		{Name: "work", MountPath: "/work"},
 		{Name: "cache", MountPath: "/cache"},

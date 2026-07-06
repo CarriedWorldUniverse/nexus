@@ -457,6 +457,28 @@ func TestBuildJob_FrontierAuth(t *testing.T) {
 		}
 	})
 
+	// IS_SANDBOX=1 lets the root-user container's claude-code CLI accept
+	// --dangerously-skip-permissions (live-confirmed fix, 2026-07-06); it is
+	// keyed to the claude-code provider only and needs no FrontierAuthFunc.
+	t.Run("claude-code gets IS_SANDBOX=1, openai does not", func(t *testing.T) {
+		envVal := func(env []corev1.EnvVar, name string) (string, bool) {
+			for _, e := range env {
+				if e.Name == name {
+					return e.Value, true
+				}
+			}
+			return "", false
+		}
+		cc := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t1", "claude-code").Spec.Template.Spec.Containers[0].Env
+		if v, ok := envVal(cc, "IS_SANDBOX"); !ok || v != "1" {
+			t.Errorf("claude-code Job: IS_SANDBOX = %q,%v; want \"1\",true", v, ok)
+		}
+		oa := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t1", "openai").Spec.Template.Spec.Containers[0].Env
+		if _, ok := envVal(oa, "IS_SANDBOX"); ok {
+			t.Error("openai Job must not set IS_SANDBOX (spawns no CLI)")
+		}
+	})
+
 	t.Run("claude-code dispatch gets the secret (k8s-secret delivery, the fallback path)", func(t *testing.T) {
 		withFunc := cfg
 		withFunc.FrontierAuthFunc = func() (string, string) {
