@@ -38,6 +38,11 @@ spec:
         metadata:
           labels: {app: drain-seeder}
         spec:
+          # localhost/nexus-broker:li1 lives only in dMon's containerd — without
+          # this pin the pod can land on the arm64 node and ErrImageNeverPull
+          # (hit live on first unsuspend, 2026-07-06).
+          nodeSelector:
+            kubernetes.io/hostname: dmonextreme
           restartPolicy: Never
           containers:
             - name: drain-seeder
