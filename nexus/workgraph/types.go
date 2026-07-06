@@ -82,9 +82,18 @@ type Result struct {
 // the ledger adapter needs to place it in the dependency graph. See
 // README.md for the full field<->ledger mapping.
 type WorkItem struct {
-	ID                 string     `json:"id"`
-	Role               string     `json:"role"`
-	TaskSpec           string     `json:"task_spec"`
+	ID       string `json:"id"`
+	Role     string `json:"role"`
+	TaskSpec string `json:"task_spec"`
+	// Summary is the ledger issue's short-form identity: GetWorkItem's read
+	// of the issue's summary column (see Summarize — always TaskSpec's first
+	// line, TrimSpace'd, capped at 120 chars; CreateWorkItem derives it this
+	// way, never from caller input, so it's a narrower/more stable identity
+	// signal than TaskSpec/Description round-tripping). NOT part of
+	// handoff.schema.json's work_item shape — an adapter-only enrichment.
+	// Empty on a WorkItem built locally before CreateWorkItem; only
+	// GetWorkItem/ListReady populate it.
+	Summary            string     `json:"summary,omitempty"`
 	AcceptanceCriteria []string   `json:"acceptance_criteria"`
 	CairnLine          string     `json:"cairn_line,omitempty"`
 	Artifacts          []Artifact `json:"artifacts,omitempty"`

@@ -193,28 +193,65 @@ func readFileLines(path string) ([]string, error) {
 }
 
 // taskSpecFirstLineMatches reports whether a and b's task specs name the
-// same task, per --dedupe's semantics: compare only the first line (a
-// TaskSpec may run to many lines — e.g. full task prose — but a recurring
-// cron-seeded task's identity lives in its first line, see
-// workgraph/adapter.go's summarize), each side TrimSpace'd first so leading/
-// trailing whitespace or a trailing newline never causes a false mismatch.
+// same task, per --dedupe's fallback semantics (see findDuplicateWorkItem —
+// this is the fallback used only when an existing item's Summary is
+// unavailable): compare only the first line (a TaskSpec may run to many
+// lines — e.g. full task prose — but a recurring cron-seeded task's
+// identity lives in its first line, see workgraph.Summarize), each side
+// normalized via normalizeTaskLine so leading/trailing whitespace, a
+// trailing newline, or the description having been reflowed/rewrapped
+// somewhere between write and read (hard newlines or repeated spaces
+// inserted at wrap points, the words themselves unchanged) never causes a
+// false mismatch.
 func taskSpecFirstLineMatches(a, b string) bool {
 	firstLine := func(s string) string {
 		s = strings.TrimSpace(s)
 		if i := strings.IndexByte(s, '\n'); i >= 0 {
 			s = s[:i]
 		}
-		return strings.TrimSpace(s)
+		return normalizeTaskLine(s)
 	}
 	return firstLine(a) == firstLine(b)
 }
 
+// normalizeTaskLine collapses any run of whitespace (spaces, tabs,
+// newlines) to a single space and trims the ends, via strings.Fields —
+// guards the fallback TaskSpec comparison (taskSpecFirstLineMatches)
+// against a description that survives a read-back reflowed/rewrapped
+// (e.g. a markdown-rendering or word-wrap pass reinserting whitespace at
+// different points) rather than byte-identical to what was written.
+func normalizeTaskLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // findDuplicateWorkItem scans existing (as returned by workgraph.Client.
 // ListReady for wi.Role — queued + dispatched/in-flight items, see
-// ListReady's doc comment) for one whose TaskSpec's first line matches wi's,
-// per taskSpecFirstLineMatches. Returns the first match's id, or "" if none.
+// ListReady's doc comment) for one that names the same task as wi.
+//
+// Primary comparison: wi's would-be Summary (workgraph.Summarize(wi.
+// TaskSpec) — wi is a not-yet-created draft, so it has no ledger-assigned
+// Summary of its own yet) against each existing item's real WorkItem.Summary
+// (GetWorkItem's read of the ledger issue's summary column). Summary is
+// preferred over TaskSpec/Description: it's a narrow, single-producer field
+// (CreateWorkItem always derives it via the same Summarize call, never from
+// caller input), so it's less exposed than TaskSpec/Description to
+// reformatting by anything else that might touch the issue between write and
+// read.
+//
+// Fallback (only when an existing item's Summary is empty — e.g. very old
+// ledger data from before this field existed): taskSpecFirstLineMatches
+// against TaskSpec/Description directly, whitespace-normalized.
+//
+// Returns the first match's id, or "" if none.
 func findDuplicateWorkItem(wi workgraph.WorkItem, existing []workgraph.WorkItem) string {
+	wantSummary := workgraph.Summarize(wi.TaskSpec)
 	for _, e := range existing {
+		if e.Summary != "" {
+			if e.Summary == wantSummary {
+				return e.ID
+			}
+			continue
+		}
 		if taskSpecFirstLineMatches(wi.TaskSpec, e.TaskSpec) {
 			return e.ID
 		}
