@@ -660,8 +660,13 @@ func main() {
 	// must be wrapped into funnelObsHook BEFORE funnel.New so every turn's
 	// events reach it.
 	var realOutputTracker *builderRealOutputTracker
+	// builderInFlight is shared between the progress hook (which feeds it
+	// ToolCallStart/ToolCallResult) and startBuilderIdleMonitor below
+	// (which reads it on every tick to suspend the stall timer while a
+	// tool call is still executing).
+	builderInFlight := &builderInFlightTracker{}
 	if *builderMode {
-		funnelObsHook = progressObservabilityHook{next: obsHook, progress: recordBuilderProgress}
+		funnelObsHook = progressObservabilityHook{next: obsHook, progress: recordBuilderProgress, inFlight: builderInFlight}
 		realOutputTracker = &builderRealOutputTracker{next: funnelObsHook}
 		funnelObsHook = realOutputTracker
 	}
@@ -964,7 +969,7 @@ func main() {
 			"idle_timeout", *builderIdleTimeout,
 			"job_hard_timeout", *builderTimeout)
 		emitBuilderAccepted(ctx, wsClient, log, os.Getenv("CW_DISPATCH_RUN_ID"))
-		go startBuilderIdleMonitor(ctx, *builderIdleTimeout, progressCh, func() {
+		go startBuilderIdleMonitor(ctx, *builderIdleTimeout, progressCh, builderInFlight, func() {
 			runID := os.Getenv("CW_DISPATCH_RUN_ID")
 			if err := wsClient.SendDispatchStatus(context.Background(), runID, "failed", builderStalledReason, time.Now().UTC()); err != nil {
 				log.Warn("agentfunnel: builder stalled status enqueue failed", "run_id", runID, "err", err)
