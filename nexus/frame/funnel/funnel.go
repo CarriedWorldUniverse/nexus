@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -1390,7 +1391,28 @@ func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, user
 		st.hookAdditionalContext = append(st.hookAdditionalContext, block)
 	}
 	if len(st.hookAdditionalContext) > 0 {
-		systemPrompt = systemPrompt + "\n\n" + strings.Join(st.hookAdditionalContext, "\n\n")
+		hookBlock := strings.Join(st.hookAdditionalContext, "\n\n")
+		// FUNNEL_PREFIX_STABLE=1: hook-injected context (SessionStart/
+		// AutoRecall) is request-varying — concatenating it onto the
+		// SYSTEM prompt busts the vLLM prefix cache from token 0 on
+		// every turn a hook fires, since the system message is the
+		// front of the cached prefix. Route it into the trailing
+		// per-turn user/delta zone instead: the same zone the
+		// goal-loop's continuation brief and Inbox items land in (see
+		// bridle's lowerRequest, run.go:635-653, which appends Inbox
+		// then UserMessage after SessionTail). The model still sees
+		// the hook context on this turn, but the system prefix that
+		// gets cached never changes shape. Default (unset) behavior
+		// is unchanged: append to the system prompt.
+		if os.Getenv("FUNNEL_PREFIX_STABLE") == "1" {
+			if userMessage != "" {
+				userMessage = userMessage + "\n\n" + hookBlock
+			} else {
+				userMessage = hookBlock
+			}
+		} else {
+			systemPrompt = systemPrompt + "\n\n" + hookBlock
+		}
 	}
 	providerEnv, err := f.resolveProviderEnv(ctx, "main")
 	if err != nil {
