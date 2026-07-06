@@ -21,7 +21,76 @@ const (
 
 type builderProgressFunc func(string)
 
-func startBuilderIdleMonitor(ctx context.Context, timeout time.Duration, progress <-chan string, onStall func(), log *slog.Logger) {
+// builderInFlightTracker counts tool calls currently executing (a
+// ToolCallStart seen, its matching ToolCallResult not yet seen). The idle
+// monitor suspends its stall timer while the count is > 0: a tool call
+// that is still running (e.g. `go build ./...` taking several minutes) is
+// itself progress, not idleness. Live evidence: a builder run was killed
+// "ESCALATION builder stalled — idle timeout expired, last_progress=
+// tool_call" while a long-running tool call was STILL EXECUTING — the old
+// monitor only reset on discrete progress *signals* (a completed tool
+// call, a chat send, …) and had no notion of "currently busy."
+//
+// Synchronization: inc/dec are called from the observability event path —
+// bridle dispatches ToolCallStart/ToolCallResult synchronously as part of
+// the model's tool-call round-trip, on whatever goroutine is driving that
+// turn. dec/inFlight are read from the separate idle-monitor goroutine on
+// every timer tick. A single mutex guards the counter AND the "did this
+// decrement cross from >0 to 0" check together (rather than a bare atomic
+// counter) so that a decrement's zero-crossing determination can never be
+// computed from a stale read — with a plain atomic, two concurrent
+// decrements could each independently observe "count is now 0" after a
+// racy load, double-reporting the zero-crossing; here the check and the
+// mutation happen under the same lock. The monitor's own read
+// (builderInFlightTracker.inFlight) also always takes the lock — the
+// select loop re-reads it fresh on every tick rather than caching a
+// snapshot from a previous tick, since the whole point is to notice a
+// tool completing between ticks.
+type builderInFlightTracker struct {
+	mu    sync.Mutex
+	count int
+}
+
+// inc records a ToolCallStart — one more tool call is now in flight.
+func (t *builderInFlightTracker) inc() {
+	t.mu.Lock()
+	t.count++
+	t.mu.Unlock()
+}
+
+// dec records a ToolCallResult (success or error — both end the tool
+// call). Returns true iff this decrement brought the in-flight count from
+// >0 down to exactly 0 — the instant the idle monitor's window should
+// restart from, per the design (a tool finishing is progress). Never lets
+// the count go negative: a ToolCallResult with no matching prior
+// ToolCallStart is unexpected but must not panic or corrupt the counter,
+// so it's logged as a warning and treated as a no-op.
+func (t *builderInFlightTracker) dec(log *slog.Logger) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.count <= 0 {
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Warn("agentfunnel: builder in-flight tool counter underflow — ToolCallResult with no matching ToolCallStart")
+		t.count = 0
+		return false
+	}
+	t.count--
+	return t.count == 0
+}
+
+// inFlight reports whether at least one tool call is currently executing.
+func (t *builderInFlightTracker) inFlight() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.count > 0
+}
+
+// startBuilderIdleMonitor watches for builder inactivity. inFlight may be
+// nil (treated as "nothing ever in flight," matching the pre-existing
+// behavior) for callers that don't track tool concurrency.
+func startBuilderIdleMonitor(ctx context.Context, timeout time.Duration, progress <-chan string, inFlight *builderInFlightTracker, onStall func(), log *slog.Logger) {
 	if timeout <= 0 {
 		return
 	}
@@ -31,6 +100,15 @@ func startBuilderIdleMonitor(ctx context.Context, timeout time.Duration, progres
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	lastReason := "startup"
+	resetTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(timeout)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -39,14 +117,18 @@ func startBuilderIdleMonitor(ctx context.Context, timeout time.Duration, progres
 			if reason != "" {
 				lastReason = reason
 			}
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(timeout)
+			resetTimer()
 		case <-timer.C:
+			// Re-check suspension on every tick — never cache the
+			// in-flight state from a previous iteration. A tool call
+			// still running when the window would otherwise expire
+			// means this isn't a stall: rearm and keep waiting.
+			if inFlight != nil && inFlight.inFlight() {
+				log.Debug("agentfunnel: builder idle timer suspended — tool call in flight",
+					"idle_timeout", timeout)
+				resetTimer()
+				continue
+			}
 			log.Error("agentfunnel: ESCALATION builder stalled — idle timeout expired",
 				"reason", builderStalledReason,
 				"idle_timeout", timeout,
@@ -69,6 +151,12 @@ func newBuilderProgressReporter(ch chan<- string) builderProgressFunc {
 type progressObservabilityHook struct {
 	next     funnel.ObservabilityHook
 	progress builderProgressFunc
+	// inFlight, when non-nil, is fed ToolCallStart/ToolCallResult so the
+	// idle monitor can suspend its timer for the duration of a tool call
+	// rather than only reacting to discrete progress signals. Optional —
+	// nil preserves the pre-existing behavior for callers that don't wire
+	// it up.
+	inFlight *builderInFlightTracker
 }
 
 func (h progressObservabilityHook) BeginTurn(turnID, label, model, provider string, triggerMsg int64) {
@@ -79,9 +167,25 @@ func (h progressObservabilityHook) BeginTurn(turnID, label, model, provider stri
 
 func (h progressObservabilityHook) OnBridleEvent(ev bridle.Event) {
 	switch e := ev.(type) {
+	case bridle.ToolCallStart:
+		if h.inFlight != nil {
+			h.inFlight.inc()
+		}
 	case bridle.ToolCallResult:
+		zeroCrossed := false
+		if h.inFlight != nil {
+			zeroCrossed = h.inFlight.dec(nil)
+		}
 		if e.Err == "" {
 			h.progress("tool_call")
+		} else if zeroCrossed {
+			// Error results don't otherwise emit a progress signal
+			// (TestBuilderIdleMonitorDoesNotResetOnErrorBursts), but a
+			// tool finishing — even with an error — that brings the
+			// in-flight count back to zero IS the moment the idle
+			// window should restart from: the tool is no longer
+			// running, so this is genuinely fresh idle time from here.
+			h.progress("tool_call_end")
 		}
 	case bridle.TurnDone:
 		h.progress("turn_done")
