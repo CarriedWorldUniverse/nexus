@@ -514,9 +514,9 @@ func TestRunnerPostsCompletionSummary(t *testing.T) {
 	end := start.Add(2 * time.Minute)
 	writeTurnFrame(t, r.Cfg.ActivityDir, "anvil", start.Add(time.Minute), observability.TurnComplete, "")
 
-	t.Cleanup(dispatch.SetLookupPRURLForTest(func(repo, branch string) (string, error) {
-		if repo != "CarriedWorldUniverse/nexus" || branch != "builder/NEX-1" {
-			t.Fatalf("lookup args repo=%q branch=%q", repo, branch)
+	t.Cleanup(dispatch.SetLookupPRURLForTest(func(repo, branch, ticket string) (string, error) {
+		if repo != "CarriedWorldUniverse/nexus" || branch != "builder/NEX-1" || ticket != "NEX-1" {
+			t.Fatalf("lookup args repo=%q branch=%q ticket=%q", repo, branch, ticket)
 		}
 		return "https://github.com/CarriedWorldUniverse/nexus/pull/123", nil
 	}))
@@ -550,7 +550,7 @@ func TestRunnerCompletionSummaryFailSoftNoPR(t *testing.T) {
 	r.Poster = poster
 	_ = r.Init(context.Background())
 
-	t.Cleanup(dispatch.SetLookupPRURLForTest(func(string, string) (string, error) {
+	t.Cleanup(dispatch.SetLookupPRURLForTest(func(string, string, string) (string, error) {
 		return "", errors.New("gh unavailable")
 	}))
 

@@ -150,14 +150,31 @@ func watchBuilderGitProgress(ctx context.Context, worktree string, interval time
 	}
 }
 
+// builderToolResultCap bounds how much tool-result text
+// builderRealOutputTracker accumulates per turn — a single file-read tool
+// result can be arbitrarily large and would otherwise blow the acceptance
+// judge's context. Tail-kept (strings.TrimLeft-style truncation from the
+// front) because recent evidence matters most: the LAST thing the model's
+// tools produced this turn is the most relevant signal for "did it actually
+// do the work."
+const builderToolResultCap = 50_000
+
 // builderRealOutputTracker accumulates the CURRENT turn's streamed model
-// text (bridle.ModelChunk events) so the verified-completion gate
-// (builderAcceptanceGate, main.go) can judge what the model actually
-// produced this turn rather than trusting a task_done self-report alone —
-// review finding on Unit B pass 1 (NET-24: keel-builder's summary claimed
-// success while the model produced nothing matching the required token; a
-// model authoring "posted CONVERGED-BETA-OK" as its OWN summary text
-// without ever having produced it would pass a summary-only check).
+// text (bridle.ModelChunk events) AND tool-call results (bridle.ToolCallResult
+// events) so the verified-completion gate (builderAcceptanceGate, main.go)
+// can judge what the model actually produced this turn rather than trusting
+// a task_done self-report alone — review finding on Unit B pass 1 (NET-24:
+// keel-builder's summary claimed success while the model produced nothing
+// matching the required token; a model authoring "posted CONVERGED-BETA-OK"
+// as its OWN summary text without ever having produced it would pass a
+// summary-only check).
+//
+// Live evidence NET-46 (2026-07-06): a real PR existed (gh pr create's tool
+// output carried the URL) but the judge only ever saw the model's streamed
+// TEXT — the tool result itself never reached verification, so genuine
+// evidence was invisible and the run was wrongly rejected. Tool results are
+// captured here alongside model text so verificationInput can fold in real
+// evidence, not just self-report + prose.
 //
 // Reset at the top of each turn (BeginTurn) so a stale prior turn's text
 // never leaks into the NEXT turn's verification. Mutex-guarded because
@@ -166,14 +183,18 @@ func watchBuilderGitProgress(ctx context.Context, worktree string, interval time
 // for that same turn's remaining tool-call rounds; snapshot() may be read
 // concurrently with a WriteString from the tail of the same turn.
 type builderRealOutputTracker struct {
-	next funnel.ObservabilityHook
-	mu   sync.Mutex
-	text strings.Builder
+	next        funnel.ObservabilityHook
+	mu          sync.Mutex
+	text        strings.Builder
+	toolNames   map[string]string // ToolCallStart.ID -> Name, for labeling results
+	toolResults string            // capped, tail-kept accumulation of tool results this turn
 }
 
 func (h *builderRealOutputTracker) BeginTurn(turnID, label, model, provider string, triggerMsg int64) {
 	h.mu.Lock()
 	h.text.Reset()
+	h.toolNames = nil
+	h.toolResults = ""
 	h.mu.Unlock()
 	if h.next != nil {
 		h.next.BeginTurn(turnID, label, model, provider, triggerMsg)
@@ -181,9 +202,31 @@ func (h *builderRealOutputTracker) BeginTurn(turnID, label, model, provider stri
 }
 
 func (h *builderRealOutputTracker) OnBridleEvent(ev bridle.Event) {
-	if chunk, ok := ev.(bridle.ModelChunk); ok {
+	switch e := ev.(type) {
+	case bridle.ModelChunk:
 		h.mu.Lock()
-		h.text.WriteString(chunk.Text)
+		h.text.WriteString(e.Text)
+		h.mu.Unlock()
+	case bridle.ToolCallStart:
+		h.mu.Lock()
+		if h.toolNames == nil {
+			h.toolNames = make(map[string]string)
+		}
+		h.toolNames[e.ID] = e.Name
+		h.mu.Unlock()
+	case bridle.ToolCallResult:
+		h.mu.Lock()
+		name := h.toolNames[e.ID]
+		if name == "" {
+			name = "tool"
+		}
+		var entry string
+		if e.Err != "" {
+			entry = "[TOOL " + name + " ERROR] " + e.Err + "\n"
+		} else {
+			entry = "[TOOL " + name + " RESULT] " + strings.TrimSpace(string(e.Result)) + "\n"
+		}
+		h.toolResults = appendCappedTail(h.toolResults, entry, builderToolResultCap)
 		h.mu.Unlock()
 	}
 	if h.next != nil {
@@ -197,14 +240,53 @@ func (h *builderRealOutputTracker) EndTurn() {
 	}
 }
 
-// snapshot returns everything streamed so far in the current turn. Safe to
-// call mid-turn (task_done fires before the turn's TurnDone event) — it
-// just returns whatever has streamed up to that instant, which is exactly
-// the "real output produced so far" signal the acceptance gate needs.
-func (h *builderRealOutputTracker) snapshot() string {
+// appendCappedTail appends add to existing and, if the result exceeds cap
+// chars, keeps only the TAIL — the most recent evidence, per NET-46's fix
+// spec, matters most for verification; an older large tool result is more
+// likely superseded than a fresh one.
+func appendCappedTail(existing, add string, maxLen int) string {
+	combined := existing + add
+	if len(combined) <= maxLen {
+		return combined
+	}
+	return combined[len(combined)-maxLen:]
+}
+
+// textSnapshot returns everything the model streamed so far in the current
+// turn. Safe to call mid-turn (task_done fires before the turn's TurnDone
+// event) — it just returns whatever has streamed up to that instant, which
+// is exactly the "real output produced so far" signal the acceptance gate
+// needs.
+func (h *builderRealOutputTracker) textSnapshot() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.text.String()
+}
+
+// toolResultsSnapshot returns the capped, tail-kept tool-result text
+// accumulated so far in the current turn.
+func (h *builderRealOutputTracker) toolResultsSnapshot() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.toolResults
+}
+
+// snapshot returns the combined real-evidence signal for the current turn:
+// streamed model text plus any tool-call results, labeled so the judge can
+// tell them apart. Kept as the single entry point realOutputFor calls so
+// verificationInput's contract (one authoritative "real output" string)
+// doesn't need to change shape for callers that don't care about the
+// text/tool-result split.
+func (h *builderRealOutputTracker) snapshot() string {
+	text := h.textSnapshot()
+	tools := h.toolResultsSnapshot()
+	if tools == "" {
+		return text
+	}
+	if text == "" {
+		return "TOOL RESULTS THIS TURN:\n" + tools
+	}
+	return text + "\n\nTOOL RESULTS THIS TURN:\n" + tools
 }
 
 func gitHead(ctx context.Context, worktree string) (string, error) {

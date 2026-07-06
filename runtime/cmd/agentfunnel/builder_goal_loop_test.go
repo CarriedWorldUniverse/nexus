@@ -135,7 +135,11 @@ func TestBuilderDecide_AcceptanceGatesNonCompleteReasons(t *testing.T) {
 // false on miss or error (fail-closed), with no stop side effect.
 func TestBuilderPRVerifier(t *testing.T) {
 	orig := prExistsFn
-	defer func() { prExistsFn = orig }()
+	origTicket := prExistsByTicketFn
+	defer func() { prExistsFn = orig; prExistsByTicketFn = origTicket }()
+	// Head-branch miss/error falls back to a ticket search (NET-46); stub it
+	// to a hermetic "not found" so this test never shells out to real gh.
+	prExistsByTicketFn = func(repo, ticket string) (bool, error) { return false, nil }
 	log := slog.Default()
 	cases := []struct {
 		name string
