@@ -68,8 +68,16 @@ func HandNamePool(base string) []string {
 // suffix a registered WorkerRole, the prefix a registered WorkerPersonality.
 var (
 	// WorkerRoles is the closed role set. SplitWorker matches the LONGEST
-	// suffix, so `security-reviewer` is recognised ahead of `reviewer`.
-	WorkerRoles = []string{"security-reviewer", "builder", "tester", "reviewer", "painter", "modeller"}
+	// suffix, so `security-reviewer` is recognised ahead of `reviewer`, and
+	// `builder-complex` ahead of `builder` (e.g. `anvil-builder-complex` →
+	// ("anvil", "builder-complex"), never a false split against `builder`).
+	//
+	// `builder-complex` is the heavy-tier builder role (2026-07-06 role-tier
+	// decision): same job as `builder`, different BRAIN (provider/model) per
+	// the role→brain config (see nexus/orchestrator's role resolver). Tier is
+	// a role property, not a personality property — any personality may take
+	// either builder role.
+	WorkerRoles = []string{"security-reviewer", "builder-complex", "builder", "tester", "reviewer", "painter", "modeller"}
 
 	// WorkerPersonalities is the pool personality set — existing single-word
 	// aspects. `shadow` is deliberately ABSENT: it is the orchestrator, not a

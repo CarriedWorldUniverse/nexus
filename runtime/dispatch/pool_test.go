@@ -647,6 +647,71 @@ func TestSubmitPoolItem_QueuedDrainInheritsLeasedPersonalityProvider(t *testing.
 	}
 }
 
+// TestSubmitPoolItem_RoleBrainOverridesLeasedPersonalityProvider proves the
+// role-tier-brains precedence (2026-07-06): PoolItem.Provider/Model, when
+// set (a role's configured brain — see nexus/orchestrator/rolebrain.go),
+// wins over the leased personality's own aspects-row provider (r.HandProvider)
+// — the opposite of TestSubmitPoolItem_InheritsLeasedPersonalityProvider,
+// which covers the personality-row fallback when no role brain is set.
+func TestSubmitPoolItem_RoleBrainOverridesLeasedPersonalityProvider(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _ := newPoolFixture(fk)
+	// Personality "keel"'s own aspects row is codex-cli, but the role brain
+	// below (claude-code) must win.
+	r.HandProvider = func(_ context.Context, parent string) string {
+		if parent == "keel" {
+			return "codex-cli"
+		}
+		return ""
+	}
+
+	if _, err := r.SubmitPoolItem(context.Background(), dispatch.PoolItem{
+		Role: "builder-complex", Task: "do work", WorkItemID: "wi-1", Personality: "keel",
+		Provider: "claude-code", Model: "claude-sonnet-4-6",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fk.jobObjs) != 1 {
+		t.Fatalf("jobs = %d, want 1", len(fk.jobObjs))
+	}
+	job := fk.jobObjs[0]
+
+	// codex-auth must NOT be mounted — the effective provider is claude-code,
+	// not the personality row's codex-cli.
+	for _, ic := range job.Spec.Template.Spec.InitContainers {
+		if ic.Name == "codex-auth" {
+			t.Error("role brain override should win: codex-auth init container should not be present")
+		}
+	}
+	for name, want := range map[string]string{
+		"CW_PROVIDER": "claude-code",
+		"CW_MODEL":    "claude-sonnet-4-6",
+	} {
+		if got, ok := jobEnvValue(job, name); !ok || got != want {
+			t.Errorf("job env %s = %q (present=%v), want %q", name, got, ok, want)
+		}
+	}
+}
+
+// TestSubmitPoolItem_NoRoleBrain_NoCWProviderModelEnv proves the empty-
+// override case reproduces pre-role-tier-brains behavior exactly: no
+// CW_PROVIDER/CW_MODEL env at all (not even empty-valued) when PoolItem
+// carries no Provider/Model.
+func TestSubmitPoolItem_NoRoleBrain_NoCWProviderModelEnv(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _ := newPoolFixture(fk)
+
+	if _, err := r.SubmitPool(context.Background(), "builder", "do work", "wi-1", ""); err != nil {
+		t.Fatal(err)
+	}
+	job := fk.jobObjs[0]
+	for _, name := range []string{"CW_PROVIDER", "CW_MODEL"} {
+		if _, ok := jobEnvValue(job, name); ok {
+			t.Errorf("job env %s should be absent when no role brain is set", name)
+		}
+	}
+}
+
 // argValueEquals mirrors jobspec_test.go's (package dispatch, internal)
 // helper of the same name — duplicated here rather than exported since
 // this file is package dispatch_test (external).

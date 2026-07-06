@@ -509,3 +509,63 @@ func TestBuildJob_FrontierAuth(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildJob_RoleBrainProviderModelEnv covers the role-tier-brains
+// (2026-07-06) CW_PROVIDER/CW_MODEL injection: a Brief carrying a role-brain
+// override (Brief.Provider/Model, threaded from dispatch.PoolItem — see
+// pool.go) must both (a) surface as CW_PROVIDER/CW_MODEL env for agentfunnel
+// to prefer over the broker resolve response, AND (b) drive the SAME
+// `provider` BuildJob parameter that gates which auth gets mounted
+// (FrontierAuthFunc's CLAUDE_CODE_OAUTH_TOKEN here) — i.e. the k8s-level
+// auth and the worker-process-level provider selection are keyed off the
+// same EFFECTIVE provider, never two different ones. Runner.launch is what
+// derives that single `provider` argument from Brief.Provider (see
+// runner.go); this test exercises BuildJob directly with that already-
+// resolved value, mirroring how launch calls it.
+func TestBuildJob_RoleBrainProviderModelEnv(t *testing.T) {
+	cfg := JobConfig{Image: "img", Namespace: "nexus", BrokerHost: "h"}
+	cfg.FrontierAuthFunc = func() (string, string) {
+		return DefaultFrontierAuthSecretName, DefaultFrontierAuthSecretKey
+	}
+
+	t.Run("role brain sets CW_PROVIDER/CW_MODEL and the matching auth mounts", func(t *testing.T) {
+		b := Brief{Agent: "keel-builder-complex", Ticket: "wi-1", Provider: "claude-code", Model: "claude-sonnet-4-6"}
+		job := BuildJob(b, cfg, "t1", b.Provider)
+		c := job.Spec.Template.Spec.Containers[0]
+		if !envValueEquals(c.Env, "CW_PROVIDER", "claude-code") {
+			t.Errorf("missing CW_PROVIDER=claude-code: %v", c.Env)
+		}
+		if !envValueEquals(c.Env, "CW_MODEL", "claude-sonnet-4-6") {
+			t.Errorf("missing CW_MODEL=claude-sonnet-4-6: %v", c.Env)
+		}
+		if !envSecretKeyRefEquals(c.Env, "CLAUDE_CODE_OAUTH_TOKEN", DefaultFrontierAuthSecretName, DefaultFrontierAuthSecretKey) {
+			t.Errorf("effective provider claude-code should get CLAUDE_CODE_OAUTH_TOKEN: %v", c.Env)
+		}
+	})
+
+	t.Run("no role brain — no CW_PROVIDER/CW_MODEL env at all (not even empty)", func(t *testing.T) {
+		job := BuildJob(Brief{Agent: "anvil-builder", Ticket: "wi-1"}, cfg, "t1", "codex-cli")
+		c := job.Spec.Template.Spec.Containers[0]
+		for _, name := range []string{"CW_PROVIDER", "CW_MODEL"} {
+			for _, v := range c.Env {
+				if v.Name == name {
+					t.Errorf("%s should be absent when Brief carries no role brain: %v", name, c.Env)
+				}
+			}
+		}
+	})
+
+	t.Run("provider set without model — only CW_PROVIDER injected", func(t *testing.T) {
+		b := Brief{Agent: "anvil-builder", Ticket: "wi-1", Provider: "codex-cli"}
+		job := BuildJob(b, cfg, "t1", b.Provider)
+		c := job.Spec.Template.Spec.Containers[0]
+		if !envValueEquals(c.Env, "CW_PROVIDER", "codex-cli") {
+			t.Errorf("missing CW_PROVIDER=codex-cli: %v", c.Env)
+		}
+		for _, v := range c.Env {
+			if v.Name == "CW_MODEL" {
+				t.Errorf("CW_MODEL should be absent when Brief.Model is empty: %v", c.Env)
+			}
+		}
+	})
+}

@@ -279,6 +279,134 @@ func TestRunDrainLoop_StopsOnContextCancel(t *testing.T) {
 	}
 }
 
+// --- parseRoleBrains / role-tier-brains ---
+
+func TestParseRoleBrains(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want map[string]orchestrator.RoleBrain
+	}{
+		{"empty", "", map[string]orchestrator.RoleBrain{}},
+		{"whitespace only", "   ", map[string]orchestrator.RoleBrain{}},
+		{
+			"single entry",
+			"builder-complex=claude-code:claude-sonnet-4-6",
+			map[string]orchestrator.RoleBrain{"builder-complex": {Provider: "claude-code", Model: "claude-sonnet-4-6"}},
+		},
+		{
+			"multiple entries with spaces",
+			" builder-complex=claude-code:claude-sonnet-4-6 , tester = codex:gpt-5 ",
+			map[string]orchestrator.RoleBrain{
+				"builder-complex": {Provider: "claude-code", Model: "claude-sonnet-4-6"},
+				"tester":          {Provider: "codex", Model: "gpt-5"},
+			},
+		},
+		{
+			"provider only (no model)",
+			"builder-complex=claude-code",
+			map[string]orchestrator.RoleBrain{"builder-complex": {Provider: "claude-code", Model: ""}},
+		},
+		{
+			"malformed entry (no =) skipped",
+			"builder-complex claude-code:claude-sonnet-4-6",
+			map[string]orchestrator.RoleBrain{},
+		},
+		{
+			"malformed entry (empty provider) skipped",
+			"builder-complex=:claude-sonnet-4-6",
+			map[string]orchestrator.RoleBrain{},
+		},
+		{
+			"one malformed entry does not drop the rest",
+			"bad-entry-no-equals,builder-complex=claude-code:claude-sonnet-4-6",
+			map[string]orchestrator.RoleBrain{"builder-complex": {Provider: "claude-code", Model: "claude-sonnet-4-6"}},
+		},
+		{
+			"unknown role still parses (with a warning, not an error)",
+			"nonexistent-role=claude-code:claude-sonnet-4-6",
+			map[string]orchestrator.RoleBrain{"nonexistent-role": {Provider: "claude-code", Model: "claude-sonnet-4-6"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseRoleBrains(tc.in, testLogger(t))
+			if len(got) != len(tc.want) {
+				t.Fatalf("parseRoleBrains(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+			for role, wantBrain := range tc.want {
+				if gotBrain, ok := got[role]; !ok || gotBrain != wantBrain {
+					t.Fatalf("parseRoleBrains(%q)[%q] = %v, want %v", tc.in, role, gotBrain, wantBrain)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildOrchestrator_DefaultRoles_IncludesBuilderComplex proves the
+// role-tier-brains default (deliverable 5) without requiring
+// ORCHESTRATOR_ROLES to be set.
+func TestBuildOrchestrator_DefaultRoles_IncludesBuilderComplex(t *testing.T) {
+	t.Setenv("ORCHESTRATOR_ENABLE", "1")
+
+	wg := &workgraph.Client{}
+	orch := buildOrchestrator(testLogger(t), wg, fakeDispatcher{}, fakeWorkerStatus{})
+	if orch == nil {
+		t.Fatal("buildOrchestrator with full env = nil, want non-nil orchestrator")
+	}
+	found := false
+	for _, r := range orch.Roles {
+		if r == "builder-complex" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("orch.Roles = %v, want it to include builder-complex", orch.Roles)
+	}
+}
+
+// TestBuildOrchestrator_RoleBrainsEnv_WiresResolver proves ORCHESTRATOR_ROLE_BRAINS
+// results in a Resolver that resolves the configured role to its brain, and an
+// unconfigured role to no override.
+func TestBuildOrchestrator_RoleBrainsEnv_WiresResolver(t *testing.T) {
+	t.Setenv("ORCHESTRATOR_ENABLE", "1")
+	t.Setenv("ORCHESTRATOR_ROLE_BRAINS", "builder-complex=claude-code:claude-sonnet-4-6")
+
+	wg := &workgraph.Client{}
+	orch := buildOrchestrator(testLogger(t), wg, fakeDispatcher{}, fakeWorkerStatus{})
+	if orch == nil {
+		t.Fatal("buildOrchestrator with full env = nil, want non-nil orchestrator")
+	}
+	if orch.Resolver == nil {
+		t.Fatal("orch.Resolver = nil, want RoleBrainResolver wired from ORCHESTRATOR_ROLE_BRAINS")
+	}
+	_, _, _, provider, model := orch.Resolver.Resolve("builder-complex")
+	if provider != "claude-code" || model != "claude-sonnet-4-6" {
+		t.Fatalf("Resolve(builder-complex) = (%q,%q), want (claude-code,claude-sonnet-4-6)", provider, model)
+	}
+	_, _, _, provider, model = orch.Resolver.Resolve("builder")
+	if provider != "" || model != "" {
+		t.Fatalf("Resolve(builder) (no override configured) = (%q,%q), want (\"\",\"\")", provider, model)
+	}
+}
+
+// TestBuildOrchestrator_NoRoleBrainsEnv_ResolverNil proves the "empty env"
+// path leaves Resolver nil (see buildOrchestrator's comment on why: matches
+// DrainOnce's zero-overhead no-Resolver behavior, unchanged for anyone not
+// using this feature).
+func TestBuildOrchestrator_NoRoleBrainsEnv_ResolverNil(t *testing.T) {
+	t.Setenv("ORCHESTRATOR_ENABLE", "1")
+
+	wg := &workgraph.Client{}
+	orch := buildOrchestrator(testLogger(t), wg, fakeDispatcher{}, fakeWorkerStatus{})
+	if orch == nil {
+		t.Fatal("buildOrchestrator with full env = nil, want non-nil orchestrator")
+	}
+	if orch.Resolver != nil {
+		t.Fatalf("orch.Resolver = %v, want nil when ORCHESTRATOR_ROLE_BRAINS is unset", orch.Resolver)
+	}
+}
+
 // --- parseCSVOrDefault ---
 
 func TestParseCSVOrDefault(t *testing.T) {

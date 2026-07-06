@@ -125,10 +125,16 @@ func buildWorkgraphClient(logger *slog.Logger) *workgraph.Client {
 //
 //	ORCHESTRATOR_ENABLE=1        explicit opt-in. Unset/not "1" → orchestrator not started.
 //	ORCHESTRATOR_ROLES           comma-separated role labels the pool serves
-//	                             (default "builder,tester,reviewer,security-reviewer")
+//	                             (default "builder,builder-complex,tester,reviewer,security-reviewer")
 //	ORCHESTRATOR_STALE_AFTER     ReapStale heartbeat-staleness threshold, a
 //	                             time.ParseDuration string (default: orchestrator's
 //	                             own 5m default; invalid values are ignored with a warning)
+//	ORCHESTRATOR_ROLE_BRAINS     role->brain overrides (role-tier-brains, 2026-07-06):
+//	                             comma-separated "role=provider:model" entries, e.g.
+//	                             "builder-complex=claude-code:claude-sonnet-4-6" — see
+//	                             parseRoleBrains. Unset/empty → no overrides, every role
+//	                             dispatches with the leased personality's own aspects-row
+//	                             provider/model (unchanged pre-role-tier-brains behavior).
 func buildOrchestrator(logger *slog.Logger, wg *workgraph.Client, dispatcher orchestrator.Dispatcher, workerStatus orchestrator.WorkerStatusStore) *orchestrator.Orchestrator {
 	if os.Getenv("ORCHESTRATOR_ENABLE") != "1" {
 		return nil
@@ -141,7 +147,8 @@ func buildOrchestrator(logger *slog.Logger, wg *workgraph.Client, dispatcher orc
 		logger.Warn("orchestrator DISABLED — ORCHESTRATOR_ENABLE=1 but dispatch Runner is not wired (no in-cluster k8s client)")
 		return nil
 	}
-	roles := parseCSVOrDefault(os.Getenv("ORCHESTRATOR_ROLES"), []string{"builder", "tester", "reviewer", "security-reviewer"})
+	roles := parseCSVOrDefault(os.Getenv("ORCHESTRATOR_ROLES"),
+		[]string{"builder", "builder-complex", "tester", "reviewer", "security-reviewer"})
 	orch := &orchestrator.Orchestrator{
 		Graph:        wg,
 		Dispatcher:   dispatcher,
@@ -156,8 +163,64 @@ func buildOrchestrator(logger *slog.Logger, wg *workgraph.Client, dispatcher orc
 			logger.Warn("ORCHESTRATOR_STALE_AFTER invalid — using orchestrator default", "value", v, "err", derr)
 		}
 	}
+	// Role-brain overrides (role-tier-brains): a Resolver is wired only when
+	// at least one entry parses — an empty map would make o.resolve's
+	// (via RoleBrainResolver) return ("","") for every role anyway, but
+	// leaving Resolver nil in that case keeps DrainOnce's "no Resolver"
+	// zero-overhead path exactly as it was before this feature, matching
+	// how every other optional wiring in this file behaves (see
+	// ensurePoolPersonalities/HandProvider being fully opt-in above).
+	if brains := parseRoleBrains(os.Getenv("ORCHESTRATOR_ROLE_BRAINS"), logger); len(brains) > 0 {
+		orch.Resolver = orchestrator.RoleBrainResolver{Brains: brains}
+		logger.Info("orchestrator: role brains configured", "brains", brains)
+	}
 	logger.Info("orchestrator ENABLED", "roles", roles)
 	return orch
+}
+
+// parseRoleBrains parses ORCHESTRATOR_ROLE_BRAINS, an operator-configured
+// role->brain override list: comma-separated "role=provider:model" entries
+// (e.g. "builder-complex=claude-code:claude-sonnet-4-6"). A malformed entry
+// (missing "=", missing ":", or an empty role/provider) is skipped with a
+// warning rather than aborting the whole parse — one bad entry never takes
+// down every other role's override. Model may be empty ("role=provider:" or
+// "role=provider") — that role then overrides only the provider, leaving the
+// leased personality's own model (or the provider's own default) in place.
+// Unset/empty input returns an empty map: every role then resolves ("","")
+// for provider/model via RoleBrainResolver, identical to no Resolver being
+// wired at all (see buildOrchestrator). Deliberately no built-in default
+// role->brain mapping is hardcoded here — the env is the only source, per
+// the build decision that this unit ships mechanism, not a specific model
+// pin (see docs/network/ROLE-MODEL.md "Role tiers" for a worked example).
+func parseRoleBrains(raw string, logger *slog.Logger) map[string]orchestrator.RoleBrain {
+	brains := map[string]orchestrator.RoleBrain{}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return brains
+	}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		role, spec, ok := strings.Cut(entry, "=")
+		role, spec = strings.TrimSpace(role), strings.TrimSpace(spec)
+		if !ok || role == "" || spec == "" {
+			logger.Warn("ORCHESTRATOR_ROLE_BRAINS: skipping malformed entry (want role=provider:model)", "entry", entry)
+			continue
+		}
+		provider, model, _ := strings.Cut(spec, ":")
+		provider, model = strings.TrimSpace(provider), strings.TrimSpace(model)
+		if provider == "" {
+			logger.Warn("ORCHESTRATOR_ROLE_BRAINS: skipping malformed entry (want role=provider:model)", "entry", entry)
+			continue
+		}
+		if !isKnownWorkerRole(role) {
+			logger.Warn("ORCHESTRATOR_ROLE_BRAINS: role is not a registered pool role — configuring it anyway (it will simply never be leased)", "role", role)
+		}
+		brains[role] = orchestrator.RoleBrain{Provider: provider, Model: model}
+	}
+	return brains
 }
 
 // orchestratorDrainInterval reads ORCHESTRATOR_DRAIN_INTERVAL (a

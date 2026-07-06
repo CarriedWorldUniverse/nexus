@@ -115,6 +115,23 @@ func TestBuildWorkItem_RoleRequired(t *testing.T) {
 	}
 }
 
+func TestBuildWorkItem_UnknownRole_Errors(t *testing.T) {
+	_, err := buildWorkItem(&workitemCreateConfig{Role: "not-a-real-role", Task: "x", Criteria: []string{"y"}})
+	if err == nil {
+		t.Fatal("expected error for unregistered --role")
+	}
+}
+
+func TestBuildWorkItem_BuilderComplexRole_Accepted(t *testing.T) {
+	wi, err := buildWorkItem(&workitemCreateConfig{Role: "builder-complex", Task: "x", Criteria: []string{"y"}})
+	if err != nil {
+		t.Fatalf("buildWorkItem with role builder-complex: %v", err)
+	}
+	if wi.Role != "builder-complex" {
+		t.Errorf("wi.Role = %q, want builder-complex", wi.Role)
+	}
+}
+
 func TestBuildWorkItem_TaskRequired(t *testing.T) {
 	_, err := buildWorkItem(&workitemCreateConfig{Role: "builder", Criteria: []string{"y"}})
 	if err == nil {

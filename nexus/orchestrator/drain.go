@@ -77,7 +77,7 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, role string, wi workgrap
 		return
 	}
 
-	rolePrompt, skills, policy := o.resolve(role)
+	rolePrompt, skills, policy, brainProvider, brainModel := o.resolve(role)
 	item := dispatch.PoolItem{
 		Role:               role,
 		Task:               wi.TaskSpec,
@@ -86,6 +86,16 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, role string, wi workgrap
 		SkillAllowlist:     skills,
 		PolicyFragment:     policy,
 		AcceptanceCriteria: formatAcceptanceCriteria(wi.AcceptanceCriteria),
+		// Provider/Model (role-tier-brains, 2026-07-06): the role's
+		// configured brain, from o.Resolver (RoleBrainResolver in
+		// production — see rolebrain.go). Empty when no Resolver is wired
+		// or the role has no override, so PoolItem/Brief's Provider/Model
+		// stay "" exactly as before this existed, and
+		// dispatch.Runner.resolveProvider's personality-row inheritance +
+		// launch's default apply unchanged (see runtime/dispatch/pool.go
+		// resolveProvider / SubmitPoolItem's precedence comment).
+		Provider: brainProvider,
+		Model:    brainModel,
 		// Repo (Phase 4, "real REPO tickets"): threading wi.Repo straight
 		// through to PoolItem.Repo -> Brief.Repo is the whole gap this
 		// closes — SubmitPoolItem/BuildJob already do everything else

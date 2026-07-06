@@ -209,6 +209,22 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	if b.Personality != "" {
 		env = append(env, corev1.EnvVar{Name: "CW_PERSONALITY", Value: b.Personality})
 	}
+	// CW_PROVIDER/CW_MODEL (role-tier-brains, 2026-07-06): a dispatch-time
+	// Brief.Provider/Brief.Model override for the worker's boot-resolved
+	// provider/model. agentfunnel prefers these over the broker resolve/
+	// validate response's Provider/Model when present, falling back to the
+	// resolve response otherwise (main.go) — the mechanism a role-brain
+	// override (dispatch.PoolItem.Provider/Model, see pool.go) needs to
+	// actually change what BRAIN the worker process talks to, not just
+	// which auth the Job mounts (which `provider` — the BuildJob parameter,
+	// already effective — governs). Empty = no override, exactly as before
+	// these env vars existed.
+	if b.Provider != "" {
+		env = append(env, corev1.EnvVar{Name: "CW_PROVIDER", Value: b.Provider})
+	}
+	if b.Model != "" {
+		env = append(env, corev1.EnvVar{Name: "CW_MODEL", Value: b.Model})
+	}
 	if len(b.SkillAllowlist) > 0 {
 		env = append(env, corev1.EnvVar{Name: "CW_SKILL_ALLOWLIST", Value: strings.Join(b.SkillAllowlist, ",")})
 	}
