@@ -397,7 +397,7 @@ func main() {
 	// binding take effect within one JWT cycle (≤ ~1 hour today,
 	// no restart required). Future config.refresh push (NEX-332
 	// phase 5) lands cache updates immediately.
-	provider, err := buildProvider(res.Provider, *claudePath)
+	provider, err := buildProvider(res.Provider, *claudePath, log)
 	if err != nil {
 		fail(log, "build provider", err)
 	}
@@ -535,7 +535,7 @@ func main() {
 		// reads when wired.
 		prev := bindingCache.Load()
 		if prev.Model != fresh.Model || string(prev.Provider) != fresh.Provider {
-			newProv, perr := buildProvider(fresh.Provider, *claudePath)
+			newProv, perr := buildProvider(fresh.Provider, *claudePath, log)
 			if perr != nil {
 				log.Warn("agentfunnel: binding refresh skipped — buildProvider failed",
 					"err", perr, "provider", fresh.Provider)
@@ -1906,7 +1906,7 @@ func applyRoleBrainOverride(res *keyfile.ValidationResult, getenv func(string) s
 // (set at `nexus aspect mint` time, NOT NULL on the aspects row), so
 // an empty string here means the Nexus returned garbage or the row is
 // corrupt — fail loudly rather than silently picking a default.
-func buildProvider(provider, claudePath string) (bridle.Provider, error) {
+func buildProvider(provider, claudePath string, log *slog.Logger) (bridle.Provider, error) {
 	switch provider {
 	case "":
 		return nil, errors.New("buildProvider: validation response carried empty provider — Nexus DB row is corrupt; re-mint the aspect with --provider")
@@ -1918,6 +1918,14 @@ func buildProvider(provider, claudePath string) (bridle.Provider, error) {
 			p.ClaudePath = resolved
 		}
 		p.DisallowedTools = funnel.DisallowedNativeTools
+		// Reasoning-EFFORT knob, claude-code/CLI leg (2026-07-06): our
+		// actual Anthropic access is subscription-only (claude-code CLI
+		// + oauth), not a metered API key, so applyEffortOverride's
+		// ThinkingBudgetTokens (claude-api's request-side field) is inert
+		// here. The claude CLI has its own `--effort <level>` flag; drive
+		// it via bridle's ExtraArgs seam (appended verbatim to the CLI
+		// invocation).
+		applyEffortCLIArg(p, os.Getenv, log)
 		return p, nil
 	case "openai":
 		// OPENAI_API_KEY + OPENAI_BASE_URL come from the start script
@@ -2342,6 +2350,51 @@ func applyEffortOverride(sampling *funnel.MainTurnSampling, provider string, get
 	sampling.ThinkingBudgetTokens = budget
 	log.Info("agentfunnel: CW_EFFORT applied to claude-api extended-thinking budget",
 		"effort", effort, "budget_tokens", budget)
+}
+
+// effortToCLIFlag maps a reasoning-EFFORT value (low|medium|high) to the
+// claude CLI's own --effort argument (2026-07-06, subscription/CLI path).
+// The CLI accepts low|medium|high|xhigh|max — confirmed live against
+// claude 2.1.201 via `claude --effort=badvalue`'s rejection message
+// ("Valid values: low, medium, high, xhigh, max"); xhigh/max are the CLI's,
+// not ours — the operator's guidance (never push reasoning past high) caps
+// RoleBrain's own table at high, and RoleBrain only ever emits
+// low/medium/high (nexus/orchestrator/rolebrain.go), so this is an
+// identity map, not a translation. ok is false for an empty or
+// unrecognized value — mirrors effortToBudgetTokens's contract.
+func effortToCLIFlag(effort string) (flag string, ok bool) {
+	switch effort {
+	case "low", "medium", "high":
+		return effort, true
+	default:
+		return "", false
+	}
+}
+
+// applyEffortCLIArg is applyEffortOverride's counterpart for the
+// claude-code CLI (subscription) path: our actual Anthropic access is
+// subscription-only (claude-code CLI + oauth token, not a metered API
+// key), so applyEffortOverride's ThinkingBudgetTokens — a claude-api
+// request-side field — is inert against it. The claude CLI instead
+// exposes its own `--effort <level>` flag; this drives it via bridle's
+// claudecode Provider.ExtraArgs (appended verbatim to the claude
+// invocation — see bridle's provider/claudecode/claudecode.go). Called
+// only from buildProvider's claude-code/claudecode branch — every other
+// provider's CW_EFFORT handling is unaffected (applyEffortOverride's
+// claude-api budget, or its logged no-op for everything else).
+func applyEffortCLIArg(p *claudecodeprovider.Provider, getenv func(string) string, log *slog.Logger) {
+	effort := getenv("CW_EFFORT")
+	if effort == "" {
+		return
+	}
+	flag, ok := effortToCLIFlag(effort)
+	if !ok {
+		log.Warn("agentfunnel: CW_EFFORT set to an unrecognized value — ignoring (want low|medium|high)", "effort", effort)
+		return
+	}
+	p.ExtraArgs = append(p.ExtraArgs, "--effort", flag)
+	log.Info("agentfunnel: CW_EFFORT applied to claude-code CLI --effort flag",
+		"effort", effort, "flag", flag)
 }
 
 // providerBundleToEnv mirrors credentials.Store.EnvForCredential's

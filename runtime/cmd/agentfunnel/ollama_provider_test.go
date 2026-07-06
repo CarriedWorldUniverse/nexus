@@ -89,7 +89,7 @@ func TestBuildProvider_OllamaIDs(t *testing.T) {
 	t.Setenv("OLLAMA_KEEP_ALIVE", "")
 	t.Setenv("OLLAMA_NUM_CTX", "")
 	for _, id := range []string{"ollama", "ollama-local"} {
-		p, err := buildProvider(id, "")
+		p, err := buildProvider(id, "", testLogger())
 		if err != nil {
 			t.Errorf("buildProvider(%q): %v", id, err)
 			continue
@@ -102,7 +102,7 @@ func TestBuildProvider_OllamaIDs(t *testing.T) {
 
 func TestBuildProvider_OllamaMalformedEnvFails(t *testing.T) {
 	t.Setenv("OLLAMA_KEEP_ALIVE", "not-a-duration")
-	if _, err := buildProvider("ollama", ""); err == nil {
+	if _, err := buildProvider("ollama", "", testLogger()); err == nil {
 		t.Fatal("buildProvider with malformed OLLAMA_KEEP_ALIVE: want error, got nil")
 	}
 }

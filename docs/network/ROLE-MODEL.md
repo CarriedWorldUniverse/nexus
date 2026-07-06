@@ -127,6 +127,13 @@ Effort→budget table (`runtime/cmd/agentfunnel/main.go`'s `effortToBudgetTokens
 
 Threaded the same shape as Provider/Model: `RoleBrain.Effort` → `dispatch.PoolItem.Effort` → `dispatch.Brief.Effort` → the Job's `CW_EFFORT` env → agentfunnel maps it through the table onto `funnel.MainTurnSampling.ThinkingBudgetTokens`, which the funnel threads to `bridle.TurnRequest.ThinkingBudgetTokens` on every main turn.
 
+**Applies on both provider paths (2026-07-06 addendum).** `CW_EFFORT` has bite on BOTH bridle providers, via two independent seams that meet in `buildProvider`:
+
+- **`claude-api`** (metered API key — not our current deployment): the table above, `effortToBudgetTokens` → `funnel.MainTurnSampling.ThinkingBudgetTokens` → `bridle.TurnRequest.ThinkingBudgetTokens` (unchanged from the original knob).
+- **`claude-code`** (the claude-code CLI over a subscription/oauth token — what our deployment actually uses, since we access Anthropic via subscription, not a metered key): `effortToCLIFlag` identity-maps `low`/`medium`/`high` onto the claude CLI's own `--effort <level>` flag (the CLI additionally accepts `xhigh`/`max`, confirmed live via `claude --effort=badvalue`'s rejection message — `Valid values: low, medium, high, xhigh, max` — but RoleBrain never emits them, and the operator's guidance is to never push reasoning past `high`). `applyEffortCLIArg` sets `bridle`'s `claudecode.Provider.ExtraArgs = ["--effort", <level>]`, appended verbatim to the CLI invocation (`bridle`'s `provider/claudecode/claudecode.go`).
+
+Every other provider (`openai`/Ornith, `ollama`, `codex-cli`, `antigravity-cli`) still no-ops on `CW_EFFORT`, logged. An empty or unrecognized `CW_EFFORT` is a no-op on both paths (warned once on the latter).
+
 **Provider scope: claude-api only.** The extended-thinking budget is a request-side knob Anthropic's Messages API exposes (`bridle`'s claude provider sets `params.Thinking` from it); no other provider's wire format has an equivalent, so CW_EFFORT is a **no-op** for claude-code (the CLI subprocess), openai/Ornith, and any other provider — agentfunnel logs one line noting the no-op (`applyEffortOverride`) rather than silently discarding the operator's intent. Setting effort for a role whose brain isn't `claude-api`/`claude` has no cost or behavior effect.
 
 ## 8. Scheduling
