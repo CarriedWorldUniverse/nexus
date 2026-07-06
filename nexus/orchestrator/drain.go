@@ -95,6 +95,14 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, role string, wi workgrap
 		// nexus/workgraph/README.md's repo mapping note). Empty wi.Repo
 		// reproduces every pre-Phase-4 pool dispatch exactly.
 		Repo: wi.Repo,
+		// Personality: threading wi.Personality straight through to
+		// PoolItem.Personality -> Brief.RequestedPersonality is the whole
+		// gap per-personality routing closes — SubmitPoolItem/reserveQueued
+		// already do everything else (lease targeting, provider
+		// inheritance) once it's non-empty. Empty wi.Personality reproduces
+		// "any free personality" exactly, same as every pre-routing pool
+		// dispatch.
+		Personality: wi.Personality,
 	}
 	if _, err := o.Dispatcher.SubmitPoolItem(ctx, item); err != nil {
 		report.Errors = append(report.Errors, errf("submit %s: %v", wi.ID, err))

@@ -43,15 +43,36 @@ func (r *Runner) personalities() []string {
 	return aspects.WorkerPersonalities
 }
 
-// tryLeaseWorkerSlot leases the first FREE personality for role and returns
-// (personality, `<personality>-<role>`), or ("","") if none is free (or the
-// global MaxConc leaves no room). A personality is free when it has no live
-// worker hand — one job per personality, so "the first agent available,
-// regardless of name, is spawned with a personality and the role"
-// (PHASE2-DESIGN §4). Caller holds r.mu.
-func (r *Runner) tryLeaseWorkerSlot(role string) (personality, name string) {
+// tryLeaseWorkerSlot leases a personality for role and returns (personality,
+// `<personality>-<role>`), or ("","") if none is free (or the global MaxConc
+// leaves no room). Caller holds r.mu.
+//
+// requested == "": leases the first FREE personality in roster order — "the
+// first agent available, regardless of name, is spawned with a personality
+// and the role" (PHASE2-DESIGN §4).
+//
+// requested != "" (per-personality routing, ROLE-MODEL.md "routing a work
+// item to a personality"): leases ONLY that personality when it is free and
+// a member of the roster (personalities()); otherwise ("","") — busy or
+// unknown never falls back to a different personality, since the request is
+// about the BRAIN behind that name (its aspects row's provider/model), and
+// substitution would defeat it. The caller (SubmitPoolItem/reserveQueued)
+// queues on a miss, same as any other lease failure.
+//
+// A personality is free when it has no live worker hand — one job per
+// personality.
+func (r *Runner) tryLeaseWorkerSlot(role, requested string) (personality, name string) {
 	if r.MaxConc > 0 && len(r.active) >= r.MaxConc {
 		return "", ""
+	}
+	if requested != "" {
+		if !containsString(r.personalities(), requested) {
+			return "", ""
+		}
+		if r.liveWorkers(requested) > 0 {
+			return "", ""
+		}
+		return requested, aspects.WorkerName(requested, role)
 	}
 	for _, p := range r.personalities() {
 		if r.liveWorkers(p) > 0 { // personality already running a pool job
@@ -60,6 +81,33 @@ func (r *Runner) tryLeaseWorkerSlot(role string) (personality, name string) {
 		return p, aspects.WorkerName(p, role)
 	}
 	return "", ""
+}
+
+// containsString reports whether list contains s.
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveProvider stamps b.Provider from r.HandProvider(personality) when
+// wired and b.Provider is not already set — the same provider-inheritance
+// this Runner already does for hand spawns (spawn.go's handProvider), now
+// also applied to a pool lease: the leased personality IS the identity
+// (Brief.SpawnParent) whose aspects row's provider/model a claude-code (or
+// any non-default) personality routing depends on (ROLE-MODEL.md). Without
+// this, every pool-leased Job ran with launch's "claude" default regardless
+// of the personality's aspects row — silently defeating per-personality
+// routing to a stronger brain. No-op when r.HandProvider is nil or
+// b.Provider is already set (never overrides an explicit caller choice).
+func (r *Runner) resolveProvider(ctx context.Context, b *Brief, personality string) {
+	if b.Provider != "" || r.HandProvider == nil || personality == "" {
+		return
+	}
+	b.Provider = r.HandProvider(ctx, personality)
 }
 
 // PoolItem is SubmitPoolItem's payload: SubmitPool's basic (role, task,
@@ -105,6 +153,15 @@ type PoolItem struct {
 	// default and agentfunnel's builderBranch already apply uniformly
 	// across every dispatch mode.
 	Repo string
+
+	// Personality mirrors Brief.RequestedPersonality (per-personality
+	// routing, ROLE-MODEL.md): requests a specific pool personality for
+	// this item's lease (workgraph.WorkItem.Personality, threaded by the
+	// orchestrator's dispatchOne). Empty = "any free personality" — every
+	// pre-routing pool dispatch's exact behavior. Non-empty is honored
+	// strictly by tryLeaseWorkerSlot: free -> leased to exactly that
+	// personality, busy -> queues (never substituted).
+	Personality string
 }
 
 // SubmitPool dispatches a role-based work item onto the shared pool
@@ -154,17 +211,18 @@ func (r *Runner) SubmitPoolItem(ctx context.Context, item PoolItem) (string, err
 	}
 
 	b := Brief{
-		SpawnParent:        poolParentName,
-		Role:               role,
-		WorkItemID:         workItemID,
-		Ticket:             workItemID,
-		Thread:             thread,
-		Task:               task,
-		RolePrompt:         item.RolePrompt,
-		SkillAllowlist:     item.SkillAllowlist,
-		PolicyFragment:     item.PolicyFragment,
-		AcceptanceCriteria: item.AcceptanceCriteria,
-		Repo:               item.Repo,
+		SpawnParent:          poolParentName,
+		Role:                 role,
+		WorkItemID:           workItemID,
+		Ticket:               workItemID,
+		Thread:               thread,
+		Task:                 task,
+		RolePrompt:           item.RolePrompt,
+		SkillAllowlist:       item.SkillAllowlist,
+		PolicyFragment:       item.PolicyFragment,
+		AcceptanceCriteria:   item.AcceptanceCriteria,
+		Repo:                 item.Repo,
+		RequestedPersonality: item.Personality,
 	}
 
 	r.mu.Lock()
@@ -184,11 +242,15 @@ func (r *Runner) SubmitPoolItem(ctx context.Context, item PoolItem) (string, err
 		}
 	}
 
-	personality, name := r.tryLeaseWorkerSlot(role)
+	personality, name := r.tryLeaseWorkerSlot(role, item.Personality)
 	if name == "" {
 		r.queue = append(r.queue, b)
 		r.mu.Unlock()
-		r.post(thread, fmt.Sprintf("pool dispatch queued (role %s, all %d personalit(ies) busy)", role, len(r.personalities())))
+		if item.Personality != "" {
+			r.post(thread, fmt.Sprintf("pool dispatch queued (role %s, requested personality %s busy/unavailable)", role, item.Personality))
+		} else {
+			r.post(thread, fmt.Sprintf("pool dispatch queued (role %s, all %d personalit(ies) busy)", role, len(r.personalities())))
+		}
 		return "", nil
 	}
 	b.SpawnParent = personality
@@ -202,6 +264,16 @@ func (r *Runner) SubmitPoolItem(ctx context.Context, item PoolItem) (string, err
 	b.Personality = personality
 	run := r.reserve(b)
 	r.mu.Unlock()
+
+	// Provider inheritance (per-personality routing): stamp the leased
+	// personality's aspects-row provider onto the Brief, mirroring
+	// spawn.go's hand provider inheritance (resolved outside r.mu, same
+	// reasoning — see resolveProvider). Without this a claude-code-routed
+	// personality's Job never got CLAUDE_CODE_OAUTH_TOKEN injected
+	// (jobspec.go gates that on provider=="claude-code"), silently falling
+	// back to launch's "claude" default for every pool-leased worker
+	// regardless of personality.
+	r.resolveProvider(ctx, &run.Brief, personality)
 
 	if err := r.launch(ctx, run); err != nil {
 		r.mu.Lock()

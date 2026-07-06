@@ -734,7 +734,7 @@ func (r *Runner) reserveQueued() []*Run {
 		// canRun(agent) like a fixed-identity brief. Lease a free
 		// personality for its role now.
 		if b.SpawnParent == poolParentName && b.Agent == "" {
-			if personality, name := r.tryLeaseWorkerSlot(b.Role); name != "" {
+			if personality, name := r.tryLeaseWorkerSlot(b.Role, b.RequestedPersonality); name != "" {
 				b.SpawnParent = personality
 				b.Agent = name
 				// See pool.go's SubmitPoolItem: Personality must be stamped
@@ -764,6 +764,16 @@ func (r *Runner) reserveQueued() []*Run {
 // at the first failure and retries on the next agent-free.
 func (r *Runner) launchPending(ctx context.Context, runs []*Run) {
 	for _, run := range runs {
+		// Provider inheritance (per-personality routing, mirrors pool.go's
+		// SubmitPoolItem): a pool item that queued at submit time and now
+		// drains through here needs its leased personality's aspects-row
+		// provider stamped just like the immediate-lease path — otherwise
+		// only pool items that never queued would ever get
+		// CLAUDE_CODE_OAUTH_TOKEN injected for a claude-code personality.
+		// No-op for non-pool runs (SpawnParent's a hand parent whose
+		// Provider spawn.go already set, or "" for a ticket dispatch) — see
+		// resolveProvider.
+		r.resolveProvider(ctx, &run.Brief, run.Brief.SpawnParent)
 		if err := r.launch(ctx, run); err != nil {
 			r.mu.Lock()
 			delete(r.active, run.ID)

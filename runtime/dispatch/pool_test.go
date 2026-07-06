@@ -478,6 +478,175 @@ func TestSubmitPoolWithoutRepoReproducesRespondOnlyBehavior(t *testing.T) {
 	}
 }
 
+// TestSubmitPoolItem_RequestedPersonalityLeasesExactlyThatOne covers
+// per-personality routing (ROLE-MODEL.md "routing a work item to a
+// personality"): a PoolItem.Personality request must be leased to exactly
+// that personality — never the roster's plain "first free" order — even
+// when an earlier-in-roster personality is free too.
+func TestSubmitPoolItem_RequestedPersonalityLeasesExactlyThatOne(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _ := newPoolFixture(fk)
+
+	if _, err := r.SubmitPoolItem(context.Background(), dispatch.PoolItem{
+		Role: "builder", Task: "do work", WorkItemID: "wi-1", Personality: "keel",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r.AgentBusy("anvil-builder") {
+		t.Error("roster-order personality (anvil) must NOT be leased when a specific personality was requested")
+	}
+	if !r.AgentBusy("keel-builder") {
+		t.Error("requested personality (keel) should be leased")
+	}
+}
+
+// TestSubmitPoolItem_RequestedPersonalityBusyQueuesNeverSubstitutes: when the
+// requested personality is already busy, the item must queue — NOT fall
+// back to a different free personality (the request is about the BRAIN
+// behind that name; substitution would defeat it).
+func TestSubmitPoolItem_RequestedPersonalityBusyQueuesNeverSubstitutes(t *testing.T) {
+	fk := &fakeK8s{}
+	r, poster, _ := newPoolFixture(fk)
+
+	// Occupy keel with a plain (unrequested) lease first.
+	if _, err := r.SubmitPoolItem(context.Background(), dispatch.PoolItem{
+		Role: "builder", Task: "do work", WorkItemID: "wi-1", Personality: "keel",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.AgentBusy("keel-builder") {
+		t.Fatal("keel-builder should be leased")
+	}
+
+	// A second item also requests keel: must queue, not lease anvil/plumb.
+	id, err := r.SubmitPoolItem(context.Background(), dispatch.PoolItem{
+		Role: "builder", Task: "do more work", WorkItemID: "wi-2", Personality: "keel",
+	})
+	if err != nil {
+		t.Fatalf("queued submit should not error: %v", err)
+	}
+	if id != "" {
+		t.Errorf("busy-requested-personality item should queue (empty run id), got %q", id)
+	}
+	if r.AgentBusy("anvil-builder") || r.AgentBusy("plumb-builder") {
+		t.Error("must not substitute a different free personality for a busy request")
+	}
+	found := false
+	for _, p := range poster.posts {
+		if strings.Contains(p, "requested personality keel") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a requested-personality-busy queued notice, got %v", poster.posts)
+	}
+
+	// Freeing keel drains the queued item onto keel specifically (not
+	// whichever personality happens to be first-free).
+	r.OnJobDone(dispatch.JobDone{Ticket: "wi-1", OK: true})
+	if !r.AgentBusy("keel-builder") {
+		t.Error("queued request should drain onto the freed requested personality")
+	}
+}
+
+// TestSubmitPoolItem_UnknownRequestedPersonalityQueues: a requested
+// personality that isn't a roster member can never be leased (there is no
+// such worker to run it as) — it queues forever rather than silently
+// substituting or erroring, same "never substitute" contract as busy.
+func TestSubmitPoolItem_UnknownRequestedPersonalityQueues(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _ := newPoolFixture(fk)
+
+	id, err := r.SubmitPoolItem(context.Background(), dispatch.PoolItem{
+		Role: "builder", Task: "do work", WorkItemID: "wi-1", Personality: "nonexistent",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != "" {
+		t.Errorf("unknown-personality request should queue (empty run id), got %q", id)
+	}
+	if len(fk.jobs) != 0 {
+		t.Errorf("jobs = %d, want 0 (nothing leased for an unknown personality)", len(fk.jobs))
+	}
+}
+
+// TestSubmitPoolItem_InheritsLeasedPersonalityProvider covers the item-4
+// finding (per-personality routing docs): a pool lease must stamp the
+// leased personality's aspects-row provider onto the Job, mirroring
+// SubmitSpawn's parent-provider inheritance (spawn_test.go
+// TestSubmitSpawnInheritsParentProvider) — otherwise a claude-code-routed
+// personality never gets CLAUDE_CODE_OAUTH_TOKEN injected and silently runs
+// as the launch default instead.
+func TestSubmitPoolItem_InheritsLeasedPersonalityProvider(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _ := newPoolFixture(fk)
+	r.HandProvider = func(_ context.Context, parent string) string {
+		if parent == "keel" {
+			return "codex-cli"
+		}
+		return ""
+	}
+
+	if _, err := r.SubmitPoolItem(context.Background(), dispatch.PoolItem{
+		Role: "builder", Task: "do work", WorkItemID: "wi-1", Personality: "keel",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fk.jobObjs) != 1 {
+		t.Fatalf("jobs = %d, want 1", len(fk.jobObjs))
+	}
+	hasCodexAuth := false
+	for _, ic := range fk.jobObjs[0].Spec.Template.Spec.InitContainers {
+		if ic.Name == "codex-auth" {
+			hasCodexAuth = true
+		}
+	}
+	if !hasCodexAuth {
+		t.Error("pool lease should inherit the leased personality's provider (codex-auth init container missing)")
+	}
+}
+
+// TestSubmitPoolItem_QueuedDrainInheritsLeasedPersonalityProvider: the same
+// provider inheritance must apply on the reserveQueued drain path
+// (runner.go's launchPending), not just the immediate-lease path in
+// SubmitPoolItem — mirrors TestSubmitPool_JobEnvCarriesRoleWorkItemPersonality's
+// two-path coverage for CW_PERSONALITY.
+func TestSubmitPoolItem_QueuedDrainInheritsLeasedPersonalityProvider(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _ := newPoolFixture(fk)
+	r.HandProvider = func(_ context.Context, parent string) string {
+		if parent == "anvil" {
+			return "codex-cli"
+		}
+		return ""
+	}
+
+	// Fill all three slots (anvil, plumb, keel), then complete anvil so a
+	// queued item drains onto the freed anvil slot via reserveQueued.
+	for i := 1; i <= 3; i++ {
+		if _, err := r.SubmitPool(context.Background(), "builder", "do work", "wi-"+itoa(i), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := r.SubmitPool(context.Background(), "builder", "do work", "wi-4", ""); err != nil {
+		t.Fatal(err)
+	}
+	r.OnJobDone(dispatch.JobDone{Ticket: "wi-1", OK: true})
+	if len(fk.jobObjs) != 4 {
+		t.Fatalf("jobs after drain = %d, want 4", len(fk.jobObjs))
+	}
+	hasCodexAuth := false
+	for _, ic := range fk.jobObjs[3].Spec.Template.Spec.InitContainers {
+		if ic.Name == "codex-auth" {
+			hasCodexAuth = true
+		}
+	}
+	if !hasCodexAuth {
+		t.Error("queued-drain pool lease should also inherit the leased (freed) personality's provider")
+	}
+}
+
 // argValueEquals mirrors jobspec_test.go's (package dispatch, internal)
 // helper of the same name — duplicated here rather than exported since
 // this file is package dispatch_test (external).

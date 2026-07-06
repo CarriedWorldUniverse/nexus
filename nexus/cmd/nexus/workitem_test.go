@@ -220,6 +220,50 @@ func TestBuildWorkItem_MapsRepo(t *testing.T) {
 	}
 }
 
+// TestParseWorkitemCreateArgs_Personality covers the --personality flag
+// (per-personality routing: requesting a work item to a specific pool
+// personality's brain).
+func TestParseWorkitemCreateArgs_Personality(t *testing.T) {
+	cfg, err := parseWorkitemCreateArgs([]string{
+		"--role", "builder", "--task", "x", "--criteria", "y",
+		"--personality", "keel",
+	})
+	if err != nil {
+		t.Fatalf("parseWorkitemCreateArgs: %v", err)
+	}
+	if cfg.Personality != "keel" {
+		t.Errorf("Personality = %q, want keel", cfg.Personality)
+	}
+}
+
+// TestParseWorkitemCreateArgs_PersonalityDefaultsEmpty: absent --personality
+// must default to "" (any free personality), unchanged from before this flag
+// existed.
+func TestParseWorkitemCreateArgs_PersonalityDefaultsEmpty(t *testing.T) {
+	cfg, err := parseWorkitemCreateArgs([]string{"--role", "builder", "--task", "x", "--criteria", "y"})
+	if err != nil {
+		t.Fatalf("parseWorkitemCreateArgs: %v", err)
+	}
+	if cfg.Personality != "" {
+		t.Errorf("Personality = %q, want empty default", cfg.Personality)
+	}
+}
+
+// TestBuildWorkItem_MapsPersonality: buildWorkItem must carry
+// cfg.Personality straight onto workgraph.WorkItem.Personality.
+func TestBuildWorkItem_MapsPersonality(t *testing.T) {
+	wi, err := buildWorkItem(&workitemCreateConfig{
+		Role: "builder", Task: "fix the bug", Criteria: []string{"builds"},
+		Personality: "keel",
+	})
+	if err != nil {
+		t.Fatalf("buildWorkItem: %v", err)
+	}
+	if wi.Personality != "keel" {
+		t.Errorf("Personality = %q, want keel", wi.Personality)
+	}
+}
+
 func TestRunWorkitemSubcommand_UnknownVerb(t *testing.T) {
 	if got := runWorkitemSubcommand([]string{"bogus"}); got != 2 {
 		t.Errorf("runWorkitemSubcommand(bogus) = %d, want 2", got)
