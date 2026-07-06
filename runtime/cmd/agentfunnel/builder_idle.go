@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/CarriedWorldUniverse/bridle"
@@ -21,7 +22,40 @@ const (
 
 type builderProgressFunc func(string)
 
-func startBuilderIdleMonitor(ctx context.Context, timeout time.Duration, progress <-chan string, onStall func(), log *slog.Logger) {
+// bridleToolFlightCounter tracks the number of in-flight bridle tool calls
+// during a builder turn. Incremented on ToolCallStart, decremented on
+// ToolCallResult (success or error — both mark the end of in-flight). The
+// idle monitor consults this counter before stalling: if tools are in-flight
+// the model is still working, so the timer resets rather than firing.
+//
+// Uses atomic.Int32 (not int64) because the count per turn is bounded by the
+// model's tool budget; int32 gives us the same race-free semantics on every
+// platform with one fewer byte of contention. Zero value is valid — a
+// builder that never calls tools keeps the counter at zero and the idle
+// monitor behaves exactly as before this change.
+type bridleToolFlightCounter struct {
+	count atomic.Int32
+}
+
+// Increment records a tool call start. Safe to call from any goroutine.
+func (c *bridleToolFlightCounter) Increment() {
+	c.count.Add(1)
+}
+
+// Decrement records a tool call result. Safe to call from any goroutine.
+// Mirrors Increment — paired per-tool, one Decrement per Increment.
+func (c *bridleToolFlightCounter) Decrement() {
+	c.count.Add(-1)
+}
+
+// Active reports whether any tools are currently in-flight. Returns false
+// for a zero-value counter (never incremented), so callers can treat a nil
+// or empty counter the same way without special-casing.
+func (c *bridleToolFlightCounter) Active() bool {
+	return c.count.Load() > 0
+}
+
+func startBuilderIdleMonitor(ctx context.Context, timeout time.Duration, progress <-chan string, flightCounter *bridleToolFlightCounter, onStall func(), log *slog.Logger) {
 	if timeout <= 0 {
 		return
 	}
@@ -47,6 +81,20 @@ func startBuilderIdleMonitor(ctx context.Context, timeout time.Duration, progres
 			}
 			timer.Reset(timeout)
 		case <-timer.C:
+			// Tool still in-flight: the model is working, just slowly.
+			// Reset the timer rather than stalling — per NET-49 the idle
+			// clock only counts time with zero in-flight tools AND no
+			// other progress signal on the progress channel.
+			if flightCounter != nil && flightCounter.Active() {
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(timeout)
+				continue
+			}
 			log.Error("agentfunnel: ESCALATION builder stalled — idle timeout expired",
 				"reason", builderStalledReason,
 				"idle_timeout", timeout,
@@ -67,8 +115,9 @@ func newBuilderProgressReporter(ch chan<- string) builderProgressFunc {
 }
 
 type progressObservabilityHook struct {
-	next     funnel.ObservabilityHook
-	progress builderProgressFunc
+	next          funnel.ObservabilityHook
+	progress      builderProgressFunc
+	flightCounter *bridleToolFlightCounter
 }
 
 func (h progressObservabilityHook) BeginTurn(turnID, label, model, provider string, triggerMsg int64) {
@@ -79,7 +128,14 @@ func (h progressObservabilityHook) BeginTurn(turnID, label, model, provider stri
 
 func (h progressObservabilityHook) OnBridleEvent(ev bridle.Event) {
 	switch e := ev.(type) {
+	case bridle.ToolCallStart:
+		if h.flightCounter != nil {
+			h.flightCounter.Increment()
+		}
 	case bridle.ToolCallResult:
+		if h.flightCounter != nil {
+			h.flightCounter.Decrement()
+		}
 		if e.Err == "" {
 			h.progress("tool_call")
 		}

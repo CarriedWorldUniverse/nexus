@@ -470,6 +470,7 @@ func main() {
 	defer stop()
 	progressCh := make(chan string, 16)
 	recordBuilderProgress := newBuilderProgressReporter(progressCh)
+	flightCounter := &bridleToolFlightCounter{}
 
 	// TokenProvider returns the cached JWT when it's still healthy.
 	// Falls back to a keyfile re-validate when sessionState is empty
@@ -661,7 +662,7 @@ func main() {
 	// events reach it.
 	var realOutputTracker *builderRealOutputTracker
 	if *builderMode {
-		funnelObsHook = progressObservabilityHook{next: obsHook, progress: recordBuilderProgress}
+		funnelObsHook = progressObservabilityHook{next: obsHook, progress: recordBuilderProgress, flightCounter: flightCounter}
 		realOutputTracker = &builderRealOutputTracker{next: funnelObsHook}
 		funnelObsHook = realOutputTracker
 	}
@@ -964,7 +965,7 @@ func main() {
 			"idle_timeout", *builderIdleTimeout,
 			"job_hard_timeout", *builderTimeout)
 		emitBuilderAccepted(ctx, wsClient, log, os.Getenv("CW_DISPATCH_RUN_ID"))
-		go startBuilderIdleMonitor(ctx, *builderIdleTimeout, progressCh, func() {
+		go startBuilderIdleMonitor(ctx, *builderIdleTimeout, progressCh, flightCounter, func() {
 			runID := os.Getenv("CW_DISPATCH_RUN_ID")
 			if err := wsClient.SendDispatchStatus(context.Background(), runID, "failed", builderStalledReason, time.Now().UTC()); err != nil {
 				log.Warn("agentfunnel: builder stalled status enqueue failed", "run_id", runID, "err", err)
