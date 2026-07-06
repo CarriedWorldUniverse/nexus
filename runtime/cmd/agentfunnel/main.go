@@ -939,6 +939,7 @@ func main() {
 			log.Error("agentfunnel: brief file unreadable", "err", err)
 			os.Exit(1)
 		}
+		b.Content = withBranchInstruction(b.Content, *repoFlag, builderBranch(*branchFlag, *ticketFlag))
 		seedBrief = b
 		f.Receive(seedBrief)
 		log.Info("agentfunnel: seeded builder brief from file", "path", *briefFile, "bytes", len(seedBrief.Content))
@@ -1059,6 +1060,23 @@ func readBriefFile(path string) (bridle.InboxItem, error) {
 		return bridle.InboxItem{}, fmt.Errorf("read brief file: %w", err)
 	}
 	return bridle.InboxItem{From: "dispatch", Content: string(b)}, nil
+}
+
+// withBranchInstruction appends a one-line directive telling the model
+// exactly which branch it is expected to work on. NET-46 live evidence:
+// anvil-builder committed to its own branch name (anvil/workers-json-flag)
+// instead of the conventional builder/<ticket> one; the harness's PR check
+// now tolerates that (prExists ticket-search fallback), but instructing the
+// model up front is the cheaper fix — most workers will just follow the
+// stated branch when told. A repo-less brief (respond-only completion,
+// NET-22) or an unresolved branch has nothing to instruct — returns content
+// unchanged.
+func withBranchInstruction(content, repo, branch string) string {
+	if repo == "" || branch == "" {
+		return content
+	}
+	line := fmt.Sprintf("\n\n[HARNESS] Work on branch `%s` — commit and push your changes to this exact branch name so the harness can find your pull request.", branch)
+	return content + line
 }
 
 func builderIdleTimeoutDefaultFromEnv(getenv func(string) string) time.Duration {
@@ -1357,7 +1375,7 @@ func builderPRVerifier(log *slog.Logger, aspect, repo, ticket, branch string) fu
 	}
 	head := builderBranch(branch, ticket)
 	return func() bool {
-		ok, err := prExists(repo, head)
+		ok, err := prExists(repo, head, ticket)
 		if err != nil {
 			log.Warn("agentfunnel: PR check errored — treating as not-yet-open", "aspect", aspect, "err", err)
 			return false
@@ -1387,7 +1405,7 @@ func builderCompleteCheck(stop context.CancelFunc, log *slog.Logger, aspect, rep
 
 // prExistsFn is the gh-backed PR lookup for a branch head, swappable in tests.
 var prExistsFn = func(repo, branch string) (bool, error) {
-	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--head", branch, "--json", "url", "-q", ".[0].url").CombinedOutput()
+	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "url", "-q", ".[0].url").CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("gh pr list: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -1443,14 +1461,76 @@ func builderPROpener(log *slog.Logger, repo, ticket, branch string) func() (stri
 	return func() (string, bool) { return harnessOpenPR(log, repo, head) }
 }
 
+// prExistsByTicketFn searches open PRs in repo for one whose head branch
+// name or title contains ticket — swappable in tests. NET-46 live evidence:
+// anvil-builder committed to its own branch (anvil/workers-json-flag)
+// instead of the conventional builder/<ticket> one and opened a real PR
+// (#413) that the head-branch-only check above missed entirely.
+var prExistsByTicketFn = func(repo, ticket string) (bool, error) {
+	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--state", "open",
+		"--json", "number,headRefName,title").CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("gh pr list (ticket fallback): %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return matchPRByTicket(out, ticket)
+}
+
+// prTicketSearchEntry is one row of
+// `gh pr list --json number,headRefName,title`.
+type prTicketSearchEntry struct {
+	Number      int    `json:"number"`
+	HeadRefName string `json:"headRefName"`
+	Title       string `json:"title"`
+}
+
+// matchPRByTicket is the pure decision core of the ticket-search fallback:
+// given the raw JSON of `gh pr list`, reports whether any PR's head branch
+// name or title contains ticket. Pulled out of prExistsByTicketFn so the
+// matching rule is unit-testable without shelling out to gh.
+func matchPRByTicket(out []byte, ticket string) (bool, error) {
+	var prs []prTicketSearchEntry
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return false, fmt.Errorf("gh pr list (ticket fallback): parse: %w", err)
+	}
+	for _, pr := range prs {
+		if strings.Contains(pr.HeadRefName, ticket) || strings.Contains(pr.Title, ticket) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // prExists reports whether a PR exists for branch in repo. Missing repo/branch
 // returns an error so the builder does not exit on an unverifiable
 // "complete" (fail-closed toward NEX-468).
-func prExists(repo, branch string) (bool, error) {
+//
+// Checks the conventional branch head first; when that misses (or errors)
+// and ticket is non-empty, falls back to searching open PRs by ticket ID in
+// the head branch name or title (NET-46: a worker may have committed to its
+// own branch name instead of the conventional one, opening a real PR the
+// head-only check can't find).
+func prExists(repo, branch, ticket string) (bool, error) {
 	if repo == "" || branch == "" {
 		return false, fmt.Errorf("prExists: repo/branch not set (repo=%q branch=%q)", repo, branch)
 	}
-	return prExistsFn(repo, branch)
+	ok, err := prExistsFn(repo, branch)
+	if err == nil && ok {
+		return true, nil
+	}
+	if strings.TrimSpace(ticket) == "" {
+		return ok, err
+	}
+	found, ferr := prExistsByTicketFn(repo, ticket)
+	if ferr != nil {
+		if err != nil {
+			return false, err
+		}
+		return false, ferr
+	}
+	if found {
+		return true, nil
+	}
+	return ok, err
 }
 
 func builderReplyTopic(builderMode bool, topic string) string {

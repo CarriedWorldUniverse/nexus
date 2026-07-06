@@ -29,7 +29,7 @@ func prURLForRun(run *Run) string {
 	if branch == "" {
 		branch = "builder/" + run.Brief.Ticket
 	}
-	prURL, err := lookupPRURL(run.Brief.Repo, branch)
+	prURL, err := lookupPRURL(run.Brief.Repo, branch, run.Brief.Ticket)
 	if err != nil {
 		return ""
 	}
