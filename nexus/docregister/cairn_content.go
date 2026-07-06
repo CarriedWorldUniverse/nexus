@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -49,7 +50,11 @@ type GitCairnContent struct {
 // docPath returns the RepoDir-relative path a document's MD body lives at:
 // docs/<kind>/<docID>.md.
 func docPath(kind Kind, docID string) string {
-	return filepath.Join("docs", string(kind), docID+".md")
+	// path.Join, NOT filepath.Join: this is a git-repo-relative path used in
+	// cairn_ref strings ("<path>@<sha>") and git commands — git paths are
+	// ALWAYS forward-slash, on every OS. filepath.Join produced backslashes
+	// on Windows (caught by CI on the landing PR: ref "docs\\spec\\doc-1.md@…").
+	return path.Join("docs", string(kind), docID+".md")
 }
 
 // RefFormat documents the cairn_ref convention: "<repo-relative-path>@<git-commit-sha>".
