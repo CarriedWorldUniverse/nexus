@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cwb:network/handoff/v1",
+  "title": "Network handoff contract v1",
+  "description": "The one fixed shape every hop uses. A work_item flows orchestrator -> role; a result flows back. Vague handoffs fail at every seam — everything a role needs is IN the item, everything the orchestrator routes on is IN the result.",
+  "$defs": {
+    "work_item": {
+      "type": "object",
+      "required": ["id", "role", "task_spec", "acceptance_criteria"],
+      "properties": {
+        "id": { "type": "string", "description": "stable work-item id; survives rework loops" },
+        "role": { "enum": ["orchestrator", "builder", "tester", "reviewer", "security-reviewer", "painter", "modeller"] },
+        "task_spec": { "type": "string", "description": "bounded, self-contained instruction; open-ended specs are a builder reject" },
+        "acceptance_criteria": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "cairn_line": { "type": "string", "description": "the line this work happens on / is read from" },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" }, "description": "prior hops' outputs this role needs" },
+        "base_knowledge": { "type": "array", "items": { "type": "string" }, "description": "commonplace topic slugs to load at spawn" },
+        "personality": { "type": "string", "description": "thin label stamped at spawn; zero capability" },
+        "prior_results": { "type": "array", "items": { "$ref": "#/$defs/result" }, "description": "full results of earlier hops on this item" },
+        "origin": { "enum": ["operator", "scheduled", "event", "rework"], "description": "trigger source; rework carries the rejecting result in prior_results" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["work_item_id", "role", "agent", "verdict"],
+      "properties": {
+        "work_item_id": { "type": "string" },
+        "role": { "type": "string" },
+        "agent": { "type": "string", "description": "pool identity (agent-01..N) — accountability, not the personality" },
+        "verdict": { "enum": ["pass", "reject", "blocked", "done"], "description": "done = producing roles; pass/reject = gates; blocked = needs orchestrator/operator input" },
+        "reasons": { "type": "array", "items": { "type": "string" }, "description": "REQUIRED when verdict != pass/done; most-severe first; machine-routable" },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" } },
+        "evidence": { "type": "string", "description": "self-verify proof: test output, curl result, render path. Producing roles MUST include it" },
+        "next_role_hint": { "type": "string", "description": "advisory only; orchestrator decides" },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "steps": { "type": "integer" },
+            "tool_calls": { "type": "integer" },
+            "duration_ms": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": { "enum": ["cairn_commit", "diff", "file", "test_output", "image", "model3d", "report"] },
+        "ref": { "type": "string", "description": "commit id, path, or URL" },
+        "note": { "type": "string" }
+      }
+    }
+  },
+  "oneOf": [ { "$ref": "#/$defs/work_item" }, { "$ref": "#/$defs/result" } ]
+}
