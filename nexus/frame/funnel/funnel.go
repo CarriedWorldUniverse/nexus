@@ -1050,13 +1050,22 @@ func (f *Funnel) Deliberate(ctx context.Context, userMessage string) (result Del
 // the turn's reply text. This is the provider-agnostic completion path for
 // builder mode: codex ignores the task_done ToolDef, but emits reply text, so
 // a sentinel is the one signal every provider can reach (NEX-440).
+//
+// Passes finalText itself (the actual reply containing the sentinel) to
+// OnTaskDone, NOT a hardcoded placeholder string. Review finding (Unit B
+// verified task_done, NET-22/23/24/27 fix pass): OnTaskDone's caller
+// (agentfunnel's builderOnTaskDone) verifies its argument against the work
+// item's acceptance criteria — a fixed literal like "done (reply sentinel)"
+// would ALWAYS fail that verification (it can never contain a required
+// token), so every sentinel-completed builder would spuriously reprompt/
+// block regardless of how correct its actual reply was.
 func (f *Funnel) maybeSignalDone(finalText string) {
 	if f.cfg.DoneSentinel == "" || f.cfg.OnTaskDone == nil {
 		return
 	}
 	if strings.Contains(finalText, f.cfg.DoneSentinel) {
 		f.log.Info("funnel: builder done sentinel detected", "sentinel", f.cfg.DoneSentinel)
-		f.cfg.OnTaskDone("done (reply sentinel)")
+		f.cfg.OnTaskDone(finalText)
 	}
 }
 

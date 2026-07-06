@@ -77,7 +77,7 @@ func TestGetPodLogsFindsBuilderPodByRunID(t *testing.T) {
 func TestSetBriefOwner(t *testing.T) {
 	// NEX-461: the brief ConfigMap must end up owned by its Job so it GCs with it.
 	k := &K8s{Client: fake.NewSimpleClientset(), Namespace: "nexus"}
-	if err := k.PutBriefConfigMap(context.Background(), "t1", "the brief"); err != nil {
+	if err := k.PutBriefConfigMap(context.Background(), "t1", map[string]string{"brief.md": "the brief"}); err != nil {
 		t.Fatal(err)
 	}
 	job, err := k.CreateJob(context.Background(), BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, JobConfig{Namespace: "nexus"}, "t1", "codex-cli"))

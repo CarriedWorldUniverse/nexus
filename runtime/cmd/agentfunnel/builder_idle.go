@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/CarriedWorldUniverse/bridle"
@@ -147,6 +148,63 @@ func watchBuilderGitProgress(ctx context.Context, worktree string, interval time
 			}
 		}
 	}
+}
+
+// builderRealOutputTracker accumulates the CURRENT turn's streamed model
+// text (bridle.ModelChunk events) so the verified-completion gate
+// (builderAcceptanceGate, main.go) can judge what the model actually
+// produced this turn rather than trusting a task_done self-report alone —
+// review finding on Unit B pass 1 (NET-24: keel-builder's summary claimed
+// success while the model produced nothing matching the required token; a
+// model authoring "posted CONVERGED-BETA-OK" as its OWN summary text
+// without ever having produced it would pass a summary-only check).
+//
+// Reset at the top of each turn (BeginTurn) so a stale prior turn's text
+// never leaks into the NEXT turn's verification. Mutex-guarded because
+// task_done can fire (on the same goroutine, synchronously, from inside
+// bridle's tool-call dispatch) while OnBridleEvent is still being called
+// for that same turn's remaining tool-call rounds; snapshot() may be read
+// concurrently with a WriteString from the tail of the same turn.
+type builderRealOutputTracker struct {
+	next funnel.ObservabilityHook
+	mu   sync.Mutex
+	text strings.Builder
+}
+
+func (h *builderRealOutputTracker) BeginTurn(turnID, label, model, provider string, triggerMsg int64) {
+	h.mu.Lock()
+	h.text.Reset()
+	h.mu.Unlock()
+	if h.next != nil {
+		h.next.BeginTurn(turnID, label, model, provider, triggerMsg)
+	}
+}
+
+func (h *builderRealOutputTracker) OnBridleEvent(ev bridle.Event) {
+	if chunk, ok := ev.(bridle.ModelChunk); ok {
+		h.mu.Lock()
+		h.text.WriteString(chunk.Text)
+		h.mu.Unlock()
+	}
+	if h.next != nil {
+		h.next.OnBridleEvent(ev)
+	}
+}
+
+func (h *builderRealOutputTracker) EndTurn() {
+	if h.next != nil {
+		h.next.EndTurn()
+	}
+}
+
+// snapshot returns everything streamed so far in the current turn. Safe to
+// call mid-turn (task_done fires before the turn's TurnDone event) — it
+// just returns whatever has streamed up to that instant, which is exactly
+// the "real output produced so far" signal the acceptance gate needs.
+func (h *builderRealOutputTracker) snapshot() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.text.String()
 }
 
 func gitHead(ctx context.Context, worktree string) (string, error) {

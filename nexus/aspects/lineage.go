@@ -53,12 +53,87 @@ func HandNamePool(base string) []string {
 	return AspectHandNames[base]
 }
 
+// Pool-worker identity grammar (2026-07-05 naming decision, supersedes the
+// `<parent>.sub-N` scheme). An orchestrator worker is named
+// `<personality>-<role>` LITERALLY — e.g. `anvil-builder`, `maren-painter`,
+// `plumb-security-reviewer`. The personality is an existing single-word aspect
+// lent to the pool (its persona/config/credentials are what the worker
+// resolves to); the role is the job, drawn from a closed vocabulary and
+// supplied at dispatch via the Brief. `sub` existed only so the real named
+// aspect could sit in chat alongside a hand — we no longer co-run it, so the
+// worker simply IS the personality doing a role.
+//
+// The split is unambiguous — and never misreads an ordinary hyphenated aspect
+// name (`maren-art`) as a worker — because BOTH halves must be known: the
+// suffix a registered WorkerRole, the prefix a registered WorkerPersonality.
+var (
+	// WorkerRoles is the closed role set. SplitWorker matches the LONGEST
+	// suffix, so `security-reviewer` is recognised ahead of `reviewer`.
+	WorkerRoles = []string{"security-reviewer", "builder", "tester", "reviewer", "painter", "modeller"}
+
+	// WorkerPersonalities is the pool personality set — existing single-word
+	// aspects. `shadow` is deliberately ABSENT: it is the orchestrator, not a
+	// worker. Any personality may take any role. Operators extend this set
+	// via config (POOL_PERSONALITIES), same as the hand-name pools above.
+	WorkerPersonalities = []string{"anvil", "plumb", "keel", "maren", "harrow"}
+)
+
+func inSet(set []string, v string) bool {
+	for _, s := range set {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
+// SplitWorker splits a pool-worker identity `<personality>-<role>` into its
+// personality and role. ok is false unless the suffix is a known WorkerRole
+// AND the remaining prefix is a known WorkerPersonality, so arbitrary aspect
+// names are never misclassified. The longest role suffix wins, so
+// `anvil-security-reviewer` → ("anvil", "security-reviewer").
+func SplitWorker(name string) (personality, role string, ok bool) {
+	best := ""
+	for _, r := range WorkerRoles {
+		suf := "-" + r
+		if strings.HasSuffix(name, suf) && len(r) > len(best) {
+			if p := name[:len(name)-len(suf)]; inSet(WorkerPersonalities, p) {
+				best, personality, role, ok = r, p, r, true
+			}
+		}
+	}
+	return personality, role, ok
+}
+
+// IsWorkerName reports whether name is a pool-worker identity.
+func IsWorkerName(name string) bool { _, _, ok := SplitWorker(name); return ok }
+
+// WorkerName composes a pool-worker identity from a personality and a role
+// (`anvil` + `builder` → `anvil-builder`). It is the inverse of SplitWorker.
+func WorkerName(personality, role string) string {
+	return personality + "-" + role
+}
+
+// PersonalityOf returns the identity whose persona/config/credentials a name
+// resolves to: the personality for a pool worker `<personality>-<role>`, the
+// base aspect for a dotted hand, or the name itself. It is the resolver every
+// serving seam should use for "which aspect's bundle applies".
+func PersonalityOf(name string) string {
+	if p, _, ok := SplitWorker(name); ok {
+		return p
+	}
+	return BaseName(name)
+}
+
 // IsDerivedName reports whether name is a derived hand identity —
 // `<base>.<suffix>`. The discriminator is the dot: aspect names use
 // hyphens and never contain one, so a dotted name is always a hand.
 // The base and the suffix must both be non-empty (`.umbra` and
 // `shadow.` are not lineages).
 func IsDerivedName(name string) bool {
+	if IsWorkerName(name) { // pool worker `<personality>-<role>` is a hand of its personality
+		return true
+	}
 	i := strings.IndexByte(name, '.')
 	return i > 0 && i < len(name)-1
 }
@@ -68,6 +143,9 @@ func IsDerivedName(name string) bool {
 // unchanged, so callers can use it unconditionally as "the identity
 // whose persona/config applies".
 func BaseName(name string) string {
+	if p, _, ok := SplitWorker(name); ok { // pool worker → its personality
+		return p
+	}
 	if i := strings.IndexByte(name, '.'); i > 0 && i < len(name)-1 {
 		return name[:i]
 	}

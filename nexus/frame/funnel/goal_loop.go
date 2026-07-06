@@ -102,6 +102,20 @@ func (g *GoalLoop) TurnCount() int {
 	return g.turnCount
 }
 
+// LastFinalText returns the most recently completed turn's natural reply —
+// the REAL posted output, not a model self-report. Set unconditionally at
+// the top of Pursue's switch (before any class-specific branch), so it is
+// valid immediately after any Pursue call, including a Done/FilterClassComplete
+// result. Unit B (verified task_done, NET-22/23/24/27) uses this as the
+// acceptance-verifier input for the judge-complete exit path: the judge that
+// classified the turn "complete" only ever saw the task text, never the
+// work item's acceptance criteria, so a second, criteria-aware check against
+// the SAME text the judge just approved is the only way to catch a
+// confabulated or merely-plausible-looking "done".
+func (g *GoalLoop) LastFinalText() string {
+	return g.priorFinalText
+}
+
 // Pursue runs one iteration of the goal-pursuit loop. It calls
 // Deliberate once; if the judge returns goal_not_met and the loop
 // cap hasn't been reached, it enqueues a continuation brief and

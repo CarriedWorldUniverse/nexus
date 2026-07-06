@@ -139,6 +139,62 @@ func BuildFilter(spec Spec) funnel.OutputFilter {
 	}
 }
 
+// BuildAcceptanceVerifier constructs the one-shot verified-task_done judge
+// (Unit B, NET-24) using the exact same provider/model resolution as
+// BuildFilter — same judge credential, same haiku-for-Claude default, same
+// bare-tier expansion — so operators configure ONE judge and get both the
+// output filter and the task_done verifier from it. Returns nil when the
+// judge is unbuildable (unrecognised provider name, no resolvable model);
+// callers must treat a nil verifier as "unavailable" and fail OPEN (honor
+// task_done without verification) rather than blocking completion on a
+// judge that doesn't exist — mirrors BuildFilter's downgrade-to-hard-rules
+// story, just with no rules-only fallback available for this classifier.
+func BuildAcceptanceVerifier(spec Spec) *funnel.AcceptanceVerifier {
+	log := spec.Logger
+
+	var jp bridle.Provider
+	var jid bridle.ProviderID
+	if name := strings.TrimSpace(spec.JudgeProviderName); name != "" {
+		p, id, ok := BuildProvider(name, spec.JudgeEnv, log)
+		if !ok {
+			log.Warn(spec.Label+": acceptance verifier requested but judge provider unbuildable; task_done will fail open",
+				"judge_provider", name)
+			return nil
+		}
+		jp, jid = p, id
+	} else {
+		jp, jid = spec.MainProvider, spec.MainProviderID
+		jp = NativeJudgeProvider(jp, jid, spec.JudgeEnv)
+	}
+
+	model := strings.TrimSpace(spec.JudgeModel)
+	if model == "" {
+		if IsClaudeFlavor(jid) {
+			model = "haiku"
+		} else {
+			model = spec.MainModel
+		}
+	}
+	model = funnel.ExpandBareClaudeTier(model, jid)
+	if model == "" {
+		log.Warn(spec.Label+": no judge model resolvable for acceptance verifier; task_done will fail open",
+			"provider", jid)
+		return nil
+	}
+
+	log.Info(spec.Label+": acceptance verifier configured (verified task_done)",
+		"judge_provider", jid, "judge_model", model, "judge_env_keys", envKeyNames(spec.JudgeEnv))
+	return &funnel.AcceptanceVerifier{
+		Harness:           bridle.NewHarness(BareJudgeProvider(jp, jid)),
+		Provider:          jid,
+		Model:             model,
+		AspectHome:        spec.AspectHome,
+		Logger:            log,
+		ObservabilityHook: spec.ObsHook,
+		ProviderEnv:       spec.JudgeEnv,
+	}
+}
+
 // BuildProvider instantiates a standalone cheap-judge provider for the
 // named family. For native Anthropic/OpenAI shapes it pins the key + base
 // URL from env at construction (the native SDKs read creds at construction,

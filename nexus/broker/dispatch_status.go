@@ -7,6 +7,7 @@ import (
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/frames"
 	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
+	"github.com/CarriedWorldUniverse/nexus/nexus/workerstatus"
 )
 
 func (c *wsConn) handleDispatchStatusFrame(env frames.Envelope) {
@@ -83,6 +84,63 @@ func (c *wsConn) handleDispatchStatusFrame(env frames.Envelope) {
 		}
 	default:
 		c.log.Warn("dispatch.status unknown status", "run_id", p.RunID, "status", p.Status, "from", c.registeredAs)
+	}
+}
+
+// handleWorkerStatusFrame upserts an incoming worker.status heartbeat
+// (M1 Unit 5, PHASE2-DESIGN §5) into the WorkerStatusStore. Best-effort
+// on the broker side too: a malformed payload or a nil store is logged
+// and dropped, never surfaced back to the worker — the heartbeat path
+// must never become a reason a worker's real turn fails.
+func (c *wsConn) handleWorkerStatusFrame(env frames.Envelope) {
+	if c.registeredAs == "" {
+		c.log.Warn("worker.status from unregistered connection dropped")
+		return
+	}
+	store := c.broker.cfg.WorkerStatusStore
+	if store == nil {
+		return
+	}
+	var p frames.WorkerStatusPayload
+	if err := frames.PayloadAs(env, &p); err != nil {
+		c.log.Warn("worker.status payload malformed", "err", err, "from", c.registeredAs)
+		return
+	}
+	// The connection's authenticated identity is the source of truth for
+	// attribution (same posture as the observe.* frames — a payload.Agent
+	// mismatch is advisory only, registeredAs wins), so a worker can never
+	// forge another worker's status row.
+	agent := c.registeredAs
+	hb := p.LastHeartbeat
+	if hb.IsZero() {
+		hb = env.TS
+	}
+	if hb.IsZero() {
+		hb = time.Now()
+	}
+	ctx := c.broker.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	st := workerstatus.Status{
+		Agent:          agent,
+		Role:           p.Role,
+		Personality:    p.Personality,
+		WorkItemID:     p.WorkItemID,
+		State:          p.State,
+		AuthOk:         p.AuthOk,
+		TokenExpiresAt: p.TokenExpiresAt,
+		Provider:       p.Provider,
+		Model:          p.Model,
+		CLIVersion:     p.CLIVersion,
+		ImageTag:       p.ImageTag,
+		LastHeartbeat:  hb,
+		StartedAt:      p.StartedAt,
+		Turns:          p.Turns,
+		TokensUsed:     p.TokensUsed,
+	}
+	if err := store.Upsert(ctx, st); err != nil {
+		c.log.Warn("worker.status upsert failed", "agent", agent, "err", err)
 	}
 }
 

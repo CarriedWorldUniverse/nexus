@@ -60,7 +60,7 @@ type K8sIface interface {
 	EnsureKeyfileSecret(ctx context.Context, aspect string) error
 	EnsureHomeRepo(ctx context.Context, agent string) error
 	EnsureSharedReposPVC(ctx context.Context) error
-	PutBriefConfigMap(ctx context.Context, taskID, brief string) error
+	PutBriefConfigMap(ctx context.Context, taskID string, data map[string]string) error
 	CreateJob(ctx context.Context, job *batchv1.Job) (*batchv1.Job, error)
 	SetBriefOwner(ctx context.Context, taskID string, job *batchv1.Job) error
 	ListActiveJobs(ctx context.Context) (map[string]ActiveJob, error)
@@ -71,6 +71,18 @@ type K8sIface interface {
 // Submitter is the interface the broker calls for !dispatch interception.
 type Submitter interface {
 	Submit(ctx context.Context, b Brief) (string, error)
+}
+
+// WorkerStatusRetirer is the subset of nexus/workerstatus.Store's write API
+// OnJobDone needs to retire a finished run's heartbeat row —
+// workerstatus.SQLStore satisfies this structurally; no adapter required.
+// Row retirement (not just row content) matters here: leaving a
+// completed/cancelled run's row in place with a live-looking state is what
+// let the orchestrator's stale-heartbeat reaper requeue an already-finished
+// (or already-cancelled) work item forever (live-reproduced NET-30,
+// 2026-07-05) — see nexus/orchestrator/reap.go.
+type WorkerStatusRetirer interface {
+	Delete(ctx context.Context, agent string) error
 }
 
 // Runner is the broker-embedded dispatch engine.
@@ -97,6 +109,13 @@ type Runner struct {
 	// applies on top.
 	SpawnMaxConcurrent int
 
+	// Personalities is the pool worker roster: the base aspects a pool
+	// lease may run as (`<personality>-<role>`). One job per personality —
+	// the first free personality is leased for an incoming role, so the
+	// roster size is the natural concurrency cap. nil → aspects.WorkerPersonalities.
+	// cmd/nexus populates this from POOL_PERSONALITIES.
+	Personalities []string
+
 	// Audit stores spawn audit posts AS a named sender, returning the
 	// message id — used for the spawn audit-thread root (the !dispatch
 	// post-as-thread-root pattern, but originated broker-side). nil =
@@ -122,6 +141,24 @@ type Runner struct {
 	// nothing and the launch default applies. In production cmd/nexus
 	// wires this to the aspects store's provider column for the parent.
 	HandProvider func(ctx context.Context, parent string) string
+
+	// OnJobDoneHook, when set, is called at the end of every OnJobDone
+	// invocation (after the existing free-agent/drain/completion-post
+	// behavior runs unchanged) — the M1 Unit 6 orchestrator's wake wiring
+	// (PHASE2-DESIGN §2 "wake triggers: OnJobDone completion hook").
+	// nil is the default and reproduces OnJobDone's exact prior behavior;
+	// this field only ever ADDS a caller shape, never replaces one. Called
+	// synchronously, outside r.mu — implementations that need to be
+	// non-blocking should hand off internally (e.g. go func()).
+	OnJobDoneHook func(JobDone)
+
+	// WorkerStatus, when set, is used by OnJobDone to retire (delete) the
+	// completed run's agent's worker_status row — a Job ending (success OR
+	// failure) means that heartbeat row no longer describes anything live.
+	// nil = no retirement (reproduces prior behavior: rows accumulate and
+	// go stale, see WorkerStatusRetirer doc). Best-effort: a delete failure
+	// is logged, never fatal to OnJobDone's other bookkeeping.
+	WorkerStatus WorkerStatusRetirer
 
 	mu        sync.Mutex
 	ctx       context.Context   // stored at Init for background callbacks (OnJobDone)
@@ -305,18 +342,44 @@ func (r *Runner) canRun(agent string) bool {
 	}
 	// Per-parent hand cap (NEX-571): a derived identity only starts
 	// while its base aspect has spare hand slots. Applies on submit AND
-	// on queue drain, so queued hands wait for a sibling to finish.
+	// on queue drain, so queued hands wait for a sibling to finish. Pool
+	// workers (`<personality>-<role>`) are capped on their OWN dimension —
+	// one job per personality, enforced at lease time by
+	// tryLeaseWorkerSlot — so liveHands deliberately counts only kindred
+	// (dotted) hands: growing one dimension never silently loosens or
+	// tightens the other.
 	if base := aspects.BaseName(agent); base != agent && r.liveHands(base) >= r.spawnMaxConcurrent() {
 		return false
 	}
 	return true
 }
 
-// liveHands counts base's busy derived identities. Caller holds r.mu.
+// liveHands counts base's busy KINDRED (dotted `<base>.<word>`) hands —
+// the SubmitSpawn fan-out cap dimension. Pool workers (`<personality>-
+// <role>`) are excluded even though they too are derived of the
+// personality: a pool lease must not eat into the personality's own
+// hand-fan-out headroom (the two caps are documented as independent).
+// Pool occupancy is counted by liveWorkers instead. Caller holds r.mu.
 func (r *Runner) liveHands(base string) int {
 	n := 0
 	for name := range r.agentBusy {
+		if aspects.IsWorkerName(name) {
+			continue
+		}
 		if aspects.IsDerivedName(name) && aspects.BaseName(name) == base {
+			n++
+		}
+	}
+	return n
+}
+
+// liveWorkers counts personality's busy pool workers (`<personality>-
+// <role>`) — the pool's one-job-per-personality cap dimension, disjoint
+// from the kindred-hand count above. Caller holds r.mu.
+func (r *Runner) liveWorkers(personality string) int {
+	n := 0
+	for name := range r.agentBusy {
+		if p, _, ok := aspects.SplitWorker(name); ok && p == personality {
 			n++
 		}
 	}
@@ -391,6 +454,26 @@ func (r *Runner) OnJobDone(done JobDone) {
 	if done.CompletedAt.IsZero() {
 		done.CompletedAt = time.Now()
 	}
+
+	// Retire the worker_status heartbeat row for the agent that just
+	// finished — keyed by run.Brief.Agent, the same identity agentBusy
+	// was just freed under (NOT done.Agent, which the caller may leave
+	// empty). Rows are keyed by agent name and re-leases REUSE names, so
+	// a stale, un-retired row here would otherwise be inherited by
+	// whichever run leases this agent next (or, worse, keep pointing the
+	// reaper at THIS run's now-finished work item forever — the NET-30
+	// loop). Best-effort: never lets a status-store hiccup block the
+	// bookkeeping/post/relaunch below.
+	if r.WorkerStatus != nil {
+		ctx := r.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := r.WorkerStatus.Delete(ctx, run.Brief.Agent); err != nil {
+			slog.Warn("dispatch: retire worker_status row failed", "agent", run.Brief.Agent, "err", err)
+		}
+	}
+
 	if r.Recorder != nil {
 		ctx := r.ctx
 		if ctx == nil {
@@ -410,9 +493,31 @@ func (r *Runner) OnJobDone(done JobDone) {
 	r.post(done.Thread, r.completionSummary(run, done))
 
 	r.launchPending(r.ctx, pending)
+
+	// M1 Unit 6 orchestrator wake (PHASE2-DESIGN §2): fires after every
+	// existing OnJobDone behavior above, never in place of it.
+	if r.OnJobDoneHook != nil {
+		r.OnJobDoneHook(done)
+	}
 }
 
 func (r *Runner) completionSummary(run *Run, done JobDone) string {
+	// Pool-lease completion (M1 Unit 4): accountability is the worker
+	// identity + role + work item, not the builder branch/PR block or
+	// the hand-of-parent lineage line. A leased worker is `<personality>-
+	// <role>` (aspects.IsWorkerName); the personality is its SpawnParent.
+	if aspects.IsWorkerName(run.Brief.Agent) {
+		status := "done"
+		if !done.OK {
+			status = "failed"
+		}
+		return strings.Join([]string{
+			"pool " + status + ": worker=" + run.Brief.Agent + " role=" + run.Brief.Role + " work_item=" + run.Brief.WorkItemID,
+			"duration: " + formatDuration(done.StartedAt, done.CompletedAt),
+			"turns: " + formatCount(r.countActivityTurns(done.Agent, done.StartedAt, done.CompletedAt)),
+		}, "\n")
+	}
+
 	// Hand completion (NEX-571): carry the lineage instead of the
 	// builder branch/PR block — hands do fan-out work in their parent's
 	// thread, not single-ticket PR runs.
@@ -563,6 +668,25 @@ func (r *Runner) reserveQueued() []*Run {
 	var runs []*Run
 	kept := make([]Brief, 0, len(r.queue))
 	for _, b := range r.queue {
+		// A queued pool work-item (pool.go) carries no personality/Agent
+		// yet — any free personality will do, so it can't be checked via
+		// canRun(agent) like a fixed-identity brief. Lease a free
+		// personality for its role now.
+		if b.SpawnParent == poolParentName && b.Agent == "" {
+			if personality, name := r.tryLeaseWorkerSlot(b.Role); name != "" {
+				b.SpawnParent = personality
+				b.Agent = name
+				// See pool.go's SubmitPoolItem: Personality must be stamped
+				// here too, or a pool item that queued (all personalities
+				// busy at submit time) and later drains through this path
+				// launches with no CW_PERSONALITY env / heartbeat field.
+				b.Personality = personality
+				runs = append(runs, r.reserve(b))
+			} else {
+				kept = append(kept, b)
+			}
+			continue
+		}
 		if r.canRun(b.Agent) {
 			runs = append(runs, r.reserve(b))
 		} else {
@@ -682,5 +806,9 @@ func provisionRun(ctx context.Context, k K8sIface, cfg JobConfig, b Brief, taskI
 		slog.Info("dispatch: skipping git credential grant; git credential name not configured",
 			"agent", b.Agent, "repo", b.Repo)
 	}
-	return k.PutBriefConfigMap(ctx, taskID, b.Task)
+	data, err := briefConfigMapData(b)
+	if err != nil {
+		return fmt.Errorf("provision: %w", err)
+	}
+	return k.PutBriefConfigMap(ctx, taskID, data)
 }

@@ -168,6 +168,16 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 	mux.Handle("POST /api/admin/rewind", b.requireAdmin(http.HandlerFunc(b.handleAdminRewind)))
 	mux.Handle("GET /api/admin/dispatch-status", b.requireAdmin(http.HandlerFunc(b.handleAdminDispatchStatus)))
 	mux.Handle("GET /api/admin/roster", b.requireAdmin(http.HandlerFunc(b.handleAdminRoster)))
+	// Consolidated fleet status (M1 Unit 5, PHASE2-DESIGN §5). requireAdmin,
+	// NOT b.auth — this is the separation-of-duties lesson: worker status
+	// (auth_ok/token_expires_at, cli_version, provider/model binding) is
+	// operator/admin-only fleet-management data, not something any
+	// authenticated aspect should be able to read about its peers.
+	// Gated on WorkerStatusStore being configured, same convention as the
+	// aspects-store-gated routes below.
+	if b.cfg.WorkerStatusStore != nil {
+		mux.Handle("GET /api/admin/workers", b.requireAdmin(http.HandlerFunc(b.handleAdminWorkers)))
+	}
 	// All known aspects (live + offline). /api/admin/roster only lists
 	// the LIVE-registered set; this surface walks the aspects DB and
 	// cross-references the roster so the Settings UI can show offline
@@ -264,6 +274,15 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 		mux.Handle("PUT /api/admin/aspects/{name}/mcp_profile",
 			b.requireAdmin(http.HandlerFunc(b.handleAdminMCPProfileSet)))
 	}
+
+	// Document register verdicts (M1 Unit 2, PHASE2-DESIGN.md §9):
+	// approve/approve-with-changes/reject/supersede. requireAdmin —
+	// operator-only, separate from the broker-authenticated workbench
+	// (create/get/list/revise/submit, registered outside registerAdmin —
+	// see registerDocRegisterWorkbench). Gated on DocRegister being
+	// configured, same "config gates the surface" convention as the rest
+	// of this function.
+	b.registerDocRegisterVerdicts(mux)
 }
 
 // handleAdminShutdown kicks off a graceful shutdown. Long-running by
@@ -391,6 +410,28 @@ func (b *Broker) handleAdminRoster(w http.ResponseWriter, r *http.Request) {
 type adminRosterAspect struct {
 	schemas.AspectState
 	DispatchEnabled bool `json:"dispatch_enabled"`
+}
+
+// handleAdminWorkers serves the M1 Unit 5 fleet-status consolidation
+// endpoint (PHASE2-DESIGN §5): one query over the worker_status table,
+// most-recently-heartbeated first — the Phase-5 UI, the minimal status
+// view, and `nexus workers` CLI all read this and nothing else. Gated
+// on WorkerStatusStore being configured (registerAdmin only wires this
+// route when non-nil), so a nil store here would be a wiring bug —
+// still handled defensively rather than assumed.
+func (b *Broker) handleAdminWorkers(w http.ResponseWriter, r *http.Request) {
+	if b.cfg.WorkerStatusStore == nil {
+		writeError(w, http.StatusNotImplemented, "worker_status_not_implemented")
+		return
+	}
+	rows, err := b.cfg.WorkerStatusStore.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"workers": rows,
+	})
 }
 
 // adminAspectAll is one row in the /api/admin/aspects/all response.

@@ -1,0 +1,44 @@
+{{/* Approval queue pane. Rendered with html/template — every field is
+     auto-escaped in its HTML context; RenderedHTML is the exception,
+     pre-sanitized markdown output (goldmark with raw-HTML passthrough
+     disabled), passed through as template.HTML deliberately. A doc
+     title containing "<script>" renders as inert escaped text because
+     .Title goes through {{.Title}}, not RenderedHTML. */}}
+<h2>Approval queue</h2>
+{{if not .Docs}}
+  <p class="empty">No documents awaiting approval.</p>
+{{end}}
+{{range .Docs}}
+<article class="doc-card" id="doc-{{.ID}}">
+  <header>
+    <h3>{{.Title}}</h3>
+    <span class="meta">{{.Kind}} &middot; v{{.Version}} &middot; work item {{.WorkItemID}}</span>
+  </header>
+  <div class="doc-rendered">{{.RenderedHTML}}</div>
+  <form class="doc-verdict-form">
+    <label>Edit (used by "approve with changes"):</label>
+    <textarea class="doc-edit" name="md_content">{{.RawMD}}</textarea>
+    <input type="hidden" name="by" value="{{$.AdminID}}">
+    <label>Reject reason:</label>
+    <textarea class="doc-reason" data-role="reason" placeholder="Why is this rejected?"></textarea>
+    <div class="doc-actions">
+      <button type="button" class="btn-approve"
+              hx-post="/api/admin/docs/{{.ID}}/approve"
+              hx-include="closest form"
+              hx-swap="none"
+              hx-on::after-request="afterVerdict(event)">Approve</button>
+      <button type="button" class="btn-approve-changes"
+              hx-post="/api/admin/docs/{{.ID}}/approve-with-changes"
+              hx-include="closest form"
+              hx-swap="none"
+              hx-on::after-request="afterVerdict(event)">Approve with changes</button>
+      <button type="button" class="btn-reject"
+              hx-post="/api/admin/docs/{{.ID}}/reject"
+              hx-include="closest form"
+              hx-vals="js:{reasons: docReasonList('{{.ID}}')}"
+              hx-swap="none"
+              hx-on::after-request="afterVerdict(event)">Reject</button>
+    </div>
+  </form>
+</article>
+{{end}}

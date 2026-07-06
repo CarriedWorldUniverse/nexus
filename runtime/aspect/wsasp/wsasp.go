@@ -767,6 +767,41 @@ func (c *Client) SendDispatchStatus(ctx context.Context, runID, status, reason s
 	return nil
 }
 
+// SendWorkerStatus emits the M1 Unit 5 worker-status heartbeat
+// (PHASE2-DESIGN §5) over the normal aspect WebSocket. Unlike
+// SendDispatchStatus, this uses SendBestEffort (no durable queue): a
+// heartbeat that misses one tick because the WS happens to be down is
+// harmless — the next ~60s tick (or the next turn boundary) supersedes
+// it — whereas queuing every dropped heartbeat behind a reconnect would
+// eventually deliver a burst of stale snapshots. Best-effort by design
+// per the build spec: a failed emit must never block or crash the
+// worker's real work, so callers should log-and-continue on error, not
+// retry or escalate.
+func (c *Client) SendWorkerStatus(ctx context.Context, p frames.WorkerStatusPayload) error {
+	// Ready(), not just SendBestEffort's bare Connected() check: Connected()
+	// flips true the instant the WS dial succeeds, which is BEFORE the
+	// register frame has even been sent (registration is driven off the
+	// wsclient Connected event by a separate goroutine — see
+	// ensureRegistered). A worker.status frame written to the wire in that
+	// window arrives at a broker-side wsConn whose registeredAs is still ""
+	// — handleWorkerStatusFrame (dispatch_status.go) drops any frame from
+	// an unregistered connection unconditionally. That gap is exactly the
+	// mechanism that made every M1 Unit 5 heartbeat vanish in production:
+	// SendBestEffort reported "sent" (no error) for a frame the broker had
+	// already silently discarded. Gating on Ready() (Connected() AND the
+	// register barrier closed) makes the failure visible to THIS caller
+	// (best-effort logs it and moves on) instead of invisible on the broker
+	// side.
+	if !c.Ready() {
+		return errNotConnected
+	}
+	env, err := frames.New(frames.KindWorkerStatus, p)
+	if err != nil {
+		return err
+	}
+	return c.SendBestEffort(ctx, env)
+}
+
 // CursorFileForAspect returns a default cursor-file path under the
 // aspect home directory (`<home>/cursor`). Convenience for callers
 // that don't want to hand-pick a path.

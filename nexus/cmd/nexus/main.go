@@ -38,6 +38,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
 	"github.com/CarriedWorldUniverse/nexus/nexus/storage"
+	"github.com/CarriedWorldUniverse/nexus/nexus/workerstatus"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 	"k8s.io/client-go/kubernetes"
 )
@@ -90,6 +91,12 @@ func main() {
 	}
 	if len(os.Args) >= 2 && os.Args[1] == "activity-summary" {
 		os.Exit(runActivitySummarySubcommand(os.Args[2:]))
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "workers" {
+		os.Exit(runWorkersSubcommand(os.Args[2:]))
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "workitem" {
+		os.Exit(runWorkitemSubcommand(os.Args[2:]))
 	}
 	addr := flag.String("addr", ":7888", "broker listen address")
 	tokenEnv := flag.String("token-env", "NEXUS_TOKEN", "env var holding the shared bearer token")
@@ -251,6 +258,16 @@ func main() {
 	// the legacy master token until reconciled (deliberate graceful
 	// degrade; cleanup tracked separately).
 	tokenStore := broker.NewTokenStore()
+	// Wire the shared bearer as the legacy MASTER (admin) token. server.go
+	// only does this on its own nil-Tokens fallback branch — since main
+	// supplies this store, the master was never set here, so NEXUS_TOKEN
+	// resolved to nothing admin-shaped and every /api/admin caller (aspect
+	// mint, cw issue-git-permission) got 401/403 (found live, Phase 4
+	// NET-36). This restores the documented back-compat intent; the
+	// per-aspect-collision guard in TokenStore.lookup still demotes it if
+	// the value doubles as a registered aspect token. Proper split-admin
+	// auth is ticketed separately.
+	tokenStore.SetLegacyMaster(token)
 	aspectIDs := discoverAspectIDs(*aspectDir, logger)
 	if len(aspectIDs) > 0 {
 		if err := tokenStore.ReconcileAgentTokens(ctx, db, aspectIDs); err != nil {
@@ -262,8 +279,16 @@ func main() {
 	chatStore := chat.NewSQLStore(db)
 	runsStore := runs.NewSQLStore(db)
 	conveneStore := convene.NewSQLStore(db)
+	workerStatusStore := workerstatus.NewSQLStore(db)
 	knowledgeStore := knowledge.New(db, logger)
 	obsHub := observability.NewHub(500, nil)
+
+	// li1-orchestrator-wiring: M1 Unit 2 document register. Dark unless
+	// DOCREGISTER_ENABLE=1 (or DOCREGISTER_CAIRN_DIR is set) — nil leaves
+	// Config.DocRegister nil below, so the /api/docs endpoints stay
+	// dormant exactly as before this wiring existed. See
+	// orchestrator_wiring.go for the full env reference.
+	docRegisterStore := buildDocRegister(logger, db)
 
 	// NEX-144: bring up the ledger issue-tracker service alongside the
 	// broker. ledger.db lives parallel to broker's nexus.db in the
@@ -420,6 +445,11 @@ func main() {
 	// cmd.Dir control vector for stolen aspect tokens).
 	aspectHomes := discoverAspectHomes(*aspectDir, logger)
 
+	// §6 frontier auth: the live secret-name/key pointer every claude-code
+	// dispatch reads at BuildJob time. Starts at the M0.3 claude-oauth
+	// default; cfgreconcile.FrontierAuth (registered below, when almanac is
+	// configured) can redirect it without a broker restart.
+	frontierAuthCfg := dispatch.NewFrontierAuthConfig()
 	dispatchCfg := dispatch.JobConfig{
 		Image:         os.Getenv("CW_BUILDER_IMAGE"),
 		Namespace:     envOrDefault("CW_K8S_NAMESPACE", "nexus"),
@@ -439,6 +469,19 @@ func main() {
 		// the fallback so one deployment env serves both.
 		OllamaBaseURL:   envOrDefault("CW_OLLAMA_BASE_URL", os.Getenv("OLLAMA_BASE_URL")),
 		OllamaKeepAlive: envOrDefault("CW_OLLAMA_KEEP_ALIVE", os.Getenv("OLLAMA_KEEP_ALIVE")),
+		// §7 CLI-version knob: CW_BUILDER_IMAGE_PIN_FILE names a file (a
+		// ConfigMap volume mount, typically) whose trimmed contents pin a
+		// full image ref for every dispatch — read fresh on each BuildJob
+		// call (not cached here), so `kubectl create/edit configmap` takes
+		// effect within the kubelet's ConfigMap sync period (no broker
+		// restart). Unset/missing/empty file → cfg.Image (today's "latest
+		// built" default) is used, unchanged behavior. See README "CLI
+		// version knob" for the live-verify path.
+		ImageTagPin: imageTagPinFunc(os.Getenv("CW_BUILDER_IMAGE_PIN_FILE")),
+		// §6 frontier auth: read live at dispatch time from frontierAuthCfg
+		// (defaults to the M0.3 claude-oauth secret; almanac can redirect it
+		// — see the cfgreconcile.FrontierAuth registration below).
+		FrontierAuthFunc: frontierAuthCfg.Get,
 	}
 	// Hand (spawn) Jobs carry no keyfile, so they can't pin the broker's
 	// self-signed / internal-CA cert the way ticket builders do (the cert is
@@ -476,6 +519,11 @@ func main() {
 		Cfg:                dispatchCfg,
 		MaxConc:            maxConc,
 		SpawnMaxConcurrent: spawnMaxConc,
+		// Retires a run's worker_status heartbeat row the moment its Job
+		// ends (see runtime/dispatch/runner.go OnJobDone / WorkerStatusRetirer
+		// doc) — the other half of the NET-30 reap<->cancel loop fix
+		// alongside nexus/orchestrator/reap.go's ledger-status recheck.
+		WorkerStatus: workerStatusStore,
 		// Hands authenticate with a broker-minted derived session JWT
 		// (no keyfile exists for <parent>.sub-N) — the mint sits beside
 		// the aspect-keyfile-<agent> seam ticket dispatches use.
@@ -499,6 +547,11 @@ func main() {
 		// NEXUS_ASPECT_HAND_NAMES="shadow=umbra|gloam|shade,plumb=bob|fathom".
 		// Unset → the built-in aspects.AspectHandNames defaults.
 		AspectHandNames: parseHandNamePools(os.Getenv("NEXUS_ASPECT_HAND_NAMES")),
+		// Pool worker roster: the personalities a role-based lease may run
+		// as (`<personality>-<role>`). POOL_PERSONALITIES overrides; unset →
+		// aspects.WorkerPersonalities. Mirrors ensurePoolPersonalities, which
+		// provisions the same roster's rows + shared Ornith credential.
+		Personalities: parseCSVOrDefault(os.Getenv("POOL_PERSONALITIES"), aspects.WorkerPersonalities),
 	}
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		if k8s, kerr := dispatch.NewInClusterK8s(dispatchCfg.Namespace); kerr != nil {
@@ -527,6 +580,25 @@ func main() {
 		if k8s, ok := dispatchRunner.K8sIface.(*dispatch.K8s); ok && k8s != nil {
 			k8sReader = k8s.Client
 			k8sNamespace = k8s.Namespace
+		}
+	}
+
+	// li1-orchestrator-wiring: the M1 Unit 6 standing orchestrator.
+	// Fail-soft + fully env-gated — dark unless WORKGRAPH_LEDGER_ADDR AND
+	// ORCHESTRATOR_ENABLE=1 are both set, and dispatchRunner survived Init
+	// above (a Runner that can actually SubmitPoolItem). Any missing
+	// prerequisite or construction error is logged by the build* helpers
+	// and this block is a no-op — runner.OnJobDoneHook stays nil and no
+	// drain loop starts, exactly as before this wiring existed. See
+	// orchestrator_wiring.go for the env-var reference.
+	if dispatchRunner != nil {
+		ensurePoolPersonalities(ctx, keyfileValidator.Store, credentialStore, logger)
+		workgraphClient := buildWorkgraphClient(logger)
+		if orch := buildOrchestrator(logger, workgraphClient, dispatchRunner, workerStatusStore); orch != nil {
+			dispatchRunner.OnJobDoneHook = orch.OnJobDoneHook()
+			drainInterval := orchestratorDrainInterval(logger)
+			go runDrainLoop(ctx, orch, drainInterval, logger)
+			logger.Info("orchestrator: drain loop started", "interval", drainInterval)
 		}
 	}
 
@@ -566,6 +638,7 @@ func main() {
 		ChatStore:          chatStore,
 		RunsStore:          runsStore,
 		ConveneStore:       conveneStore,
+		WorkerStatusStore:  workerStatusStore,
 		SQLDB:              db,
 		ActivityLogDir:     activityLogDir,
 		K8sReader:          k8sReader,
@@ -590,6 +663,10 @@ func main() {
 		// Task #218: broker-mediated credentials. Nil-safe — admin
 		// routes register only when non-nil, otherwise return 503.
 		Credentials: credentialStore,
+		// li1-orchestrator-wiring: M1 Unit 2 document register. nil
+		// (the default, no new env set) leaves the /api/docs endpoints
+		// dormant — unchanged behavior.
+		DocRegister: docRegisterStore,
 		// custodian M1: git credential.fetch routes here when configured
 		// (CUSTODIAN_GRPC_ADDR); nil = git stays local (no regression).
 		CustodianGit: custodianGit,
@@ -778,6 +855,13 @@ func main() {
 		if credentialStore != nil {
 			recs = append(recs, cfgreconcile.NewNetworkDefaults(almanacReader, credentialStore, logger))
 		}
+		// §6 frontier auth: almanac SecureParameter (cwb/nexus/frontier-auth)
+		// can redirect which k8s Secret/key delivers CLAUDE_CODE_OAUTH_TOKEN
+		// into claude-code dispatch Jobs. Dark (almanacReader nil, this whole
+		// block skipped) → frontierAuthCfg stays at its claude-oauth default,
+		// which is still wired into dispatchCfg above — that's the "falls
+		// back to the k8s secret" path from the §7 build spec.
+		recs = append(recs, cfgreconcile.NewFrontierAuth(almanacReader, frontierAuthCfg, logger))
 		go cfgreconcile.RunAll(ctx, almanacInterval, logger, recs...)
 	}
 
@@ -1197,6 +1281,26 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// imageTagPinFunc builds dispatch.JobConfig.ImageTagPin (the §7 CLI-version
+// knob): when path is empty, returns nil (no knob — cfg.Image, "latest
+// built", is used for every dispatch, matching today's behavior exactly).
+// When path is set, returns a func that re-reads and trims the file's
+// contents on every call — a missing file or read error yields "" (no pin),
+// never a crash, so a mistyped/not-yet-mounted path degrades to the default
+// rather than failing dispatch.
+func imageTagPinFunc(path string) func() string {
+	if path == "" {
+		return nil
+	}
+	return func() string {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(b))
+	}
 }
 
 func reaper(ctx context.Context, r *roster.Roster, b *broker.Broker, staleAfter, every time.Duration, log *slog.Logger) {

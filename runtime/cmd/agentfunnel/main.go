@@ -50,6 +50,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -92,6 +93,12 @@ const defaultDrainPrompt = `You are shadow, woken for ONE autonomous orchestrate
 Hard rules: one ticket per builder; never bundle tickets in a dispatch; transition-on-dispatch is mandatory; when in doubt about a merge, ESCALATE; if it isn't in Jira/git/the run log, it didn't happen.`
 
 func main() {
+	// processStartedAt anchors the M1 Unit 5 worker.status heartbeat's
+	// `started_at` field — stable across every heartbeat this process
+	// emits (the worker_status store treats a zero StartedAt on later
+	// upserts as "don't overwrite," so this is really only read once,
+	// at the first emit).
+	processStartedAt := time.Now().UTC()
 	keyfilePath := flag.String("k", "", "path to the aspect keyfile (required)")
 	cursorDir := flag.String("cursor-dir", "", "directory for the Lock 6 message-cursor file (defaults to <cwd>/cursor)")
 	contextMode := flag.String("context-mode", string(schemas.ContextThread), "context mode: global, thread, or stateless (Nexus does not yet ship context_mode in the validation response)")
@@ -111,10 +118,42 @@ func main() {
 	branchFlag := flag.String("branch", "", "builder mode: dispatched branch (defaults to builder/<ticket>)")
 	drainMode := flag.Bool("drain", false, "drain/one-shot mode: run ONE autonomous orchestrate drain over shadow's queue (claude -p with the materialised MCPs + gh bridged), then exit. No builder worktree/PR-verify coupling — used by the heartbeat CronJob.")
 	drainPrompt := flag.String("drain-prompt", defaultDrainPrompt, "drain mode: the orchestrate drain instruction handed to claude -p")
+	roleFile := flag.String("role-file", "", "builder mode: path to the resolved role system-prompt text for this spawn (role-at-spawn overlay; optional — dispatch.Brief.RolePrompt written by BuildJob when a RolePrompt is set). composeSystemPrompt prepends its contents above the (thin) personality.")
+	policyFragmentFile := flag.String("policy-fragment-file", "", "builder mode: path to a spawn-supplied funnel.ToolPolicy JSON overlay applied over -policy for this spawn (role-at-spawn overlay; optional — dispatch.Brief.PolicyFragment written by BuildJob when set).")
+	acceptanceFile := flag.String("acceptance-file", "", "builder mode: path to the ledger work item's acceptance criteria text (Unit B verified task_done, NET-22/23/24; optional — dispatch.Brief.AcceptanceCriteria written by BuildJob when the work item has a DoD). When set, task_done is verified against this text before the builder is allowed to exit.")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
+
+	// Role-at-spawn overlay (M1 Unit 3): read here, before both the tool
+	// policy load and composeSystemPrompt need them. A missing/malformed
+	// file at a NON-empty path fails fast (same posture as -policy) —
+	// BuildJob only ever passes these flags when the ConfigMap key it
+	// names actually exists, so a read failure here means a real bug.
+	// Empty flags (the default) leave both zero values → no overlay,
+	// exactly matching pre-role-at-spawn behavior.
+	var spawnRolePrompt string
+	if *roleFile != "" {
+		raw, err := os.ReadFile(*roleFile)
+		if err != nil {
+			fail(log, "read role-file", err)
+		}
+		spawnRolePrompt = strings.TrimSpace(string(raw))
+	}
+	var spawnPolicyFragment *funnel.ToolPolicy
+	if *policyFragmentFile != "" {
+		raw, err := os.ReadFile(*policyFragmentFile)
+		if err != nil {
+			fail(log, "read policy-fragment-file", err)
+		}
+		var frag funnel.ToolPolicy
+		if err := json.Unmarshal(raw, &frag); err != nil {
+			fail(log, "parse policy-fragment-file", err)
+		}
+		spawnPolicyFragment = &frag
+	}
+	acceptanceCriteria := readAcceptanceCriteriaFile(*acceptanceFile, log)
 
 	// Boot credential: a normal aspect presents a keyfile (-k); a
 	// spawned hand (NEX-571 Task D) presents a broker-minted session JWT
@@ -357,12 +396,14 @@ func main() {
 	// Threaded into every newBindingHarness call below so the P3b/P3c
 	// permission hook enforces it on native-API providers.
 	//
-	// Tier B (follow-on): store the per-aspect policy centrally in the
-	// Nexus and deliver it via keyfile.ValidationResult — mirroring the
-	// existing res.MCPProfile field (keyfile.go ValidationResult.MCPProfile,
-	// the NEX-169 resolved MCP-server blob). That removes the on-host file
-	// and makes the policy Nexus-authoritative like provider/model.
-	policy, err := loadToolPolicy(*policyPath)
+	// Tier B (role-at-spawn, M1 Unit 3): a spawn-supplied PolicyFragment
+	// (dispatch.Brief.PolicyFragment, delivered via -policy-fragment-file)
+	// overlays the static -policy file per-spawn rather than per-aspect —
+	// see applyPolicyFragment. Computed ONCE here, same as the static file
+	// always was; every newBindingHarness call below (incl. the binding
+	// refresh loop at re-validate) re-registers this SAME policy value
+	// unchanged, so the refresh loop cannot clobber the spawn overlay.
+	policy, err := loadToolPolicy(*policyPath, spawnPolicyFragment)
 	if err != nil {
 		fail(log, "load tool policy", err)
 	}
@@ -529,6 +570,24 @@ func main() {
 		fail(log, "wsasp.NewClient", err)
 	}
 
+	// M1 Unit 5 fix (root cause): wsClient.Run(ctx) — the call that actually
+	// dials + registers the WS connection — used to be the LAST statement in
+	// this function, invoked only after the entire funnel/filter/tool-runner
+	// setup below (hundreds of lines) and after the boot heartbeat had
+	// already been Emit()'d. Since Emit()/SendWorkerStatus route through
+	// wsasp.Client.SendBestEffort, which requires the connection to already
+	// be up, that meant the boot heartbeat ("running" or "spawning") was
+	// GUARANTEED to be dropped — Connected() is trivially false before Run()
+	// has ever been called — and every subsequent heartbeat raced the
+	// dial+register handshake for however long that took. Starting the dial
+	// loop here, as early as wsClient exists, gives it the whole span of the
+	// remaining setup (escalator, gateways, funnel construction, tool runner,
+	// etc.) to reach Ready() before the first heartbeat fires. wsClientRunErr
+	// carries Run's terminal error to the wait point that replaces the old
+	// blocking call (search for "wsClientRunErr" below).
+	wsClientRunErr := make(chan error, 1)
+	go func() { wsClientRunErr <- wsClient.Run(ctx) }()
+
 	// P3c: now that the wsasp client exists, build the operator-escalation
 	// requester for native providers and re-store the binding cache with
 	// an escalator-equipped harness. wsClient.Request blocks on the
@@ -554,12 +613,17 @@ func main() {
 	// field was nil → CommsRunner returned "knowledge gateway not
 	// configured" on every call.
 	knowledgeGateway := wsasp.NewKnowledgeGateway(wsClient)
+	// onTaskDone/doneSentinel are assigned below, once the acceptance
+	// verifier (Unit B — verified task_done, NET-22/23/24) is built
+	// alongside the output filter; commsRunner.OnTaskDone is patched in
+	// place afterward (same variable, value-copy semantics — see below).
+	// seedBrief is populated later (the -brief-file read, further down)
+	// but declared here so the OnTaskDone closure can read its
+	// ThreadRoot lazily at call time rather than needing it threaded
+	// through as an extra parameter.
 	var onTaskDone func(string)
 	doneSentinel := ""
-	if *builderMode {
-		onTaskDone = builderOnTaskDone(stop, log, res.AspectName)
-		doneSentinel = builderDoneSentinel
-	}
+	var seedBrief bridle.InboxItem
 	commsRunner := funnel.CommsRunner{
 		Gateway:    chatGateway,
 		Knowledge:  knowledgeGateway,
@@ -588,9 +652,54 @@ func main() {
 		log,
 	)
 	var funnelObsHook funnel.ObservabilityHook = obsHook
+	// realOutputTracker captures the CURRENT turn's streamed model text so
+	// the verified-task_done gate can judge what the model actually
+	// produced, not just its task_done self-report (review finding on
+	// Unit B pass 1 — see builderOnTaskDone/verificationInput). Declared
+	// here (rather than where it's read, near onTaskDone below) because it
+	// must be wrapped into funnelObsHook BEFORE funnel.New so every turn's
+	// events reach it.
+	var realOutputTracker *builderRealOutputTracker
 	if *builderMode {
 		funnelObsHook = progressObservabilityHook{next: obsHook, progress: recordBuilderProgress}
+		realOutputTracker = &builderRealOutputTracker{next: funnelObsHook}
+		funnelObsHook = realOutputTracker
 	}
+
+	// M1 Unit 5 — worker-status heartbeat (PHASE2-DESIGN §5). The
+	// turnMetricsTracker wraps whichever observability hook is already
+	// wired above (transparent decorator — every call still reaches
+	// obsforward/progress reporting unchanged) and additionally counts
+	// main-deliberation turns + cumulative tokens for the heartbeat
+	// shape. statusEmitter is constructed just below; the tracker's
+	// onMainTurnEnd callback closes over the pointer so a turn boundary
+	// fires an Emit ("each turn boundary" per the build spec) without a
+	// circular-construction ordering problem.
+	var statusEmitter *workerStatusEmitter
+	metricsTracker := newTurnMetricsTracker(funnelObsHook, func() {
+		if statusEmitter != nil {
+			statusEmitter.Emit(ctx, "running")
+		}
+	})
+	funnelObsHook = metricsTracker
+
+	statusEmitter = newWorkerStatusEmitter(
+		wsClient,
+		res.AspectName,
+		os.Getenv("CW_ROLE"),
+		os.Getenv("CW_PERSONALITY"),
+		os.Getenv("CW_WORK_ITEM_ID"),
+		detectCLIVersion(*claudePath, log),
+		os.Getenv("CW_IMAGE_TAG"),
+		processStartedAt,
+		func() funnel.Binding { return *bindingCache.Load() },
+		func() (bool, time.Time) {
+			snap := state.Snapshot()
+			return snap.JWT != "" && time.Until(snap.Expires) > 0, snap.Expires
+		},
+		metricsTracker,
+		log,
+	)
 
 	// NEX-293: fetch the per-aspect admin model_config overrides
 	// before constructing the filter. agentfunnel runs out-of-process
@@ -642,11 +751,62 @@ func main() {
 	// why a reply was suppressed.
 	outputFilter := buildAgentFunnelFilter(provider, bridle.ProviderID(res.Provider), judgeProviderOverride, judgeModelOverride, judgeEnv, res.Model, log, obsHook)
 
+	// funnelPtr is declared here (rather than at its original spot below,
+	// next to postTurn) so the builder task_done verification gate — wired
+	// immediately below — can read funnelPtr.ReceiveSynthetic for the
+	// bounded re-prompt path. Both users tolerate the nil window before
+	// funnel.New assigns it further down (postTurn's closure already did;
+	// the OnTaskDone closure only fires from inside Deliberate, long after
+	// funnelPtr is set).
+	var funnelPtr *funnel.Funnel
+
+	// Verified task_done + goal-loop completion (Unit B — NET-22/23/24/27):
+	// builds the same judge this aspect's output filter uses
+	// (buildAcceptanceVerifier mirrors buildAgentFunnelFilter's Spec
+	// exactly — one judge credential drives both), then wraps it in ONE
+	// builderAcceptanceGate shared by BOTH of a builder's completion paths:
+	//
+	//  1. the model calls task_done (builderOnTaskDone below), and
+	//  2. the goal-loop's own judge classifies a turn FilterClassComplete
+	//     with no task_done call at all (builderGoalLoop, wired further
+	//     down where the goalCfg/GoalLoop exist).
+	//
+	// Unit B's first pass only gated path 1. Live evidence 2026-07-05
+	// (NET-27) showed path 2 exiting completely ungated: a repo-less brief
+	// with deliberately unsatisfiable criteria ("contains the SHA-512 of a
+	// password you cannot know") "completed successfully" because the
+	// cheap judge that classifies FilterClassComplete only ever sees the
+	// task text, never the work item's acceptance criteria — it rated a
+	// one-line greeting substantive and the model never even called
+	// task_done. One shared gate (rather than two independent ones) means
+	// a builder racing both paths in the same turn is judged once, against
+	// one reprompt budget — see builderAcceptanceGate's doc comment.
+	var acceptanceGate *builderAcceptanceGate
+	if *builderMode {
+		acceptanceVerifier := buildAcceptanceVerifier(provider, bridle.ProviderID(res.Provider), judgeProviderOverride, judgeModelOverride, judgeEnv, res.Model, log, obsHook)
+		var verify taskDoneVerifyFn
+		if acceptanceVerifier != nil {
+			verify = acceptanceVerifier.Verify
+		}
+		acceptanceGate = newBuilderAcceptanceGate(acceptanceCriteria, verify)
+		onTaskDone = builderOnTaskDone(stop, log, res.AspectName, acceptanceGate,
+			func() string {
+				if realOutputTracker == nil {
+					return ""
+				}
+				return realOutputTracker.snapshot()
+			},
+			func() *funnel.Funnel { return funnelPtr },
+			func() int64 { return seedBrief.ThreadRoot },
+			wsClient, os.Getenv("CW_DISPATCH_RUN_ID"))
+		doneSentinel = builderDoneSentinel
+		commsRunner.OnTaskDone = onTaskDone
+	}
+
 	// Rewriter wiring: default-on for claude-code-flavored providers,
 	// no-op otherwise. The session jsonl path is resolved lazily
 	// through funnelPtr so funnel session-id rotations (compaction,
 	// rewriter-driven reset) are picked up automatically.
-	var funnelPtr *funnel.Funnel
 	postTurn := buildAgentFunnelRewriter(res.AspectName, res.Provider, provider, res.Model, func() string {
 		if funnelPtr == nil {
 			return ""
@@ -671,7 +831,7 @@ func main() {
 		fail(log, "build tool runner", err)
 	}
 
-	systemPrompt := composeSystemPrompt(res)
+	systemPrompt := composeSystemPrompt(res, spawnRolePrompt)
 	// Parse the validate response's mcp_profile into the funnel's MCP server
 	// list so non-claude-code providers (openai, codex) receive the servers
 	// in their TurnRequest. Empty/unparsed → keep MCP non-nil-but-empty,
@@ -773,7 +933,6 @@ func main() {
 	funnelPtr = f
 	bridge = wsasp.NewBridge(f)
 
-	var seedBrief bridle.InboxItem
 	if *builderMode && *briefFile != "" {
 		b, err := readBriefFile(*briefFile)
 		if err != nil {
@@ -791,6 +950,14 @@ func main() {
 		"system_prompt_bytes", len(systemPrompt),
 		"central_version", res.CentralVersion,
 		"personality_version", res.Personality.Version)
+
+	// M1 Unit 5: boot heartbeat (spawning->running — by the time we reach
+	// here validation/funnel/wsasp setup is done and the loop is about to
+	// start, so "running" is the accurate boot state) plus the ~60s
+	// wall-clock ticker for the remainder of this process's life.
+	statusEmitter.Emit(ctx, "running")
+	statusEmitter.StartHeartbeat(ctx, heartbeatInterval)
+
 	if *builderMode {
 		log.Info("agentfunnel: builder liveness configured",
 			"idle_timeout", *builderIdleTimeout,
@@ -846,7 +1013,8 @@ func main() {
 		}
 		verifyPR := builderPRVerifier(log, res.AspectName, *repoFlag, *ticketFlag, *branchFlag)
 		openPR := builderPROpener(log, *repoFlag, *ticketFlag, *branchFlag)
-		go builderGoalLoop(ctx, f, log, goalCfg, verifyPR, openPR, stop)
+		go builderGoalLoop(ctx, f, log, goalCfg, verifyPR, openPR, stop,
+			acceptanceGate, wsClient, os.Getenv("CW_DISPATCH_RUN_ID"))
 	} else {
 		var onComplete func() bool
 		if *builderMode {
@@ -855,7 +1023,10 @@ func main() {
 		go deliberateLoop(ctx, f, log, onComplete)
 	}
 
-	if err := wsClient.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	// wsClient.Run(ctx) was started early (see wsClientRunErr above) so the
+	// boot heartbeat had a live, registered connection to land on; this wait
+	// preserves the old blocking call's terminal-error semantics exactly.
+	if err := <-wsClientRunErr; err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("agentfunnel: wsClient.Run", "err", err)
 		os.Exit(1)
 	}
@@ -925,16 +1096,29 @@ func emitBuilderAccepted(ctx context.Context, wsClient *wsasp.Client, log *slog.
 // nexus/frame/embed_personality_test.go's
 // TestEmbed_ComposedDoesNotDoubleBakeCentral).
 //
+// rolePrompt is the role-at-spawn overlay (M1 Unit 3, dispatch.Brief.RolePrompt,
+// read from -role-file): the resolved system-prompt text for this
+// work-item's assigned role. It is inserted ABOVE the (thin) personality —
+// after central (org-wide base knowledge always applies first) but before
+// aspect/personality (decoration) — per PHASE2-DESIGN §3 / ROLE-MODEL.md
+// §3 ("capability = role + task spec + base knowledge; personality is
+// decoration"). Empty rolePrompt (the default — no Role on the brief) is
+// dropped from the join exactly like any other empty section, reproducing
+// today's prompt exactly.
+//
 // Empty sections are dropped from the join. Returns "" only when
 // every section is empty (legacy / pre-Part-9 Nexus + unprovisioned
 // aspect).
-func composeSystemPrompt(res *keyfile.ValidationResult) string {
+func composeSystemPrompt(res *keyfile.ValidationResult, rolePrompt string) string {
 	if res == nil {
 		return ""
 	}
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 5)
 	if res.CentralNexusMD != "" {
 		parts = append(parts, res.CentralNexusMD)
+	}
+	if rolePrompt != "" {
+		parts = append(parts, rolePrompt)
 	}
 	if res.Personality.Composed != "" {
 		parts = append(parts, res.Personality.Composed)
@@ -958,11 +1142,198 @@ func composeSystemPrompt(res *keyfile.ValidationResult) string {
 // The dispatch brief instructs the builder to end its final message with it.
 const builderDoneSentinel = "<<TASK_COMPLETE>>"
 
-func builderOnTaskDone(stop context.CancelFunc, log *slog.Logger, aspect string) func(string) {
-	return func(summary string) {
-		log.Info("agentfunnel: builder task_done — exiting", "aspect", aspect, "summary", summary)
-		stop()
+// builderAcceptanceRepromptCap bounds how many times a rejected task_done
+// gets re-prompted before the builder gives up and exits BLOCKED. Mirrors
+// builderPRRepromptCap's rationale: a model that keeps calling task_done
+// without actually meeting the criteria must not loop forever — GoalLoop
+// MaxTurns and -builder-timeout remain the outer backstops.
+const builderAcceptanceRepromptCap = 3
+
+// taskDoneStep is builderAcceptanceGate.Decide's verdict.
+type taskDoneStep int
+
+const (
+	taskDoneHonor    taskDoneStep = iota // exit success: no criteria, judge unavailable/errored (fail open), or met
+	taskDoneReprompt                     // not met, reprompt budget remains — keep the builder running
+	taskDoneBlocked                      // not met, budget exhausted — exit BLOCKED, never a silent success
+)
+
+// taskDoneDecide is the pure decision core of verified task_done/goal-loop
+// completion (Unit B — NET-22/23/24/27). Pulled out of builderAcceptanceGate
+// (which does the judge call + the shared-budget bookkeeping) so the
+// decision matrix is unit-testable without mocking any of that:
+//
+//   - no criteria captured on this dispatch, or the verifier is unavailable
+//     (judge unbuildable), or the verify call itself errored -> honor.
+//     Fail OPEN is the deliberate posture (mirrors CheapModelFilter): the
+//     completion path must not hard-depend on the judge, and a dispatch
+//     with no captured DoD reproduces today's unconditional-honor behavior
+//     exactly (back-compat for non-ledger !dispatch).
+//   - met -> honor.
+//   - not met, reprompts remain -> reprompt (bounded).
+//   - not met, reprompts exhausted -> blocked (honest failure).
+func taskDoneDecide(hasCriteria bool, verifierAvailable bool, verifyErr error, met bool, repromptsLeft int) taskDoneStep {
+	if !hasCriteria || !verifierAvailable || verifyErr != nil {
+		return taskDoneHonor
 	}
+	if met {
+		return taskDoneHonor
+	}
+	if repromptsLeft > 0 {
+		return taskDoneReprompt
+	}
+	return taskDoneBlocked
+}
+
+// taskDoneVerifyFn is the injectable shape of AcceptanceVerifier.Verify —
+// builderAcceptanceGate takes this instead of a concrete
+// *funnel.AcceptanceVerifier so tests can supply a fake judge without a real
+// bridle harness. nil means "no verifier available" (judge unbuildable at
+// startup).
+type taskDoneVerifyFn func(ctx context.Context, criteria, output string) (funnel.AcceptanceVerdict, error)
+
+// builderAcceptanceGate is the SINGLE arbiter for verified completion,
+// shared between the two independent exit paths a builder-mode process can
+// take:
+//
+//  1. the model calls the task_done tool (CommsRunner.runTaskDone ->
+//     builderOnTaskDone below), and
+//  2. the goal-loop's own cheap judge classifies a turn FilterClassComplete
+//     with no task_done call at all (builderGoalLoop/builderDecide).
+//
+// A prior pass gated ONLY path 1 — live evidence 2026-07-05 (NET-27) showed
+// path 2 exiting ungated (a judge that never sees acceptance criteria
+// declaring victory on a one-line greeting against unsatisfiable criteria).
+// Wiring two INDEPENDENT gates back in would let a builder that races both
+// paths (e.g. calls task_done mid-turn while the SAME turn's judge is also
+// about to rule complete) get judged twice against two separate reprompt
+// budgets — burning 2x the intended budget, or worse, disagreeing (one path
+// honors while the other blocks). This type holds ONE decision + ONE
+// mutex-guarded reprompt budget so whichever path fires first — or both, in
+// a race — consumes the same shared budget and reaches the same verdict for
+// the same output.
+type builderAcceptanceGate struct {
+	mu            sync.Mutex
+	criteria      string
+	hasCriteria   bool
+	verify        taskDoneVerifyFn
+	repromptsLeft int
+}
+
+// newBuilderAcceptanceGate constructs the shared gate. verify may be nil
+// (judge unbuildable at startup) — Decide then always fails open via
+// taskDoneDecide's verifierAvailable=false branch, exactly like an empty
+// criteria dispatch.
+func newBuilderAcceptanceGate(criteria string, verify taskDoneVerifyFn) *builderAcceptanceGate {
+	return &builderAcceptanceGate{
+		criteria:      criteria,
+		hasCriteria:   strings.TrimSpace(criteria) != "",
+		verify:        verify,
+		repromptsLeft: builderAcceptanceRepromptCap,
+	}
+}
+
+// Decide runs ONE verification of output — the REAL posted turn output,
+// never a bare self-report (NET-24: a task_done summary can claim success
+// while the model produced nothing matching the required criteria) —
+// against the gate's criteria, and returns the shared decision, consuming
+// one unit of the SHARED reprompt budget on taskDoneReprompt. The mutex
+// makes this safe even if both completion paths fire close together (task_done
+// mid-turn racing the same turn's judge-complete classification).
+func (g *builderAcceptanceGate) Decide(ctx context.Context, output string, log *slog.Logger) (taskDoneStep, funnel.AcceptanceVerdict) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var verdict funnel.AcceptanceVerdict
+	var verr error
+	if g.hasCriteria && g.verify != nil {
+		verdict, verr = g.verify(ctx, g.criteria, output)
+		if verr != nil {
+			log.Warn("agentfunnel: acceptance verification errored — failing open", "err", verr)
+		}
+	}
+	step := taskDoneDecide(g.hasCriteria, g.verify != nil, verr, verdict.Met, g.repromptsLeft)
+	if step == taskDoneReprompt {
+		g.repromptsLeft--
+	}
+	return step, verdict
+}
+
+// builderOnTaskDone returns the CommsRunner/funnel completion callback for
+// builder mode. Live evidence 2026-07-05 (NET-24): keel-builder called
+// task_done with a confabulated summary ("0 conflicts, 100% memory match")
+// and never produced the required token — the Job "completed successfully"
+// because task_done trusted the model's self-report unconditionally. gate
+// runs ONE cheap-judge verification (shared with the goal-loop's own exit
+// path — see builderAcceptanceGate) before honoring completion.
+//
+// realOutputFor returns the actual text the model streamed THIS turn (see
+// builderRealOutputTracker) — the review finding behind this pass: verifying
+// only args.Summary lets a model write "posted CONVERGED-BETA-OK" in the
+// tool-call summary without ever having produced it. The real output, when
+// available, is folded in as the authoritative signal alongside the
+// self-report; an empty real-output snapshot (tracker not wired, or nothing
+// streamed yet at the moment task_done fired) degrades to summary-only,
+// unchanged from before this pass.
+//
+// funnelFor/threadRootFor are late-bound accessors (rather than direct
+// values) because builderOnTaskDone is constructed before funnel.New and
+// before the seed brief is read — both are populated by the time task_done
+// can actually fire (Deliberate only runs after the funnel and inbox seed
+// are both up), so the indirection just avoids a construction-order
+// dependency, not a real race.
+func builderOnTaskDone(stop context.CancelFunc, log *slog.Logger, aspect string, gate *builderAcceptanceGate,
+	realOutputFor func() string, funnelFor func() *funnel.Funnel, threadRootFor func() int64,
+	wsClient *wsasp.Client, runID string) func(string) {
+	return func(summary string) {
+		output := verificationInput(summary, realOutputFor)
+		step, verdict := gate.Decide(context.Background(), output, log)
+		switch step {
+		case taskDoneHonor:
+			log.Info("agentfunnel: builder task_done — exiting", "aspect", aspect, "summary", summary, "verified", gate.hasCriteria && gate.verify != nil)
+			stop()
+		case taskDoneReprompt:
+			log.Info("agentfunnel: task_done rejected — acceptance criteria not met, re-prompting",
+				"aspect", aspect, "reason", verdict.Reason)
+			if f := funnelFor(); f != nil {
+				f.ReceiveSynthetic(bridle.InboxItem{
+					From:       "system",
+					Source:     "builder_acceptance_check",
+					ThreadRoot: threadRootFor(),
+					Content: fmt.Sprintf(
+						"[CONTINUATION] Your task_done was rejected: the acceptance criteria are not met (%s). "+
+							"ACCEPTANCE CRITERIA:\n%s\n\nKeep working and only call task_done again once you have "+
+							"genuinely satisfied these criteria — do not re-claim completion without new work to back it up.",
+						verdict.Reason, gate.criteria),
+				})
+			}
+		case taskDoneBlocked:
+			log.Error("agentfunnel: ESCALATION task_done rejected — acceptance criteria not met and reprompt budget exhausted",
+				"aspect", aspect, "reason", verdict.Reason)
+			if wsClient != nil {
+				if serr := wsClient.SendDispatchStatus(context.Background(), runID, "failed", "acceptance_criteria_not_met", time.Now().UTC()); serr != nil {
+					log.Warn("agentfunnel: blocked status enqueue failed", "run_id", runID, "err", serr)
+				}
+			}
+			stop()
+		}
+	}
+}
+
+// verificationInput combines a model's self-report (summary — the
+// task_done tool's free-text argument) with the real output streamed this
+// turn (realOutputFor, when non-empty), labeling the real output as
+// authoritative. Isolated as its own function so the "which signal wins"
+// policy is stated once and unit-testable without a gate/harness.
+func verificationInput(summary string, realOutputFor func() string) string {
+	var real string
+	if realOutputFor != nil {
+		real = strings.TrimSpace(realOutputFor())
+	}
+	if real == "" {
+		return summary
+	}
+	return "AGENT SELF-REPORT (task_done summary — may be inaccurate or confabulated):\n" + summary +
+		"\n\nACTUAL TURN OUTPUT (authoritative — judge against THIS, not the self-report above):\n" + real
 }
 
 // builderPRVerifier returns a pure check: does a PR exist for the builder branch?
@@ -970,6 +1341,20 @@ func builderOnTaskDone(stop context.CancelFunc, log *slog.Logger, aspect string)
 // decide for itself what to do next. Fail-closed: a gh error reports false
 // (NEX-468 — never declare completion we cannot verify).
 func builderPRVerifier(log *slog.Logger, aspect, repo, ticket, branch string) func() bool {
+	if repo == "" {
+		// Unit B item 3 (respond-only completion, NET-22): a repo-less
+		// brief has no PR to gate on — the completion contract for a
+		// repo-less dispatch is verified-task_done only (builderOnTaskDone
+		// above). Bypass the PR gate unconditionally rather than looping
+		// builderPRRepromptCap re-prompts asking the model to open a PR
+		// that can never exist; that was exactly the anvil-builder bug
+		// (NET-22: judge ruled complete, no repo, blocked after the work
+		// was already done and correct).
+		return func() bool {
+			log.Info("agentfunnel: no repo on brief — PR gate skipped (respond-only completion)", "aspect", aspect, "ticket", ticket)
+			return true
+		}
+	}
 	head := builderBranch(branch, ticket)
 	return func() bool {
 		ok, err := prExists(repo, head)
@@ -1166,31 +1551,88 @@ const builderPRRepromptCap = 3
 type builderStep int
 
 const (
-	builderContinue   builderStep = iota // intermediate goal_not_met — keep pursuing
-	builderExit                          // terminal: verified-complete, blocked, or exhausted
-	builderRepromptPR                    // judge says complete but no PR — push back for it
+	builderContinue           builderStep = iota // intermediate goal_not_met — keep pursuing
+	builderExit                                  // terminal: verified-complete, blocked, or exhausted
+	builderRepromptPR                            // judge says complete but no PR — push back for it
+	builderRepromptAcceptance                    // judge says complete but acceptance criteria not met — push back with the criteria
+	builderBlockedAcceptance                     // acceptance criteria never met, reprompt budget exhausted — honest failure exit
 )
 
-// builderDecide maps a GoalLoop result plus a PR-verification outcome to the
-// builder's next step. Pure (no funnel, no I/O) so it is unit-testable.
+// builderDecide maps a GoalLoop result plus the acceptance/PR-verification
+// outcomes to the builder's next step. Pure (no funnel, no I/O) so it is
+// unit-testable.
 //
-//   - blocked                                  -> exit (escalated)
-//   - not done (intermediate goal_not_met)     -> continue (Pursue enqueued a continuation)
-//   - done + PR verified                       -> exit (success)
-//   - done, reason "complete", no PR, budget   -> reprompt for the PR
-//   - any other done (scratch / loop_cap / no
-//     PR with budget exhausted)                -> exit
-func builderDecide(result funnel.GoalResult, prVerified bool, prRepromptsLeft int) builderStep {
+// Live evidence 2026-07-05 (NET-27): a repo-less brief with deliberately
+// unsatisfiable acceptance criteria ("contains the SHA-512 of a password
+// you cannot know") exited via THIS function's judge-complete branch with a
+// one-line greeting — the cheap judge that classifies FilterClassComplete
+// only ever sees the task text, never the work item's acceptance criteria,
+// so it rated the greeting substantive and complete. builderOnTaskDone's
+// verified-task_done gate (Unit B pass 1) never fired because the model
+// never called task_done at all — it just replied, and the judge alone
+// declared victory. acceptance (below) closes that second exit path with
+// the SAME taskDoneDecide matrix builderOnTaskDone uses, run against the
+// goal-loop's LastFinalText (the actual posted turn output, not a
+// self-report) instead of a task_done summary.
+//
+// Live-reproduced 2026-07-05 08:19 (bounded residual, NET-27 follow-up): a
+// model can call task_done mid-turn (REJECTED — not met, reprompt budget
+// remains, ctx stays LIVE since only an HONORED task_done cancels ctx) and
+// have that SAME turn's judge classify anything OTHER than
+// FilterClassComplete (scratch/loop_cap/unknown_class) once the tool round
+// finishes. The REJECTED task_done is still a live completion CLAIM this
+// gate exists to police — gating acceptance ONLY on reason=="complete" let
+// that claim's rejection get silently overridden by an unconditional exit
+// the moment the SAME turn's overall reply also happened to read as
+// "scratch". acceptance is now decided (in builderGoalLoop) for EVERY
+// Done && !Blocked result, not just "complete" — gate on shape
+// (Done && !Blocked), not on the reason string, because the gate itself
+// fails open when no criteria were ever captured, so over-gating a run
+// with no acceptance criteria is a no-op (identical behavior to before this
+// pass). Only the PR check remains reason=="complete"-scoped below: a
+// scratch/loop_cap/unknown_class turn never claimed a PR-worthy completion,
+// so there's still nothing to verify a PR against for those reasons.
+//
+//   - blocked                                       -> exit (escalated)
+//   - not done (intermediate goal_not_met)          -> continue (Pursue enqueued a continuation)
+//   - done, acceptance says reprompt                 -> reprompt acceptance (criteria not met, budget remains —
+//     regardless of reason: a rejected task_done this turn is a live claim
+//     even when the judge separately called the turn scratch/loop_cap/unknown_class)
+//   - done, acceptance says blocked                  -> exit BLOCKED (criteria never met, budget exhausted)
+//   - done, reason != "complete", acceptance honors  -> exit (no PR gate — no completion claim to verify a PR against)
+//   - done, reason "complete", acceptance honors
+//     (met / no criteria / verifier unavailable /
+//     verify errored — fail open), PR verified        -> exit (success)
+//   - done, reason "complete", acceptance honors,
+//     no PR, budget                                   -> reprompt for the PR
+//   - done, reason "complete", acceptance honors,
+//     no PR, budget exhausted                         -> exit
+func builderDecide(result funnel.GoalResult, acceptance taskDoneStep, prVerified bool, prRepromptsLeft int) builderStep {
 	if result.Blocked {
 		return builderExit
 	}
 	if !result.Done {
 		return builderContinue
 	}
+	switch acceptance {
+	case taskDoneReprompt:
+		return builderRepromptAcceptance
+	case taskDoneBlocked:
+		return builderBlockedAcceptance
+	}
+	// acceptance == taskDoneHonor: met, no criteria captured, verifier
+	// unavailable, or verify call errored (fail open) — including the case
+	// where this Done reason never carried any completion claim to verify
+	// in the first place (no task_done this turn, no criteria captured).
+	if result.Reason != "complete" {
+		// No PR gate for non-complete reasons — there's no completion
+		// claim to verify a PR against (NEX-468/471 unaffected).
+		return builderExit
+	}
 	if prVerified {
 		return builderExit
 	}
-	if result.Reason == "complete" && prRepromptsLeft > 0 {
+	if prRepromptsLeft > 0 {
 		return builderRepromptPR
 	}
 	return builderExit
@@ -1201,11 +1643,14 @@ func builderDecide(result funnel.GoalResult, prVerified bool, prRepromptsLeft in
 // the inbox and then idles when the judge rules goal_not_met — GoalLoop posts
 // the progress reply (ShouldPost) AND enqueues a continuation so the builder
 // keeps working toward the DoD until it is met, blocked, or capped. Completion
-// is gated on the PR actually existing (NEX-468/471): if the judge rules
-// complete but no PR is found, the builder is re-prompted to open it rather
-// than exiting empty-handed. The -builder-timeout goroutine remains the
-// wall-clock backstop.
-func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cfg funnel.GoalConfig, verifyPR func() bool, openPR func() (string, bool), stop context.CancelFunc) {
+// is gated TWICE (NET-22/23/24/27): acceptance criteria (when the work item
+// carried any — same judge/gate builderOnTaskDone uses, run here against the
+// judge-classified-complete turn's actual output) AND the PR actually
+// existing (NEX-468/471, when the brief names a repo). Either gate can push
+// back a bounded re-prompt before the builder is allowed to exit; the
+// -builder-timeout goroutine remains the wall-clock backstop.
+func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cfg funnel.GoalConfig, verifyPR func() bool, openPR func() (string, bool), stop context.CancelFunc,
+	gate *builderAcceptanceGate, wsClient *wsasp.Client, runID string) {
 	gl := funnel.NewGoalLoop(f, cfg)
 	prRepromptsLeft := builderPRRepromptCap
 	for {
@@ -1220,14 +1665,84 @@ func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cf
 			log.Warn("agentfunnel: builder goal-loop pursue", "err", err)
 			return
 		}
-		prVerified := false
+
+		// Review finding #3 (Unit B fix pass 2) — dual-arbiter race: a
+		// builder can call task_done mid-turn (canceling ctx via stop())
+		// AND have that SAME turn's judge classify FilterClassComplete, so
+		// Pursue can return a normal (non-error) Done result even though
+		// completion was ALREADY decided by the task_done path a moment
+		// ago. Without this check the goal-loop below would call
+		// gate.Decide a second time for output the task_done path already
+		// judged — burning an extra unit of the SHARED reprompt budget, or
+		// worse, sending its own terminal SendDispatchStatus after
+		// task_done's callback already did. Once ctx is canceled, someone
+		// else (task_done, the idle monitor, JWT expiry, …) has already
+		// made the terminal call — this loop has nothing left to decide.
+		if ctx.Err() != nil {
+			return
+		}
+
+		// Acceptance gate (NET-27, broadened by the 2026-07-05 08:19 bounded
+		// residual pass): gated on the RESULT SHAPE (Done && !Blocked), not
+		// on result.Reason == "complete". A rejected task_done mid-turn is a
+		// live completion CLAIM regardless of what the SAME turn's judge
+		// separately classified it as (complete/scratch/loop_cap/
+		// unknown_class) — restricting this to reason=="complete" let that
+		// claim's rejection get silently overridden the moment the judge
+		// happened to call the turn something else. gate.Decide fails open
+		// on its own (no criteria captured -> honor unconditionally), so
+		// gating every Done && !Blocked exit — rather than trying to guess
+		// which Reason values might carry a completion claim — is safe and
+		// behaviorally identical to before this pass for any run that never
+		// captured acceptance criteria. gl.LastFinalText() is the turn's
+		// actual posted reply (what the judge itself just judged), not a
+		// task_done self-report — the live NET-27 failure was a judge
+		// rating a one-line greeting "complete" against unsatisfiable
+		// criteria it never saw; feeding it the real output closes that gap.
+		// gate is the SAME builderAcceptanceGate builderOnTaskDone uses —
+		// one shared decision + one shared reprompt budget across both
+		// completion paths (see builderAcceptanceGate's doc comment).
+		acceptance := taskDoneHonor
+		var verdict funnel.AcceptanceVerdict
 		if result.Done && !result.Blocked {
-			// Only spend a gh call when the loop thinks it is finished.
+			acceptance, verdict = gate.Decide(ctx, gl.LastFinalText(), log)
+		}
+
+		prVerified := false
+		if result.Done && !result.Blocked && acceptance == taskDoneHonor {
+			// Only spend a gh call once acceptance (if applicable) already
+			// passed — no point checking for a PR on output that doesn't
+			// even meet the DoD yet.
 			prVerified = verifyPR()
 		}
-		switch builderDecide(result, prVerified, prRepromptsLeft) {
+
+		switch builderDecide(result, acceptance, prVerified, prRepromptsLeft) {
 		case builderContinue:
 			continue
+		case builderRepromptAcceptance:
+			log.Info("agentfunnel: completion claimed but acceptance criteria not met — re-prompting",
+				"ticket", cfg.TicketID, "reason", verdict.Reason, "goal_loop_reason", result.Reason)
+			f.ReceiveSynthetic(bridle.InboxItem{
+				From:       "system",
+				Source:     "builder_acceptance_check",
+				ThreadRoot: cfg.ThreadRoot,
+				Content: fmt.Sprintf(
+					"[CONTINUATION] Your last reply claimed or implied completion, but it does not satisfy the work item's "+
+						"acceptance criteria (%s):\n%s\n\nRevise your work so the criteria above are genuinely met, "+
+						"then reply again. If you cannot meet them, say so explicitly and name the blocker.",
+					verdict.Reason, gate.criteria),
+			})
+			continue
+		case builderBlockedAcceptance:
+			log.Error("agentfunnel: ESCALATION acceptance criteria never met — reprompt budget exhausted",
+				"ticket", cfg.TicketID, "reason", verdict.Reason)
+			if wsClient != nil {
+				if serr := wsClient.SendDispatchStatus(context.Background(), runID, "failed", "acceptance_criteria_not_met", time.Now().UTC()); serr != nil {
+					log.Warn("agentfunnel: blocked status enqueue failed", "run_id", runID, "err", serr)
+				}
+			}
+			stop()
+			return
 		case builderRepromptPR:
 			// The agent ruled itself done but no PR exists. If the work is
 			// already pushed, the harness opens the PR itself (NEX-528) rather
@@ -1416,29 +1931,71 @@ func newBindingHarness(provider bridle.Provider, providerName string, esc *funne
 
 // loadToolPolicy resolves the per-aspect tool permission policy.
 //
-// Tier A (this function): an empty path returns the permissive default
+// Tier A (base): an empty path returns the permissive default
 // (DefaultAllow=true) so unconfigured aspects behave exactly as they did
 // before the -policy flag existed. A non-empty path is read and
 // JSON-decoded into a funnel.ToolPolicy; a missing or malformed file
 // returns a wrapped error so startup fails fast rather than silently
 // running permissive — a misconfigured policy must be loud.
 //
-// Tier B (follow-on): the Nexus stores the per-aspect policy and delivers
-// it through keyfile.ValidationResult, mirroring the existing MCPProfile
-// field, removing the need for an on-host file.
-func loadToolPolicy(path string) (funnel.ToolPolicy, error) {
-	if path == "" {
-		return funnel.ToolPolicy{DefaultAllow: true}, nil
+// Tier B (role-at-spawn, M1 Unit 3): fragment, when non-nil, is a
+// spawn-supplied ToolPolicy overlay (dispatch.Brief.PolicyFragment,
+// delivered via -policy-fragment-file) applied over the Tier-A base by
+// applyPolicyFragment. This is the "Tier B" the original comment
+// recorded as a follow-on — delivered per-spawn (via the brief) rather
+// than centrally in the Nexus/ValidationResult, which was the other
+// option considered (see README.md). A nil fragment is a total no-op:
+// loadToolPolicy("", nil) and loadToolPolicy(path, nil) behave exactly
+// as before this change.
+func loadToolPolicy(path string, fragment *funnel.ToolPolicy) (funnel.ToolPolicy, error) {
+	base := funnel.ToolPolicy{DefaultAllow: true}
+	if path != "" {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return funnel.ToolPolicy{}, fmt.Errorf("read tool policy %q: %w", path, err)
+		}
+		var p funnel.ToolPolicy
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return funnel.ToolPolicy{}, fmt.Errorf("parse tool policy %q: %w", path, err)
+		}
+		base = p
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return funnel.ToolPolicy{}, fmt.Errorf("read tool policy %q: %w", path, err)
+	return applyPolicyFragment(base, fragment), nil
+}
+
+// applyPolicyFragment overlays a spawn-supplied PolicyFragment onto the
+// Tier-A base policy. Precedence, field by field:
+//
+//   - DefaultAllow always takes the fragment's value when a fragment is
+//     present — presence of any fragment means the role made an explicit
+//     decision about it (it isn't an optional sub-field like the others).
+//   - Tools/Escalate/BashDeny/WritePathAllow: a field the fragment sets
+//     (a non-nil map/slice — including an explicit empty one, e.g. an
+//     empty write_path_allow for a read-only role) REPLACES the base
+//     field outright. A field the fragment OMITS (nil, the Go zero value
+//     for an absent JSON key) leaves the base field untouched.
+//
+// A nil fragment returns base unchanged — the total no-op that preserves
+// today's static-file-only behavior.
+func applyPolicyFragment(base funnel.ToolPolicy, fragment *funnel.ToolPolicy) funnel.ToolPolicy {
+	if fragment == nil {
+		return base
 	}
-	var p funnel.ToolPolicy
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return funnel.ToolPolicy{}, fmt.Errorf("parse tool policy %q: %w", path, err)
+	out := base
+	out.DefaultAllow = fragment.DefaultAllow
+	if fragment.Tools != nil {
+		out.Tools = fragment.Tools
 	}
-	return p, nil
+	if fragment.Escalate != nil {
+		out.Escalate = fragment.Escalate
+	}
+	if fragment.BashDeny != nil {
+		out.BashDeny = fragment.BashDeny
+	}
+	if fragment.WritePathAllow != nil {
+		out.WritePathAllow = fragment.WritePathAllow
+	}
+	return out
 }
 
 // policySource renders a human label for the policy origin in log lines.
@@ -1474,6 +2031,48 @@ func deniedToolCount(p funnel.ToolPolicy) int {
 // non-Claude judge-model fallback.
 func buildAgentFunnelFilter(provider bridle.Provider, providerID bridle.ProviderID, judgeProviderOverride, judgeModelOverride string, providerEnv map[string]string, mainModel string, log *slog.Logger, obsHook funnel.ObservabilityHook) funnel.OutputFilter {
 	return judge.BuildFilter(judge.Spec{
+		Label:             "agentfunnel",
+		MainProvider:      provider,
+		MainProviderID:    providerID,
+		MainModel:         mainModel,
+		JudgeProviderName: judgeProviderOverride,
+		JudgeModel:        judgeModelOverride,
+		JudgeEnv:          providerEnv,
+		ObsHook:           obsHook,
+		Logger:            log,
+	})
+}
+
+// readAcceptanceCriteriaFile reads path (the -acceptance-file flag) and
+// returns its trimmed contents, or "" for an empty path OR an unreadable
+// file. Unlike -role-file/-policy-fragment-file (which fail() the process
+// on a read error), an unreadable acceptance file WARNS and falls open
+// (empty criteria) rather than crashing. Review finding: a ConfigMap-mount
+// race (the volume not yet materialized when agentfunnel starts) is a real,
+// recoverable class of failure for k8s-mounted files, and this file's
+// entire purpose is a fail-OPEN verification gate — crashing the builder
+// over a missing acceptance.md would be exactly backwards (turning an
+// optional stricter check into a hard startup dependency).
+func readAcceptanceCriteriaFile(path string, log *slog.Logger) string {
+	if path == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		log.Warn("agentfunnel: acceptance-file unreadable — proceeding with no acceptance criteria (fail open)", "path", path, "err", err)
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+// buildAcceptanceVerifier constructs the verified-task_done judge (Unit B —
+// NET-22/23/24) with the IDENTICAL judge.Spec buildAgentFunnelFilter uses,
+// so a single configured judge credential drives both the output filter and
+// the task_done verification gate — no separate "acceptance judge" knob for
+// operators to configure. May return nil (judge unbuildable); callers must
+// treat nil as "unavailable" and fail open (see judge.BuildAcceptanceVerifier).
+func buildAcceptanceVerifier(provider bridle.Provider, providerID bridle.ProviderID, judgeProviderOverride, judgeModelOverride string, providerEnv map[string]string, mainModel string, log *slog.Logger, obsHook funnel.ObservabilityHook) *funnel.AcceptanceVerifier {
+	return judge.BuildAcceptanceVerifier(judge.Spec{
 		Label:             "agentfunnel",
 		MainProvider:      provider,
 		MainProviderID:    providerID,
