@@ -58,6 +58,7 @@ spec:
                 - "Drain the shadow-queue: list ready items in the shadow Jira queue and dispatch/triage each per the queue runbook"
                 - --criteria
                 - "A drain summary was posted"
+                - --dedupe
               env:
                 # Same ledger dial nexus-control's orchestrator uses
                 # (WORKGRAPH_* — see deploy/nexus-control/README.md's

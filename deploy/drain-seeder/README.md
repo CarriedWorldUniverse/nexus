@@ -27,23 +27,29 @@ pool worker on its own cadence (`ORCHESTRATOR_DRAIN_INTERVAL=15s` there) —
 this CronJob is just the heartbeat that keeps the queue-drain habit alive
 now that no always-on shadow aspect exists to self-schedule it.
 
-## Idempotency — NOT yet handled, by design (v1)
+## Idempotency — `--dedupe` (closed)
 
-`workgraph.Client.CreateWorkItem` has **no dedupe** — every fire of this
-CronJob (once un-suspended) files a brand-new ledger issue, even if the
-previous one is still open/unclaimed/in-progress. Left simple
-deliberately for v1: shadow-drain itself only ran one drain per fire and
-relied on Forbid concurrency + its own in-process queue-empty short
-circuit, neither of which this seeder has an equivalent for on the ledger
-side.
+`cronjob.yaml` passes `nexus workitem create ... --dedupe`. Before filing,
+`--dedupe` calls `workgraph.Client.ListReady(ctx, role, "")` for the
+work item's role (`builder`) — this returns every item still queued or
+dispatched/in-flight for that role, per `ListReady`'s doc comment — and
+compares each one's `TaskSpec` against the new item's `TaskSpec`, **first
+line only**, both sides `strings.TrimSpace`'d (`taskSpecFirstLineMatches`
+in `nexus/cmd/nexus/workitem.go`). Rest-of-body differences (e.g. a
+timestamp or detail baked further into the task text) don't defeat the
+match — only the first line is the task's identity, matching how
+`workgraph.summarize` already treats a `TaskSpec`'s first line as its
+short-form identity.
 
-**Before un-suspending on a real cadence**, pair this with a dedupe check
-(e.g. skip the `workitem create` call if a `role=builder,
-assignee_aspect=builder` item already sits open/unclaimed in project NET —
-a `ListReadyIssues`-shaped check ahead of the create). Until that lands,
-either: leave `suspend: true` and fire manually/on-demand, or accept that
-a `*/30 * * * *` schedule can pile up duplicate open drain items if the
-pool falls behind.
+On a match: prints `skipped: <existing-id> already open` to stdout and
+exits **0** — success, not an error, so the CronJob never alarms on a
+skip. No match: creates the item as normal and prints its id, same as
+without `--dedupe`.
+
+This closes the earlier no-dedupe caveat: a `*/30 * * * *` schedule can no
+longer pile up concurrent duplicate drain items when the pool falls
+behind — each fire either creates one drain item or, if one's still open
+from a prior fire, skips.
 
 ## Operating
 
