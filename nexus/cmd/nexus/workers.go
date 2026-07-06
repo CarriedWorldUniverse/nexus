@@ -23,11 +23,16 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/workerstatus"
 )
 
-// runWorkersSubcommand parses `nexus workers [--data-dir DIR]` and prints
-// the consolidated worker_status fleet as a table.
+// runWorkersSubcommand parses `nexus workers [--data-dir DIR] [--role ROLE]`
+// and prints the consolidated worker_status fleet as a table (optionally
+// filtered to a single role). The --role filter is applied client-side
+// after the full list is fetched, so the flag never masks a store read
+// failure behind a silent empty result — you always see either the filtered
+// table or an error from the DB.
 func runWorkersSubcommand(args []string) int {
 	fs := flag.NewFlagSet("workers", flag.ContinueOnError)
 	dataDir := commonDataDirFlag(fs)
+	role := fs.String("role", "", "filter rows to a single role (e.g. \"builder\"). Empty = show all workers.")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -48,6 +53,7 @@ func runWorkersSubcommand(args []string) int {
 		fmt.Fprintf(os.Stderr, "workers: %v\n", err)
 		return 1
 	}
+	rows = filterByRole(rows, *role)
 	printWorkerStatusTable(os.Stdout, rows, time.Now())
 	return 0
 }
@@ -68,6 +74,24 @@ func listWorkerStatusRows(ctx context.Context, db *sql.DB) ([]workerstatus.Statu
 		return nil, fmt.Errorf("list worker_status: %w", err)
 	}
 	return rows, nil
+}
+
+// filterByRole returns a copy of rows restricted to the named role, or the
+// full slice if role is empty. Empty string is the default flag value
+// (no filter) and is treated as "show all" rather than "match the literal
+// empty string" — an operator passing --role '' would otherwise be asked
+// a question the flag already answered.
+func filterByRole(rows []workerstatus.Status, role string) []workerstatus.Status {
+	if role == "" {
+		return rows
+	}
+	out := make([]workerstatus.Status, 0, len(rows))
+	for _, r := range rows {
+		if r.Role == role {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // printWorkerStatusTable renders the fleet as a fixed-width table:
