@@ -33,13 +33,21 @@ now that no always-on shadow aspect exists to self-schedule it.
 `--dedupe` calls `workgraph.Client.ListReady(ctx, role, "")` for the
 work item's role (`builder`) — this returns every item still queued or
 dispatched/in-flight for that role, per `ListReady`'s doc comment — and
-compares each one's `TaskSpec` against the new item's `TaskSpec`, **first
-line only**, both sides `strings.TrimSpace`'d (`taskSpecFirstLineMatches`
-in `nexus/cmd/nexus/workitem.go`). Rest-of-body differences (e.g. a
-timestamp or detail baked further into the task text) don't defeat the
-match — only the first line is the task's identity, matching how
-`workgraph.summarize` already treats a `TaskSpec`'s first line as its
-short-form identity.
+looks for one that names the same task as the new item
+(`findDuplicateWorkItem` in `nexus/cmd/nexus/workitem.go`):
+
+- **Primary:** the new item's would-be `Summary` (`workgraph.Summarize
+  (task_spec)` — first line, `TrimSpace`'d, capped at 120 chars) against
+  each existing item's real `Summary` (`GetWorkItem`'s read of the ledger
+  issue's `summary` column). Preferred over a `TaskSpec`/`Description`
+  comparison: `Summary` is a narrow, single-producer field (`CreateWorkItem`
+  always derives it this same way, never from caller input), so it has less
+  surface for anything else touching the issue between write and read to
+  reformat than the wider `Description` field does.
+- **Fallback** (only if an existing item has no `Summary`, e.g. very old
+  ledger data predating this field): `taskSpecFirstLineMatches` against
+  `TaskSpec`/`Description` directly — first line only, whitespace
+  (including internal reflow/rewrap) normalized.
 
 On a match: prints `skipped: <existing-id> already open` to stdout and
 exits **0** — success, not an error, so the CronJob never alarms on a
@@ -50,6 +58,23 @@ This closes the earlier no-dedupe caveat: a `*/30 * * * *` schedule can no
 longer pile up concurrent duplicate drain items when the pool falls
 behind — each fire either creates one drain item or, if one's still open
 from a prior fire, skips.
+
+**2026-07-06 hardening:** a live failure was reported — NET-41/NET-42 both
+open for role `builder`, yet a `--dedupe` run created NET-43 instead of
+skipping, despite the seeder's `--task` text being byte-identical across
+fires (confirmed via git history: unchanged since this file's introduction).
+Investigation (see `nexus/workgraph/adapter.go`'s `GetWorkItem`/`Summarize`,
+the pinned `github.com/CarriedWorldUniverse/ledger` v0.1.4's `toProtoIssue`/
+`CreateIssue`/`GetIssue`, and `TestListReady_RoundTripsTaskSpecAndSummary`)
+found no confirmed `Description`-round-trip mutation in the code paths this
+repo can inspect/exercise — both are exact passthroughs of the stored
+columns. Given no live-ledger access to inspect the actual NET-41/42/43 rows
+directly, the fix taken is defensive rather than a confirmed-root-cause
+patch: match preferentially on the narrower `Summary` field (added to
+`workgraph.WorkItem`, populated by `GetWorkItem`) instead of the wider
+`TaskSpec`/`Description`, and normalize the `TaskSpec` fallback against
+internal whitespace reflow. See PR that introduced this section for the
+full file:line writeup.
 
 ## Operating
 

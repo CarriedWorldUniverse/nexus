@@ -3,6 +3,7 @@ package workgraph
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -426,5 +427,79 @@ func TestRework(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected relates-to back-edge %s -> %s, links = %v", newID, id, f.links)
+	}
+}
+
+// TestListReady_RoundTripsTaskSpecAndSummary is the empirical-reproduction
+// test for the drain-seeder --dedupe live-failure report (NET-41/NET-42
+// open, NET-43 created anyway despite identical --task text): create a work
+// item via the real Client.CreateWorkItem, transition it to dispatched
+// (matching the reported "In Progress" state), then confirm ListReady's
+// round-tripped WorkItem carries the SAME TaskSpec and a Summary matching
+// Summarize(TaskSpec) — i.e. the create->GetIssue->toProtoIssue->GetWorkItem
+// path (adapter.go's GetWorkItem: TaskSpec: issue.GetDescription(),
+// Summary: issue.GetSummary()) does not mutate either field. This
+// reproduces (and refutes, for this fake — which mirrors the confirmed live
+// ListReadyIssues/GetIssue semantics per fake_test.go's doc comments) the
+// coordinator's Description-round-trip-mutation hypothesis: with the actual
+// client/adapter code path exercised end to end, both fields survive
+// unchanged. (cmd/nexus/workitem.go's findDuplicateWorkItem is nonetheless
+// hardened to prefer the narrower Summary field over TaskSpec, in case a
+// live-only intermediary this fake can't model ever does reformat
+// Description — see that package's TestFindDuplicateWorkItem_* tests.)
+func TestListReady_RoundTripsTaskSpecAndSummary(t *testing.T) {
+	c, _ := newTestClient()
+	ctx := context.Background()
+	if err := c.EnsureProject(ctx); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	task := "Drain the shadow-queue: list ready items in the shadow Jira queue and dispatch/triage each per the queue runbook"
+	id, err := c.CreateWorkItem(ctx, WorkItem{
+		Role: "builder", TaskSpec: task, AcceptanceCriteria: []string{"A drain summary was posted"},
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkItem: %v", err)
+	}
+	if err := c.Transition(ctx, id, StatusDispatched); err != nil {
+		t.Fatalf("Transition: %v", err)
+	}
+
+	got, err := c.ListReady(ctx, "builder", "")
+	if err != nil {
+		t.Fatalf("ListReady: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListReady returned %d items, want 1: %+v", len(got), got)
+	}
+	if got[0].TaskSpec != task {
+		t.Errorf("TaskSpec = %q, want unchanged %q", got[0].TaskSpec, task)
+	}
+	wantSummary := Summarize(task)
+	if got[0].Summary != wantSummary {
+		t.Errorf("Summary = %q, want %q", got[0].Summary, wantSummary)
+	}
+}
+
+func TestSummarize(t *testing.T) {
+	cases := []struct {
+		name, taskSpec, want string
+	}{
+		{name: "single line unchanged", taskSpec: "Drain the shadow-queue: foo", want: "Drain the shadow-queue: foo"},
+		{name: "first line only", taskSpec: "Drain the shadow-queue: foo\nmore body text", want: "Drain the shadow-queue: foo"},
+		{name: "trims whitespace", taskSpec: "  Drain the shadow-queue: foo  \n", want: "Drain the shadow-queue: foo"},
+		{name: "empty", taskSpec: "", want: ""},
+		{
+			name:     "caps at 120 chars",
+			taskSpec: strings.Repeat("x", 130),
+			want:     strings.Repeat("x", 120),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Summarize(tc.taskSpec); got != tc.want {
+				t.Errorf("Summarize(%q) = %q, want %q", tc.taskSpec, got, tc.want)
+			}
+		})
 	}
 }

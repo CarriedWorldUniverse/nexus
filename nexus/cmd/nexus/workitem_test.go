@@ -306,6 +306,21 @@ func TestTaskSpecFirstLineMatches(t *testing.T) {
 			b:    "   \n  ",
 			want: true,
 		},
+		{
+			// Encodes part of the coordinator-reported live-failure
+			// hypothesis: a description that comes back reformatted with
+			// doubled/tabbed internal whitespace (same words, same single
+			// line) must still match — normalizeTaskLine's strings.Fields
+			// collapses any whitespace run to one space. (A reflow that
+			// inserts hard newlines INSIDE the first line is not something
+			// a first-line split can defend against — that's why
+			// findDuplicateWorkItem prefers the narrower Summary field,
+			// see TestFindDuplicateWorkItem_PrefersSummaryOverTaskSpec.)
+			name: "match despite doubled/tabbed internal whitespace (same words, same line)",
+			a:    "Drain the shadow-queue: list ready items in the shadow Jira queue and dispatch/triage each per the queue runbook",
+			b:    "Drain the shadow-queue:  list ready items in the shadow Jira queue and\tdispatch/triage each  per the queue runbook",
+			want: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -336,6 +351,77 @@ func TestFindDuplicateWorkItem_NoMatch(t *testing.T) {
 	}
 	if got := findDuplicateWorkItem(wi, existing); got != "" {
 		t.Errorf("findDuplicateWorkItem = %q, want empty (no match)", got)
+	}
+}
+
+// TestFindDuplicateWorkItem_PrefersSummaryOverTaskSpec is the regression
+// test for the coordinator-reported live failure: with NET-41/NET-42 both
+// open for role builder and the seeder's --task text unchanged, --dedupe
+// created NET-43 instead of skipping. Root cause per file:line evidence
+// (see this ticket's report): no confirmed Description-round-trip mutation
+// in the pinned ledger v0.1.4 (nexus/workgraph/adapter.go's GetWorkItem —
+// TaskSpec: issue.GetDescription() — and the vendored ledger's toProtoIssue
+// are a pure passthrough of the stored column), but Description/TaskSpec is
+// a wide field with more surface for something downstream to reformat than
+// Summary (a narrow field with one producer: CreateWorkItem's Summarize
+// call). This test encodes that defensive posture directly: even when an
+// existing item's TaskSpec has been mangled somehow (simulating any such
+// future or unconfirmed transformation) so the fallback
+// taskSpecFirstLineMatches would miss, a matching Summary must still find
+// the duplicate.
+func TestFindDuplicateWorkItem_PrefersSummaryOverTaskSpec(t *testing.T) {
+	task := "Drain the shadow-queue: list ready items in the shadow Jira queue and dispatch/triage each per the queue runbook"
+	wi := workgraph.WorkItem{TaskSpec: task}
+	existing := []workgraph.WorkItem{
+		{
+			ID: "NET-41",
+			// TaskSpec deliberately mangled relative to wi's — simulates an
+			// unconfirmed round-trip transformation. Summary, however,
+			// matches workgraph.Summarize(task) exactly, as CreateWorkItem
+			// always derives it.
+			TaskSpec: "Drain the shadow-queue: list ready items in the shadow\nJira queue and dispatch/triage each per the queue runbook — rendered",
+			Summary:  workgraph.Summarize(task),
+		},
+	}
+	if got := findDuplicateWorkItem(wi, existing); got != "NET-41" {
+		t.Errorf("findDuplicateWorkItem = %q, want NET-41 (Summary match despite mangled TaskSpec)", got)
+	}
+}
+
+// TestFindDuplicateWorkItem_SummaryMismatchNoFallback: once an existing
+// item HAS a Summary, findDuplicateWorkItem trusts it exclusively for that
+// item (Summary is the narrower, preferred signal) — it does not also
+// fall back to a TaskSpec comparison that happens to match. A populated but
+// differing Summary means "not the same task", full stop.
+func TestFindDuplicateWorkItem_SummaryMismatchNoFallback(t *testing.T) {
+	wi := workgraph.WorkItem{TaskSpec: "Drain the shadow-queue: foo"}
+	existing := []workgraph.WorkItem{
+		{ID: "PROJ-1", TaskSpec: "Drain the shadow-queue: foo", Summary: "a different summary entirely"},
+	}
+	if got := findDuplicateWorkItem(wi, existing); got != "" {
+		t.Errorf("findDuplicateWorkItem = %q, want empty (populated Summary mismatch must not fall back to TaskSpec match)", got)
+	}
+}
+
+// TestFindDuplicateWorkItem_DrainSeederFixture is the fixture-based
+// regression test for the coordinator-reported live failure, using the
+// exact drain-seeder task text and the shape workgraph.Client.ListReady
+// actually returns for an already-dispatched item (Status/Summary/TaskSpec
+// all populated by GetWorkItem — see workgraph/adapter_test.go's
+// TestListReady_RoundTripsTaskSpecAndSummary for the end-to-end confirmation
+// that a real create->transition->ListReady round trip through the fake
+// ledger preserves both fields unchanged).
+func TestFindDuplicateWorkItem_DrainSeederFixture(t *testing.T) {
+	task := "Drain the shadow-queue: list ready items in the shadow Jira queue and dispatch/triage each per the queue runbook"
+	candidate := workgraph.WorkItem{Role: "builder", TaskSpec: task}
+	existing := []workgraph.WorkItem{
+		{
+			ID: "NET-41", Role: "builder", TaskSpec: task, Summary: workgraph.Summarize(task),
+			Status: workgraph.StatusDispatched,
+		},
+	}
+	if got := findDuplicateWorkItem(candidate, existing); got != "NET-41" {
+		t.Errorf("findDuplicateWorkItem = %q, want NET-41", got)
 	}
 }
 

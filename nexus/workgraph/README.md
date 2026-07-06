@@ -24,6 +24,7 @@ to place an item in the dependency graph:
 | `role` | **both** `Issue.skills[0]` (label, informational) **and** `Issue.assignee_aspect` (see "Role -> ready", below — this is what actually gates `ListReadyIssues` on the live ledger) |
 | `task_spec` | `Issue.description` |
 | `acceptance_criteria[]` | `Issue.definition_of_done`, newline-joined (ledger enforces DoD on the Done transition) |
+| `summary` *(adapter-only — not in handoff.schema.json)* | `Issue.summary`, read-only: `GetWorkItem` folds it in (`Summarize(task_spec)`'s output — first line, `TrimSpace`'d, capped at 120 chars — is always what `CreateWorkItem` derives and sends as `CreateIssueRequest.Summary`, never caller input). Empty on a `WorkItem` built locally before `CreateWorkItem`. A narrower, single-producer identity signal than `task_spec`/`Issue.description` — used by `nexus workitem create --dedupe` (`cmd/nexus/workitem.go`'s `findDuplicateWorkItem`) in preference to a `task_spec` comparison. |
 | `depends_on[]` | `issue_links type=blocks`, blocker -> this (`AddLink(key=blocker, to_key=this)`) |
 | `status` | workflow state, see the table below |
 | `stream_id` | `Issue.parent_key` (epic) — a stream is an epic subtree |

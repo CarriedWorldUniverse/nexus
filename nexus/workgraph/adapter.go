@@ -104,14 +104,31 @@ func (c *Client) CreateWorkItem(ctx context.Context, wi WorkItem) (string, error
 	return id, nil
 }
 
-// summarize derives an issue summary from wi when the caller hasn't
-// provided one via TaskSpec's first line — kept short for the ledger's
-// summary field.
-func summarize(wi WorkItem) string {
-	line := strings.SplitN(wi.TaskSpec, "\n", 2)[0]
+// Summarize derives the short-form task identity CreateWorkItem always
+// stores as a ledger issue's summary column: taskSpec's first line,
+// TrimSpace'd, capped at 120 chars. Exported so a caller holding a
+// not-yet-created WorkItem (e.g. `nexus workitem create --dedupe`, see
+// cmd/nexus/workitem.go's findDuplicateWorkItem) can derive the same
+// identity value an already-created item's WorkItem.Summary (GetWorkItem)
+// carries, without duplicating this derivation or round-tripping through
+// TaskSpec/Description (which — unlike Summary, a narrow field with one
+// producer — has more surface for an intermediate system to reformat/
+// rewrap before a later read).
+func Summarize(taskSpec string) string {
+	line := strings.TrimSpace(strings.SplitN(taskSpec, "\n", 2)[0])
 	if len(line) > 120 {
 		line = line[:120]
 	}
+	return line
+}
+
+// summarize derives an issue summary from wi when the caller hasn't
+// provided one, via Summarize(wi.TaskSpec) — kept short for the ledger's
+// summary field. Falls back to wi.ID (only meaningful post-create, so this
+// fallback is mostly theoretical for the pre-create caller, e.g. an
+// empty-TaskSpec draft) when the derived line is empty.
+func summarize(wi WorkItem) string {
+	line := Summarize(wi.TaskSpec)
 	if line == "" {
 		return wi.ID
 	}
@@ -131,6 +148,7 @@ func (c *Client) GetWorkItem(ctx context.Context, id string) (WorkItem, error) {
 	wi := WorkItem{
 		ID:                 issue.GetKey(),
 		TaskSpec:           issue.GetDescription(),
+		Summary:            issue.GetSummary(),
 		AcceptanceCriteria: parseDoD(issue.GetDefinitionOfDone()),
 		StreamID:           issue.GetParentKey(),
 		Status:             ledgerToStatus[issue.GetStatus()],
