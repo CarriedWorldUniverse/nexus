@@ -64,8 +64,14 @@ func RenderRecalledKnowledge(hits []KnowledgeHit, maxChars int) string {
 		if perEntry > 0 {
 			content = truncateRunes(content, perEntry)
 		}
-		fmt.Fprintf(&b, "\n[%d] topic: %s (from: %s, updated: %s)\n%s\n",
-			i+1, flattenLine(h.Topic), h.FromAgent, h.UpdatedAt, content)
+		// Deliberately omit h.UpdatedAt here: it's a volatile per-render
+		// timestamp that adds no decision value to the model but churns
+		// this block's bytes on every recall, needlessly widening the
+		// diff of the trailing delta zone turn over turn. from (the
+		// authoring agent) is kept — it's stable per entry, doesn't
+		// change between renders of the same hit.
+		fmt.Fprintf(&b, "\n[%d] topic: %s (from: %s)\n%s\n",
+			i+1, flattenLine(h.Topic), h.FromAgent, content)
 	}
 	b.WriteString("</recalled-knowledge>")
 	return b.String()

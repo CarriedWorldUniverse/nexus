@@ -40,10 +40,17 @@ func TestDeliberate_ReadMemoryHookPreservesAutoRecallInjection(t *testing.T) {
 	if _, err := f.Deliberate(context.Background(), "how do I deploy"); err != nil {
 		t.Fatalf("Deliberate failed: %v", err)
 	}
-	got := prov.last.AppendSystemPrompt
+	// Hook-injected recall context routes to the trailing per-turn
+	// user/delta zone, never the system prompt (see funnel.go's
+	// buildTurnRequest: tail-injection is unconditional so a turn where
+	// recall fires never busts the whole-conversation vLLM prefix cache).
+	if strings.Contains(prov.last.AppendSystemPrompt, "build then ship") {
+		t.Fatalf("recall context leaked into system prompt:\n%s", prov.last.AppendSystemPrompt)
+	}
+	got := messagesText(prov.last.Messages)
 	for _, want := range []string{"<recalled-knowledge>", CommonplaceGuard, "build then ship"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("system prompt missing %q:\n%s", want, got)
+			t.Fatalf("trailing messages missing %q:\n%s", want, got)
 		}
 	}
 	if len(kg.searchCalls) != 1 {
@@ -51,7 +58,7 @@ func TestDeliberate_ReadMemoryHookPreservesAutoRecallInjection(t *testing.T) {
 	}
 }
 
-func TestDeliberate_SessionStartAdditionalContextInjectsAtTopOfTurn(t *testing.T) {
+func TestDeliberate_SessionStartAdditionalContextRoutesToUserMessage(t *testing.T) {
 	engine := funnelhooks.New()
 	if err := engine.Register("SessionStart", "*", 0, testHookHandler(func(_ context.Context, payload map[string]any) (funnelhooks.Decision, error) {
 		if payload["hook_event_name"] != "SessionStart" {
@@ -67,42 +74,25 @@ func TestDeliberate_SessionStartAdditionalContextInjectsAtTopOfTurn(t *testing.T
 	if _, err := f.Deliberate(context.Background(), "hello"); err != nil {
 		t.Fatalf("Deliberate failed: %v", err)
 	}
-	if !strings.Contains(prov.last.AppendSystemPrompt, "session memory") {
-		t.Fatalf("SessionStart additionalContext not injected:\n%s", prov.last.AppendSystemPrompt)
+	// The hook block must NOT land on the system prompt (that would bust
+	// the cached prefix every turn it fires) — it must land in the
+	// trailing per-turn user/delta zone instead. This is the only path;
+	// there is no env-gated system-prompt alternative.
+	if strings.Contains(prov.last.AppendSystemPrompt, "session memory") {
+		t.Fatalf("hook context leaked into system prompt:\n%s", prov.last.AppendSystemPrompt)
+	}
+	if !strings.Contains(messagesText(prov.last.Messages), "session memory") {
+		t.Fatalf("hook context missing from trailing messages: %+v", prov.last.Messages)
 	}
 }
 
-func TestDeliberate_SessionStartAdditionalContext_PrefixStableRoutesToUserMessage(t *testing.T) {
-	t.Setenv("FUNNEL_PREFIX_STABLE", "1")
-
-	engine := funnelhooks.New()
-	if err := engine.Register("SessionStart", "*", 0, testHookHandler(func(_ context.Context, _ map[string]any) (funnelhooks.Decision, error) {
-		return funnelhooks.Decision{AdditionalContext: "session memory"}, nil
-	})); err != nil {
-		t.Fatal(err)
+func messagesText(msgs []bridle.ProviderMessage) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		b.WriteString(m.Content)
+		b.WriteString("\n")
 	}
-	f, prov := newTestFunnel(t, bridle.ProviderResult{FinalText: "ack"})
-	f.cfg.Hooks = engine
-
-	if _, err := f.Deliberate(context.Background(), "hello"); err != nil {
-		t.Fatalf("Deliberate failed: %v", err)
-	}
-	// FUNNEL_PREFIX_STABLE=1: the hook block must NOT land on the system
-	// prompt (that would bust the cached prefix every turn it fires) —
-	// it must land in the trailing per-turn user/delta zone instead.
-	if strings.Contains(prov.last.AppendSystemPrompt, "session memory") {
-		t.Fatalf("FUNNEL_PREFIX_STABLE=1: hook context leaked into system prompt:\n%s", prov.last.AppendSystemPrompt)
-	}
-	gotInUserMessage := false
-	for _, m := range prov.last.Messages {
-		if strings.Contains(m.Content, "session memory") {
-			gotInUserMessage = true
-			break
-		}
-	}
-	if !gotInUserMessage {
-		t.Fatalf("FUNNEL_PREFIX_STABLE=1: hook context missing from trailing messages: %+v", prov.last.Messages)
-	}
+	return b.String()
 }
 
 func TestDeliberate_WriteMemoryHookCapturesExplicitMarker(t *testing.T) {
