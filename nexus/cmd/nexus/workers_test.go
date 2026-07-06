@@ -102,6 +102,75 @@ func TestPrintWorkerStatusTable_Empty(t *testing.T) {
 	}
 }
 
+func TestPrintWorkerStatusJSON(t *testing.T) {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	rows := []workerstatus.Status{
+		{
+			Agent:         "anvil-builder",
+			Role:          "builder",
+			WorkItemID:    "wi-1",
+			State:         "running",
+			LastHeartbeat: now.Add(-90 * time.Second),
+			Turns:         3,
+			TokensUsed:    1200,
+		},
+		{
+			Agent: "stale-agent",
+			State: "spawning",
+			// LastHeartbeat left zero — never reported.
+		},
+	}
+	var buf bytes.Buffer
+	rc := printWorkerStatusJSON(&buf, rows)
+	if rc != 0 {
+		t.Fatalf("printWorkerStatusJSON returned %d, want 0", rc)
+	}
+	out := buf.String()
+
+	// Top-level must be a JSON array (starts with '[').
+	if !strings.HasPrefix(out, "[") {
+		t.Errorf("expected JSON array, got: %s", out)
+	}
+	// Sanity-check a few field names that come from Status's json tags.
+	for _, want := range []string{`"agent": "anvil-builder"`, `"state": "running"`,
+		`"agent": "stale-agent"`, `"turns": 3`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("json output missing %q; got:\n%s", want, out)
+		}
+	}
+	// Zero heartbeat renders as epoch-zero integer (RFC 3339 "1970-01-01T00:00:00Z")
+	// or, withomitempty, the field is omitted. Either way the agent+state must
+	// still be present.
+	if !strings.Contains(out, `"stale-agent"`) {
+		t.Errorf("json missing stale-agent: %s", out)
+	}
+}
+
+func TestPrintWorkerStatusJSON_Empty(t *testing.T) {
+	var buf bytes.Buffer
+	rc := printWorkerStatusJSON(&buf, nil)
+	if rc != 0 {
+		t.Fatalf("printWorkerStatusJSON returned %d, want 0", rc)
+	}
+	if buf.String() != "[]\n" {
+		t.Errorf("expected [] for empty input, got: %q", buf.String())
+	}
+}
+
+func TestPrintWorkerStatusJSON_NilSlice(t *testing.T) {
+	// Nil slice (not empty) must also emit "[]\n", matching
+	// printWorkerStatusTable's empty-fleet behaviour.
+	var buf bytes.Buffer
+	var rows []workerstatus.Status
+	rc := printWorkerStatusJSON(&buf, rows)
+	if rc != 0 {
+		t.Fatalf("printWorkerStatusJSON returned %d, want 0", rc)
+	}
+	if buf.String() != "[]\n" {
+		t.Errorf("expected [] for nil slice, got: %q", buf.String())
+	}
+}
+
 func TestTruncateCell(t *testing.T) {
 	if got := truncateCell("short", 10); got != "short" {
 		t.Errorf("truncateCell(short) = %q, want unchanged", got)
