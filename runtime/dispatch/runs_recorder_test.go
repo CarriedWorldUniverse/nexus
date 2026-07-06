@@ -91,9 +91,9 @@ func TestJobDoneRecordsPRURL(t *testing.T) {
 	if err := r.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(SetLookupPRURLForTest(func(repo, branch string) (string, error) {
-		if repo != "org/repo" || branch != "feature/x" {
-			t.Fatalf("lookup args repo=%q branch=%q", repo, branch)
+	t.Cleanup(SetLookupPRURLForTest(func(repo, branch, ticket string) (string, error) {
+		if repo != "org/repo" || branch != "feature/x" || ticket != "NEX-3" {
+			t.Fatalf("lookup args repo=%q branch=%q ticket=%q", repo, branch, ticket)
 		}
 		return "https://github.com/org/repo/pull/1", nil
 	}))

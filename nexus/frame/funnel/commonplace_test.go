@@ -32,7 +32,7 @@ func TestRenderRecalledKnowledge_FramesAndFences(t *testing.T) {
 		}
 	}
 	// Provenance for every entry — the recalling aspect must see who authored it.
-	for _, want := range []string{"anvil", "shadow", "deploy runbook", "incident", "2026-05-30"} {
+	for _, want := range []string{"anvil", "shadow", "deploy runbook", "incident"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing provenance/content %q; got:\n%s", want, got)
 		}
@@ -40,6 +40,12 @@ func TestRenderRecalledKnowledge_FramesAndFences(t *testing.T) {
 	// Content is present.
 	if !strings.Contains(got, "step 1: build") || !strings.Contains(got, "broker OOM") {
 		t.Errorf("entry content missing; got:\n%s", got)
+	}
+	// updated: timestamps are volatile and add no decision value — they
+	// must not be rendered (they'd churn the trailing delta zone on
+	// every recall without helping the model).
+	if strings.Contains(got, "2026-05-30") || strings.Contains(got, "updated:") {
+		t.Errorf("volatile updated timestamp should not be rendered; got:\n%s", got)
 	}
 }
 

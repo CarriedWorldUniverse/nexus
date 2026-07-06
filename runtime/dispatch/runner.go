@@ -24,7 +24,7 @@ var execCommandContext = exec.CommandContext
 var lookupPRURL = lookupPRURLWithGH
 
 // SetLookupPRURLForTest swaps PR lookup and returns a restore function.
-func SetLookupPRURLForTest(fn func(repo, branch string) (string, error)) func() {
+func SetLookupPRURLForTest(fn func(repo, branch, ticket string) (string, error)) func() {
 	old := lookupPRURL
 	lookupPRURL = fn
 	return func() { lookupPRURL = old }
@@ -537,7 +537,7 @@ func (r *Runner) completionSummary(run *Run, done JobDone) string {
 	if branch == "" {
 		branch = "builder/" + run.Brief.Ticket
 	}
-	prURL, prErr := lookupPRURL(run.Brief.Repo, branch)
+	prURL, prErr := lookupPRURL(run.Brief.Repo, branch, run.Brief.Ticket)
 	duration := formatDuration(done.StartedAt, done.CompletedAt)
 	turns := r.countActivityTurns(done.Agent, done.StartedAt, done.CompletedAt)
 
@@ -575,7 +575,7 @@ func formatCount(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-func lookupPRURLWithGH(repo, branch string) (string, error) {
+func lookupPRURLWithGH(repo, branch, ticket string) (string, error) {
 	if repo == "" {
 		return "", fmt.Errorf("repo not set")
 	}
@@ -591,10 +591,71 @@ func lookupPRURLWithGH(repo, branch string) (string, error) {
 		"--json", "url",
 		"-q", ".[0].url",
 	).CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("gh pr list: %w: %s", err, strings.TrimSpace(string(out)))
+	if err == nil {
+		if url := strings.TrimSpace(string(out)); url != "" {
+			return url, nil
+		}
 	}
-	return strings.TrimSpace(string(out)), nil
+
+	// Fallback (NET-46 live evidence): a worker that committed to its own
+	// branch name instead of the conventional builder/<ticket> one still
+	// opens a real PR — the harness must not miss it. Search open PRs for
+	// the ticket ID in the head branch name or title before giving up.
+	if strings.TrimSpace(ticket) == "" {
+		if err != nil {
+			return "", fmt.Errorf("gh pr list: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+		return "", nil
+	}
+	url, ferr := lookupPRURLByTicket(ctx, repo, ticket)
+	if ferr != nil {
+		if err != nil {
+			return "", fmt.Errorf("gh pr list: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+		return "", ferr
+	}
+	return url, nil
+}
+
+// lookupPRURLByTicket searches open PRs in repo for one whose head branch
+// name or title contains ticket, returning its URL. Empty string, nil error
+// means none found.
+func lookupPRURLByTicket(ctx context.Context, repo, ticket string) (string, error) {
+	out, err := execCommandContext(ctx, "gh", "pr", "list",
+		"--repo", repo,
+		"--state", "open",
+		"--json", "number,headRefName,title,url",
+	).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh pr list (ticket fallback): %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return selectPRURLByTicket(out, ticket)
+}
+
+// prListEntry is one row of `gh pr list --json number,headRefName,title,url`.
+type prListEntry struct {
+	Number      int    `json:"number"`
+	HeadRefName string `json:"headRefName"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+}
+
+// selectPRURLByTicket is the pure decision core of the ticket-search fallback
+// (NET-46): given the raw JSON of `gh pr list`, return the URL of the first
+// PR whose head branch name or title contains ticket. Empty string, nil error
+// means none matched. Pulled out of lookupPRURLByTicket so the matching rule
+// is unit-testable without shelling out to gh.
+func selectPRURLByTicket(out []byte, ticket string) (string, error) {
+	var prs []prListEntry
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return "", fmt.Errorf("gh pr list (ticket fallback): parse: %w", err)
+	}
+	for _, pr := range prs {
+		if strings.Contains(pr.HeadRefName, ticket) || strings.Contains(pr.Title, ticket) {
+			return pr.URL, nil
+		}
+	}
+	return "", nil
 }
 
 func (r *Runner) countActivityTurns(aspect string, start, end time.Time) int {
