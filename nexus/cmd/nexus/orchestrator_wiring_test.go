@@ -227,17 +227,32 @@ func (d *countingDrainer) DrainOnce(ctx context.Context) (orchestrator.DrainRepo
 func TestRunDrainLoop_CallsDrainOnceOnTickerCadence(t *testing.T) {
 	d := &countingDrainer{callCh: make(chan struct{}, 8)}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
-	go runDrainLoop(ctx, d, 5*time.Millisecond, testLogger(t))
+	done := make(chan struct{})
+	go func() {
+		runDrainLoop(ctx, d, 5*time.Millisecond, testLogger(t))
+		close(done)
+	}()
 
 	select {
 	case <-d.callCh:
 		// at least one DrainOnce call observed.
 	case <-time.After(2 * time.Second):
+		cancel()
 		t.Fatal("timed out waiting for runDrainLoop to call DrainOnce")
 	}
 	cancel()
+
+	// Wait for the goroutine to actually exit before the test returns —
+	// otherwise it keeps ticking and calling testLogger's t.Log (via
+	// logger.Info) after this test has completed, which the race detector
+	// (correctly) flags as a write-after-test-done race.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runDrainLoop did not return after ctx cancellation")
+	}
+
 	if d.calls.Load() < 1 {
 		t.Fatalf("DrainOnce calls = %d, want >= 1", d.calls.Load())
 	}

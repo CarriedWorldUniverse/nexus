@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,14 +13,20 @@ import (
 )
 
 // memWorkerStatus is an in-memory workerstatus.Store fake, mirroring
-// memRuns in runs_adapter_test.go.
+// memRuns in runs_adapter_test.go. It's guarded by a mutex because — unlike
+// the unit tests that drive it single-threaded — the e2e tests exercise it
+// from a real broker connection goroutine (via handleWorkerStatusFrame)
+// concurrently with the test goroutine's own List() polling.
 type memWorkerStatus struct {
+	mu   sync.Mutex
 	rows map[string]workerstatus.Status
 }
 
 func (m *memWorkerStatus) Migrate(context.Context) error { return nil }
 
 func (m *memWorkerStatus) Upsert(_ context.Context, s workerstatus.Status) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.rows == nil {
 		m.rows = map[string]workerstatus.Status{}
 	}
@@ -28,10 +35,14 @@ func (m *memWorkerStatus) Upsert(_ context.Context, s workerstatus.Status) error
 }
 
 func (m *memWorkerStatus) Get(_ context.Context, agent string) (workerstatus.Status, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.rows[agent], nil
 }
 
 func (m *memWorkerStatus) List(context.Context) ([]workerstatus.Status, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var out []workerstatus.Status
 	for _, s := range m.rows {
 		out = append(out, s)
@@ -40,6 +51,8 @@ func (m *memWorkerStatus) List(context.Context) ([]workerstatus.Status, error) {
 }
 
 func (m *memWorkerStatus) Delete(_ context.Context, agent string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	delete(m.rows, agent)
 	return nil
 }
