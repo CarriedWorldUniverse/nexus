@@ -67,6 +67,14 @@ func TestSplitWorker(t *testing.T) {
 		{"nobody-builder", "", "", false}, // unknown personality
 		{"anvil", "", "", false},          // bare personality is not a worker identity
 		{"plumb.bob", "", "", false},      // dotted hand is not a worker identity
+
+		// builder-complex: the longest-suffix match must not misread it as
+		// personality "anvil-builder" + trailing "-complex" garbage, nor let
+		// the plain "builder" suffix steal the match.
+		{"anvil-builder-complex", "anvil", "builder-complex", true},
+		{"maren-builder-complex", "maren", "builder-complex", true},
+		{"anvil-builder", "anvil", "builder", true}, // plain builder still resolves, unaffected by the new suffix
+		{"builder-complex-builder", "", "", false},  // "builder-complex" is not a registered personality
 	}
 	for _, c := range cases {
 		p, r, ok := SplitWorker(c.name)

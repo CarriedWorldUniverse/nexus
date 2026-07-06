@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 	"github.com/CarriedWorldUniverse/nexus/nexus/workerstatus"
 	"github.com/CarriedWorldUniverse/nexus/nexus/workgraph"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
@@ -400,6 +401,65 @@ func TestDrainOnceThreadsPersonality(t *testing.T) {
 	}
 	if without.Personality != "" {
 		t.Errorf("work item with no requested personality must produce empty PoolItem.Personality, got %q", without.Personality)
+	}
+}
+
+// fakeRoleResolver is a minimal RoleResolver test double: it returns a
+// fixed brain for one role (and the zero value — "", nil, nil, "", "" —
+// for every other role), so tests can assert dispatchOne threads
+// Resolve's provider/model onto PoolItem without needing the real
+// RoleBrainResolver (rolebrain.go, exercised in cmd/nexus's wiring test).
+type fakeRoleResolver struct {
+	role     string
+	provider string
+	model    string
+}
+
+func (f fakeRoleResolver) Resolve(role string) (string, []string, *funnel.ToolPolicy, string, string) {
+	if role != f.role {
+		return "", nil, nil, "", ""
+	}
+	return "", nil, nil, f.provider, f.model
+}
+
+// TestDrainOnceThreadsRoleBrain covers role-tier-brains (2026-07-06):
+// dispatchOne must carry o.Resolver's resolved Provider/Model onto
+// PoolItem.Provider/Model for the matching role only — an unmatched role
+// (or a nil Resolver, covered by TestDrainOnceDispatchesReadyItems) must
+// produce an empty PoolItem.Provider/Model, reproducing pre-role-tier-
+// brains behavior exactly.
+func TestDrainOnceThreadsRoleBrain(t *testing.T) {
+	graph := newFakeGraph()
+	graph.addReady("wi-1", workgraph.WorkItem{Role: "builder-complex", TaskSpec: "fix the hard bug"})
+	graph.addReady("wi-2", workgraph.WorkItem{Role: "builder", TaskSpec: "fix the easy bug"})
+	disp := &fakeDispatcher{}
+	o := &Orchestrator{
+		Graph:        graph,
+		Dispatcher:   disp,
+		WorkerStatus: &fakeWorkerStatus{},
+		Roles:        []string{"builder-complex", "builder"},
+		Resolver:     fakeRoleResolver{role: "builder-complex", provider: "claude-code", model: "claude-sonnet-4-6"},
+	}
+
+	if _, err := o.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("DrainOnce: %v", err)
+	}
+	if len(disp.calls) != 2 {
+		t.Fatalf("expected 2 SubmitPoolItem calls, got %d", len(disp.calls))
+	}
+	var complex, plain dispatch.PoolItem
+	for _, c := range disp.calls {
+		if c.WorkItemID == "wi-1" {
+			complex = c
+		} else {
+			plain = c
+		}
+	}
+	if complex.Provider != "claude-code" || complex.Model != "claude-sonnet-4-6" {
+		t.Errorf("builder-complex item Provider/Model = %q/%q, want claude-code/claude-sonnet-4-6", complex.Provider, complex.Model)
+	}
+	if plain.Provider != "" || plain.Model != "" {
+		t.Errorf("plain builder item (no brain configured for it) Provider/Model = %q/%q, want empty", plain.Provider, plain.Model)
 	}
 }
 

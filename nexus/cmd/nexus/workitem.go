@@ -24,9 +24,25 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/workgraph"
 	"google.golang.org/grpc"
 )
+
+// isKnownWorkerRole reports whether role is a registered pool role
+// (aspects.WorkerRoles — the closed vocabulary SplitWorker/dispatch require;
+// role-tier-brains, 2026-07-06, added "builder-complex" alongside "builder").
+// --role is free text at the flag level (unchanged), but an unregistered
+// value can never be leased by any pool worker, so failing fast here with a
+// helpful message beats a work item that silently sits forever unclaimed.
+func isKnownWorkerRole(role string) bool {
+	for _, r := range aspects.WorkerRoles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
 
 // runWorkitemSubcommand dispatches `nexus workitem <verb> [...]`.
 func runWorkitemSubcommand(args []string) int {
@@ -113,6 +129,11 @@ const defaultWorkitemSubject = "nexus-orchestrator"
 func buildWorkItem(cfg *workitemCreateConfig) (workgraph.WorkItem, error) {
 	if cfg.Role == "" {
 		return workgraph.WorkItem{}, errors.New("--role is required")
+	}
+	if !isKnownWorkerRole(cfg.Role) {
+		return workgraph.WorkItem{}, fmt.Errorf(
+			"--role %q is not a registered pool role (known roles: %s)",
+			cfg.Role, strings.Join(aspects.WorkerRoles, ", "))
 	}
 	task, err := resolveOneOf("task", cfg.Task, cfg.TaskFile, readFileTrimmed)
 	if err != nil {

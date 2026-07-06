@@ -86,6 +86,27 @@ Pool workers (`{personality}-{role}`) inherit their provider/model from their **
 
 `--personality` only *targets* a lease; it never sets a personality's provider/model itself, and this command never touches cluster state or aspects rows.
 
+### Role tiers (2026-07-06)
+
+Complexity tier is a **role property, not a personality property.** `builder` and `builder-complex` are the same job (spec → code → hand to gates, same verification spine, same skills allow-list) at two different BRAINS:
+
+- **`builder` (simple tier)** — the default everything already ran before this split: Ornith, bounded single-file/single-concern tickets.
+- **`builder-complex` (heavy tier)** — a heavier provider/model (operator-configured, e.g. Claude/Opus-class) for work where a lighter brain's scaffold-but-weak-judgment envelope isn't enough: real concurrency, multi-file refactors, or subtle-correctness changes — the live, motivating case is NET-49 (a race-condition fix Ornith kept getting subtly wrong across several attempts; routing the retry to `builder-complex` closed it in one pass).
+
+Any personality may take either role — tier is orthogonal to which personality (name/voice) is running it, exactly like the existing personality-vs-role split in §3. **Verification is identical across tiers**: the same gates (tester/reviewer/security-reviewer as the item needs), the same handoff contract (§5), the same DoD/acceptance-criteria check — a heavier brain earns no shortcut past the verification spine.
+
+**Config:** the orchestrator's role→brain mapping is `ORCHESTRATOR_ROLE_BRAINS`, a comma-separated `role=provider:model` list, e.g.:
+
+```
+ORCHESTRATOR_ROLE_BRAINS="builder-complex=claude-code:claude-sonnet-4-6"
+```
+
+Unset (or a role absent from the list) means no override for that role — it dispatches with whatever the leased personality's own aspects row already resolves to (§7's existing per-personality routing), unchanged. There is no hardcoded default role→brain mapping; the example model id above is illustrative, not a pin — pick whatever brain fits the operator's actual provider/model roster.
+
+**Precedence** (highest wins): the role's configured brain (`ORCHESTRATOR_ROLE_BRAINS`) > the leased personality's own aspects-row provider/model (§7's `nexus aspect set`) > the dispatch launch default. A role brain is threaded orchestrator → `dispatch.PoolItem` → `dispatch.Brief` → the Job's `CW_PROVIDER`/`CW_MODEL` env, which the worker (agentfunnel) prefers over the broker validate/resolve response's provider/model at boot.
+
+`nexus workitem create --role <role>` validates `--role` against the registered pool-role vocabulary (`security-reviewer`, `builder-complex`, `builder`, `tester`, `reviewer`, `painter`, `modeller`) and fails fast with a helpful error on an unregistered role, rather than filing a work item nothing will ever lease.
+
 ## 8. Scheduling
 
 Scheduling is a **trigger — not a role, not an agent.** A thin timer (k8s CronJob — proven by transcript-ingest; the old "must be in-nexus, Windows has no cron" rationale is stale on k3s) fires → builds a work-item (role + spec) → injects it into the orchestrator's intake → routed like any work. If named "hermes": **hermes delivers, never performs.** The schedule list (what/cadence/enabled) can be operator-editable config in nexus; execution is the dumbest reliable timer.

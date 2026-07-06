@@ -14,10 +14,19 @@ import (
 type Brief struct {
 	Agent    string `json:"agent"`
 	Provider string `json:"provider,omitempty"`
-	Repo     string `json:"repo"`
-	Ticket   string `json:"ticket"`
-	Branch   string `json:"branch"`
-	Thread   string `json:"thread"`
+	// Model, when non-empty, is a role-brain override (role-tier-brains,
+	// 2026-07-06) threaded from dispatch.PoolItem.Model — see pool.go's
+	// SubmitPoolItem. It is injected into the Job env as CW_MODEL
+	// (jobspec.go), which agentfunnel prefers over the broker resolve/
+	// validate response's Model when present (main.go), the same
+	// override-over-resolve-response precedence Provider/CW_PROVIDER
+	// follows. Empty = no override — the resolved personality row's model
+	// applies unchanged, exactly as before this field existed.
+	Model  string `json:"model,omitempty"`
+	Repo   string `json:"repo"`
+	Ticket string `json:"ticket"`
+	Branch string `json:"branch"`
+	Thread string `json:"thread"`
 	// DispatchMsgID is the persisted chat message id of the !dispatch command.
 	DispatchMsgID int64 `json:"dispatch_msg_id,omitempty"`
 	// RunID is set by the broker's Runner at dispatch time — a unique run

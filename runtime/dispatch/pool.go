@@ -162,6 +162,20 @@ type PoolItem struct {
 	// strictly by tryLeaseWorkerSlot: free -> leased to exactly that
 	// personality, busy -> queues (never substituted).
 	Personality string
+
+	// Provider/Model mirror Brief.Provider/Brief.Model (role-tier-brains,
+	// 2026-07-06): the ROLE's configured brain — e.g. "builder-complex"
+	// routed to a heavier provider/model than plain "builder" — threaded by
+	// the orchestrator's dispatchOne from its RoleResolver (RoleBrainResolver
+	// in production, see nexus/orchestrator/rolebrain.go). Precedence (see
+	// SubmitPoolItem/resolveProvider): a non-empty Provider here is stamped
+	// straight onto the leased Brief BEFORE resolveProvider runs, so it wins
+	// over the leased personality's own aspects-row provider, which in turn
+	// wins over launch's "claude" default. Empty = no role-brain override —
+	// every pre-role-tier-brains pool dispatch's exact behavior (personality
+	// row, then launch default, same as before this field existed).
+	Provider string
+	Model    string
 }
 
 // SubmitPool dispatches a role-based work item onto the shared pool
@@ -223,6 +237,16 @@ func (r *Runner) SubmitPoolItem(ctx context.Context, item PoolItem) (string, err
 		AcceptanceCriteria:   item.AcceptanceCriteria,
 		Repo:                 item.Repo,
 		RequestedPersonality: item.Personality,
+		// Provider/Model: the role's brain override, stamped onto the Brief
+		// up front (role-tier-brains). Setting Brief.Provider here — BEFORE
+		// resolveProvider runs below — is what gives the role brain
+		// precedence over the leased personality's own aspects-row provider:
+		// resolveProvider is a no-op once b.Provider is already non-empty.
+		// Empty item.Provider/item.Model reproduces every pre-role-tier-
+		// brains pool dispatch exactly (personality-row inheritance, then
+		// launch's default).
+		Provider: item.Provider,
+		Model:    item.Model,
 	}
 
 	r.mu.Lock()

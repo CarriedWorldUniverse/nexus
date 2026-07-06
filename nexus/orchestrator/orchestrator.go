@@ -85,14 +85,21 @@ func (a LogAlerter) Alert(_ context.Context, subject, detail string) error {
 
 // RoleResolver resolves a role LABEL (e.g. "builder") to the role-at-spawn
 // overlay (M1 Unit 3, PHASE2-DESIGN §3) a dispatch should carry: the
-// resolved role system-prompt text, the skill allowlist, and a tool-policy
-// fragment. Optional — a nil Orchestrator.Resolver dispatches with the role
-// label alone (RolePrompt="", SkillAllowlist=nil, PolicyFragment=nil),
-// reproducing SubmitPool's original behavior exactly. See README.md
-// "Role resolution (out of scope, by design)" for why this unit ships the
-// seam but not a docs/network/roles/*.yaml-backed implementation.
+// resolved role system-prompt text, the skill allowlist, a tool-policy
+// fragment, and (role-tier-brains, 2026-07-06) the role's configured BRAIN —
+// Provider/Model — when the operator has pinned one for that role tier
+// (e.g. "builder-complex" running a heavier brain than plain "builder").
+// Optional — a nil Orchestrator.Resolver dispatches with the role label
+// alone (RolePrompt="", SkillAllowlist=nil, PolicyFragment=nil,
+// provider="", model=""), reproducing SubmitPool's original behavior
+// exactly. See README.md "Role resolution (out of scope, by design)" for
+// why this unit ships the seam but not a docs/network/roles/*.yaml-backed
+// implementation of the prompt/skills/policy fields — RoleBrainResolver
+// (rolebrain.go) is, as of role-tier-brains, the one concrete implementation
+// wired in production, and it ONLY resolves provider/model (the other three
+// fields stay "" / nil from it, same as a nil Resolver).
 type RoleResolver interface {
-	Resolve(role string) (rolePrompt string, skillAllowlist []string, policy *funnel.ToolPolicy)
+	Resolve(role string) (rolePrompt string, skillAllowlist []string, policy *funnel.ToolPolicy, provider string, model string)
 }
 
 // DrainReport is DrainOnce's (and RecordJobResult's re-drain's) result —
@@ -203,9 +210,9 @@ func (o *Orchestrator) alert(ctx context.Context, subject, detail string) {
 	}
 }
 
-func (o *Orchestrator) resolve(role string) (string, []string, *funnel.ToolPolicy) {
+func (o *Orchestrator) resolve(role string) (string, []string, *funnel.ToolPolicy, string, string) {
 	if o.Resolver == nil {
-		return "", nil, nil
+		return "", nil, nil, "", ""
 	}
 	return o.Resolver.Resolve(role)
 }

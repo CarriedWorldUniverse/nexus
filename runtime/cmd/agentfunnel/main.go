@@ -279,6 +279,19 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	// Role-brain override (role-tier-brains, 2026-07-06): CW_PROVIDER/
+	// CW_MODEL, set from dispatch.Brief.Provider/Model by jobspec.go
+	// whenever a role's configured brain (e.g. "builder-complex" routed to
+	// a heavier provider/model) applies, PREFERRED over the broker
+	// validate/resolve response's Provider/Model when present. This is the
+	// only seam that can override what brain the worker process itself
+	// talks to — the resolve response is otherwise keyed purely off the
+	// leased personality's own aspects-row binding, with no notion of the
+	// per-dispatch role tier. Unset env (the overwhelming common case: no
+	// role brain configured, or this role has none) leaves res.Provider/
+	// res.Model exactly as the broker resolved them — the fallback. See
+	// applyRoleBrainOverride's doc/tests for the precedence in isolation.
+	applyRoleBrainOverride(res, os.Getenv)
 	log.Info("agentfunnel: validated",
 		"aspect", res.AspectName,
 		"provider", res.Provider,
@@ -1856,6 +1869,26 @@ func builderGoalLoop(ctx context.Context, f *funnel.Funnel, log *slog.Logger, cf
 			stop()
 			return
 		}
+	}
+}
+
+// applyRoleBrainOverride overlays a role-brain override (role-tier-brains,
+// 2026-07-06) onto a broker validate/resolve response's Provider/Model:
+// CW_PROVIDER/CW_MODEL (getenv), when non-empty, WIN — the dispatch-time
+// role brain (dispatch.PoolItem.Provider/Model, threaded via
+// dispatch.Brief.Provider/Model -> jobspec.go's env injection) takes
+// precedence over whatever the leased personality's own aspects-row
+// binding resolved to. An empty getenv result for a field leaves res's
+// existing value (the resolve response) untouched — the fallback, and the
+// unchanged behavior for every dispatch that carries no role brain. getenv
+// is injected (os.Getenv in production) purely so this is unit-testable
+// without touching the process environment.
+func applyRoleBrainOverride(res *keyfile.ValidationResult, getenv func(string) string) {
+	if v := getenv("CW_PROVIDER"); v != "" {
+		res.Provider = v
+	}
+	if v := getenv("CW_MODEL"); v != "" {
+		res.Model = v
 	}
 }
 
