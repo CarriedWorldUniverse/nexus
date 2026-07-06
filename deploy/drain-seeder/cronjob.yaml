@@ -1,0 +1,78 @@
+# drain-seeder — replaces shadow-drain (deploy/shadow/drain-cronjob.yaml,
+# SUSPENDED, backed up at dMon ~/phase3-backup/cronjob-shadow-drain.yaml).
+#
+# shadow-drain ran agentfunnel -drain AS the named shadow aspect: it
+# authenticated with shadow's keyfile (aspect-keyfile-shadow), ran under
+# shadow's ServiceAccount (shadow-aspect), and used shadow's Claude OAuth
+# token — the named-fleet coupling this Phase retires (see README.md).
+#
+# This CronJob does NOT drain anything itself. It only SEEDS a ledger work
+# item every fire (`nexus workitem create`) — a plain gRPC write to the
+# sovereign ledger, no aspect identity, no k8s dispatch authority, no
+# Claude spend. The standing orchestrator (ORCHESTRATOR_ENABLE=1 on
+# nexus-control, see deploy/nexus-control/README.md) drains the resulting
+# work item into a pool worker ({personality}-builder) on its own cadence —
+# THAT'S what actually does the drain-queue work now.
+#
+# suspend: true — the operator un-suspends deliberately (same posture
+# shadow-drain shipped with: `kubectl patch cronjob drain-seeder -n nexus
+# -p '{"spec":{"suspend":false}}'`).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: drain-seeder
+  namespace: nexus
+  labels: {app: drain-seeder}
+spec:
+  schedule: "*/30 * * * *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 300 # a ledger write, not a drain — seconds, not minutes
+      backoffLimit: 1
+      template:
+        metadata:
+          labels: {app: drain-seeder}
+        spec:
+          # localhost/nexus-broker:li1 lives only in dMon's containerd — without
+          # this pin the pod can land on the arm64 node and ErrImageNeverPull
+          # (hit live on first unsuspend, 2026-07-06).
+          nodeSelector:
+            kubernetes.io/hostname: dmonextreme
+          restartPolicy: Never
+          containers:
+            - name: drain-seeder
+              image: localhost/nexus-broker:li1 # has the nexus binary (nexus-control's image)
+              imagePullPolicy: Never
+              command: ["/usr/local/bin/nexus"]
+              args:
+                - workitem
+                - create
+                - --role
+                - builder
+                - --task
+                - "Drain the shadow-queue: list ready items in the shadow Jira queue and dispatch/triage each per the queue runbook"
+                - --criteria
+                - "A drain summary was posted"
+                - --dedupe
+              env:
+                # Same ledger dial nexus-control's orchestrator uses
+                # (WORKGRAPH_* — see deploy/nexus-control/README.md's
+                # convergence notes). WORKGRAPH_ORG/SUBJECT/PROJECT are left
+                # unset here: `nexus workitem create` defaults them to
+                # carriedworld/nexus-orchestrator/NET, the same values the
+                # orchestrator dial resolves to.
+                - {name: WORKGRAPH_LEDGER_ADDR, value: "ledger.cwb.svc.cluster.local:8081"}
+                - {name: WORKGRAPH_TLS_CERT, value: "/etc/cwb/custodian-client/tls.crt"}
+                - {name: WORKGRAPH_TLS_KEY, value: "/etc/cwb/custodian-client/tls.key"}
+                - {name: WORKGRAPH_TLS_CA, value: "/etc/cwb/custodian-client/ca.crt"}
+              volumeMounts:
+                - {name: custodian-client-tls, mountPath: /etc/cwb/custodian-client, readOnly: true}
+          volumes:
+            - name: custodian-client-tls
+              secret:
+                secretName: nexus-broker-custodian-client

@@ -71,6 +71,19 @@ const (
 	KindDispatchError  Kind = "dispatch.error"
 	KindDispatchStatus Kind = "dispatch.status"
 
+	// KindWorkerStatus is the M1 Unit 5 worker-status heartbeat (PHASE2-
+	// DESIGN §5): every worker (and orchestrator invocation) emits this
+	// over its normal aspect WebSocket at boot, each turn boundary, and
+	// on a ~60s wall-clock ticker. Deliberately a NEW kind rather than an
+	// extension of dispatch.status — dispatch.status is the narrower
+	// accepted/failed lifecycle signal the runs store already consumes;
+	// worker.status is the broader, higher-frequency fleet-consolidation
+	// shape (nexus/workerstatus). Keeping them separate means an old
+	// receiver that only understands dispatch.status is unaffected by
+	// this addition (frames are UNVERSIONED — field-additive/kind-
+	// additive only, never repurpose an existing field or kind).
+	KindWorkerStatus Kind = "worker.status"
+
 	// CWB data-plane relay (aspect REST/gRPC calls bridged WS<->HTTP by the broker).
 	KindCWBRequest  Kind = "cwb.request"
 	KindCWBResponse Kind = "cwb.response"
@@ -358,6 +371,7 @@ func IsKnown(k Kind) bool {
 		KindOutpostRegister, KindOutpostRegisterAck, KindOutpostDeregister,
 		KindTurn, KindTurnResult,
 		KindDispatch, KindDispatchResult, KindDispatchError, KindDispatchStatus,
+		KindWorkerStatus,
 		KindCWBRequest, KindCWBResponse,
 		KindChatSend, KindChatDeliver, KindChatReaction, KindChatRead,
 		KindChatReadResult, KindAnnounceFile, KindShareFile, KindFileResult,

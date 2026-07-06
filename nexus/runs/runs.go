@@ -48,6 +48,7 @@ type Store interface {
 	GetLogs(ctx context.Context, runID string) (string, error)
 	ListRunning(ctx context.Context) ([]Run, error)
 	List(ctx context.Context, limit int) ([]Run, error)
+	ListCompleted(ctx context.Context, limit int) ([]Run, error)
 	Get(ctx context.Context, runID string) (Run, error)
 }
 
@@ -229,6 +230,36 @@ func (s *SQLStore) List(ctx context.Context, limit int) ([]Run, error) {
 		FROM runs ORDER BY started_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("runs.List: %w", err)
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ListCompleted returns the most-recently-completed runs (status IN
+// complete/failed/cancelled), most recent first by completed_at, capped
+// at limit (default/clamp mirrors List). Used by the console fleet
+// pane's "Recently completed" section, which reads run history the
+// live worker_status table can no longer show once a run's row is
+// reaped at JobDone.
+func (s *SQLStore) ListCompleted(ctx context.Context, limit int) ([]Run, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT run_id, ticket, agent, thread, dispatch_msg_id, parent_run_id,
+		       command, repo, status, reason, started_at, completed_at, pr_url, duration_secs
+		FROM runs WHERE status IN (?, ?, ?) ORDER BY completed_at DESC LIMIT ?`,
+		string(StatusComplete), string(StatusFailed), string(StatusCancelled), limit)
+	if err != nil {
+		return nil, fmt.Errorf("runs.ListCompleted: %w", err)
 	}
 	defer rows.Close()
 	var out []Run

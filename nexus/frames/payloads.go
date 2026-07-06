@@ -202,6 +202,69 @@ type DispatchStatusPayload struct {
 	At     time.Time `json:"at,omitempty"`
 }
 
+// WorkerStatusPayload is the M1 Unit 5 worker-status heartbeat (PHASE2-
+// DESIGN §5) — one machine-readable status shape every worker (and
+// orchestrator invocation) emits over its normal aspect WebSocket at
+// boot, each turn boundary, and on a ~60s wall-clock ticker. Deliberately
+// a NEW payload/kind rather than an extension of DispatchStatusPayload:
+// dispatch.status stays the narrower accepted/failed run-lifecycle
+// signal nexus/runs already consumes; worker.status is the broader,
+// higher-frequency fleet-consolidation shape the broker upserts into
+// nexus/workerstatus. A field-additive frame, per the unversioned-frame
+// discipline — old receivers that don't know this kind log-and-drop
+// (frames.IsKnown), new receivers add fields here without breaking
+// anyone.
+type WorkerStatusPayload struct {
+	// Agent is the worker's identity (aspect name, or the derived
+	// `<parent>.sub-N` hand identity for pool leases). Required.
+	Agent string `json:"agent"`
+	// Role is the role LABEL this spawn is dispatched under (builder/
+	// tester/reviewer/…), from dispatch.Brief.Role. Empty for named-
+	// agent dispatch outside the pool.
+	Role string `json:"role,omitempty"`
+	// Personality is the thin, display-only label from dispatch.Brief.
+	// Personality. Decoration only, never load-bearing.
+	Personality string `json:"personality,omitempty"`
+	// WorkItemID identifies the pool work-item this spawn serves
+	// (PHASE2-DESIGN §1/§3), from dispatch.Brief.WorkItemID.
+	WorkItemID string `json:"work_item_id,omitempty"`
+
+	// State is the worker's lifecycle state machine position.
+	// One of: spawning, running, blocked, awaiting_gate, done, failed.
+	State string `json:"state"`
+
+	// AuthOk reports whether the worker's frontier credential (the
+	// CLAUDE_CODE_OAUTH_TOKEN / session JWT) is currently valid.
+	AuthOk bool `json:"auth_ok"`
+	// TokenExpiresAt is when the current frontier credential expires.
+	// Zero when unknown/not applicable.
+	TokenExpiresAt time.Time `json:"token_expires_at,omitempty"`
+	// Provider/Model are the resolved binding this worker is currently
+	// running turns against (funnel.Binding, refreshed on re-validate).
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+
+	// CLIVersion is the pinned claude-code (or other harness) CLI
+	// version baked into the worker image (PHASE2-DESIGN §7).
+	CLIVersion string `json:"cli_version,omitempty"`
+	// ImageTag is the worker image tag this pod is running.
+	ImageTag string `json:"image_tag,omitempty"`
+
+	// LastHeartbeat is this emission's own timestamp — the broker also
+	// has the envelope TS, but carrying it in-payload lets the worker
+	// stamp its own emission time (e.g. under clock skew, or a batched
+	// send) rather than trusting only wire arrival time.
+	LastHeartbeat time.Time `json:"last_heartbeat"`
+	// StartedAt is when this worker pod/process began (stable across
+	// every heartbeat this worker sends).
+	StartedAt time.Time `json:"started_at,omitempty"`
+	// Turns is the count of completed main-deliberation turns so far.
+	Turns int `json:"turns,omitempty"`
+	// TokensUsed is the cumulative token count (input+output) across
+	// this worker's turns so far.
+	TokensUsed int `json:"tokens_used,omitempty"`
+}
+
 // RunPayload is the operator-facing shape of a persisted dispatch run.
 type RunPayload struct {
 	RunID         string `json:"run_id"`

@@ -21,8 +21,9 @@ const aspectMCPName = "nexus-skills"
 
 func main() {
 	var (
-		logLevel = flag.String("log-level", "info", "slog level")
-		logFile  = flag.String("log-file", "", "Write logs here.")
+		logLevel       = flag.String("log-level", "info", "slog level")
+		logFile        = flag.String("log-file", "", "Write logs here.")
+		skillAllowlist = flag.String("skill-allowlist", "", "comma-separated skill names to serve for this spawn (role-at-spawn skill gating, M1 Unit 3; empty = all skills, the back-compat default). Falls back to the CW_SKILL_ALLOWLIST env var, which BuildJob sets from dispatch.Brief.SkillAllowlist.")
 	)
 	flag.Parse()
 
@@ -37,16 +38,40 @@ func main() {
 	defer stop()
 	_ = ctx
 
+	allow := skillAllowlistFrom(*skillAllowlist, os.Getenv("CW_SKILL_ALLOWLIST"))
 	srv := mcpserver.NewMCPServer(aspectMCPName, "0.1.0",
 		mcpserver.WithLogging(),
 		mcpserver.WithToolCapabilities(true),
 	)
-	registerTools(srv, log)
-	log.Info("nexus-skills-mcp ready")
+	registerTools(srv, log, allow)
+	log.Info("nexus-skills-mcp ready", "skill_allowlist", allow)
 
 	if err := mcpserver.ServeStdio(srv); err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "EOF") {
 		log.Error("MCP stdio loop ended", "err", err)
 	}
+}
+
+// skillAllowlistFrom resolves the skill-gating allow list: the -skill-
+// allowlist flag wins when set, else the CW_SKILL_ALLOWLIST env var (the
+// value BuildJob injects from dispatch.Brief.SkillAllowlist), else empty
+// (all skills — today's ungated behavior). Both sources are a
+// comma-separated list of exact skill names; blank entries are dropped.
+func skillAllowlistFrom(flagVal, envVal string) []string {
+	raw := flagVal
+	if raw == "" {
+		raw = envVal
+	}
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, name := range strings.Split(raw, ",") {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func buildLogger(level, file string) (*slog.Logger, func(), error) {

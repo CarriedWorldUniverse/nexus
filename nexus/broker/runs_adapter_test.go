@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -62,6 +63,20 @@ func (m *memRuns) GetLogs(_ context.Context, id string) (string, error) {
 }
 
 func (m *memRuns) List(context.Context, int) ([]runs.Run, error) { return nil, nil }
+
+func (m *memRuns) ListCompleted(_ context.Context, limit int) ([]runs.Run, error) {
+	var out []runs.Run
+	for _, r := range m.rows {
+		if r.Status == runs.StatusComplete || r.Status == runs.StatusFailed || r.Status == runs.StatusCancelled {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CompletedAt.After(out[j].CompletedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
 
 func (m *memRuns) ListRunning(context.Context) ([]runs.Run, error) {
 	var out []runs.Run

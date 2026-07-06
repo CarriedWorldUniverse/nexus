@@ -1,0 +1,257 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    deployment.kubernetes.io/revision: "5"
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"labels":{"app":"nexus-control"},"name":"nexus-control","namespace":"nexus"},"spec":{"replicas":1,"revisionHistoryLimit":10,"selector":{"matchLabels":{"app":"nexus-control"}},"strategy":{"type":"Recreate"},"template":{"metadata":{"labels":{"app":"nexus-control","app.nexus/nexus-broker":"true","app.nexus/sqld":"true"}},"spec":{"containers":[{"env":[{"name":"TS_AUTHKEY","valueFrom":{"secretKeyRef":{"key":"TS_AUTHKEY","name":"tailscale-auth"}}},{"name":"TS_HOSTNAME","value":"nexus"},{"name":"TS_USERSPACE","value":"false"},{"name":"TS_STATE_DIR","value":"/var/lib/tailscale"},{"name":"TS_KUBE_SECRET","value":""}],"image":"ghcr.io/tailscale/tailscale:stable","imagePullPolicy":"IfNotPresent","name":"tailscale","securityContext":{"capabilities":{"add":["NET_ADMIN"]}},"volumeMounts":[{"mountPath":"/tmp","name":"ts-sock"},{"mountPath":"/var/lib/tailscale","name":"data","subPath":"ts-state"}]},{"args":["S=/tmp/tailscaled.sock\nuntil tailscale --socket=$S status \u003e/dev/null 2\u003e\u00261; do echo \"wait tailscaled\"; sleep 3; done\nwhile true; do\n  tailscale --socket=$S cert \\\n    --cert-file=/certs/tls.crt --key-file=/certs/tls.key \\\n    nexus.tail41686e.ts.net || { echo \"cert failed; retry\"; sleep 30; continue; }\n  echo \"cert ok; sleep 12h\"; sleep 43200\ndone\n"],"command":["/bin/sh","-c"],"image":"ghcr.io/tailscale/tailscale:stable","imagePullPolicy":"IfNotPresent","name":"tailscale-cert","volumeMounts":[{"mountPath":"/tmp","name":"ts-sock"},{"mountPath":"/certs","name":"ts-certs"}]},{"args":["until [ -s /certs/tls.crt ] \u0026\u0026 [ -s /certs/tls.key ]; do echo \"wait cert\"; sleep 3; done\nexec /usr/local/bin/nexus -addr :7888 \\\n  -data-dir /var/lib/nexus \\\n  -tls-cert /certs/tls.crt -tls-key /certs/tls.key \\\n  -aspect-dir /var/lib/nexus/aspects\n"],"command":["/bin/sh","-c"],"env":[{"name":"NEXUS_DB_DSN","value":"http://localhost:8080"},{"name":"NEXUS_ASPECT_WAKE_POLICY","value":"plumb=wake-on-mention,anvil=wake-on-mention,harrow=wake-on-mention,keel=wake-on-mention,maren=wake-on-mention,shadow=wake-on-mention"},{"name":"NEXUS_WAKE_IDLE_TIMEOUT","value":"15m"},{"name":"NEXUS_DATA_DIR","value":"/var/lib/nexus"},{"name":"NEXUS_ASPECT_DIR","value":"/var/lib/nexus/aspects"},{"name":"CW_BUILDER_IMAGE","value":"localhost/nexus-builder:dev"},{"name":"CW_K8S_NAMESPACE","value":"nexus"},{"name":"CW_NODE_IP","value":"10.43.138.250"},{"name":"CW_BROKER_HOST","value":"nexus.tail41686e.ts.net"},{"name":"CW_BRIEF_TIMEOUT","value":"30m"},{"name":"CW_OLLAMA_BASE_URL","value":"http://gemma-ollama.nexus.svc.cluster.local:11434"},{"name":"CW_OLLAMA_KEEP_ALIVE","value":"-1s"},{"name":"CUSTODIAN_GRPC_ADDR","value":"custodian.cwb.svc:8085"},{"name":"CUSTODIAN_GRPC_ORG","value":"cwb-admin"},{"name":"CUSTODIAN_TLS_CERT","value":"/etc/cwb/custodian-client/tls.crt"},{"name":"CUSTODIAN_TLS_KEY","value":"/etc/cwb/custodian-client/tls.key"},{"name":"CUSTODIAN_TLS_CA","value":"/etc/cwb/custodian-client/ca.crt"},{"name":"ALMANAC_GRPC_ADDR","value":"almanac.cwb.svc:8083"},{"name":"ALMANAC_GRPC_ORG","value":"07244ac5-1fbd-4786-9301-a925f4241306"},{"name":"ALMANAC_GRPC_SUBJECT","value":"nexus-broker"},{"name":"ALMANAC_TLS_CERT","value":"/etc/cwb/custodian-client/tls.crt"},{"name":"ALMANAC_TLS_KEY","value":"/etc/cwb/custodian-client/tls.key"},{"name":"ALMANAC_TLS_CA","value":"/etc/cwb/custodian-client/ca.crt"}],"envFrom":[{"secretRef":{"name":"nexus-broker-env"}}],"image":"localhost/nexus-broker:dev","imagePullPolicy":"Never","name":"broker","ports":[{"containerPort":7888,"name":"broker","protocol":"TCP"}],"resources":{"limits":{"cpu":"2","memory":"1Gi"},"requests":{"cpu":"100m","memory":"256Mi"}},"volumeMounts":[{"mountPath":"/certs","name":"ts-certs","readOnly":true},{"mountPath":"/var/lib/nexus","name":"data"},{"mountPath":"/etc/cwb/custodian-client","name":"custodian-client-tls","readOnly":true}]}],"initContainers":[{"env":[{"name":"SQLD_HTTP_LISTEN_ADDR","value":"0.0.0.0:8080"},{"name":"SQLD_NODE","value":"primary"}],"image":"ghcr.io/tursodatabase/libsql-server:latest","imagePullPolicy":"Always","livenessProbe":{"initialDelaySeconds":15,"periodSeconds":20,"tcpSocket":{"port":8080}},"name":"sqld","ports":[{"containerPort":8080,"name":"sqld-http","protocol":"TCP"}],"resources":{"limits":{"cpu":"1","memory":"1Gi"},"requests":{"cpu":"50m","memory":"128Mi"}},"restartPolicy":"Always","startupProbe":{"failureThreshold":45,"periodSeconds":2,"tcpSocket":{"port":8080}},"volumeMounts":[{"mountPath":"/var/lib/sqld","name":"sqld-data"}]}],"nodeSelector":{"kubernetes.io/hostname":"dmonextreme"},"serviceAccountName":"nexus-broker","volumes":[{"emptyDir":{},"name":"ts-sock"},{"emptyDir":{},"name":"ts-certs"},{"name":"custodian-client-tls","secret":{"defaultMode":420,"secretName":"nexus-broker-custodian-client"}},{"name":"data","persistentVolumeClaim":{"claimName":"nexus-broker-data"}},{"name":"sqld-data","persistentVolumeClaim":{"claimName":"sqld-data"}}]}}}}
+  creationTimestamp: "2026-06-27T18:23:00Z"
+  generation: 5
+  labels:
+    app: nexus-control
+  name: nexus-control
+  namespace: nexus
+  resourceVersion: "1597088"
+  uid: ad10c7cf-cc48-4f51-ad8e-8888927e618e
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: nexus-control
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/restartedAt: "2026-07-04T18:01:45+12:00"
+      labels:
+        app: nexus-control
+        app.nexus/nexus-broker: "true"
+        app.nexus/sqld: "true"
+    spec:
+      containers:
+      - env:
+        - name: TS_AUTHKEY
+          valueFrom:
+            secretKeyRef:
+              key: TS_AUTHKEY
+              name: tailscale-auth
+        - name: TS_HOSTNAME
+          value: nexus
+        - name: TS_USERSPACE
+          value: "false"
+        - name: TS_STATE_DIR
+          value: /var/lib/tailscale
+        - name: TS_KUBE_SECRET
+        image: ghcr.io/tailscale/tailscale:stable
+        imagePullPolicy: IfNotPresent
+        name: tailscale
+        resources: {}
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /tmp
+          name: ts-sock
+        - mountPath: /var/lib/tailscale
+          name: data
+          subPath: ts-state
+      - args:
+        - |
+          S=/tmp/tailscaled.sock
+          until tailscale --socket=$S status >/dev/null 2>&1; do echo "wait tailscaled"; sleep 3; done
+          while true; do
+            tailscale --socket=$S cert \
+              --cert-file=/certs/tls.crt --key-file=/certs/tls.key \
+              nexus.tail41686e.ts.net || { echo "cert failed; retry"; sleep 30; continue; }
+            echo "cert ok; sleep 12h"; sleep 43200
+          done
+        command:
+        - /bin/sh
+        - -c
+        image: ghcr.io/tailscale/tailscale:stable
+        imagePullPolicy: IfNotPresent
+        name: tailscale-cert
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /tmp
+          name: ts-sock
+        - mountPath: /certs
+          name: ts-certs
+      - args:
+        - |
+          until [ -s /certs/tls.crt ] && [ -s /certs/tls.key ]; do echo "wait cert"; sleep 3; done
+          exec /usr/local/bin/nexus -addr :7888 \
+            -data-dir /var/lib/nexus \
+            -tls-cert /certs/tls.crt -tls-key /certs/tls.key \
+            -aspect-dir /var/lib/nexus/aspects
+        command:
+        - /bin/sh
+        - -c
+        env:
+        - name: NEXUS_DB_DSN
+          value: http://localhost:8080
+        - name: NEXUS_ASPECT_WAKE_POLICY
+          value: plumb=wake-on-mention,anvil=wake-on-mention,harrow=wake-on-mention,keel=wake-on-mention,maren=wake-on-mention,shadow=wake-on-mention
+        - name: NEXUS_WAKE_IDLE_TIMEOUT
+          value: 15m
+        - name: NEXUS_DATA_DIR
+          value: /var/lib/nexus
+        - name: NEXUS_ASPECT_DIR
+          value: /var/lib/nexus/aspects
+        - name: CW_BUILDER_IMAGE
+          value: localhost/nexus-builder:dev
+        - name: CW_K8S_NAMESPACE
+          value: nexus
+        - name: CW_NODE_IP
+          value: 10.43.138.250
+        - name: CW_BROKER_HOST
+          value: nexus.tail41686e.ts.net
+        - name: CW_BRIEF_TIMEOUT
+          value: 30m
+        - name: CW_OLLAMA_BASE_URL
+          value: http://gemma-ollama.nexus.svc.cluster.local:11434
+        - name: CW_OLLAMA_KEEP_ALIVE
+          value: -1s
+        - name: CUSTODIAN_GRPC_ADDR
+          value: custodian.cwb.svc:8085
+        - name: CUSTODIAN_GRPC_ORG
+          value: cwb-admin
+        - name: CUSTODIAN_TLS_CERT
+          value: /etc/cwb/custodian-client/tls.crt
+        - name: CUSTODIAN_TLS_KEY
+          value: /etc/cwb/custodian-client/tls.key
+        - name: CUSTODIAN_TLS_CA
+          value: /etc/cwb/custodian-client/ca.crt
+        - name: ALMANAC_GRPC_ADDR
+          value: almanac.cwb.svc:8083
+        - name: ALMANAC_GRPC_ORG
+          value: 07244ac5-1fbd-4786-9301-a925f4241306
+        - name: ALMANAC_GRPC_SUBJECT
+          value: nexus-broker
+        - name: ALMANAC_TLS_CERT
+          value: /etc/cwb/custodian-client/tls.crt
+        - name: ALMANAC_TLS_KEY
+          value: /etc/cwb/custodian-client/tls.key
+        - name: ALMANAC_TLS_CA
+          value: /etc/cwb/custodian-client/ca.crt
+        envFrom:
+        - secretRef:
+            name: nexus-broker-env
+        image: localhost/nexus-broker:dev
+        imagePullPolicy: Never
+        name: broker
+        ports:
+        - containerPort: 7888
+          name: broker
+          protocol: TCP
+        resources:
+          limits:
+            cpu: "2"
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /certs
+          name: ts-certs
+          readOnly: true
+        - mountPath: /var/lib/nexus
+          name: data
+        - mountPath: /etc/cwb/custodian-client
+          name: custodian-client-tls
+          readOnly: true
+      dnsPolicy: ClusterFirst
+      initContainers:
+      - env:
+        - name: SQLD_HTTP_LISTEN_ADDR
+          value: 0.0.0.0:8080
+        - name: SQLD_NODE
+          value: primary
+        image: ghcr.io/tursodatabase/libsql-server:latest
+        imagePullPolicy: Always
+        livenessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          successThreshold: 1
+          tcpSocket:
+            port: 8080
+          timeoutSeconds: 1
+        name: sqld
+        ports:
+        - containerPort: 8080
+          name: sqld-http
+          protocol: TCP
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            cpu: 50m
+            memory: 128Mi
+        restartPolicy: Always
+        startupProbe:
+          failureThreshold: 45
+          periodSeconds: 2
+          successThreshold: 1
+          tcpSocket:
+            port: 8080
+          timeoutSeconds: 1
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /var/lib/sqld
+          name: sqld-data
+      nodeSelector:
+        kubernetes.io/hostname: dmonextreme
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: nexus-broker
+      serviceAccountName: nexus-broker
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - emptyDir: {}
+        name: ts-sock
+      - emptyDir: {}
+        name: ts-certs
+      - name: custodian-client-tls
+        secret:
+          defaultMode: 420
+          secretName: nexus-broker-custodian-client
+      - name: data
+        persistentVolumeClaim:
+          claimName: nexus-broker-data
+      - name: sqld-data
+        persistentVolumeClaim:
+          claimName: sqld-data
+status:
+  availableReplicas: 1
+  conditions:
+  - lastTransitionTime: "2026-06-27T18:23:00Z"
+    lastUpdateTime: "2026-07-04T06:02:21Z"
+    message: ReplicaSet "nexus-control-7bf844cb59" has successfully progressed.
+    reason: NewReplicaSetAvailable
+    status: "True"
+    type: Progressing
+  - lastTransitionTime: "2026-07-04T19:38:19Z"
+    lastUpdateTime: "2026-07-04T19:38:19Z"
+    message: Deployment has minimum availability.
+    reason: MinimumReplicasAvailable
+    status: "True"
+    type: Available
+  observedGeneration: 5
+  readyReplicas: 1
+  replicas: 1
+  terminatingReplicas: 0
+  updatedReplicas: 1

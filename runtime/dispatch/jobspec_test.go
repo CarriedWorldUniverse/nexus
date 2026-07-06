@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -278,4 +279,233 @@ func TestBuildJob_TTLAndRunUUIDName(t *testing.T) {
 	if !strings.HasSuffix(job.Name, "-run-550e8400e29b41d4a716") {
 		t.Fatalf("job name should include a long UUID-derived suffix, got %q", job.Name)
 	}
+}
+
+// TestBuildJob_RoleAtSpawn is a table test of the M1 Unit 3 threading: an
+// empty Brief (no RolePrompt/SkillAllowlist/PolicyFragment/WorkItemID/
+// Personality) must reproduce today's exact Job args/env/labels, and
+// each field, when set, must surface at its documented touchpoint.
+func TestBuildJob_RoleAtSpawn(t *testing.T) {
+	cfg := JobConfig{Namespace: "nexus", Image: "img", BrokerHost: "broker.example"}
+
+	t.Run("empty brief: no role-at-spawn args/env/labels", func(t *testing.T) {
+		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		if contains(c.Args, "-role-file") || contains(c.Args, "-policy-fragment-file") || contains(c.Args, "-acceptance-file") {
+			t.Errorf("empty brief must not pass role-at-spawn flags: %v", c.Args)
+		}
+		for _, name := range []string{"CW_ROLE", "CW_WORK_ITEM_ID", "CW_PERSONALITY", "CW_SKILL_ALLOWLIST"} {
+			for _, e := range c.Env {
+				if e.Name == name {
+					t.Errorf("empty brief must not set env %s", name)
+				}
+			}
+		}
+		job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t1", "codex-cli")
+		if _, ok := job.Labels["nexus.dispatch/work-item"]; ok {
+			t.Error("empty brief must not set the work-item label")
+		}
+		if _, ok := job.Labels["nexus.dispatch/personality"]; ok {
+			t.Error("empty brief must not set the personality label")
+		}
+	})
+
+	t.Run("role sets -role-file pointing at the brief ConfigMap mount", func(t *testing.T) {
+		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", RolePrompt: "you are a builder"}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		if !argValueEquals(c.Args, "-role-file", "/etc/dispatch/role.md") {
+			t.Errorf("args missing -role-file /etc/dispatch/role.md: %v", c.Args)
+		}
+	})
+
+	t.Run("policy fragment sets -policy-fragment-file", func(t *testing.T) {
+		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", PolicyFragment: &funnel.ToolPolicy{DefaultAllow: false}}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		if !argValueEquals(c.Args, "-policy-fragment-file", "/etc/dispatch/policy.json") {
+			t.Errorf("args missing -policy-fragment-file /etc/dispatch/policy.json: %v", c.Args)
+		}
+	})
+
+	// Unit B (verified task_done, NET-22/23/24): acceptance criteria sets
+	// -acceptance-file pointing at the brief ConfigMap mount, mirroring the
+	// role-prompt/policy-fragment overlay wiring above exactly.
+	t.Run("acceptance criteria sets -acceptance-file", func(t *testing.T) {
+		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", AcceptanceCriteria: "- must produce token X"}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		if !argValueEquals(c.Args, "-acceptance-file", "/etc/dispatch/acceptance.md") {
+			t.Errorf("args missing -acceptance-file /etc/dispatch/acceptance.md: %v", c.Args)
+		}
+	})
+
+	t.Run("skill allowlist becomes CW_SKILL_ALLOWLIST env", func(t *testing.T) {
+		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", SkillAllowlist: []string{"test-run", "bash"}}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		if !envValueEquals(c.Env, "CW_SKILL_ALLOWLIST", "test-run,bash") {
+			t.Errorf("env missing CW_SKILL_ALLOWLIST=test-run,bash: %v", c.Env)
+		}
+	})
+
+	t.Run("role label becomes CW_ROLE env (M1 Unit 5 heartbeat source)", func(t *testing.T) {
+		c := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", Role: "builder"}, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		if !envValueEquals(c.Env, "CW_ROLE", "builder") {
+			t.Errorf("env missing CW_ROLE=builder: %v", c.Env)
+		}
+	})
+
+	t.Run("work item id becomes label and env", func(t *testing.T) {
+		job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", WorkItemID: "work-item-42"}, cfg, "t1", "codex-cli")
+		if job.Labels["nexus.dispatch/work-item"] != "work-item-42" {
+			t.Errorf("label nexus.dispatch/work-item = %q", job.Labels["nexus.dispatch/work-item"])
+		}
+		c := job.Spec.Template.Spec.Containers[0]
+		if !envValueEquals(c.Env, "CW_WORK_ITEM_ID", "work-item-42") {
+			t.Errorf("env missing CW_WORK_ITEM_ID=work-item-42: %v", c.Env)
+		}
+	})
+
+	t.Run("personality becomes label and env", func(t *testing.T) {
+		job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1", Personality: "anvil"}, cfg, "t1", "codex-cli")
+		if job.Labels["nexus.dispatch/personality"] != "anvil" {
+			t.Errorf("label nexus.dispatch/personality = %q", job.Labels["nexus.dispatch/personality"])
+		}
+		c := job.Spec.Template.Spec.Containers[0]
+		if !envValueEquals(c.Env, "CW_PERSONALITY", "anvil") {
+			t.Errorf("env missing CW_PERSONALITY=anvil: %v", c.Env)
+		}
+	})
+}
+
+// envSecretKeyRefEquals reports whether env carries a var named `name`
+// sourced from a SecretKeyRef matching (secretName, secretKey).
+func envSecretKeyRefEquals(env []corev1.EnvVar, name, secretName, secretKey string) bool {
+	for _, v := range env {
+		if v.Name != name {
+			continue
+		}
+		if v.ValueFrom == nil || v.ValueFrom.SecretKeyRef == nil {
+			return false
+		}
+		ref := v.ValueFrom.SecretKeyRef
+		return ref.Name == secretName && ref.Key == secretKey
+	}
+	return false
+}
+
+// TestBuildJob_ImageTagKnob is the §7 build-spec acceptance test: the CLI
+// version knob (JobConfig.ImageTagPin) selects the image tag per dispatch —
+// default (nil knob, or a knob returning "") uses cfg.Image unchanged;
+// a non-empty pin overrides it, and CW_IMAGE_TAG mirrors whichever won.
+func TestBuildJob_ImageTagKnob(t *testing.T) {
+	baseCfg := JobConfig{Image: "localhost/nexus-runner:latest", Namespace: "nexus", BrokerHost: "h"}
+
+	t.Run("no knob uses cfg.Image (today's behavior)", func(t *testing.T) {
+		job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, baseCfg, "t1", "codex-cli")
+		c := job.Spec.Template.Spec.Containers[0]
+		if c.Image != baseCfg.Image {
+			t.Errorf("image = %q, want default %q", c.Image, baseCfg.Image)
+		}
+		if !envValueEquals(c.Env, "CW_IMAGE_TAG", baseCfg.Image) {
+			t.Errorf("CW_IMAGE_TAG should mirror the default image: %v", c.Env)
+		}
+	})
+
+	t.Run("knob returning empty string uses cfg.Image (clear-the-pin path)", func(t *testing.T) {
+		cfg := baseCfg
+		cfg.ImageTagPin = func() string { return "" }
+		job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t1", "codex-cli")
+		c := job.Spec.Template.Spec.Containers[0]
+		if c.Image != baseCfg.Image {
+			t.Errorf("image = %q, want default %q", c.Image, baseCfg.Image)
+		}
+	})
+
+	t.Run("non-empty pin overrides cfg.Image", func(t *testing.T) {
+		cfg := baseCfg
+		cfg.ImageTagPin = func() string { return "localhost/nexus-runner:cli-2.1.3" }
+		job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t1", "codex-cli")
+		c := job.Spec.Template.Spec.Containers[0]
+		if c.Image != "localhost/nexus-runner:cli-2.1.3" {
+			t.Errorf("image = %q, want pinned tag", c.Image)
+		}
+		if !envValueEquals(c.Env, "CW_IMAGE_TAG", "localhost/nexus-runner:cli-2.1.3") {
+			t.Errorf("CW_IMAGE_TAG should mirror the pinned image: %v", c.Env)
+		}
+	})
+
+	t.Run("pin also applies to the codex-auth init container image", func(t *testing.T) {
+		cfg := baseCfg
+		cfg.ImageTagPin = func() string { return "localhost/nexus-runner:cli-2.1.3" }
+		job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t1", "codex-cli")
+		pod := job.Spec.Template.Spec
+		for _, ic := range pod.InitContainers {
+			if ic.Name == "codex-auth" && ic.Image != "localhost/nexus-runner:cli-2.1.3" {
+				t.Errorf("codex-auth init image = %q, want pinned tag", ic.Image)
+			}
+		}
+	})
+}
+
+// TestBuildJob_FrontierAuth is the §6 build-spec acceptance test: the
+// frontier (claude-code) OAuth token is injected as CLAUDE_CODE_OAUTH_TOKEN
+// via secretKeyRef for claude-code-provider dispatches only, sourced from
+// whatever JobConfig.FrontierAuthFunc currently returns.
+func TestBuildJob_FrontierAuth(t *testing.T) {
+	cfg := JobConfig{Image: "img", Namespace: "nexus", BrokerHost: "h"}
+
+	t.Run("no FrontierAuthFunc means no injection (today's behavior)", func(t *testing.T) {
+		job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, cfg, "t1", "claude-code")
+		c := job.Spec.Template.Spec.Containers[0]
+		for _, v := range c.Env {
+			if v.Name == "CLAUDE_CODE_OAUTH_TOKEN" {
+				t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN should not be injected without FrontierAuthFunc: %v", c.Env)
+			}
+		}
+	})
+
+	t.Run("claude-code dispatch gets the secret (k8s-secret delivery, the fallback path)", func(t *testing.T) {
+		withFunc := cfg
+		withFunc.FrontierAuthFunc = func() (string, string) {
+			return DefaultFrontierAuthSecretName, DefaultFrontierAuthSecretKey
+		}
+		job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, withFunc, "t1", "claude-code")
+		c := job.Spec.Template.Spec.Containers[0]
+		if !envSecretKeyRefEquals(c.Env, "CLAUDE_CODE_OAUTH_TOKEN", DefaultFrontierAuthSecretName, DefaultFrontierAuthSecretKey) {
+			t.Errorf("missing CLAUDE_CODE_OAUTH_TOKEN secretKeyRef: %v", c.Env)
+		}
+	})
+
+	t.Run("claude-code provider aliases all get the token", func(t *testing.T) {
+		withFunc := cfg
+		withFunc.FrontierAuthFunc = func() (string, string) {
+			return DefaultFrontierAuthSecretName, DefaultFrontierAuthSecretKey
+		}
+		for _, provider := range []string{"claude-code", "claudecode", "claude", "claude-api"} {
+			job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, withFunc, "t1", provider)
+			c := job.Spec.Template.Spec.Containers[0]
+			if !envSecretKeyRefEquals(c.Env, "CLAUDE_CODE_OAUTH_TOKEN", DefaultFrontierAuthSecretName, DefaultFrontierAuthSecretKey) {
+				t.Errorf("provider %q: missing CLAUDE_CODE_OAUTH_TOKEN secretKeyRef: %v", provider, c.Env)
+			}
+		}
+	})
+
+	t.Run("almanac-sourced pointer overrides the default secret", func(t *testing.T) {
+		withFunc := cfg
+		withFunc.FrontierAuthFunc = func() (string, string) { return "almanac-frontier-secret", "TOKEN" }
+		job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, withFunc, "t1", "claude-code")
+		c := job.Spec.Template.Spec.Containers[0]
+		if !envSecretKeyRefEquals(c.Env, "CLAUDE_CODE_OAUTH_TOKEN", "almanac-frontier-secret", "TOKEN") {
+			t.Errorf("missing almanac-sourced secretKeyRef: %v", c.Env)
+		}
+	})
+
+	t.Run("non-claude-code providers never get the token", func(t *testing.T) {
+		withFunc := cfg
+		withFunc.FrontierAuthFunc = func() (string, string) {
+			return DefaultFrontierAuthSecretName, DefaultFrontierAuthSecretKey
+		}
+		for _, provider := range []string{"codex-cli", "ollama", "antigravity-cli"} {
+			job := BuildJob(Brief{Agent: "anvil", Ticket: "NEX-1"}, withFunc, "t1", provider)
+			c := job.Spec.Template.Spec.Containers[0]
+			for _, v := range c.Env {
+				if v.Name == "CLAUDE_CODE_OAUTH_TOKEN" {
+					t.Errorf("provider %q should not get CLAUDE_CODE_OAUTH_TOKEN: %v", provider, c.Env)
+				}
+			}
+		}
+	})
 }

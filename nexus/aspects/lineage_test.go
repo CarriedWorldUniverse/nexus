@@ -49,6 +49,51 @@ func TestOverflowHandName(t *testing.T) {
 	}
 }
 
+func TestSplitWorker(t *testing.T) {
+	cases := []struct {
+		name        string
+		personality string
+		role        string
+		ok          bool
+	}{
+		{"anvil-builder", "anvil", "builder", true},
+		{"maren-painter", "maren", "painter", true},
+		{"plumb-security-reviewer", "plumb", "security-reviewer", true}, // longest role suffix wins
+		{"keel-modeller", "keel", "modeller", true},
+		{"harrow-tester", "harrow", "tester", true},
+		{"shadow-builder", "", "", false}, // shadow is the orchestrator, not a worker personality
+		{"maren-art", "", "", false},      // ordinary hyphenated aspect name, not a worker
+		{"anvil-plumber", "", "", false},  // unknown role
+		{"nobody-builder", "", "", false}, // unknown personality
+		{"anvil", "", "", false},          // bare personality is not a worker identity
+		{"plumb.bob", "", "", false},      // dotted hand is not a worker identity
+	}
+	for _, c := range cases {
+		p, r, ok := SplitWorker(c.name)
+		if ok != c.ok || p != c.personality || r != c.role {
+			t.Errorf("SplitWorker(%q) = (%q,%q,%v), want (%q,%q,%v)", c.name, p, r, ok, c.personality, c.role, c.ok)
+		}
+		if IsWorkerName(c.name) != c.ok {
+			t.Errorf("IsWorkerName(%q) = %v, want %v", c.name, IsWorkerName(c.name), c.ok)
+		}
+	}
+}
+
+func TestPersonalityOf(t *testing.T) {
+	cases := map[string]string{
+		"anvil-builder":           "anvil",     // worker → personality
+		"plumb-security-reviewer": "plumb",     // worker → personality
+		"shadow.umbra":            "shadow",    // dotted hand → base aspect
+		"maren-art":               "maren-art", // ordinary aspect → itself
+		"harrow":                  "harrow",    // bare aspect → itself
+	}
+	for name, want := range cases {
+		if got := PersonalityOf(name); got != want {
+			t.Errorf("PersonalityOf(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestHandNamePool(t *testing.T) {
 	if pool := HandNamePool("shadow"); len(pool) == 0 || pool[0] != "umbra" {
 		t.Fatalf("shadow pool unexpected: %v", pool)

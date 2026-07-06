@@ -29,6 +29,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/convene"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
 	"github.com/CarriedWorldUniverse/nexus/nexus/cwb/custodian"
+	"github.com/CarriedWorldUniverse/nexus/nexus/docregister"
 	"github.com/CarriedWorldUniverse/nexus/nexus/handqueue"
 	"github.com/CarriedWorldUniverse/nexus/nexus/knowledge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
@@ -36,6 +37,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
+	"github.com/CarriedWorldUniverse/nexus/nexus/workerstatus"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 	"k8s.io/client-go/kubernetes"
@@ -127,11 +129,31 @@ type Config struct {
 	// New migrates it and adapts it into dispatch.Runner.Recorder.
 	RunsStore runs.Store
 
+	// WorkerStatusStore powers the M1 Unit 5 fleet-status spine
+	// (PHASE2-DESIGN §5). When configured, New migrates it, the
+	// worker.status frame handler (dispatch_status.go) upserts into it,
+	// and GET /api/admin/workers reads the consolidated fleet from it.
+	// nil = the worker.status frame handler and the /api/admin/workers
+	// route are both inert (frame dropped with a warn log; route not
+	// registered — same "config gates the surface" convention as
+	// RunsStore/ConveneStore below).
+	WorkerStatusStore workerstatus.Store
+
 	// ConveneStore persists !convene roundtables (roundtable spec
 	// component 3). When configured, New migrates it; the !convene chat
 	// path records a row and convene.close / convenes.list operate on it.
 	// nil → !convene is rejected (no record spine).
 	ConveneStore convene.Store
+
+	// DocRegister powers the M1 Unit 2 document register (PHASE2-DESIGN.md
+	// §9): specs/plans/designs/reports as first-class, lifecycle-managed,
+	// operator-approvable docs — the operator+shadow shared workbench. When
+	// configured, New migrates its Store and registerDocRegister wires the
+	// workbench (broker-authenticated: create/get/list/submit/revise) and
+	// verdict (requireAdmin: approve/approve-with-changes/reject/supersede)
+	// routes. nil = the /api/docs/* and /api/admin/docs/* surfaces are not
+	// registered (pre-Unit-2 boot, or a deployment that doesn't need it).
+	DocRegister *docregister.Register
 
 	// SQLDB is the broker's sqld connection (shared by the chat/runs/aspects
 	// stores). env.health pings it to report sqld reachability — sqld lives in
@@ -562,6 +584,16 @@ func New(cfg Config, r *roster.Roster) *Broker {
 			b.log.Warn("convene store migration failed", "err", err)
 		}
 	}
+	if cfg.WorkerStatusStore != nil {
+		if err := cfg.WorkerStatusStore.Migrate(context.Background()); err != nil {
+			b.log.Warn("worker status store migration failed", "err", err)
+		}
+	}
+	if cfg.DocRegister != nil && cfg.DocRegister.Store != nil {
+		if err := cfg.DocRegister.Store.Migrate(context.Background()); err != nil {
+			b.log.Warn("docregister store migration failed", "err", err)
+		}
+	}
 	return b
 }
 
@@ -644,6 +676,11 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	mux.Handle("GET /api/aspects", b.auth(http.HandlerFunc(b.handleList)))
 	// Image attach (NEX-538): operator-gated upload, capability-URL serve.
 	mux.Handle("POST /api/images", b.auth(http.HandlerFunc(b.handleImageUpload)))
+	// Document register workbench (M1 Unit 2, PHASE2-DESIGN.md §9):
+	// broker-authenticated create/get/list/revise/submit. Verdicts
+	// (approve/approve-with-changes/reject/supersede) are requireAdmin —
+	// see registerDocRegisterVerdicts, wired via registerAdmin below.
+	b.registerDocRegisterWorkbench(mux)
 	mux.HandleFunc("GET /api/images/{id}", b.handleImageGet)
 	mux.HandleFunc("GET /health", b.handleHealth)
 	// Auth mode probe — SPA reads this on load to decide whether to
@@ -792,6 +829,14 @@ func (b *Broker) ListenAndServe(ctx context.Context) error {
 	// embedded and supplies AdminCallbacks. Per spec §3.3, admin ops
 	// belong to the Frame because the Frame IS the Nexus.
 	b.registerAdmin(mux)
+
+	// Operator console v0 (M1 Unit 8, PHASE2-DESIGN.md §9a). Registered
+	// unconditionally — every route it serves (shell, static assets,
+	// fragments) is requireAdmin-gated in registerConsole itself, and
+	// each pane degrades to a "not configured" placeholder when its
+	// backing config (DocRegister / WorkerStatusStore) is nil, same
+	// convention as the panes' own data endpoints.
+	b.registerConsole(mux)
 
 	// Embedder-supplied peer-service routes (NEX-144). cmd/nexus uses
 	// this hook to mount ledger.HealthzHandler at /healthz/ledger on the

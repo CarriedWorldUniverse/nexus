@@ -3,5 +3,5 @@
 # DB DSN, and operator/admin config arrive at runtime via mounted secrets/env.
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY nexus /usr/local/bin/
+COPY nexus cw /usr/local/bin/
 ENTRYPOINT ["/usr/local/bin/nexus"]

@@ -1,15 +1,13 @@
 filippo.io/edwards25519 v1.2.0 h1:crnVqOiS4jqYleHd9vaKZ+HKtHfllngJIiOpNpoJsjo=
 filippo.io/edwards25519 v1.2.0/go.mod h1:xzAOLCNug/yB62zG1bQ8uziwrIqIuxhctzJT18Q77mc=
-github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260611001639-485d4e71b9b0 h1:dGQcGrtpm3vitPdNpN8N2eHIe8gSNqcyHHnjuFKXdMM=
-github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260611001639-485d4e71b9b0/go.mod h1:nEWWic3aiWRjyUzmjdafUtqXoqS9f92KuUuuKpT5NYE=
 github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260616044812-c574daa0ddbc h1:SuPURCvUmgW+4cGdlUFCYB/FpCjeQPH16h0X4AjoOeM=
 github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260616044812-c574daa0ddbc/go.mod h1:nEWWic3aiWRjyUzmjdafUtqXoqS9f92KuUuuKpT5NYE=
 github.com/CarriedWorldUniverse/casket-go v0.1.0 h1:t+DvXs8vhaNcTfkSS/sqK47fBTNVRdHfF7DT/ur0jtY=
 github.com/CarriedWorldUniverse/casket-go v0.1.0/go.mod h1:v0y8kPW/WmusBw+Q3ZtRYhVwoK/WVVVXHWSc/oRVWBo=
 github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603092700-bad238fd9d58 h1:EOFOdPFVNdmtqoJEDwRGJAdy1/yQid8VVeaJ4goQN6I=
 github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603092700-bad238fd9d58/go.mod h1:mYs7BzEiFdFx5hDaahzRutND9gjxixt++t/S+XbQQvA=
-github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260611212122-c2fe7a68f6af h1:BjOsxAnHfNwDhycSpgodoVV+KrGqbFjOkoCqByc7Oo0=
-github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260611212122-c2fe7a68f6af/go.mod h1:SBXfS7WeuwK80SZrysL1YC0oDrNlNYoXqgWKkeK80wE=
+github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260613191908-362c19c9dfd7 h1:L3fcQpEUvRAsRaKqGGOvIBUXKa+ErQ50Tha9i88Cz0g=
+github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260613191908-362c19c9dfd7/go.mod h1:SBXfS7WeuwK80SZrysL1YC0oDrNlNYoXqgWKkeK80wE=
 github.com/CarriedWorldUniverse/ledger v0.1.4 h1:gtu/8E1f2yRXMubTaS5IiG6mUmjYuuHObWZJos+2OGA=
 github.com/CarriedWorldUniverse/ledger v0.1.4/go.mod h1:2aeFr46SOJ19rDnwsSwGJA9CZqNrtYXY1BQ6vfzMEog=
 github.com/anthropics/anthropic-sdk-go v1.38.0 h1:bA4DcK+91gorIX+5VTONnynyt9LRU4nnN6rRQ+j/NIg=
@@ -183,6 +181,8 @@ github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT0
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.2.1/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=
+github.com/yuin/goldmark v1.8.2 h1:kEGpgqJXdgbkhcOgBxkC0X0PmoPG1ZyoZ117rDVp4zE=
+github.com/yuin/goldmark v1.8.2/go.mod h1:ip/1k0VRfGynBgxOz0yCqHrbZXhcjxyuS66Brc7iBKg=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
 go.opentelemetry.io/auto/sdk v1.2.1/go.mod h1:KRTj+aOaElaLi+wW1kO/DZRXwkF4C5xPbEe3ZiIhN7Y=
 go.opentelemetry.io/otel v1.43.0 h1:mYIM03dnh5zfN7HautFE4ieIig9amkNANT+xcVxAj9I=

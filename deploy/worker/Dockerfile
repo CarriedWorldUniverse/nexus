@@ -52,9 +52,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends nano && rm -rf 
 COPY agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp cw /usr/local/bin/
 
 # Provider CLI: codex (standalone, installed via npm — fetches the linux
-# binary into the standalone layout). claude-code can be added the same way
-# (npm i -g @anthropic-ai/claude-code) when claude-backed builders are wanted.
+# binary into the standalone layout).
 RUN npm config set prefix /root/.npm-global && npm i -g @openai/codex && codex --version
+
+# Provider CLI: claude-code (M1 Unit 7, PHASE2-DESIGN §6/§7 — frontier auth +
+# CLI version knob). CLAUDE_CODE_VERSION pins the exact release this image
+# carries; the CI workflow (.github/workflows/runner-images.yml) sets it per
+# build and tags the resulting image runner:cli-<ver>, so a pod NEVER
+# self-updates mid-job (auto-updater disabled — see README "CLI version
+# knob"). Default "latest" only for ad-hoc/dev builds (build.sh); every
+# CI-built image passes an explicit version.
+ARG CLAUDE_CODE_VERSION=latest
+RUN npm i -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+ && claude --version \
+ && (claude config set -g autoUpdaterStatus disabled || true)  # -g dropped in newer CLIs; autoupdater is irrelevant in a one-shot Job image
 
 # Provider CLI: Antigravity (agy) — a dependency-free Go binary; the installer
 # drops it into /root/.local/bin. The binary install is auth-free; agy's runtime

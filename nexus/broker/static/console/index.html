@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nexus operator console</title>
+<link rel="stylesheet" href="/console/static/console.css">
+<script src="/console/static/htmx.min.js"></script>
+<script src="/console/static/json-enc.js"></script>
+</head>
+<body hx-ext="json-enc">
+<header class="console-header">
+  <h1>Nexus operator console</h1>
+  <p class="console-sub">Boring by design — a rendering layer over /api/docs and /api/admin/workers. No SPA.</p>
+</header>
+<main class="console-grid">
+  <section class="console-pane" id="approvals-pane"
+           hx-get="/console/fragments/approvals"
+           hx-trigger="load, every 15s, refresh-approvals from:body"
+           hx-swap="innerHTML">
+    <p class="pane-loading">Loading approval queue&hellip;</p>
+  </section>
+  <section class="console-pane" id="fleet-pane"
+           hx-get="/console/fragments/fleet"
+           hx-trigger="load, every 10s"
+           hx-swap="innerHTML">
+    <p class="pane-loading">Loading fleet status&hellip;</p>
+  </section>
+</main>
+<script>
+// Bearer-token plumbing: the console's data routes (fragments + the
+// unit-2 verdict endpoints) are requireAdmin, same as everything else
+// under /api/admin/*. A browser tab has no way to attach an
+// Authorization header to the initial navigation, so the operator's
+// admin token is passed once as ?token= on the /console/ URL and
+// cached in localStorage from there; every subsequent htmx request
+// (fragment loads, verdict POSTs) gets it attached via the
+// htmx:configRequest hook below. This is a deliberate v0 stopgap
+// documented in README.md — not a replacement for a real login flow.
+(function () {
+  var params = new URLSearchParams(window.location.search);
+  var qtoken = params.get('token');
+  if (qtoken) {
+    localStorage.setItem('nexusConsoleToken', qtoken);
+    // Scrub the token from the visible URL/history once cached.
+    params.delete('token');
+    var clean = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+    window.history.replaceState({}, '', clean);
+  }
+  document.body.addEventListener('htmx:configRequest', function (evt) {
+    var token = localStorage.getItem('nexusConsoleToken');
+    if (token) {
+      evt.detail.headers['Authorization'] = 'Bearer ' + token;
+    }
+  });
+})();
+
+// docReasonText / docFieldValue: small helpers the verdict buttons'
+// hx-vals="js:..." expressions call to read sibling form fields. Kept
+// as named globals (not inlined) so each button's hx-vals stays short.
+function docFieldValue(docID, selector) {
+  var el = document.querySelector('#doc-' + docID + ' ' + selector);
+  return el ? el.value : '';
+}
+function docReasonList(docID) {
+  var text = docFieldValue(docID, 'textarea[data-role=reason]').trim();
+  return text ? [text] : ['no reason given'];
+}
+function afterVerdict(evt) {
+  if (evt.detail.successful) {
+    htmx.trigger(document.body, 'refresh-approvals');
+  }
+}
+</script>
+</body>
+</html>

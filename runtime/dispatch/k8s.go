@@ -116,14 +116,19 @@ func (k *K8s) EnsureSharedReposPVC(ctx context.Context) error {
 	return err
 }
 
-func (k *K8s) PutBriefConfigMap(ctx context.Context, taskID, brief string) error {
+// PutBriefConfigMap writes the brief ConfigMap mounted at /etc/dispatch in
+// the builder Job (BuildJob's "brief" volume). data always carries
+// "brief.md" (the task text); role-at-spawn overlay keys (role.md,
+// policy.json — see briefConfigMapData) ride the same ConfigMap, since a
+// ConfigMap volume mounts every Data key as a file with no extra wiring.
+func (k *K8s) PutBriefConfigMap(ctx context.Context, taskID string, data map[string]string) error {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "brief-" + taskID,
 			Namespace: k.Namespace,
 			Labels:    map[string]string{"app": "nexus-builder"},
 		},
-		Data: map[string]string{"brief.md": brief},
+		Data: data,
 	}
 	_, err := k.Client.CoreV1().ConfigMaps(k.Namespace).Create(ctx, cm, metav1.CreateOptions{})
 	return err
