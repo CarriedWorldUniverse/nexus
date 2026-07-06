@@ -36,7 +36,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -1392,26 +1391,33 @@ func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, user
 	}
 	if len(st.hookAdditionalContext) > 0 {
 		hookBlock := strings.Join(st.hookAdditionalContext, "\n\n")
-		// FUNNEL_PREFIX_STABLE=1: hook-injected context (SessionStart/
-		// AutoRecall) is request-varying — concatenating it onto the
-		// SYSTEM prompt busts the vLLM prefix cache from token 0 on
-		// every turn a hook fires, since the system message is the
-		// front of the cached prefix. Route it into the trailing
-		// per-turn user/delta zone instead: the same zone the
-		// goal-loop's continuation brief and Inbox items land in (see
-		// bridle's lowerRequest, run.go:635-653, which appends Inbox
-		// then UserMessage after SessionTail). The model still sees
-		// the hook context on this turn, but the system prefix that
-		// gets cached never changes shape. Default (unset) behavior
-		// is unchanged: append to the system prompt.
-		if os.Getenv("FUNNEL_PREFIX_STABLE") == "1" {
-			if userMessage != "" {
-				userMessage = userMessage + "\n\n" + hookBlock
-			} else {
-				userMessage = hookBlock
-			}
+		// Hook-injected context (SessionStart/AutoRecall) is
+		// request-varying — concatenating it onto the SYSTEM prompt
+		// busts the vLLM prefix cache from token 0 on every turn a
+		// hook fires, since the system message is the front of the
+		// cached prefix. This is not an opt-in tradeoff: a single
+		// turn where recall fires would invalidate the KV cache for
+		// the ENTIRE conversation (measured: 22.9s -> 0.2s TTFT swing
+		// between a cache miss and a cache hit on a long session —
+		// see fix/recall-cache-landmine). So this routing is
+		// unconditional, not gated behind an env var.
+		//
+		// FOOTGUN: route ANY hook output into the trailing per-turn
+		// user/delta zone below, never into systemPrompt above. The
+		// delta zone (the same zone the goal-loop's continuation
+		// brief and Inbox items land in — see bridle's lowerRequest,
+		// run.go:635-653, which appends Inbox then UserMessage after
+		// SessionTail) changes every turn anyway, so appending
+		// request-varying text there is harmless-ish (it just means
+		// that turn's suffix isn't cached, not the whole prefix). If
+		// a future hook returns dynamic text (current time, presence,
+		// status, etc.) and someone is tempted to move this back onto
+		// the system prompt for convenience — don't: that reintroduces
+		// the whole-conversation cache invalidation this fix removes.
+		if userMessage != "" {
+			userMessage = userMessage + "\n\n" + hookBlock
 		} else {
-			systemPrompt = systemPrompt + "\n\n" + hookBlock
+			userMessage = hookBlock
 		}
 	}
 	providerEnv, err := f.resolveProviderEnv(ctx, "main")

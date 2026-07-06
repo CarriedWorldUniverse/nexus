@@ -55,7 +55,7 @@ ledger → dispatch → agentfunnel ──[composes context]──▶ bridle ─
 | `composeSystemPrompt` (`runtime/cmd/agentfunnel/main.go:1112`) | deterministic | no timestamps, no map iteration in the rendered text |
 | openai provider request assembly (`bridle` `provider/openai/openai.go:361`) | deterministic | serializes the already-built message/tool list; introduces no ordering of its own |
 | MCP tool listing → `mergeToolSurface` (`bridle` `run.go:834`, pre-fix) | **the one default-on breaker** | MCP servers reconnect + re-`ListTools` every `RunTurn` (`run.go:32-52`); each server's list order is server-dependent, so the merged surface reordered on every turn and busted the cached prefix from token 0. **Fixed** in bridle by sorting the merged surface by tool `Name` — see `fix/deterministic-tool-order`, merged as `e2c52f8` ([bridle#74](https://github.com/CarriedWorldUniverse/bridle/pull/74)). |
-| `hookAdditionalContext` (SessionStart/AutoRecall hooks) (`nexus/frame/funnel/funnel.go:1393-1394`, pre-fix) | breaks-cache-always when enabled | off by default; concatenates onto the SYSTEM prompt every turn a hook fires. **Fixed** behind `FUNNEL_PREFIX_STABLE=1`, which routes the hook block into the trailing per-turn user/delta zone instead (same zone as Inbox/continuation-brief, bridle `lowerRequest` `run.go:635-653`); default (unset) behavior unchanged. |
+| `hookAdditionalContext` (SessionStart/AutoRecall hooks) (`nexus/frame/funnel/funnel.go:1387-1394`, pre-fix) | breaks-cache-always when enabled | previously off by default (env-gated); concatenated onto the SYSTEM prompt every turn a hook fires — a single recall-firing turn invalidated the KV cache for the whole conversation (measured 22.9s→0.2s TTFT swing). **Fixed unconditionally** — tail-injection into the trailing per-turn user/delta zone (same zone as Inbox/continuation-brief, bridle `lowerRequest` `run.go:635-653`) is now the only path, no env gate; the rendered recall entries also drop their volatile `updated:` timestamp so the delta-zone diff itself stays minimal (`nexus/frame/funnel/commonplace.go:67`). |
 
 ### 2. Tool-result eviction to a workspace
 
@@ -100,7 +100,7 @@ Add a one-line per-run summary to the worker-status store / recent-runs panel: `
 ## Rollout
 
 Env-gated, additive, reversible — same posture as every unit this session:
-- `FUNNEL_PREFIX_STABLE=1` (append-only prompt assembly), vLLM `--enable-prefix-caching` (serving).
+- Tail-injection of hook-additional-context is unconditional (no env gate — see §1 audit table); vLLM `--enable-prefix-caching` (serving).
 - `FUNNEL_WORKSPACE_EVICT=1` + `FUNNEL_EVICT_RESULT_TOKENS` (default 20000) + `FUNNEL_CTX_SWEEP_PCT` (default 85).
 - `FUNNEL_TODOS=1`.
 Each independently togglable so the measurement steps above isolate each mechanism's effect. Ship as separate units (one line each), each with the seal-then-verify + `-race` gate and a live re-run of the NET-36-class ticket as its acceptance test.
