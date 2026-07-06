@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/CarriedWorldUniverse/bridle"
 )
@@ -305,6 +306,100 @@ func TestCommitTurnState_EvictionOrderedBeforeCompaction(t *testing.T) {
 	}
 	if sawRaw {
 		t.Error("compaction's summarize call saw the raw oversize content — the rotate discarded (or raced past) the fresh eviction pointer")
+	}
+}
+
+// TestWorkspaceEviction_CountReported proves the measurement signal
+// the design's §Measurement plan requires (per-run `evictions`): every
+// tool result actually evicted to the workspace bumps EvictionCount,
+// and a run with no eviction leaves it at zero. Turn 1 evicts one
+// oversize result; the counter must read exactly 1.
+func TestWorkspaceEviction_CountReported(t *testing.T) {
+	t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+	home := t.TempDir()
+
+	bigResult := strings.Repeat("A", 100_000) // ~25k tokens, over the 20k bar
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t1", Name: "read_file", Args: json.RawMessage(`{}`)}}},
+		{FinalText: "done", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+	}}
+	f, err := New(Config{
+		AspectID:   "frame",
+		AspectHome: home,
+		Harness:    bridle.NewHarness(prov),
+		Provider:   "scripted",
+		Model:      "m",
+		Runner:     constResultRunner{result: json.RawMessage(`"` + bigResult + `"`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := f.EvictionCount(); got != 0 {
+		t.Fatalf("EvictionCount before any turn = %d, want 0", got)
+	}
+	f.Receive(bridle.InboxItem{From: "operator", Content: "read the file"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.EvictionCount(); got != 1 {
+		t.Fatalf("EvictionCount after one oversize eviction = %d, want 1", got)
+	}
+}
+
+// TestWorkspaceEviction_CountZeroWhenDisabled verifies the counter
+// stays at zero when eviction is off, so a per-run summary that reads
+// EvictionCount reports honest zeros rather than phantom evictions.
+func TestWorkspaceEviction_CountZeroWhenDisabled(t *testing.T) {
+	t.Setenv("FUNNEL_WORKSPACE_EVICT", "")
+	home := t.TempDir()
+
+	bigResult := strings.Repeat("A", 100_000)
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t1", Name: "read_file", Args: json.RawMessage(`{}`)}}},
+		{FinalText: "done", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+	}}
+	f, err := New(Config{
+		AspectID:   "frame",
+		AspectHome: home,
+		Harness:    bridle.NewHarness(prov),
+		Provider:   "scripted",
+		Model:      "m",
+		Runner:     constResultRunner{result: json.RawMessage(`"` + bigResult + `"`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{From: "operator", Content: "read the file"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.EvictionCount(); got != 0 {
+		t.Fatalf("EvictionCount with eviction disabled = %d, want 0", got)
+	}
+}
+
+// TestEvictionPreviewLine_UTF8Safe checks the preview truncation never
+// splits a multibyte rune: an over-cap line of multibyte runes must
+// yield a stub whose preview is still valid UTF-8 (a byte-offset slice
+// would land mid-rune and corrupt the prompt text).
+func TestEvictionPreviewLine_UTF8Safe(t *testing.T) {
+	// 3-byte runes so the 200-byte cap lands mid-rune (200 % 3 != 0).
+	line := strings.Repeat("あ", 400) // 1200 bytes, all multibyte
+	got := truncateEvictionPreviewLine(line)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated preview line is not valid UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("over-cap line should be marked truncated with an ellipsis, got %q", got[len(got)-6:])
+	}
+	// Body (sans ellipsis) must be whole runes and within the cap.
+	body := strings.TrimSuffix(got, "…")
+	if len(body) > evictionPreviewLineCap {
+		t.Errorf("truncated body %d bytes exceeds cap %d", len(body), evictionPreviewLineCap)
+	}
+	if !utf8.ValidString(body) {
+		t.Errorf("truncated body is not whole-rune UTF-8: %q", body)
 	}
 }
 

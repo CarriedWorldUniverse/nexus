@@ -43,6 +43,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
@@ -766,6 +767,15 @@ type Funnel struct {
 	// guarded by mu — atomic is cheaper than taking the funnel lock
 	// just to bump a counter.
 	evictionSeq atomic.Int64
+
+	// evictionCount is the running total of tool results evicted to the
+	// workspace over this funnel's lifetime — the `evictions` signal the
+	// design's measurement plan wants in the per-run summary
+	// (FUNNEL-V2-DESIGN.md §Measurement: "input_tokens, steps,
+	// evictions, outcome"). Bumped once per successful eviction across
+	// both passes; read via EvictionCount(). Atomic for the same reason
+	// as evictionSeq — no need to hold f.mu just to count.
+	evictionCount atomic.Int64
 }
 
 // compactionFailureLimit caps how many consecutive compact() errors
@@ -1790,9 +1800,22 @@ func (f *Funnel) commitTurnState(ctx context.Context, st *deliberateState, resul
 	// doc; Deliberate's single-caller guard is what makes this
 	// ordering safe without extra locking here).
 	if f.workspaceEviction.enabled {
+		before := f.evictionCount.Load()
 		f.evictOversizeResults(len(result.SessionDelta))
 		if st.sawContextBudgetWarning {
 			f.sweepContextPressure()
+		}
+		// Surface per-turn eviction activity so the recent-runs panel /
+		// worker-status store can accumulate the `evictions` figure the
+		// measurement plan calls for (FUNNEL-V2-DESIGN.md §Measurement),
+		// without every consumer having to poll EvictionCount().
+		if evicted := f.evictionCount.Load() - before; evicted > 0 {
+			f.log.Info("funnel: workspace eviction",
+				"aspect", f.cfg.AspectID,
+				"turn_id", st.turnID,
+				"evicted", evicted,
+				"total_evictions", f.evictionCount.Load(),
+				"sweep", st.sawContextBudgetWarning)
 		}
 	}
 
@@ -1935,10 +1958,18 @@ func (f *Funnel) evictSessionTailEntry(idx int, content string) bool {
 		return false
 	}
 	f.mu.Lock()
-	if idx < len(f.sessionTail) && f.sessionTail[idx].Content == content {
+	swapped := idx < len(f.sessionTail) && f.sessionTail[idx].Content == content
+	if swapped {
 		f.sessionTail[idx].Content = stub
 	}
 	f.mu.Unlock()
+	// Count only entries actually swapped in-window. The defensive
+	// re-match effectively never fails (commitTurnState is single-caller
+	// via Deliberate's guard), but if the tail moved under us we wrote a
+	// file we didn't reference — don't inflate the eviction count for it.
+	if swapped {
+		f.evictionCount.Add(1)
+	}
 	return true
 }
 
@@ -1982,7 +2013,15 @@ func truncateEvictionPreviewLine(line string) string {
 	if len(line) <= evictionPreviewLineCap {
 		return line
 	}
-	return line[:evictionPreviewLineCap] + "…"
+	// Cut on a rune boundary, not a byte offset: tool output is often
+	// UTF-8 (source, JSON, logs), and slicing at a fixed byte index can
+	// land mid-rune and emit the replacement char into the prompt stub.
+	// Walk back to the last boundary at or before the cap.
+	cut := evictionPreviewLineCap
+	for cut > 0 && !utf8.RuneStart(line[cut]) {
+		cut--
+	}
+	return line[:cut] + "…"
 }
 
 // workspaceDir resolves the directory oversize tool results are
@@ -2272,6 +2311,15 @@ func (f *Funnel) CumulativeTokens() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.cumulativeTokens
+}
+
+// EvictionCount reports the total number of tool results evicted to
+// the workspace over this funnel's lifetime (funnel v2 §2). It is the
+// `evictions` field the design's measurement plan wants folded into
+// the per-run summary alongside input_tokens / steps / outcome
+// (FUNNEL-V2-DESIGN.md §Measurement). Zero when eviction is disabled.
+func (f *Funnel) EvictionCount() int64 {
+	return f.evictionCount.Load()
 }
 
 // SessionID returns the current bridle session handle. Rotates on
