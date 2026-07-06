@@ -9,6 +9,7 @@
 //	                       [--criteria <text> ...] [--criteria-file <path>]
 //	                       [--repo <owner/name>]
 //	                       [--org <org>] [--subject <subject>] [--project <project>]
+//	                       [--dedupe]
 //
 // Prints the created ledger issue key (work item id) to stdout on success.
 package main
@@ -57,6 +58,7 @@ type workitemCreateConfig struct {
 	Org          string
 	Subject      string
 	Project      string
+	Dedupe       bool
 }
 
 // parseWorkitemCreateArgs parses `nexus workitem create`'s flags. Flags only
@@ -75,6 +77,7 @@ func parseWorkitemCreateArgs(args []string) (*workitemCreateConfig, error) {
 	org := fs.String("org", envOrDefault("WORKGRAPH_ORG", workgraph.DefaultOrg), "cwb-org presented to the ledger (default: WORKGRAPH_ORG env, then workgraph.DefaultOrg)")
 	subject := fs.String("subject", envOrDefault("WORKGRAPH_SUBJECT", defaultWorkitemSubject), "cwb-subject presented to the ledger (default: WORKGRAPH_SUBJECT env, then \""+defaultWorkitemSubject+"\")")
 	project := fs.String("project", envOrDefault("WORKGRAPH_PROJECT", workgraph.DefaultProject), "ledger project key the work item is filed under (default: WORKGRAPH_PROJECT env, then workgraph.DefaultProject)")
+	dedupe := fs.Bool("dedupe", false, "before creating, skip (exit 0) if an existing ready/in-flight item for --role already has the same task-spec first line (see taskSpecFirstLineMatches) — for cron-seeded recurring tasks that must not pile up concurrent duplicates")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -88,6 +91,7 @@ func parseWorkitemCreateArgs(args []string) (*workitemCreateConfig, error) {
 		Org:          *org,
 		Subject:      *subject,
 		Project:      *project,
+		Dedupe:       *dedupe,
 	}, nil
 }
 
@@ -188,6 +192,36 @@ func readFileLines(path string) ([]string, error) {
 	return out, nil
 }
 
+// taskSpecFirstLineMatches reports whether a and b's task specs name the
+// same task, per --dedupe's semantics: compare only the first line (a
+// TaskSpec may run to many lines — e.g. full task prose — but a recurring
+// cron-seeded task's identity lives in its first line, see
+// workgraph/adapter.go's summarize), each side TrimSpace'd first so leading/
+// trailing whitespace or a trailing newline never causes a false mismatch.
+func taskSpecFirstLineMatches(a, b string) bool {
+	firstLine := func(s string) string {
+		s = strings.TrimSpace(s)
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			s = s[:i]
+		}
+		return strings.TrimSpace(s)
+	}
+	return firstLine(a) == firstLine(b)
+}
+
+// findDuplicateWorkItem scans existing (as returned by workgraph.Client.
+// ListReady for wi.Role — queued + dispatched/in-flight items, see
+// ListReady's doc comment) for one whose TaskSpec's first line matches wi's,
+// per taskSpecFirstLineMatches. Returns the first match's id, or "" if none.
+func findDuplicateWorkItem(wi workgraph.WorkItem, existing []workgraph.WorkItem) string {
+	for _, e := range existing {
+		if taskSpecFirstLineMatches(wi.TaskSpec, e.TaskSpec) {
+			return e.ID
+		}
+	}
+	return ""
+}
+
 // runWorkitemCreate parses args, dials the sovereign ledger (same env
 // convention as the orchestrator's buildWorkgraphClient: WORKGRAPH_LEDGER_ADDR
 // + WORKGRAPH_TLS_*), files the work item, and prints its id.
@@ -228,6 +262,17 @@ func runWorkitemCreate(args []string) int {
 	if err := client.EnsureProject(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "workitem create: ensure project %q/%q: %v\n", cfg.Org, cfg.Project, err)
 		return 1
+	}
+	if cfg.Dedupe {
+		existing, err := client.ListReady(ctx, wi.Role, "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "workitem create: dedupe check: %v\n", err)
+			return 1
+		}
+		if dupID := findDuplicateWorkItem(wi, existing); dupID != "" {
+			fmt.Fprintf(os.Stdout, "skipped: %s already open\n", dupID)
+			return 0
+		}
 	}
 	id, err := client.CreateWorkItem(ctx, wi)
 	if err != nil {

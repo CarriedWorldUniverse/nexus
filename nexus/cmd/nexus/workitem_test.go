@@ -232,6 +232,113 @@ func TestRunWorkitemSubcommand_NoArgs(t *testing.T) {
 	}
 }
 
+// TestParseWorkitemCreateArgs_Dedupe covers the --dedupe flag (default
+// false, settable true), added for the drain-seeder's dedupe follow-up.
+func TestParseWorkitemCreateArgs_Dedupe(t *testing.T) {
+	cfg, err := parseWorkitemCreateArgs([]string{
+		"--role", "builder", "--task", "x", "--criteria", "y", "--dedupe",
+	})
+	if err != nil {
+		t.Fatalf("parseWorkitemCreateArgs: %v", err)
+	}
+	if !cfg.Dedupe {
+		t.Errorf("Dedupe = false, want true")
+	}
+}
+
+func TestParseWorkitemCreateArgs_DedupeDefaultsFalse(t *testing.T) {
+	cfg, err := parseWorkitemCreateArgs([]string{"--role", "builder", "--task", "x", "--criteria", "y"})
+	if err != nil {
+		t.Fatalf("parseWorkitemCreateArgs: %v", err)
+	}
+	if cfg.Dedupe {
+		t.Errorf("Dedupe = true, want false default")
+	}
+}
+
+// TestTaskSpecFirstLineMatches covers taskSpecFirstLineMatches's match/
+// no-match/whitespace cases (--dedupe's pure matching helper).
+func TestTaskSpecFirstLineMatches(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{
+			name: "exact match",
+			a:    "Drain the shadow-queue: foo",
+			b:    "Drain the shadow-queue: foo",
+			want: true,
+		},
+		{
+			name: "match ignoring rest-of-body differences",
+			a:    "Drain the shadow-queue: foo\nsome details here",
+			b:    "Drain the shadow-queue: foo\ndifferent details entirely",
+			want: true,
+		},
+		{
+			name: "match ignoring surrounding whitespace",
+			a:    "  Drain the shadow-queue: foo  \n",
+			b:    "Drain the shadow-queue: foo",
+			want: true,
+		},
+		{
+			name: "match ignoring leading/trailing blank lines",
+			a:    "\n\nDrain the shadow-queue: foo\n",
+			b:    "Drain the shadow-queue: foo",
+			want: true, // TrimSpace strips the leading/trailing blank lines entirely before the first-line split.
+		},
+		{
+			name: "no match, different task",
+			a:    "Drain the shadow-queue: foo",
+			b:    "Drain the shadow-queue: bar",
+			want: false,
+		},
+		{
+			name: "no match, empty vs non-empty",
+			a:    "",
+			b:    "Drain the shadow-queue: foo",
+			want: false,
+		},
+		{
+			name: "both empty match",
+			a:    "",
+			b:    "   \n  ",
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := taskSpecFirstLineMatches(tc.a, tc.b); got != tc.want {
+				t.Errorf("taskSpecFirstLineMatches(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFindDuplicateWorkItem covers findDuplicateWorkItem's scan over
+// ListReady's results for a first-line match.
+func TestFindDuplicateWorkItem(t *testing.T) {
+	wi := workgraph.WorkItem{TaskSpec: "Drain the shadow-queue: foo"}
+	existing := []workgraph.WorkItem{
+		{ID: "PROJ-1", TaskSpec: "Some other task"},
+		{ID: "PROJ-2", TaskSpec: "Drain the shadow-queue: foo\nrest of body"},
+	}
+	if got := findDuplicateWorkItem(wi, existing); got != "PROJ-2" {
+		t.Errorf("findDuplicateWorkItem = %q, want PROJ-2", got)
+	}
+}
+
+func TestFindDuplicateWorkItem_NoMatch(t *testing.T) {
+	wi := workgraph.WorkItem{TaskSpec: "Drain the shadow-queue: foo"}
+	existing := []workgraph.WorkItem{
+		{ID: "PROJ-1", TaskSpec: "Some other task"},
+	}
+	if got := findDuplicateWorkItem(wi, existing); got != "" {
+		t.Errorf("findDuplicateWorkItem = %q, want empty (no match)", got)
+	}
+}
+
 func TestRunWorkitemCreate_MissingLedgerAddr(t *testing.T) {
 	os.Unsetenv("WORKGRAPH_LEDGER_ADDR")
 	got := runWorkitemCreate([]string{"--role", "builder", "--task", "x", "--criteria", "y"})
