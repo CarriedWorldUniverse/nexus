@@ -1536,11 +1536,12 @@ func TestDeliberate_NEX300_MainTurnSamplingThreadsToRequest(t *testing.T) {
 		Model:        "test-model",
 		Runner:       noopRunner{},
 		MainTurnSampling: MainTurnSampling{
-			Temperature:     &temp,
-			TopP:            &topP,
-			Seed:            &seed,
-			MaxOutputTokens: 4096,
-			StopSequences:   []string{"</done>"},
+			Temperature:          &temp,
+			TopP:                 &topP,
+			Seed:                 &seed,
+			MaxOutputTokens:      4096,
+			StopSequences:        []string{"</done>"},
+			ThinkingBudgetTokens: 8192,
 		},
 	})
 	if err != nil {
@@ -1567,6 +1568,11 @@ func TestDeliberate_NEX300_MainTurnSamplingThreadsToRequest(t *testing.T) {
 	// TopK left unset by operator — should stay nil on the wire.
 	if prov.last.TopK != nil {
 		t.Errorf("TopK should be nil when unset; got %v", *prov.last.TopK)
+	}
+	// Reasoning-EFFORT knob (2026-07-06): ThinkingBudgetTokens mirrors the
+	// other MainTurnSampling fields straight through to the bridle request.
+	if prov.last.ThinkingBudgetTokens != 8192 {
+		t.Errorf("ThinkingBudgetTokens = %d, want 8192", prov.last.ThinkingBudgetTokens)
 	}
 }
 
@@ -1595,6 +1601,9 @@ func TestDeliberate_NEX300_ZeroMainTurnSamplingPreservesDefaults(t *testing.T) {
 	}
 	if len(prov.last.StopSequences) != 0 {
 		t.Errorf("StopSequences should be empty; got %v", prov.last.StopSequences)
+	}
+	if prov.last.ThinkingBudgetTokens != 0 {
+		t.Errorf("ThinkingBudgetTokens should be 0 when not configured; got %d", prov.last.ThinkingBudgetTokens)
 	}
 }
 

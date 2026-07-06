@@ -327,6 +327,29 @@ func TestParseRoleBrains(t *testing.T) {
 			"nonexistent-role=claude-code:claude-sonnet-4-6",
 			map[string]orchestrator.RoleBrain{"nonexistent-role": {Provider: "claude-code", Model: "claude-sonnet-4-6"}},
 		},
+		{
+			"3-field entry with valid effort",
+			"builder-complex=claude-api:claude-opus-4-6:high",
+			map[string]orchestrator.RoleBrain{"builder-complex": {Provider: "claude-api", Model: "claude-opus-4-6", Effort: "high"}},
+		},
+		{
+			"3-field entry, low/medium effort variants",
+			"builder-complex=claude-api:claude-opus-4-6:low, tester=claude-api:claude-sonnet-4-6:medium",
+			map[string]orchestrator.RoleBrain{
+				"builder-complex": {Provider: "claude-api", Model: "claude-opus-4-6", Effort: "low"},
+				"tester":          {Provider: "claude-api", Model: "claude-sonnet-4-6", Effort: "medium"},
+			},
+		},
+		{
+			"bad effort value — warn+ignore effort, keep provider/model",
+			"builder-complex=claude-api:claude-opus-4-6:ultra",
+			map[string]orchestrator.RoleBrain{"builder-complex": {Provider: "claude-api", Model: "claude-opus-4-6", Effort: ""}},
+		},
+		{
+			"2-field entry (no effort) — back-compat, Effort stays empty",
+			"builder-complex=claude-code:claude-sonnet-4-6",
+			map[string]orchestrator.RoleBrain{"builder-complex": {Provider: "claude-code", Model: "claude-sonnet-4-6", Effort: ""}},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -380,13 +403,13 @@ func TestBuildOrchestrator_RoleBrainsEnv_WiresResolver(t *testing.T) {
 	if orch.Resolver == nil {
 		t.Fatal("orch.Resolver = nil, want RoleBrainResolver wired from ORCHESTRATOR_ROLE_BRAINS")
 	}
-	_, _, _, provider, model := orch.Resolver.Resolve("builder-complex")
-	if provider != "claude-code" || model != "claude-sonnet-4-6" {
-		t.Fatalf("Resolve(builder-complex) = (%q,%q), want (claude-code,claude-sonnet-4-6)", provider, model)
+	_, _, _, provider, model, effort := orch.Resolver.Resolve("builder-complex")
+	if provider != "claude-code" || model != "claude-sonnet-4-6" || effort != "" {
+		t.Fatalf("Resolve(builder-complex) = (%q,%q,%q), want (claude-code,claude-sonnet-4-6,\"\")", provider, model, effort)
 	}
-	_, _, _, provider, model = orch.Resolver.Resolve("builder")
-	if provider != "" || model != "" {
-		t.Fatalf("Resolve(builder) (no override configured) = (%q,%q), want (\"\",\"\")", provider, model)
+	_, _, _, provider, model, effort = orch.Resolver.Resolve("builder")
+	if provider != "" || model != "" || effort != "" {
+		t.Fatalf("Resolve(builder) (no override configured) = (%q,%q,%q), want (\"\",\"\",\"\")", provider, model, effort)
 	}
 }
 

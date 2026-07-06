@@ -225,6 +225,17 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	if b.Model != "" {
 		env = append(env, corev1.EnvVar{Name: "CW_MODEL", Value: b.Model})
 	}
+	// CW_EFFORT (reasoning-EFFORT knob, 2026-07-06): a dispatch-time
+	// Brief.Effort override — low|medium|high — for the worker's
+	// extended-thinking budget on the claude-api provider path.
+	// agentfunnel maps this via a fixed effort->budget_tokens table onto
+	// bridle.TurnRequest.ThinkingBudgetTokens; every other provider (no
+	// request-side thinking-budget knob) logs a one-line no-op note and
+	// otherwise ignores it. Empty = no override, exactly as before this
+	// env var existed.
+	if b.Effort != "" {
+		env = append(env, corev1.EnvVar{Name: "CW_EFFORT", Value: b.Effort})
+	}
 	if len(b.SkillAllowlist) > 0 {
 		env = append(env, corev1.EnvVar{Name: "CW_SKILL_ALLOWLIST", Value: strings.Join(b.SkillAllowlist, ",")})
 	}

@@ -325,6 +325,16 @@ type MainTurnSampling struct {
 	Seed            *int
 	MaxOutputTokens int
 	StopSequences   []string
+
+	// ThinkingBudgetTokens (reasoning-EFFORT knob, 2026-07-06) requests
+	// Anthropic extended-thinking with this token budget — mirrors
+	// bridle.TurnRequest.ThinkingBudgetTokens 1:1, same as every other
+	// field on this struct. 0 = unset, provider default (no thinking).
+	// Only the claude-api provider honors this; every other bridle
+	// provider silently ignores it (see provider/claude/claude.go). Set
+	// by runtime/cmd/agentfunnel/main.go's applyEffortOverride from
+	// CW_EFFORT via effortToBudgetTokens.
+	ThinkingBudgetTokens int
 }
 
 // Binding is the per-turn provider+model+harness triple. Used by the
@@ -1571,12 +1581,13 @@ func (f *Funnel) buildTurnRequest(ctx context.Context, st *deliberateState, user
 		// overrides flow through to the wire. Nil pointers / zero
 		// values stay unset on the request → bridle providers fall
 		// through to their own defaults (existing back-compat).
-		Temperature:     f.cfg.MainTurnSampling.Temperature,
-		TopP:            f.cfg.MainTurnSampling.TopP,
-		TopK:            f.cfg.MainTurnSampling.TopK,
-		Seed:            f.cfg.MainTurnSampling.Seed,
-		MaxOutputTokens: f.cfg.MainTurnSampling.MaxOutputTokens,
-		StopSequences:   f.cfg.MainTurnSampling.StopSequences,
+		Temperature:          f.cfg.MainTurnSampling.Temperature,
+		TopP:                 f.cfg.MainTurnSampling.TopP,
+		TopK:                 f.cfg.MainTurnSampling.TopK,
+		Seed:                 f.cfg.MainTurnSampling.Seed,
+		MaxOutputTokens:      f.cfg.MainTurnSampling.MaxOutputTokens,
+		StopSequences:        f.cfg.MainTurnSampling.StopSequences,
+		ThinkingBudgetTokens: f.cfg.MainTurnSampling.ThinkingBudgetTokens,
 	}
 }
 

@@ -77,7 +77,7 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, role string, wi workgrap
 		return
 	}
 
-	rolePrompt, skills, policy, brainProvider, brainModel := o.resolve(role)
+	rolePrompt, skills, policy, brainProvider, brainModel, brainEffort := o.resolve(role)
 	item := dispatch.PoolItem{
 		Role:               role,
 		Task:               wi.TaskSpec,
@@ -96,6 +96,11 @@ func (o *Orchestrator) dispatchOne(ctx context.Context, role string, wi workgrap
 		// resolveProvider / SubmitPoolItem's precedence comment).
 		Provider: brainProvider,
 		Model:    brainModel,
+		// Effort (reasoning-EFFORT knob, 2026-07-06): the role's configured
+		// thinking-budget tier, threaded the same way as Provider/Model —
+		// see dispatch.PoolItem.Effort and RoleBrain.Effort's doc for the
+		// full CW_EFFORT chain. Empty = no override (provider default).
+		Effort: brainEffort,
 		// Repo (Phase 4, "real REPO tickets"): threading wi.Repo straight
 		// through to PoolItem.Repo -> Brief.Repo is the whole gap this
 		// closes — SubmitPoolItem/BuildJob already do everything else

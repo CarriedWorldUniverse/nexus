@@ -712,6 +712,40 @@ func TestSubmitPoolItem_NoRoleBrain_NoCWProviderModelEnv(t *testing.T) {
 	}
 }
 
+// TestSubmitPoolItem_ThreadsEffortToJobEnv covers the reasoning-EFFORT knob
+// (2026-07-06): PoolItem.Effort must thread through Brief.Effort onto the
+// job's CW_EFFORT env — mirroring how Provider/Model thread through. An
+// empty PoolItem.Effort must produce no CW_EFFORT env at all (not even
+// empty-valued), reproducing every pre-reasoning-EFFORT pool dispatch.
+func TestSubmitPoolItem_ThreadsEffortToJobEnv(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _ := newPoolFixture(fk)
+
+	if _, err := r.SubmitPoolItem(context.Background(), dispatch.PoolItem{
+		Role: "builder-complex", Task: "do work", WorkItemID: "wi-1",
+		Provider: "claude-api", Effort: "medium",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job := fk.jobObjs[0]
+	if got, ok := jobEnvValue(job, "CW_EFFORT"); !ok || got != "medium" {
+		t.Errorf("job env CW_EFFORT = %q (present=%v), want medium", got, ok)
+	}
+}
+
+func TestSubmitPoolItem_NoEffort_NoCWEffortEnv(t *testing.T) {
+	fk := &fakeK8s{}
+	r, _, _ := newPoolFixture(fk)
+
+	if _, err := r.SubmitPool(context.Background(), "builder", "do work", "wi-2", ""); err != nil {
+		t.Fatal(err)
+	}
+	job := fk.jobObjs[0]
+	if _, ok := jobEnvValue(job, "CW_EFFORT"); ok {
+		t.Error("job env CW_EFFORT should be absent when PoolItem carries no Effort")
+	}
+}
+
 // argValueEquals mirrors jobspec_test.go's (package dispatch, internal)
 // helper of the same name — duplicated here rather than exported since
 // this file is package dispatch_test (external).

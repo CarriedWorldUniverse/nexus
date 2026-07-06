@@ -14,6 +14,18 @@ import "github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 type RoleBrain struct {
 	Provider string
 	Model    string
+	// Effort is the role's reasoning-EFFORT knob (low|medium|high, empty =
+	// provider default) — the reasoning-EFFORT knob (2026-07-06): lets a
+	// complex-tier builder run the claude-api provider at a chosen
+	// extended-thinking budget (see runtime/cmd/agentfunnel/main.go's
+	// effortToBudgetTokens for the low/medium/high -> budget_tokens table).
+	// Threaded the same way as Provider/Model: RoleBrain.Effort ->
+	// dispatch.PoolItem.Effort (pool.go) -> dispatch.Brief.Effort (brief.go)
+	// -> CW_EFFORT job env (jobspec.go) -> agentfunnel applies it to the
+	// claude-api provider's TurnRequest.ThinkingBudgetTokens; a no-op
+	// (logged) on claude-code/openai/other providers, which have no
+	// request-side thinking-budget knob. Empty = no override.
+	Effort string
 }
 
 // RoleBrainResolver is a RoleResolver that resolves ONLY the role->brain
@@ -36,7 +48,7 @@ type RoleBrainResolver struct {
 
 // Resolve implements RoleResolver. See the type doc for what it does and
 // does not resolve.
-func (r RoleBrainResolver) Resolve(role string) (rolePrompt string, skillAllowlist []string, policy *funnel.ToolPolicy, provider string, model string) {
+func (r RoleBrainResolver) Resolve(role string) (rolePrompt string, skillAllowlist []string, policy *funnel.ToolPolicy, provider string, model string, effort string) {
 	b := r.Brains[role]
-	return "", nil, nil, b.Provider, b.Model
+	return "", nil, nil, b.Provider, b.Model, b.Effort
 }

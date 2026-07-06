@@ -129,12 +129,18 @@ func buildWorkgraphClient(logger *slog.Logger) *workgraph.Client {
 //	ORCHESTRATOR_STALE_AFTER     ReapStale heartbeat-staleness threshold, a
 //	                             time.ParseDuration string (default: orchestrator's
 //	                             own 5m default; invalid values are ignored with a warning)
-//	ORCHESTRATOR_ROLE_BRAINS     role->brain overrides (role-tier-brains, 2026-07-06):
-//	                             comma-separated "role=provider:model" entries, e.g.
-//	                             "builder-complex=claude-code:claude-sonnet-4-6" — see
-//	                             parseRoleBrains. Unset/empty → no overrides, every role
-//	                             dispatches with the leased personality's own aspects-row
-//	                             provider/model (unchanged pre-role-tier-brains behavior).
+//	ORCHESTRATOR_ROLE_BRAINS     role->brain overrides (role-tier-brains, 2026-07-06;
+//	                             reasoning-EFFORT knob added 2026-07-06): comma-separated
+//	                             "role=provider:model" or "role=provider:model:effort"
+//	                             entries, e.g. "builder-complex=claude-code:claude-sonnet-4-6"
+//	                             or "builder-complex=claude-api:claude-opus-4-6:high" — see
+//	                             parseRoleBrains. The effort field is optional (2-field
+//	                             "role=provider:model" back-compat kept) and must be one of
+//	                             low|medium|high; a bad value is warned and ignored (the
+//	                             provider/model override still applies). Unset/empty →
+//	                             no overrides, every role dispatches with the leased
+//	                             personality's own aspects-row provider/model (unchanged
+//	                             pre-role-tier-brains behavior).
 func buildOrchestrator(logger *slog.Logger, wg *workgraph.Client, dispatcher orchestrator.Dispatcher, workerStatus orchestrator.WorkerStatusStore) *orchestrator.Orchestrator {
 	if os.Getenv("ORCHESTRATOR_ENABLE") != "1" {
 		return nil
@@ -179,19 +185,27 @@ func buildOrchestrator(logger *slog.Logger, wg *workgraph.Client, dispatcher orc
 }
 
 // parseRoleBrains parses ORCHESTRATOR_ROLE_BRAINS, an operator-configured
-// role->brain override list: comma-separated "role=provider:model" entries
-// (e.g. "builder-complex=claude-code:claude-sonnet-4-6"). A malformed entry
+// role->brain override list: comma-separated "role=provider:model" or
+// "role=provider:model:effort" entries (e.g.
+// "builder-complex=claude-code:claude-sonnet-4-6" or
+// "builder-complex=claude-api:claude-opus-4-6:high"). A malformed entry
 // (missing "=", missing ":", or an empty role/provider) is skipped with a
 // warning rather than aborting the whole parse — one bad entry never takes
 // down every other role's override. Model may be empty ("role=provider:" or
 // "role=provider") — that role then overrides only the provider, leaving the
 // leased personality's own model (or the provider's own default) in place.
-// Unset/empty input returns an empty map: every role then resolves ("","")
-// for provider/model via RoleBrainResolver, identical to no Resolver being
-// wired at all (see buildOrchestrator). Deliberately no built-in default
-// role->brain mapping is hardcoded here — the env is the only source, per
-// the build decision that this unit ships mechanism, not a specific model
-// pin (see docs/network/ROLE-MODEL.md "Role tiers" for a worked example).
+// The effort field (reasoning-EFFORT knob, 2026-07-06) is optional — a
+// plain 2-field "role=provider:model" entry is unaffected (back-compat) —
+// and must be one of low|medium|high (validEffort); an unrecognized value
+// is warned and ignored (dropped, NOT the whole entry — the provider/model
+// override still applies) rather than aborting the parse.
+// Unset/empty input returns an empty map: every role then resolves
+// ("","","") for provider/model/effort via RoleBrainResolver, identical to
+// no Resolver being wired at all (see buildOrchestrator). Deliberately no
+// built-in default role->brain mapping is hardcoded here — the env is the
+// only source, per the build decision that this unit ships mechanism, not a
+// specific model pin (see docs/network/ROLE-MODEL.md "Role tiers" for a
+// worked example).
 func parseRoleBrains(raw string, logger *slog.Logger) map[string]orchestrator.RoleBrain {
 	brains := map[string]orchestrator.RoleBrain{}
 	raw = strings.TrimSpace(raw)
@@ -206,21 +220,46 @@ func parseRoleBrains(raw string, logger *slog.Logger) map[string]orchestrator.Ro
 		role, spec, ok := strings.Cut(entry, "=")
 		role, spec = strings.TrimSpace(role), strings.TrimSpace(spec)
 		if !ok || role == "" || spec == "" {
-			logger.Warn("ORCHESTRATOR_ROLE_BRAINS: skipping malformed entry (want role=provider:model)", "entry", entry)
+			logger.Warn("ORCHESTRATOR_ROLE_BRAINS: skipping malformed entry (want role=provider:model[:effort])", "entry", entry)
 			continue
 		}
-		provider, model, _ := strings.Cut(spec, ":")
-		provider, model = strings.TrimSpace(provider), strings.TrimSpace(model)
+		provider, rest, hasRest := strings.Cut(spec, ":")
+		provider = strings.TrimSpace(provider)
+		var model, effort string
+		if hasRest {
+			if m, e, hasEffort := strings.Cut(rest, ":"); hasEffort {
+				model, effort = strings.TrimSpace(m), strings.TrimSpace(e)
+			} else {
+				model = strings.TrimSpace(rest)
+			}
+		}
 		if provider == "" {
-			logger.Warn("ORCHESTRATOR_ROLE_BRAINS: skipping malformed entry (want role=provider:model)", "entry", entry)
+			logger.Warn("ORCHESTRATOR_ROLE_BRAINS: skipping malformed entry (want role=provider:model[:effort])", "entry", entry)
 			continue
 		}
 		if !isKnownWorkerRole(role) {
 			logger.Warn("ORCHESTRATOR_ROLE_BRAINS: role is not a registered pool role — configuring it anyway (it will simply never be leased)", "role", role)
 		}
-		brains[role] = orchestrator.RoleBrain{Provider: provider, Model: model}
+		if effort != "" && !validEffort(effort) {
+			logger.Warn("ORCHESTRATOR_ROLE_BRAINS: unrecognized effort value — ignoring effort, keeping provider/model override (want low|medium|high)", "entry", entry, "effort", effort)
+			effort = ""
+		}
+		brains[role] = orchestrator.RoleBrain{Provider: provider, Model: model, Effort: effort}
 	}
 	return brains
+}
+
+// validEffort reports whether s is one of the reasoning-EFFORT knob's
+// recognized values (low|medium|high) — see
+// runtime/cmd/agentfunnel/main.go's effortToBudgetTokens for the table
+// each maps to.
+func validEffort(s string) bool {
+	switch s {
+	case "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
 }
 
 // orchestratorDrainInterval reads ORCHESTRATOR_DRAIN_INTERVAL (a

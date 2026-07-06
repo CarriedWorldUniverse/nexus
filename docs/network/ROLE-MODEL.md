@@ -107,6 +107,28 @@ Unset (or a role absent from the list) means no override for that role — it di
 
 `nexus workitem create --role <role>` validates `--role` against the registered pool-role vocabulary (`security-reviewer`, `builder-complex`, `builder`, `tester`, `reviewer`, `painter`, `modeller`) and fails fast with a helpful error on an unregistered role, rather than filing a work item nothing will ever lease.
 
+**Reasoning-EFFORT knob (2026-07-06).** A role's brain can additionally pin a reasoning EFFORT — `low`|`medium`|`high` — that sets how much Anthropic extended-thinking budget a complex-tier builder gets, independent of which provider/model it runs. Motivating case: a model x effort cost eval (a high-reasoning Sonnet can cost MORE than a low-effort Opus, because effort multiplies OUTPUT/thinking tokens — must be measured, not assumed).
+
+Config extends the same env, as an optional third field: `role=provider:model:effort`, e.g.:
+
+```
+ORCHESTRATOR_ROLE_BRAINS="builder-complex=claude-api:claude-opus-4-6:high"
+```
+
+The 2-field form (`role=provider:model`, no effort) still works unchanged — effort is opt-in. An unrecognized effort value (anything other than `low`/`medium`/`high`) is warned and dropped; the provider/model override still applies.
+
+Effort→budget table (`runtime/cmd/agentfunnel/main.go`'s `effortToBudgetTokens`; tunable named constants, not magic numbers — all clear the Anthropic API's 1024-token `budget_tokens` minimum):
+
+| Effort   | `budget_tokens` |
+|----------|-----------------|
+| `low`    | 2048            |
+| `medium` | 8192            |
+| `high`   | 24576           |
+
+Threaded the same shape as Provider/Model: `RoleBrain.Effort` → `dispatch.PoolItem.Effort` → `dispatch.Brief.Effort` → the Job's `CW_EFFORT` env → agentfunnel maps it through the table onto `funnel.MainTurnSampling.ThinkingBudgetTokens`, which the funnel threads to `bridle.TurnRequest.ThinkingBudgetTokens` on every main turn.
+
+**Provider scope: claude-api only.** The extended-thinking budget is a request-side knob Anthropic's Messages API exposes (`bridle`'s claude provider sets `params.Thinking` from it); no other provider's wire format has an equivalent, so CW_EFFORT is a **no-op** for claude-code (the CLI subprocess), openai/Ornith, and any other provider — agentfunnel logs one line noting the no-op (`applyEffortOverride`) rather than silently discarding the operator's intent. Setting effort for a role whose brain isn't `claude-api`/`claude` has no cost or behavior effect.
+
 ## 8. Scheduling
 
 Scheduling is a **trigger — not a role, not an agent.** A thin timer (k8s CronJob — proven by transcript-ingest; the old "must be in-nexus, Windows has no cron" rationale is stale on k3s) fires → builds a work-item (role + spec) → injects it into the orchestrator's intake → routed like any work. If named "hermes": **hermes delivers, never performs.** The schedule list (what/cadence/enabled) can be operator-editable config in nexus; execution is the dumbest reliable timer.

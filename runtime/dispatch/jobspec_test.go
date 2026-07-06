@@ -591,3 +591,32 @@ func TestBuildJob_RoleBrainProviderModelEnv(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildJob_RoleBrainEffortEnv covers the reasoning-EFFORT knob
+// (2026-07-06) CW_EFFORT injection: a Brief carrying a role-brain effort
+// override (Brief.Effort, threaded from dispatch.PoolItem.Effort — see
+// pool.go) must surface as CW_EFFORT env for agentfunnel to map onto the
+// claude-api provider's extended-thinking budget. Mirrors
+// TestBuildJob_RoleBrainProviderModelEnv's Provider/Model coverage.
+func TestBuildJob_RoleBrainEffortEnv(t *testing.T) {
+	cfg := JobConfig{Image: "img", Namespace: "nexus", BrokerHost: "h"}
+
+	t.Run("role brain sets CW_EFFORT", func(t *testing.T) {
+		b := Brief{Agent: "keel-builder-complex", Ticket: "wi-1", Provider: "claude-api", Effort: "high"}
+		job := BuildJob(b, cfg, "t1", b.Provider)
+		c := job.Spec.Template.Spec.Containers[0]
+		if !envValueEquals(c.Env, "CW_EFFORT", "high") {
+			t.Errorf("missing CW_EFFORT=high: %v", c.Env)
+		}
+	})
+
+	t.Run("no role brain — no CW_EFFORT env at all (not even empty)", func(t *testing.T) {
+		job := BuildJob(Brief{Agent: "anvil-builder", Ticket: "wi-1"}, cfg, "t1", "codex-cli")
+		c := job.Spec.Template.Spec.Containers[0]
+		for _, v := range c.Env {
+			if v.Name == "CW_EFFORT" {
+				t.Errorf("CW_EFFORT should be absent when Brief carries no role brain effort: %v", c.Env)
+			}
+		}
+	})
+}
