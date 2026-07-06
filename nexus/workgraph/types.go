@@ -110,9 +110,21 @@ type WorkItem struct {
 	// WorkItemID for pool dispatch), same as named dispatch's default.
 	Repo          string   `json:"repo,omitempty"`
 	BaseKnowledge []string `json:"base_knowledge,omitempty"`
-	Personality   string   `json:"personality,omitempty"`
-	PriorResults  []Result `json:"prior_results,omitempty"`
-	Origin        Origin   `json:"origin,omitempty"`
+	// Personality REQUESTS a specific pool personality (e.g. "keel") for
+	// this work item's role-based lease, when the operator wants a
+	// particular personality's brain (its aspects row's provider/model —
+	// see nexus aspect set <p> --provider --model) rather than "any free
+	// personality" (empty, today's behavior, unchanged). Threaded to
+	// dispatch.PoolItem.Personality -> Brief.RequestedPersonality by the
+	// orchestrator's dispatchOne (drain.go); the lease (runtime/dispatch
+	// tryLeaseWorkerSlot) honors it strictly: free -> leased to exactly
+	// that personality, busy -> the item queues (never substituted to a
+	// different personality — see docs/network/ROLE-MODEL.md). NOT the
+	// same thing as a Result.Agent or worker_status.personality (those are
+	// the ACTUAL identity a run landed on); this is the REQUEST.
+	Personality  string   `json:"personality,omitempty"`
+	PriorResults []Result `json:"prior_results,omitempty"`
+	Origin       Origin   `json:"origin,omitempty"`
 
 	// Status is the current lifecycle status (graph-only; not part of the
 	// handoff.schema.json work_item, which is the point-in-time payload

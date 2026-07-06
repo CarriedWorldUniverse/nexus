@@ -89,6 +89,19 @@ type Brief struct {
 	// bundle (res.Personality) that composeSystemPrompt already layers in.
 	Personality string `json:"personality,omitempty"`
 
+	// RequestedPersonality is a pool work item's requested pool personality
+	// (workgraph.WorkItem.Personality, threaded by the orchestrator's
+	// dispatchOne -> dispatch.PoolItem.Personality) — the brain the item
+	// wants, honored strictly by the pool lease (tryLeaseWorkerSlot): free
+	// -> leased to exactly this personality, busy -> the item queues
+	// carrying this field so reserveQueued keeps targeting the same
+	// personality on later drains, never substituting a different one.
+	// Empty = "any free personality" (today's behavior, unchanged). Unlike
+	// Personality (below), this is the REQUEST, present before a lease
+	// succeeds; Personality is the resolved, ACTUAL identity a lease
+	// stamped once it did.
+	RequestedPersonality string `json:"requested_personality,omitempty"`
+
 	// AcceptanceCriteria carries the ledger work item's DoD checklist
 	// (workgraph.WorkItem.AcceptanceCriteria, formatted one-per-line) into
 	// the spawn — Unit B "verified task_done" (NET-22/23/24): the funnel

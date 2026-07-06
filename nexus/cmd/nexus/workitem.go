@@ -8,6 +8,7 @@
 //	nexus workitem create --role <role> {--task <text> | --task-file <path>}
 //	                       [--criteria <text> ...] [--criteria-file <path>]
 //	                       [--repo <owner/name>]
+//	                       [--personality <name>]
 //	                       [--org <org>] [--subject <subject>] [--project <project>]
 //	                       [--dedupe]
 //
@@ -55,6 +56,7 @@ type workitemCreateConfig struct {
 	Criteria     []string
 	CriteriaFile string
 	Repo         string
+	Personality  string
 	Org          string
 	Subject      string
 	Project      string
@@ -74,6 +76,7 @@ func parseWorkitemCreateArgs(args []string) (*workitemCreateConfig, error) {
 	fs.Var(&criteria, "criteria", "an acceptance-criteria line; repeat for multiple (mutually exclusive with --criteria-file)")
 	criteriaFile := fs.String("criteria-file", "", "path to a file with one acceptance-criteria line per line (mutually exclusive with --criteria)")
 	repo := fs.String("repo", "", "git repo (owner/name) this work item's builder should check out/branch/PR against (Phase 4, real REPO tickets); empty = respond-only work, no repo/branch/PR gate")
+	personality := fs.String("personality", "", "request a specific pool personality (e.g. keel) for this work item's role lease, honored strictly (free -> leased to it, busy -> queued, never substituted); empty = any free personality (default)")
 	org := fs.String("org", envOrDefault("WORKGRAPH_ORG", workgraph.DefaultOrg), "cwb-org presented to the ledger (default: WORKGRAPH_ORG env, then workgraph.DefaultOrg)")
 	subject := fs.String("subject", envOrDefault("WORKGRAPH_SUBJECT", defaultWorkitemSubject), "cwb-subject presented to the ledger (default: WORKGRAPH_SUBJECT env, then \""+defaultWorkitemSubject+"\")")
 	project := fs.String("project", envOrDefault("WORKGRAPH_PROJECT", workgraph.DefaultProject), "ledger project key the work item is filed under (default: WORKGRAPH_PROJECT env, then workgraph.DefaultProject)")
@@ -88,6 +91,7 @@ func parseWorkitemCreateArgs(args []string) (*workitemCreateConfig, error) {
 		Criteria:     []string(criteria),
 		CriteriaFile: *criteriaFile,
 		Repo:         *repo,
+		Personality:  *personality,
 		Org:          *org,
 		Subject:      *subject,
 		Project:      *project,
@@ -123,6 +127,7 @@ func buildWorkItem(cfg *workitemCreateConfig) (workgraph.WorkItem, error) {
 		TaskSpec:           task,
 		AcceptanceCriteria: criteria,
 		Repo:               cfg.Repo,
+		Personality:        cfg.Personality,
 	}, nil
 }
 

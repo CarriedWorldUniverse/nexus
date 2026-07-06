@@ -358,6 +358,51 @@ func TestDrainOnceThreadsRepo(t *testing.T) {
 	}
 }
 
+// TestDrainOnceThreadsPersonality covers per-personality routing: dispatchOne
+// must carry wi.Personality straight onto PoolItem.Personality so it reaches
+// Brief.RequestedPersonality (and, downstream, the lease — see
+// runtime/dispatch tryLeaseWorkerSlot and docs/network/ROLE-MODEL.md). A
+// work item with no requested personality (every pre-routing caller) must
+// produce an empty PoolItem.Personality, reproducing today's "any free
+// personality" behavior exactly.
+func TestDrainOnceThreadsPersonality(t *testing.T) {
+	graph := newFakeGraph()
+	graph.addReady("wi-1", workgraph.WorkItem{
+		Role:        "builder",
+		TaskSpec:    "fix the bug",
+		Personality: "keel",
+	})
+	graph.addReady("wi-2", workgraph.WorkItem{Role: "builder", TaskSpec: "respond to the thread"})
+	disp := &fakeDispatcher{}
+	o := &Orchestrator{
+		Graph:        graph,
+		Dispatcher:   disp,
+		WorkerStatus: &fakeWorkerStatus{},
+		Roles:        []string{"builder"},
+	}
+
+	if _, err := o.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("DrainOnce: %v", err)
+	}
+	if len(disp.calls) != 2 {
+		t.Fatalf("expected 2 SubmitPoolItem calls, got %d", len(disp.calls))
+	}
+	var withPersonality, without dispatch.PoolItem
+	for _, c := range disp.calls {
+		if c.WorkItemID == "wi-1" {
+			withPersonality = c
+		} else {
+			without = c
+		}
+	}
+	if withPersonality.Personality != "keel" {
+		t.Errorf("Personality = %q, want keel", withPersonality.Personality)
+	}
+	if without.Personality != "" {
+		t.Errorf("work item with no requested personality must produce empty PoolItem.Personality, got %q", without.Personality)
+	}
+}
+
 func TestDrainOnceSkipsAlreadyDispatchedAcrossTwoPasses(t *testing.T) {
 	graph := newFakeGraph()
 	graph.addReady("wi-1", workgraph.WorkItem{Role: "builder", TaskSpec: "build the thing"})

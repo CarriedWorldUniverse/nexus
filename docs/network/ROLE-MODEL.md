@@ -77,6 +77,15 @@ The axis that actually varies is **how work is verified**, not its tech:
 - **Ornith runs OpenAI-native** via bridle's native-API ToolRunner (the harness we own + proved with DeepSeek), pointed at `vllm-ornith:8000/v1` — **not** the Anthropic-shaped Claude-CLI shim. `plumb-ornith` = plumb on this path via `provider-binding {openai, ornith}`. Don't build a bespoke CLI/harness.
 - **Ornith is a gated builder, never the orchestrator** — its envelope (good scaffold, weak judgment/self-verify) is *why* the gates are external and mandatory.
 
+### Routing a work item to a personality
+
+Pool workers (`{personality}-{role}`) inherit their provider/model from their **personality's** aspects row at validate time — not from the role. To route a hard ticket to a stronger brain (e.g. flip `keel` to `claude-code` while the rest of the roster stays on Ornith), two things compose:
+
+1. **Set the personality's brain:** `nexus aspect set <personality> --provider --model` (e.g. `nexus aspect set keel --provider claude-code`). This is the only thing that actually changes what the personality *is* — routing a work item to it just picks which existing brain answers.
+2. **Request that personality for a work item:** `nexus workitem create --role builder --task ... --criteria ... --personality keel`. The lease is strict: `keel` free → leased to `keel-builder` exactly; `keel` busy → the item **queues** (never substituted to a different free personality — the request is about the brain, and substitution would defeat it). It drains onto `keel` on the next completion that frees it. Omit `--personality` for the default: any free personality, unchanged.
+
+`--personality` only *targets* a lease; it never sets a personality's provider/model itself, and this command never touches cluster state or aspects rows.
+
 ## 8. Scheduling
 
 Scheduling is a **trigger — not a role, not an agent.** A thin timer (k8s CronJob — proven by transcript-ingest; the old "must be in-nexus, Windows has no cron" rationale is stale on k3s) fires → builds a work-item (role + spec) → injects it into the orchestrator's intake → routed like any work. If named "hermes": **hermes delivers, never performs.** The schedule list (what/cadence/enabled) can be operator-editable config in nexus; execution is the dumbest reliable timer.
