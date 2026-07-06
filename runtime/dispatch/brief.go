@@ -22,7 +22,17 @@ type Brief struct {
 	// override-over-resolve-response precedence Provider/CW_PROVIDER
 	// follows. Empty = no override — the resolved personality row's model
 	// applies unchanged, exactly as before this field existed.
-	Model  string `json:"model,omitempty"`
+	Model string `json:"model,omitempty"`
+	// Effort, when non-empty, is a role-brain reasoning-EFFORT override
+	// (2026-07-06) threaded from dispatch.PoolItem.Effort — see pool.go's
+	// SubmitPoolItem. Values: "low"|"medium"|"high". Injected into the Job
+	// env as CW_EFFORT (jobspec.go); agentfunnel maps it via a fixed
+	// effort->budget_tokens table onto the claude-api provider's
+	// bridle.TurnRequest.ThinkingBudgetTokens (main.go's
+	// effortToBudgetTokens/applyEffortOverride). No-op (logged) on
+	// providers with no request-side thinking-budget knob (claude-code,
+	// openai, ...). Empty = no override — provider default.
+	Effort string `json:"effort,omitempty"`
 	Repo   string `json:"repo"`
 	Ticket string `json:"ticket"`
 	Branch string `json:"branch"`

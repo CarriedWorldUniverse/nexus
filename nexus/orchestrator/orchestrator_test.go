@@ -405,21 +405,22 @@ func TestDrainOnceThreadsPersonality(t *testing.T) {
 }
 
 // fakeRoleResolver is a minimal RoleResolver test double: it returns a
-// fixed brain for one role (and the zero value — "", nil, nil, "", "" —
+// fixed brain for one role (and the zero value — "", nil, nil, "", "", "" —
 // for every other role), so tests can assert dispatchOne threads
-// Resolve's provider/model onto PoolItem without needing the real
+// Resolve's provider/model/effort onto PoolItem without needing the real
 // RoleBrainResolver (rolebrain.go, exercised in cmd/nexus's wiring test).
 type fakeRoleResolver struct {
 	role     string
 	provider string
 	model    string
+	effort   string
 }
 
-func (f fakeRoleResolver) Resolve(role string) (string, []string, *funnel.ToolPolicy, string, string) {
+func (f fakeRoleResolver) Resolve(role string) (string, []string, *funnel.ToolPolicy, string, string, string) {
 	if role != f.role {
-		return "", nil, nil, "", ""
+		return "", nil, nil, "", "", ""
 	}
-	return "", nil, nil, f.provider, f.model
+	return "", nil, nil, f.provider, f.model, f.effort
 }
 
 // TestDrainOnceThreadsRoleBrain covers role-tier-brains (2026-07-06):
@@ -438,7 +439,7 @@ func TestDrainOnceThreadsRoleBrain(t *testing.T) {
 		Dispatcher:   disp,
 		WorkerStatus: &fakeWorkerStatus{},
 		Roles:        []string{"builder-complex", "builder"},
-		Resolver:     fakeRoleResolver{role: "builder-complex", provider: "claude-code", model: "claude-sonnet-4-6"},
+		Resolver:     fakeRoleResolver{role: "builder-complex", provider: "claude-code", model: "claude-sonnet-4-6", effort: "high"},
 	}
 
 	if _, err := o.DrainOnce(context.Background()); err != nil {
@@ -455,11 +456,11 @@ func TestDrainOnceThreadsRoleBrain(t *testing.T) {
 			plain = c
 		}
 	}
-	if complex.Provider != "claude-code" || complex.Model != "claude-sonnet-4-6" {
-		t.Errorf("builder-complex item Provider/Model = %q/%q, want claude-code/claude-sonnet-4-6", complex.Provider, complex.Model)
+	if complex.Provider != "claude-code" || complex.Model != "claude-sonnet-4-6" || complex.Effort != "high" {
+		t.Errorf("builder-complex item Provider/Model/Effort = %q/%q/%q, want claude-code/claude-sonnet-4-6/high", complex.Provider, complex.Model, complex.Effort)
 	}
-	if plain.Provider != "" || plain.Model != "" {
-		t.Errorf("plain builder item (no brain configured for it) Provider/Model = %q/%q, want empty", plain.Provider, plain.Model)
+	if plain.Provider != "" || plain.Model != "" || plain.Effort != "" {
+		t.Errorf("plain builder item (no brain configured for it) Provider/Model/Effort = %q/%q/%q, want empty", plain.Provider, plain.Model, plain.Effort)
 	}
 }
 

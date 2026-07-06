@@ -176,6 +176,15 @@ type PoolItem struct {
 	// row, then launch default, same as before this field existed).
 	Provider string
 	Model    string
+
+	// Effort mirrors Brief.Effort (reasoning-EFFORT knob, 2026-07-06): the
+	// role's configured reasoning effort — low|medium|high — threaded by
+	// the orchestrator's dispatchOne from its RoleResolver's Effort return
+	// (RoleBrainResolver in production, see nexus/orchestrator/rolebrain.go).
+	// Empty = no override — agentfunnel leaves the claude-api provider's
+	// extended-thinking budget unset (provider default), exactly like every
+	// pre-reasoning-EFFORT pool dispatch.
+	Effort string
 }
 
 // SubmitPool dispatches a role-based work item onto the shared pool
@@ -247,6 +256,12 @@ func (r *Runner) SubmitPoolItem(ctx context.Context, item PoolItem) (string, err
 		// launch's default).
 		Provider: item.Provider,
 		Model:    item.Model,
+		// Effort: the role's reasoning-effort override (reasoning-EFFORT
+		// knob), stamped onto the Brief unconditionally — unlike Provider,
+		// there is no personality-row inheritance to precede for Effort, so
+		// it just carries straight through. Empty item.Effort reproduces
+		// every pre-reasoning-EFFORT pool dispatch exactly.
+		Effort: item.Effort,
 	}
 
 	r.mu.Lock()

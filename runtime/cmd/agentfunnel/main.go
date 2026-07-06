@@ -755,6 +755,14 @@ func main() {
 	// Best-effort — missing file / malformed JSON / absent block all
 	// return a zero MainTurnSampling, preserving provider defaults.
 	mainTurnSampling := readMainTurnSamplingFromAspectJSON(cwd, log)
+	// Reasoning-EFFORT knob (2026-07-06): CW_EFFORT, set from
+	// dispatch.Brief.Effort by jobspec.go whenever a role's configured
+	// brain carries a reasoning-effort tier, maps onto
+	// mainTurnSampling.ThinkingBudgetTokens — claude-api only, no-op
+	// (logged) elsewhere. res.Provider is read here AFTER
+	// applyRoleBrainOverride above, so this sees the EFFECTIVE provider
+	// (CW_PROVIDER override, when present, already applied).
+	applyEffortOverride(&mainTurnSampling, res.Provider, os.Getenv, log)
 
 	// Build the output filter (cheap-judge by default). Mirrors the
 	// Frame's buildOutputFilter but simpler: identity comes from Nexus
@@ -2262,6 +2270,78 @@ func readMainTurnSamplingFromAspectJSON(aspectHome string, log *slog.Logger) fun
 		"max_output_tokens", out.MaxOutputTokens,
 		"stop_sequences_count", len(out.StopSequences))
 	return out
+}
+
+// Reasoning-EFFORT knob (2026-07-06): the low/medium/high -> Anthropic
+// extended-thinking budget_tokens table. Tunable named constants rather
+// than magic numbers scattered at the call site — all three are >=1024
+// (the Anthropic API's ThinkingConfigEnabledParam.BudgetTokens minimum;
+// see bridle's provider/claude/claude.go, which rounds any sub-1024
+// caller value up to 1024 as a floor, so these are already comfortably
+// clear of that edge). Chosen to span a meaningful low/medium/high
+// spread for the model x effort cost eval this knob exists to run —
+// not derived from any particular benchmark, adjust freely.
+const (
+	effortBudgetLow    = 2048
+	effortBudgetMedium = 8192
+	effortBudgetHigh   = 24576
+)
+
+// effortToBudgetTokens maps a reasoning-EFFORT value (low|medium|high) to
+// its Anthropic extended-thinking budget_tokens. ok is false for an empty
+// or unrecognized value — callers should warn+ignore rather than apply a
+// zero budget (which bridle would otherwise treat as "disabled").
+func effortToBudgetTokens(effort string) (budget int, ok bool) {
+	switch effort {
+	case "low":
+		return effortBudgetLow, true
+	case "medium":
+		return effortBudgetMedium, true
+	case "high":
+		return effortBudgetHigh, true
+	default:
+		return 0, false
+	}
+}
+
+// applyEffortOverride maps CW_EFFORT (the reasoning-EFFORT knob's job-env
+// carrier — dispatch.Brief.Effort, set by jobspec.go from a role brain's
+// RoleBrain.Effort, see nexus/orchestrator/rolebrain.go) onto
+// sampling.ThinkingBudgetTokens, which funnel.go threads straight to
+// bridle.TurnRequest.ThinkingBudgetTokens (the request-side extended-
+// thinking seam; see provider/claude/claude.go in bridle).
+//
+// Effort only has an effect on the claude-api provider — the ONE bridle
+// provider whose wire format has a request-side thinking-budget knob at
+// all (every other provider, e.g. claude-code's CLI subprocess or
+// openai/Ornith, silently ignores TurnRequest.ThinkingBudgetTokens with
+// no way to honor it). So an effort set against any other provider is
+// logged as an explicit one-line no-op note — an operator debugging a
+// model x effort cost eval should never be left wondering why effort had
+// no bite.
+//
+// provider is the EFFECTIVE provider string (res.Provider, already
+// resolved through applyRoleBrainOverride's CW_PROVIDER precedence by the
+// time this is called) — "claude-api" or "claude" both count as the
+// claude-api path (buildProvider treats them identically).
+func applyEffortOverride(sampling *funnel.MainTurnSampling, provider string, getenv func(string) string, log *slog.Logger) {
+	effort := getenv("CW_EFFORT")
+	if effort == "" {
+		return
+	}
+	budget, ok := effortToBudgetTokens(effort)
+	if !ok {
+		log.Warn("agentfunnel: CW_EFFORT set to an unrecognized value — ignoring (want low|medium|high)", "effort", effort)
+		return
+	}
+	if provider != "claude-api" && provider != "claude" {
+		log.Info("agentfunnel: CW_EFFORT has no effect on this provider — no request-side thinking-budget knob (claude-api only)",
+			"provider", provider, "effort", effort)
+		return
+	}
+	sampling.ThinkingBudgetTokens = budget
+	log.Info("agentfunnel: CW_EFFORT applied to claude-api extended-thinking budget",
+		"effort", effort, "budget_tokens", budget)
 }
 
 // providerBundleToEnv mirrors credentials.Store.EnvForCredential's

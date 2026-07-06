@@ -91,15 +91,16 @@ func (a LogAlerter) Alert(_ context.Context, subject, detail string) error {
 // (e.g. "builder-complex" running a heavier brain than plain "builder").
 // Optional — a nil Orchestrator.Resolver dispatches with the role label
 // alone (RolePrompt="", SkillAllowlist=nil, PolicyFragment=nil,
-// provider="", model=""), reproducing SubmitPool's original behavior
-// exactly. See README.md "Role resolution (out of scope, by design)" for
-// why this unit ships the seam but not a docs/network/roles/*.yaml-backed
-// implementation of the prompt/skills/policy fields — RoleBrainResolver
-// (rolebrain.go) is, as of role-tier-brains, the one concrete implementation
-// wired in production, and it ONLY resolves provider/model (the other three
-// fields stay "" / nil from it, same as a nil Resolver).
+// provider="", model="", effort=""), reproducing SubmitPool's original
+// behavior exactly. See README.md "Role resolution (out of scope, by
+// design)" for why this unit ships the seam but not a
+// docs/network/roles/*.yaml-backed implementation of the prompt/skills/
+// policy fields — RoleBrainResolver (rolebrain.go) is, as of role-tier-
+// brains, the one concrete implementation wired in production, and it
+// ONLY resolves provider/model/effort (the other three fields stay "" /
+// nil from it, same as a nil Resolver).
 type RoleResolver interface {
-	Resolve(role string) (rolePrompt string, skillAllowlist []string, policy *funnel.ToolPolicy, provider string, model string)
+	Resolve(role string) (rolePrompt string, skillAllowlist []string, policy *funnel.ToolPolicy, provider string, model string, effort string)
 }
 
 // DrainReport is DrainOnce's (and RecordJobResult's re-drain's) result —
@@ -210,9 +211,9 @@ func (o *Orchestrator) alert(ctx context.Context, subject, detail string) {
 	}
 }
 
-func (o *Orchestrator) resolve(role string) (string, []string, *funnel.ToolPolicy, string, string) {
+func (o *Orchestrator) resolve(role string) (string, []string, *funnel.ToolPolicy, string, string, string) {
 	if o.Resolver == nil {
-		return "", nil, nil, "", ""
+		return "", nil, nil, "", "", ""
 	}
 	return o.Resolver.Resolve(role)
 }
