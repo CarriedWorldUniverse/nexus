@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,11 +24,14 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/workerstatus"
 )
 
-// runWorkersSubcommand parses `nexus workers [--data-dir DIR]` and prints
-// the consolidated worker_status fleet as a table.
+// runWorkersSubcommand parses `nexus workers [--data-dir DIR] [--json]` and
+// prints the consolidated worker_status fleet. Default renders a fixed-width
+// table; --json writes a pretty-printed JSON array of worker status objects
+// (same shape as GET /api/admin/workers) for programmatic consumption.
 func runWorkersSubcommand(args []string) int {
 	fs := flag.NewFlagSet("workers", flag.ContinueOnError)
 	dataDir := commonDataDirFlag(fs)
+	jsonOut := fs.Bool("json", false, "emit the fleet as a JSON array (one object per worker) instead of a table")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -47,6 +51,9 @@ func runWorkersSubcommand(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "workers: %v\n", err)
 		return 1
+	}
+	if *jsonOut {
+		return printWorkerStatusJSON(os.Stdout, rows)
 	}
 	printWorkerStatusTable(os.Stdout, rows, time.Now())
 	return 0
@@ -91,6 +98,25 @@ func printWorkerStatusTable(w io.Writer, rows []workerstatus.Status, now time.Ti
 			r.TokensUsed,
 			heartbeatAge(r, now))
 	}
+}
+
+// printWorkerStatusJSON writes rows as a pretty-printed JSON array on w.
+// Empty input writes an empty array ("[]\n"), not null — callers can
+// downstream-feed the output through `jq length` without a null-vs-array
+// distinction. Uses the Status struct's existing JSON tags (see
+// workerstatus.Status in nexus/workerstatus/workerstatus.go), so the
+// wire shape matches GET /api/admin/workers one-for-one.
+func printWorkerStatusJSON(w io.Writer, rows []workerstatus.Status) int {
+	if rows == nil {
+		rows = []workerstatus.Status{}
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(rows); err != nil {
+		fmt.Fprintf(os.Stderr, "workers: encode json: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // heartbeatAge renders LastHeartbeat as "<duration> ago", or "never" for a
