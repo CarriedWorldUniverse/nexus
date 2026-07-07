@@ -342,3 +342,96 @@ func (p *recordingScriptedProvider) RunTurn(_ context.Context, req bridle.Provid
 	}
 	return r, nil
 }
+
+// TestWorkspaceEviction_StubTruncation verifies that long single-line
+// results are properly truncated in the preview (evictionPreviewLineCap).
+func TestWorkspaceEviction_StubTruncation(t *testing.T) {
+	// renderEvictionStub and truncateEvictionPreviewLine are unexported
+	// but tested through the writeEvictedResult path.
+	t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+	home := t.TempDir()
+
+	// A single-line result far exceeding the line cap.
+	longLine := strings.Repeat("X", 100_000)
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t1", Name: "grep", Args: json.RawMessage(`{}`)}}},
+		{FinalText: "done", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+	}}
+	f, err := New(Config{
+		AspectID:   "frame",
+		AspectHome: home,
+		Harness:    bridle.NewHarness(prov),
+		Provider:   "scripted",
+		Model:      "m",
+		Runner:     constResultRunner{result: json.RawMessage(`"` + longLine + `"`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.Receive(bridle.InboxItem{From: "operator", Content: "search"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	toolEv := toolResultEvent(t, f.SessionTail())
+	if !strings.HasPrefix(toolEv.Content, evictionStubPrefix) {
+		t.Fatalf("expected eviction stub, got %d bytes", len(toolEv.Content))
+	}
+
+	// Validate the preview line is truncated — the original was 5000 chars,
+	// the stub preview should be at most 200 (evictionPreviewLineCap) plus "…".
+	// The total stub must be much shorter than the original result.
+	if len(toolEv.Content) >= 2000 {
+		t.Errorf("stub too long: %d bytes (original was %d)", len(toolEv.Content), len(longLine))
+	}
+
+	// Verify the workspace file still contains the full content.
+	path := stubPath(t, toolEv.Content)
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("workspace file not found: %v", err)
+	}
+	if !strings.Contains(string(written), longLine) {
+		t.Error("workspace file missing full result content")
+	}
+}
+
+// TestWorkspaceEviction_EmptyToolResultNotEvicted confirms that tool
+// results with empty content are never evicted (they're already the
+// smallest possible entry).
+func TestWorkspaceEviction_EmptyToolResultNotEvicted(t *testing.T) {
+	t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+	t.Setenv("FUNNEL_EVICT_RESULT_TOKENS", "1") // tiny threshold
+	home := t.TempDir()
+
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t1", Name: "noop"}}},
+		{FinalText: "done", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+	}}
+	f, err := New(Config{
+		AspectID:   "frame",
+		AspectHome: home,
+		Harness:    bridle.NewHarness(prov),
+		Provider:   "scripted",
+		Model:      "m",
+		Runner:     constResultRunner{result: json.RawMessage(`""`)}, // empty string
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.Receive(bridle.InboxItem{From: "operator", Content: "go"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	toolEv := toolResultEvent(t, f.SessionTail())
+	if strings.HasPrefix(toolEv.Content, evictionStubPrefix) {
+		t.Fatal("empty tool result should NOT be evicted")
+	}
+	// Must also not be nil — an empty JSON string `""` should survive as-is.
+	if toolEv.Content != `""` {
+		t.Errorf("expected empty JSON string content, got %q", toolEv.Content)
+	}
+}
