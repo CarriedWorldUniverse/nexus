@@ -1,0 +1,1 @@
+The dominant color of the image is blue.
