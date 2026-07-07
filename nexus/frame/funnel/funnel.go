@@ -1928,6 +1928,8 @@ func (f *Funnel) evictSessionTailEntry(idx int, content string) bool {
 		f.sessionTail[idx].Content = stub
 	}
 	f.mu.Unlock()
+	f.log.Debug("funnel: evicted tool result to workspace",
+		"aspect", f.cfg.AspectID, "bytes_reclaimed", len(content)-len(stub))
 	return true
 }
 
