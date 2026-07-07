@@ -111,6 +111,44 @@ func TestWorkspaceEviction_OversizeResultWrittenToFile(t *testing.T) {
 	}
 }
 
+// TestWorkspaceEviction_CustomThreshold verifies that
+// FUNNEL_EVICT_RESULT_TOKENS overrides the default 20k threshold: a
+// result small enough to survive the default threshold is evicted when
+// the threshold is lowered below its size.
+func TestWorkspaceEviction_CustomThreshold(t *testing.T) {
+	t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+	t.Setenv("FUNNEL_EVICT_RESULT_TOKENS", "500") // override: evict > 500 tokens (~2000 chars)
+	home := t.TempDir()
+
+	// ~3k chars = ~750 estimated tokens — under the 20k default but over the 500-token custom bar.
+	medResult := strings.Repeat("M", 3_000)
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t1", Name: "read_file", Args: json.RawMessage(`{}`)}}},
+		{FinalText: "done", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+	}}
+	f, err := New(Config{
+		AspectID:   "frame",
+		AspectHome: home,
+		Harness:    bridle.NewHarness(prov),
+		Provider:   "scripted",
+		Model:      "m",
+		Runner:     constResultRunner{result: json.RawMessage(`"` + medResult + `"`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.Receive(bridle.InboxItem{From: "operator", Content: "read"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	toolEv := toolResultEvent(t, f.SessionTail())
+	if !strings.HasPrefix(toolEv.Content, evictionStubPrefix) {
+		t.Fatalf("result should have been evicted at the 500-token custom threshold, got %.80q", toolEv.Content)
+	}
+}
+
 // TestWorkspaceEviction_DisabledByDefault verifies the eviction rollout
 // posture (FUNNEL-V2-DESIGN.md "Rollout": env-gated, off unless
 // explicitly flipped on) — with no env var set, a huge tool result
