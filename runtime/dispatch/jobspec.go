@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"os"
 	"strings"
 	"time"
 
@@ -8,6 +9,18 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// acceptanceGateEnvKeys are the ACCEPTANCE-GATE-HARDENING knobs the worker
+// (agentfunnel) reads — the gate runs in the worker, not the broker, and a
+// k8s Job does not inherit the broker pod's env, so BuildJob forwards any
+// that are set on the broker. Unset = the worker's code defaults (U2 on at
+// floor 1, U1 judge-the-diff on, U3 test-evidence off). This makes the gate
+// operator-tunable via the broker deployment env, no per-knob code change.
+var acceptanceGateEnvKeys = []string{
+	"ACCEPTANCE_MIN_DIFF_LINES",   // Unit 2 floor (default 1; 0 disables)
+	"ACCEPTANCE_JUDGE_DIFF",       // Unit 1 (default on; 0 disables)
+	"ACCEPTANCE_REQUIRE_TEST_DIFF", // Unit 3 (default off; 1 enables)
+}
 
 type JobConfig struct {
 	Image         string
@@ -316,6 +329,14 @@ func BuildJob(b Brief, cfg JobConfig, taskID string, provider string) *batchv1.J
 	// tier only — Ornith (openai provider) never spawns the CLI.
 	if claudeCodeProvider {
 		env = append(env, corev1.EnvVar{Name: "IS_SANDBOX", Value: "1"})
+	}
+	// Forward the acceptance-gate knobs from the broker's env to the worker
+	// (see acceptanceGateEnvKeys) — only those explicitly set, so an unset
+	// broker env leaves the worker on its safe code defaults.
+	for _, k := range acceptanceGateEnvKeys {
+		if v := os.Getenv(k); v != "" {
+			env = append(env, corev1.EnvVar{Name: k, Value: v})
+		}
 	}
 	volumeMounts := []corev1.VolumeMount{
 		{Name: "work", MountPath: "/work"},
