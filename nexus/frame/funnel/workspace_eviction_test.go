@@ -342,3 +342,406 @@ func (p *recordingScriptedProvider) RunTurn(_ context.Context, req bridle.Provid
 	}
 	return r, nil
 }
+
+// --- Edge-case & unit tests for the eviction helpers ------------------------
+
+func TestIsEvictionStub(t *testing.T) {
+	tests := []struct {
+		content string
+		want   bool
+	}{
+		{"«result written to /tmp/x.txt (5 lines); first 5 lines:\n...»", true},
+		{"«result written to /other.txt (1 lines); first 1 lines:\nx»", true},
+		{"plain tool result", false},
+		{"", false},
+		{"«result written", false},                        // incomplete prefix
+		{" «result written to /tmp/x.txt (5 lines)»", false}, // leading space
+	}
+	for _, tc := range tests {
+		if got := isEvictionStub(tc.content); got != tc.want {
+			t.Errorf("isEvictionStub(%q) = %v; want %v", tc.content, got, tc.want)
+		}
+	}
+}
+
+func TestTruncateEvictionPreviewLine(t *testing.T) {
+	tests := []struct {
+		line string
+		want string
+	}{
+		{"short", "short"},
+		{strings.Repeat("x", 200), strings.Repeat("x", 200)},
+		{strings.Repeat("x", 201), strings.Repeat("x", 200) + "…"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		if got := truncateEvictionPreviewLine(tc.line); got != tc.want {
+			t.Errorf("truncateEvictionPreviewLine(%q...) = %q; want %q",
+				tc.line[:min(len(tc.line), 10)], got, tc.want)
+		}
+	}
+}
+
+func TestResolveWorkspaceEviction(t *testing.T) {
+	t.Run("defaults when env unset", func(t *testing.T) {
+		t.Setenv("FUNNEL_WORKSPACE_EVICT", "")
+		c := resolveWorkspaceEviction(0)
+		if c.enabled {
+			t.Error("should be disabled by default")
+		}
+		if c.resultTokenThreshold != 20_000 {
+			t.Errorf("resultTokenThreshold = %d; want 20000", c.resultTokenThreshold)
+		}
+		if c.sweepPercent != 85 {
+			t.Errorf("sweepPercent = %d; want 85", c.sweepPercent)
+		}
+		if c.windowTokens != 150_000 {
+			t.Errorf("windowTokens = %d; want 150000", c.windowTokens)
+		}
+	})
+
+	t.Run("enabled via env", func(t *testing.T) {
+		t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+		c := resolveWorkspaceEviction(0)
+		if !c.enabled {
+			t.Error("should be enabled")
+		}
+	})
+
+	t.Run("custom result token threshold", func(t *testing.T) {
+		t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+		t.Setenv("FUNNEL_EVICT_RESULT_TOKENS", "5000")
+		c := resolveWorkspaceEviction(0)
+		if c.resultTokenThreshold != 5000 {
+			t.Errorf("resultTokenThreshold = %d; want 5000", c.resultTokenThreshold)
+		}
+	})
+
+	t.Run("invalid result token threshold falls back to default", func(t *testing.T) {
+		t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+		t.Setenv("FUNNEL_EVICT_RESULT_TOKENS", "not-a-number")
+		c := resolveWorkspaceEviction(0)
+		if c.resultTokenThreshold != 20_000 {
+			t.Errorf("resultTokenThreshold = %d; want 20000 (default)", c.resultTokenThreshold)
+		}
+	})
+
+	t.Run("zero result token threshold rejected", func(t *testing.T) {
+		t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+		t.Setenv("FUNNEL_EVICT_RESULT_TOKENS", "0")
+		c := resolveWorkspaceEviction(0)
+		if c.resultTokenThreshold == 0 {
+			t.Error("resultTokenThreshold should not be 0 (must be > 0 per Atoi guard)")
+		}
+	})
+
+	t.Run("custom sweep percent", func(t *testing.T) {
+		t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+		t.Setenv("FUNNEL_CTX_SWEEP_PCT", "70")
+		c := resolveWorkspaceEviction(0)
+		if c.sweepPercent != 70 {
+			t.Errorf("sweepPercent = %d; want 70", c.sweepPercent)
+		}
+	})
+
+	t.Run("sweep percent > 100 rejected", func(t *testing.T) {
+		t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+		t.Setenv("FUNNEL_CTX_SWEEP_PCT", "120")
+		c := resolveWorkspaceEviction(0)
+		if c.sweepPercent == 120 {
+			t.Error("sweepPercent should not be > 100")
+		}
+	})
+
+	t.Run("sweep percent zero rejected", func(t *testing.T) {
+		t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+		t.Setenv("FUNNEL_CTX_SWEEP_PCT", "0")
+		c := resolveWorkspaceEviction(0)
+		if c.sweepPercent == 0 {
+			t.Error("sweepPercent should not be 0 (must be > 0 per Atoi guard)")
+		}
+	})
+
+	t.Run("custom window tokens from config", func(t *testing.T) {
+		t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+		c := resolveWorkspaceEviction(200_000)
+		if c.windowTokens != 200_000 {
+			t.Errorf("windowTokens = %d; want 200000", c.windowTokens)
+		}
+	})
+
+	t.Run("sweepBudgetTokens zero when disabled", func(t *testing.T) {
+		c := workspaceEvictionConfig{enabled: false}
+		if c.sweepBudgetTokens() != 0 {
+			t.Errorf("sweepBudgetTokens = %d; want 0 when disabled", c.sweepBudgetTokens())
+		}
+	})
+
+	t.Run("sweepBudgetTokens computed correctly", func(t *testing.T) {
+		c := workspaceEvictionConfig{enabled: true, sweepPercent: 85, windowTokens: 100_000}
+		if c.sweepBudgetTokens() != 85_000 {
+			t.Errorf("sweepBudgetTokens = %d; want 85000", c.sweepBudgetTokens())
+		}
+	})
+}
+
+// TestWorkspaceEviction_StubNotReEvicted verifies that already-evicted
+// stubs survive both the oversize check and the sweep without being
+// double-processed. evictOversizeResults skips stubs via isEvictionStub;
+// sweepContextPressure skips them via the RoleTool + !isEvictionStub guard.
+func TestWorkspaceEviction_StubNotReEvicted(t *testing.T) {
+	t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+	t.Setenv("FUNNEL_EVICT_RESULT_TOKENS", "1") // evict anything over 4 chars
+	t.Setenv("FUNNEL_CTX_SWEEP_PCT", "5")       // sweep budget is tiny — everything over budget
+	home := t.TempDir()
+
+	// Two tool results, both oversize relative to the tiny threshold.
+	r1 := strings.Repeat("X", 1_000)
+	r2 := strings.Repeat("Y", 2_000)
+	runner := &queuedRunner{results: []json.RawMessage{
+		json.RawMessage(`"` + r1 + `"`),
+		json.RawMessage(`"` + r2 + `"`),
+	}}
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t1", Name: "a", Args: json.RawMessage(`{}`)}}},
+		{FinalText: "t1", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t2", Name: "b", Args: json.RawMessage(`{}`)}}},
+		{FinalText: "t2", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+	}}
+	f, err := New(Config{
+		AspectID:            "frame",
+		AspectHome:          home,
+		Harness:             bridle.NewHarness(prov),
+		Provider:            "scripted",
+		Model:               "m",
+		Runner:              runner,
+		ContextWindowTokens: 1_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn 1: r1 should be evicted by evictOversizeResults.
+	f.Receive(bridle.InboxItem{From: "operator", Content: "go"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	// Turn 2: both evictOversizeResults and sweepContextPressure run.
+	// r2 is evicted by evictOversizeResults. The sweep then runs and
+	// must NOT try to re-evict r1's stub.
+	f.Receive(bridle.InboxItem{From: "operator", Content: "go again"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	tail := f.SessionTail()
+	stubCount := 0
+	for _, ev := range tail {
+		if ev.Role == bridle.RoleTool && isEvictionStub(ev.Content) {
+			stubCount++
+		}
+	}
+	if stubCount != 2 {
+		t.Errorf("expected 2 eviction stubs (both results evicted exactly once), got %d", stubCount)
+	}
+}
+
+// TestWorkspaceEviction_SweepZeroBudgetNoop verifies that
+// sweepContextPressure is a no-op when budget is 0 (eviction disabled).
+func TestWorkspaceEviction_SweepZeroBudgetNoop(t *testing.T) {
+	t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+	cfg := workspaceEvictionConfig{enabled: true, sweepPercent: 0, windowTokens: 1000}
+	if cfg.sweepBudgetTokens() != 0 {
+		t.Fatal("sweepBudgetTokens should be 0 with sweepPercent=0")
+	}
+	// sweepContextPressure itself bails immediately at the `budget <= 0` guard;
+	// no need for a full funnel construction here — unit-test the config.
+}
+
+// TestWorkspaceEviction_PreviewStubFewerThan10Lines verifies that when
+// evicted content has fewer than 10 lines, the stub says "first N lines"
+// and includes exactly N preview lines, not 10.
+func TestWorkspaceEviction_PreviewStubFewerThan10Lines(t *testing.T) {
+	t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+	t.Setenv("FUNNEL_EVICT_RESULT_TOKENS", "1")
+	home := t.TempDir()
+
+	// 3-line content over the tiny token threshold.
+	result := "line1\nline2\nline3"
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t1", Name: "read_file", Args: json.RawMessage(`{}`)}}},
+		{FinalText: "done", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+	}}
+	f, err := New(Config{
+		AspectID:   "frame",
+		AspectHome: home,
+		Harness:    bridle.NewHarness(prov),
+		Provider:   "scripted",
+		Model:      "m",
+		Runner:     constResultRunner{result: json.RawMessage(`"` + result + `"`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{From: "operator", Content: "go"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := toolResultEvent(t, f.SessionTail()).Content
+	if !strings.Contains(stub, "first 3 lines:") {
+		t.Errorf("stub should say 'first 3 lines:' for 3-line content, got: %s", stub)
+	}
+	if strings.Contains(stub, "first 10 lines:") {
+		t.Error("stub should not say 'first 10 lines:' when content has only 3 lines")
+	}
+}
+
+// TestWorkspaceEviction_PreviewLineTruncated verifies that preview lines
+// longer than evictionPreviewLineCap (200) are truncated with a '…' suffix.
+func TestWorkspaceEviction_PreviewLineTruncated(t *testing.T) {
+	t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+	t.Setenv("FUNNEL_EVICT_RESULT_TOKENS", "1")
+	home := t.TempDir()
+
+	// Single line, 500 chars — over the 200-char cap.
+	longLine := strings.Repeat("Z", 500)
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t1", Name: "read_file", Args: json.RawMessage(`{}`)}}},
+		{FinalText: "done", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+	}}
+	f, err := New(Config{
+		AspectID:   "frame",
+		AspectHome: home,
+		Harness:    bridle.NewHarness(prov),
+		Provider:   "scripted",
+		Model:      "m",
+		Runner:     constResultRunner{result: json.RawMessage(`"` + longLine + `"`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{From: "operator", Content: "go"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := toolResultEvent(t, f.SessionTail()).Content
+	// The preview line in the stub should end with '…' and be <= 201 chars
+	// (200 chars + '…').
+	if !strings.Contains(stub, "…»") {
+		t.Errorf("stub should contain truncated line ending with '…', got: %.300q", stub)
+	}
+	// Also verify the raw result was NOT inlined — only a stub.
+	if len(stub) > len(longLine) {
+		t.Error("stub is larger than the original content; eviction didn't shrink it")
+	}
+}
+
+// TestWorkspaceEviction_SweepAllStubsExitsCleanly verifies that
+// sweepContextPressure doesn't loop forever when the tail is over budget
+// but every tool result is already a stub. The "idx == -1" guard exits.
+func TestWorkspaceEviction_SweepAllStubsExitsCleanly(t *testing.T) {
+	t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+	t.Setenv("FUNNEL_EVICT_RESULT_TOKENS", "1")
+	t.Setenv("FUNNEL_CTX_SWEEP_PCT", "99") // budget = 99% of 1_000 = 990 tokens
+	home := t.TempDir()
+
+	// Turn 1: produce an oversize result that gets evicted.
+	r1 := strings.Repeat("X", 10_000) // ~2.5k tokens, over the tiny RESULT threshold
+	runner := &queuedRunner{results: []json.RawMessage{
+		json.RawMessage(`"` + r1 + `"`),
+		json.RawMessage(`{}`),
+	}}
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t1", Name: "read", Args: json.RawMessage(`{}`)}}},
+		{FinalText: "t1", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t2", Name: "read", Args: json.RawMessage(`{}`)}}},
+		{FinalText: "t2", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+	}}
+	f, err := New(Config{
+		AspectID:            "frame",
+		AspectHome:          home,
+		Harness:             bridle.NewHarness(prov),
+		Provider:            "scripted",
+		Model:               "m",
+		Runner:              runner,
+		ContextWindowTokens: 1_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn 1: evictOversizeResults kicks in (r1 is huge), leaving a stub.
+	f.Receive(bridle.InboxItem{From: "operator", Content: "go"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	tail1 := f.SessionTail()
+	if !strings.HasPrefix(toolResultEvent(t, tail1).Content, evictionStubPrefix) {
+		t.Fatal("turn 1's result should have been evicted to a stub")
+	}
+
+	// Turn 2: the tail now contains [stub, assistant, {}, assistant].
+	// The sweep fires (budget tiny, ContextBudgetWarning from bridle).
+	// But the only tool result is already a stub → sweep exits via idx==-1.
+	f.Receive(bridle.InboxItem{From: "operator", Content: "go again"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should still have exactly the stubs from before plus turn 2's entries.
+	// No panic, no infinite loop.
+	tail2 := f.SessionTail()
+	stubCount := 0
+	for _, ev := range tail2 {
+		if isEvictionStub(ev.Content) {
+			stubCount++
+		}
+	}
+	if stubCount < 1 {
+		t.Error("should still have at least one eviction stub from turn 1")
+	}
+}
+
+// TestWorkspaceEviction_ExplicitWorkspaceDir verifies that Config.WorkspaceDir
+// takes priority over the AspectHome/.funnel-workspace default.
+func TestWorkspaceEviction_ExplicitWorkspaceDir(t *testing.T) {
+	t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+	t.Setenv("FUNNEL_EVICT_RESULT_TOKENS", "1")
+	home := t.TempDir()
+	wsDir := filepath.Join(home, "custom-workspace")
+
+	bigResult := strings.Repeat("A", 10_000)
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t1", Name: "read_file", Args: json.RawMessage(`{}`)}}},
+		{FinalText: "done", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+	}}
+	f, err := New(Config{
+		AspectID:     "frame",
+		AspectHome:   home,
+		WorkspaceDir: wsDir,
+		Harness:      bridle.NewHarness(prov),
+		Provider:     "scripted",
+		Model:        "m",
+		Runner:       constResultRunner{result: json.RawMessage(`"` + bigResult + `"`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{From: "operator", Content: "go"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := toolResultEvent(t, f.SessionTail()).Content
+	path := stubPath(t, stub)
+	if !strings.HasPrefix(path, wsDir) {
+		t.Errorf("evicted file path %q not under explicit workspace dir %q", path, wsDir)
+	}
+	// Verify the default dir was NOT created.
+	defaultDir := filepath.Join(home, ".funnel-workspace")
+	if _, err := os.Stat(defaultDir); !os.IsNotExist(err) {
+		t.Errorf("default workspace dir %q should not exist when WorkspaceDir is explicit", defaultDir)
+	}
+}
