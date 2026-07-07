@@ -1509,34 +1509,91 @@ func builderPROpener(log *slog.Logger, repo, ticket, branch string) func() (stri
 // (#413) that the head-branch-only check above missed entirely.
 var prExistsByTicketFn = func(repo, ticket string) (bool, error) {
 	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--state", "open",
-		"--json", "number,headRefName,title").CombinedOutput()
+		"--json", "number,headRefName,title,createdAt").CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("gh pr list (ticket fallback): %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return matchPRByTicket(out, ticket)
+	return matchPRByTicket(out, ticket, provenanceNotBefore)
 }
 
 // prTicketSearchEntry is one row of
-// `gh pr list --json number,headRefName,title`.
+// `gh pr list --json number,headRefName,title,createdAt`.
 type prTicketSearchEntry struct {
-	Number      int    `json:"number"`
-	HeadRefName string `json:"headRefName"`
-	Title       string `json:"title"`
+	Number      int       `json:"number"`
+	HeadRefName string    `json:"headRefName"`
+	Title       string    `json:"title"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// provenanceNotBefore is the ACCEPTANCE-GATE-HARDENING Unit 4 provenance floor
+// for the loose ticket-fallback PR credit. agentfunnel is one-shot per
+// dispatch, so the process start time IS this run's start; a PR credited via
+// the ticket search (not the exact own-branch head match) must have been
+// created at/after this, so a pre-existing or foreign PR that merely mentions
+// the ticket in its title/branch cannot be credited to this run. The exact
+// own-branch head match (prExistsFn) is deliberately NOT time-guarded — it is
+// this ticket's designated branch, and a re-dispatch legitimately inherits it.
+//
+// provenanceGrace slackens the floor by a few minutes so ordinary clock skew
+// between this pod and GitHub can't false-reject a legitimately just-opened
+// PR (the run does real work before opening a PR, so run-start and PR-creation
+// are already well separated; the grace only covers skew for very fast tasks).
+// A genuinely foreign/pre-existing PR is minutes-to-days older than run start,
+// so the grace does not let it through. Swappable in tests.
+const provenanceGrace = 5 * time.Minute
+
+var provenanceNotBefore = time.Now().Add(-provenanceGrace)
+
+// ticketWordMatch reports whether ticket occurs in s as a whole token —
+// bounded by string start/end or a non-alphanumeric byte on each side — so
+// "NET-6" does NOT match inside "NET-66" (the substring bug the raw
+// strings.Contains fallback had, which could credit one ticket's run with
+// another ticket's PR). Ticket IDs and branch names are ASCII (e.g. NET-66,
+// anvil/workers-json-flag); a multibyte title byte adjacent to a hit is >127,
+// hence non-alnum, hence a valid boundary.
+func ticketWordMatch(s, ticket string) bool {
+	if ticket == "" {
+		return false
+	}
+	for i := 0; i+len(ticket) <= len(s); {
+		j := strings.Index(s[i:], ticket)
+		if j < 0 {
+			return false
+		}
+		start := i + j
+		end := start + len(ticket)
+		beforeOK := start == 0 || !isAlnumByte(s[start-1])
+		afterOK := end == len(s) || !isAlnumByte(s[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		i = start + 1
+	}
+	return false
+}
+
+func isAlnumByte(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // matchPRByTicket is the pure decision core of the ticket-search fallback:
-// given the raw JSON of `gh pr list`, reports whether any PR's head branch
-// name or title contains ticket. Pulled out of prExistsByTicketFn so the
-// matching rule is unit-testable without shelling out to gh.
-func matchPRByTicket(out []byte, ticket string) (bool, error) {
+// reports whether any open PR's head branch or title carries ticket as a whole
+// token (ticketWordMatch) AND was created at/after notBefore (Unit 4
+// provenance — never credit a run with a PR opened before it started). Pulled
+// out of prExistsByTicketFn so both rules are unit-testable without gh.
+func matchPRByTicket(out []byte, ticket string, notBefore time.Time) (bool, error) {
 	var prs []prTicketSearchEntry
 	if err := json.Unmarshal(out, &prs); err != nil {
 		return false, fmt.Errorf("gh pr list (ticket fallback): parse: %w", err)
 	}
 	for _, pr := range prs {
-		if strings.Contains(pr.HeadRefName, ticket) || strings.Contains(pr.Title, ticket) {
-			return true, nil
+		if !ticketWordMatch(pr.HeadRefName, ticket) && !ticketWordMatch(pr.Title, ticket) {
+			continue
 		}
+		if pr.CreatedAt.Before(notBefore) {
+			continue // pre-existing/foreign PR — not this run's work
+		}
+		return true, nil
 	}
 	return false, nil
 }
@@ -1617,37 +1674,42 @@ func parsePRDiffStatsHead(out []byte) (prDiffStats, bool, error) {
 
 // prTicketStatsEntry is one row of the ticket-fallback stats query.
 type prTicketStatsEntry struct {
-	HeadRefName  string `json:"headRefName"`
-	Title        string `json:"title"`
-	Additions    int    `json:"additions"`
-	Deletions    int    `json:"deletions"`
-	ChangedFiles int    `json:"changedFiles"`
+	HeadRefName  string    `json:"headRefName"`
+	Title        string    `json:"title"`
+	Additions    int       `json:"additions"`
+	Deletions    int       `json:"deletions"`
+	ChangedFiles int       `json:"changedFiles"`
+	CreatedAt    time.Time `json:"createdAt"`
 }
 
 // prDiffStatsByTicketFn is the diff-footprint parallel of prExistsByTicketFn:
-// searches open PRs for one whose head branch name or title contains ticket
-// and returns its stats. Swappable in tests.
+// searches open PRs for one carrying ticket as a whole token and returns its
+// stats — subject to the same Unit 4 provenance floor. Swappable in tests.
 var prDiffStatsByTicketFn = func(repo, ticket string) (prDiffStats, bool, error) {
 	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--state", "open",
-		"--json", "headRefName,title,additions,deletions,changedFiles").CombinedOutput()
+		"--json", "headRefName,title,additions,deletions,changedFiles,createdAt").CombinedOutput()
 	if err != nil {
 		return prDiffStats{}, false, fmt.Errorf("gh pr list (diff stats, ticket): %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return selectPRDiffStatsByTicket(out, ticket)
+	return selectPRDiffStatsByTicket(out, ticket, provenanceNotBefore)
 }
 
 // selectPRDiffStatsByTicket is the pure decision core of the ticket-fallback
-// stats lookup — same match rule as matchPRByTicket (head branch or title
-// contains ticket), returning the matched PR's diff footprint.
-func selectPRDiffStatsByTicket(out []byte, ticket string) (prDiffStats, bool, error) {
+// stats lookup — same rules as matchPRByTicket (whole-token ticket match AND
+// created at/after notBefore), returning the matched PR's diff footprint.
+func selectPRDiffStatsByTicket(out []byte, ticket string, notBefore time.Time) (prDiffStats, bool, error) {
 	var rows []prTicketStatsEntry
 	if err := json.Unmarshal(out, &rows); err != nil {
 		return prDiffStats{}, false, fmt.Errorf("gh pr list (diff stats, ticket): parse: %w", err)
 	}
 	for _, r := range rows {
-		if strings.Contains(r.HeadRefName, ticket) || strings.Contains(r.Title, ticket) {
-			return prDiffStats{Additions: r.Additions, Deletions: r.Deletions, ChangedFiles: r.ChangedFiles}, true, nil
+		if !ticketWordMatch(r.HeadRefName, ticket) && !ticketWordMatch(r.Title, ticket) {
+			continue
 		}
+		if r.CreatedAt.Before(notBefore) {
+			continue // pre-existing/foreign PR — not this run's work
+		}
+		return prDiffStats{Additions: r.Additions, Deletions: r.Deletions, ChangedFiles: r.ChangedFiles}, true, nil
 	}
 	return prDiffStats{}, false, nil
 }
