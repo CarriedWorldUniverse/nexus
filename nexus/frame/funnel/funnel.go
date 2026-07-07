@@ -1320,6 +1320,13 @@ type deliberateState struct {
 	// exceeded workspaceEviction.sweepBudgetTokens()). commitTurnState
 	// reads it to decide whether to run the §2 context-pressure sweep.
 	sawContextBudgetWarning bool
+	// budgetAssembled is the largest ContextBudgetWarning.Assembled seen
+	// this turn — the estimated size of the WHOLE assembled prompt bridle
+	// measured (system prompt + tool schemas + tail), not just the tail.
+	// The sweep uses it to target the total prompt back under budget
+	// rather than stopping when the tail alone dips under (which leaves
+	// the fixed prompt overhead pushing the total over budget still).
+	budgetAssembled int
 }
 
 // popHeadForTurn pops the next inbox head (FIFO), builds the trigger
@@ -1643,6 +1650,7 @@ func (f *Funnel) runMainTurn(ctx context.Context, st *deliberateState, req bridl
 	}
 	if budgetSink != nil {
 		st.sawContextBudgetWarning = budgetSink.saw.Load()
+		st.budgetAssembled = int(budgetSink.assembled.Load())
 	}
 	// turn.end must fire whether the turn succeeded or errored — the
 	// Lock 5 spec promises every turn.start has a paired turn.end.
@@ -1792,7 +1800,7 @@ func (f *Funnel) commitTurnState(ctx context.Context, st *deliberateState, resul
 	if f.workspaceEviction.enabled {
 		f.evictOversizeResults(len(result.SessionDelta))
 		if st.sawContextBudgetWarning {
-			f.sweepContextPressure()
+			f.sweepContextPressure(st.budgetAssembled)
 		}
 	}
 
@@ -1881,17 +1889,40 @@ func (f *Funnel) evictOversizeResults(newCount int) {
 // once a turn's bridle call has warned that the assembled prompt met
 // workspaceEviction.sweepBudgetTokens() (~85% of the model's window),
 // rewrite tool results to workspace pointers — oldest first — until
-// the tail's estimated token count is back under that same budget. A
+// the WHOLE assembled prompt is estimated back under that budget. A
 // single batched pass per turn (never per-step), called once from
 // commitTurnState after this turn's own append lands.
-func (f *Funnel) sweepContextPressure() {
+//
+// assembled is the ContextBudgetWarning.Assembled bridle reported: the
+// estimated size of the full prompt it measured (system prompt + tool
+// schemas + tail), which is what actually crossed the budget. The tail
+// funnel can shrink is only part of that, so the sweep targets the
+// tail against the budget MINUS the fixed non-tail overhead — otherwise
+// it stops as soon as the tail alone dips under budget while the total
+// prompt is still over by the overhead, and the warning just re-fires
+// next turn. overhead is derived once at sweep entry so the target is
+// self-consistent with the measured over-budget point even if the tail
+// grew between bridle's measurement and this post-turn sweep; it clamps
+// to >=0 so a stale/under-count assembled degrades to the old
+// tail-only behaviour rather than misbehaving. Over-evicting slightly
+// is harmless and lossless (§2: results are re-readable on demand).
+func (f *Funnel) sweepContextPressure(assembled int) {
 	budget := f.workspaceEviction.sweepBudgetTokens()
 	if budget <= 0 {
 		return
 	}
+	f.mu.Lock()
+	tailAtStart := estimateContextTokens(f.sessionTail, nil, "")
+	f.mu.Unlock()
+	overhead := assembled - tailAtStart
+	if overhead < 0 {
+		overhead = 0
+	}
+	// Effective tail budget: shrink the tail until tail+overhead < budget.
+	tailBudget := budget - overhead
 	for {
 		f.mu.Lock()
-		if estimateContextTokens(f.sessionTail, nil, "") < budget {
+		if estimateContextTokens(f.sessionTail, nil, "") < tailBudget {
 			f.mu.Unlock()
 			return
 		}
@@ -2362,13 +2393,24 @@ func (f *Funnel) buildTurnSink(replyTo int64) bridle.EventSink {
 // RunTurn caller; every other event still flows through to inner
 // unchanged.
 type contextBudgetSink struct {
-	inner bridle.EventSink
-	saw   atomic.Bool
+	inner     bridle.EventSink
+	saw       atomic.Bool
+	assembled atomic.Int64 // largest ContextBudgetWarning.Assembled seen
 }
 
 func (s *contextBudgetSink) Emit(ev bridle.Event) {
-	if _, ok := ev.(bridle.ContextBudgetWarning); ok {
+	if w, ok := ev.(bridle.ContextBudgetWarning); ok {
 		s.saw.Store(true)
+		// A turn can warn on more than one internal provider call (a
+		// multi-step tool loop reassembles the prompt each round). Keep
+		// the largest assembled estimate so the sweep targets the worst
+		// over-budget point the turn actually reached.
+		for {
+			cur := s.assembled.Load()
+			if int64(w.Assembled) <= cur || s.assembled.CompareAndSwap(cur, int64(w.Assembled)) {
+				break
+			}
+		}
 	}
 	if s.inner != nil {
 		s.inner.Emit(ev)

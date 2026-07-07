@@ -308,6 +308,86 @@ func TestCommitTurnState_EvictionOrderedBeforeCompaction(t *testing.T) {
 	}
 }
 
+// TestWorkspaceEviction_SweepAccountsForPromptOverhead guards the fix
+// for the trigger/target-budget mismatch: bridle's ContextBudgetWarning
+// fires on the WHOLE assembled prompt (system prompt + tool schemas +
+// tail), but the sweep can only shrink the tail. With a large system
+// prompt, the tail alone can sit UNDER budget while the total prompt is
+// OVER — so a tail-only sweep would evict nothing and the warning would
+// re-fire every turn. The sweep must subtract the fixed non-tail
+// overhead (derived from warning.Assembled) and still evict the oldest
+// result. Here tail ≈ 10k tokens stays under the 17k budget, but a ~10k-
+// token system prompt pushes the assembled prompt over — so exactly the
+// oldest result must be swept, and the newest kept.
+func TestWorkspaceEviction_SweepAccountsForPromptOverhead(t *testing.T) {
+	t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+	home := t.TempDir()
+
+	// ~10k tokens of fixed prompt overhead that the sweep cannot touch.
+	bigSystemPrompt := strings.Repeat("S", 40_000)
+	oldResult := strings.Repeat("B", 20_000) // ~5k tokens — turn 1's result
+	newResult := strings.Repeat("C", 20_000) // ~5k tokens — turn 2's result
+	runner := &queuedRunner{results: []json.RawMessage{
+		json.RawMessage(`"` + oldResult + `"`),
+		json.RawMessage(`"` + newResult + `"`),
+	}}
+	prov := &scriptedProvider{results: []bridle.ProviderResult{
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t1", Name: "read_file", Args: json.RawMessage(`{}`)}}},
+		{FinalText: "turn 1 done", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+		{ToolCalls: []bridle.ToolInvocation{{ID: "t2", Name: "read_file", Args: json.RawMessage(`{}`)}}},
+		{FinalText: "turn 2 done", Usage: bridle.Usage{InputTokens: 10, OutputTokens: 10}},
+	}}
+	f, err := New(Config{
+		AspectID:            "frame",
+		AspectHome:          home,
+		Harness:             bridle.NewHarness(prov),
+		Provider:            "scripted",
+		Model:               "m",
+		SystemPrompt:        bigSystemPrompt,
+		Runner:              runner,
+		ContextWindowTokens: 20_000, // budget = 85% = 17_000 tokens
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.Receive(bridle.InboxItem{From: "operator", Content: "first"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	f.Receive(bridle.InboxItem{From: "operator", Content: "second"})
+	if _, err := f.Deliberate(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity: the tail alone must be UNDER budget — otherwise this test
+	// would pass even with the old tail-only sweep and prove nothing.
+	if tailTokens := estimateContextTokens(f.SessionTail(), nil, ""); tailTokens >= 17_000 {
+		t.Fatalf("test precondition broken: tail alone (%d tokens) already over budget; overhead is what should trip the sweep", tailTokens)
+	}
+
+	var toolEvents []bridle.SessionEvent
+	for _, ev := range f.SessionTail() {
+		if ev.Role == bridle.RoleTool {
+			toolEvents = append(toolEvents, ev)
+		}
+	}
+	if len(toolEvents) != 2 {
+		t.Fatalf("expected 2 tool-result events, got %d", len(toolEvents))
+	}
+	// Oldest must be swept despite the tail alone being under budget —
+	// the prompt overhead is what tripped the warning, and the sweep now
+	// accounts for it (old tail-only sweep would have evicted nothing).
+	if !strings.HasPrefix(toolEvents[0].Content, evictionStubPrefix) {
+		t.Errorf("oldest result should have been swept once overhead is accounted for, got %.80q", toolEvents[0].Content)
+	}
+	// Newest survives: evicting the single oldest already brings the
+	// total under budget, so the batched sweep stops there.
+	if toolEvents[1].Content != string(json.RawMessage(`"`+newResult+`"`)) {
+		t.Errorf("newest result should have survived, got %.80q", toolEvents[1].Content)
+	}
+}
+
 // recordingScriptedProvider is scriptedProvider plus a record of every
 // ProviderRequest it saw, in order — needed to inspect an
 // intermediate call (the compact summarize call) rather than just the
