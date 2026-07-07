@@ -8,7 +8,14 @@ import (
 
 func TestBuilderCompleteCheck(t *testing.T) {
 	orig := prExistsFn
-	defer func() { prExistsFn = orig }()
+	origStats := prDiffStatsFn
+	defer func() { prExistsFn = orig; prDiffStatsFn = origStats }()
+	// Unit 2: the gate now also requires a non-empty diff. Stub the substance
+	// lookup to a substantial PR so the "pr exists" case exercises the stop
+	// path; the no-pr / error cases short-circuit at prExists before this runs.
+	prDiffStatsFn = func(string, string) (prDiffStats, bool, error) {
+		return prDiffStats{Additions: 20, Deletions: 2, ChangedFiles: 2}, true, nil
+	}
 	log := slog.Default()
 
 	cases := []struct {

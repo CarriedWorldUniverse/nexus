@@ -1408,8 +1408,23 @@ func builderPRVerifier(log *slog.Logger, aspect, repo, ticket, branch string) fu
 		}
 		if !ok {
 			log.Info("agentfunnel: no PR found for builder branch", "aspect", aspect, "repo", repo, "branch", head)
+			return false
 		}
-		return ok
+		// ACCEPTANCE-GATE-HARDENING Unit 2: a PR that exists but changes
+		// nothing is not a completed build. Fail-closed on a gh error;
+		// disabled when ACCEPTANCE_MIN_DIFF_LINES=0.
+		floor := minAcceptanceDiffLines()
+		sub, serr := prSubstantial(repo, head, ticket, floor)
+		if serr != nil {
+			log.Warn("agentfunnel: PR substance check errored — treating as not-yet-complete", "aspect", aspect, "err", serr)
+			return false
+		}
+		if !sub {
+			log.Info("agentfunnel: PR exists but diff is empty/below floor — not complete",
+				"aspect", aspect, "repo", repo, "branch", head, "min_diff_lines", floor)
+			return false
+		}
+		return true
 	}
 }
 
@@ -1557,6 +1572,129 @@ func prExists(repo, branch, ticket string) (bool, error) {
 		return true, nil
 	}
 	return ok, err
+}
+
+// --- ACCEPTANCE-GATE-HARDENING Unit 2: objective substance precondition ---
+//
+// prExists proves a PR *exists*; it never inspects what's in it. A builder
+// can satisfy the PR gate with an empty/whitespace PR and a convincing
+// narrative (the judge reads self-reported prose, not the diff). prSubstantial
+// is the objective, pre-judge, fail-closed check that the run's PR actually
+// changes something. It gates the SAME PR prExists credits (own-branch first,
+// then the ticket fallback), so the two agree on which PR they're judging.
+
+// prDiffStats is the changed-line footprint of a PR — the substance signal.
+type prDiffStats struct {
+	Additions    int `json:"additions"`
+	Deletions    int `json:"deletions"`
+	ChangedFiles int `json:"changedFiles"`
+}
+
+// prDiffStatsFn fetches the diff footprint of the open PR on branch's head.
+// found=false means no such PR (distinct from a real PR with a zero diff).
+// Swappable in tests.
+var prDiffStatsFn = func(repo, branch string) (prDiffStats, bool, error) {
+	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open",
+		"--json", "additions,deletions,changedFiles").CombinedOutput()
+	if err != nil {
+		return prDiffStats{}, false, fmt.Errorf("gh pr list (diff stats): %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return parsePRDiffStatsHead(out)
+}
+
+// parsePRDiffStatsHead is the pure core: the first row of a `gh pr list --json
+// additions,deletions,changedFiles` array, or found=false for an empty list.
+func parsePRDiffStatsHead(out []byte) (prDiffStats, bool, error) {
+	var rows []prDiffStats
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return prDiffStats{}, false, fmt.Errorf("gh pr list (diff stats): parse: %w", err)
+	}
+	if len(rows) == 0 {
+		return prDiffStats{}, false, nil
+	}
+	return rows[0], true, nil
+}
+
+// prTicketStatsEntry is one row of the ticket-fallback stats query.
+type prTicketStatsEntry struct {
+	HeadRefName  string `json:"headRefName"`
+	Title        string `json:"title"`
+	Additions    int    `json:"additions"`
+	Deletions    int    `json:"deletions"`
+	ChangedFiles int    `json:"changedFiles"`
+}
+
+// prDiffStatsByTicketFn is the diff-footprint parallel of prExistsByTicketFn:
+// searches open PRs for one whose head branch name or title contains ticket
+// and returns its stats. Swappable in tests.
+var prDiffStatsByTicketFn = func(repo, ticket string) (prDiffStats, bool, error) {
+	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--state", "open",
+		"--json", "headRefName,title,additions,deletions,changedFiles").CombinedOutput()
+	if err != nil {
+		return prDiffStats{}, false, fmt.Errorf("gh pr list (diff stats, ticket): %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return selectPRDiffStatsByTicket(out, ticket)
+}
+
+// selectPRDiffStatsByTicket is the pure decision core of the ticket-fallback
+// stats lookup — same match rule as matchPRByTicket (head branch or title
+// contains ticket), returning the matched PR's diff footprint.
+func selectPRDiffStatsByTicket(out []byte, ticket string) (prDiffStats, bool, error) {
+	var rows []prTicketStatsEntry
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return prDiffStats{}, false, fmt.Errorf("gh pr list (diff stats, ticket): parse: %w", err)
+	}
+	for _, r := range rows {
+		if strings.Contains(r.HeadRefName, ticket) || strings.Contains(r.Title, ticket) {
+			return prDiffStats{Additions: r.Additions, Deletions: r.Deletions, ChangedFiles: r.ChangedFiles}, true, nil
+		}
+	}
+	return prDiffStats{}, false, nil
+}
+
+// minAcceptanceDiffLines is the floor (additions+deletions) a PR's diff must
+// clear to count as substantive. Default 1 — a literally-empty PR fails, any
+// real change passes, so on-by-default can never block legitimate work.
+// ACCEPTANCE_MIN_DIFF_LINES overrides; set it to 0 to DISABLE the substance
+// gate entirely (pure pre-Unit-2 back-compat). A malformed/negative value
+// falls back to the default rather than silently disabling.
+func minAcceptanceDiffLines() int {
+	v := strings.TrimSpace(os.Getenv("ACCEPTANCE_MIN_DIFF_LINES"))
+	if v == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 1
+	}
+	return n
+}
+
+// prSubstantial reports whether the run's PR has a non-empty diff clearing
+// floor — the objective, pre-judge substance precondition (Unit 2).
+// Fail-closed: a gh error returns (false, err). Resolves the same
+// own-branch-then-ticket PR that prExists credits. floor<=0 disables the
+// check (returns true — back-compat). found=false (no PR to measure) returns
+// (false, nil): prExists already reports not-verified in that case; this just
+// agrees without inventing an error.
+func prSubstantial(repo, branch, ticket string, floor int) (bool, error) {
+	if floor <= 0 {
+		return true, nil
+	}
+	stats, found, err := prDiffStatsFn(repo, branch)
+	if err != nil {
+		return false, err
+	}
+	if !found && strings.TrimSpace(ticket) != "" {
+		stats, found, err = prDiffStatsByTicketFn(repo, ticket)
+		if err != nil {
+			return false, err
+		}
+	}
+	if !found {
+		return false, nil
+	}
+	return stats.ChangedFiles >= 1 && (stats.Additions+stats.Deletions) >= floor, nil
 }
 
 func builderReplyTopic(builderMode bool, topic string) string {
