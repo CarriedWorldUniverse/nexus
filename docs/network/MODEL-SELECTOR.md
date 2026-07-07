@@ -13,7 +13,7 @@ The point the grid proves: **capability ≠ sticker price, and "newer/bigger" �
 
 ## The selector (numeric, 1 = best on that axis)
 
-Scales are 1–5, lower = better. `Cap` = can it clear **complex**. `Tok` = output-token cost bucket (the real cost driver — the fleet is output-bound). `$` = marginal dollar cost. `Sov` = sovereignty (local/owned). `Eff` = effort-dial control. `Lat` = wall-clock. `Wire` = wired & proven.
+Scales are 1–5, lower = better. `Cap` = can it clear **complex**. `Tok` = output-token cost bucket (the real cost driver — the fleet is output-bound). `$` = marginal dollar cost. `Sov` = sovereignty (local/owned). `Eff` = effort-dial control (**1 = graded low/med/high slider, 2 = binary thinking on/off, 3 = no knob / fixed**). `Lat` = wall-clock. `Wire` = wired & proven.
 
 | brain | Cap | Tok | $ | Sov | Eff | Lat | Wire | cost class |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|---|
@@ -29,7 +29,7 @@ Scales are 1–5, lower = better. `Cap` = can it clear **complex**. `Tok` = outp
 | **deepseek-v4-pro** | 4 | 5 | 3 | 3 | 3 | 4 | 2 | metered-prepaid |
 | **deepseek-v4-flash** | 2? | 4? | 3 | 3 | 3 | 4 | 3 | metered-prepaid |
 | **deepseek-chat** | 4 | 4 | 3 | 3 | 3 | 2 | 1 | metered-prepaid |
-| **glm-4.6** | 5 | — | 2 | 3 | 3 | 4 | 2 | subscription |
+| **glm-4.6** | 5 | — | 2 | 3 | 2 | 4 | 2 | subscription |
 
 \* `ornith` Cap=5 is **for the complex tier only** — locally it fails at *building* hard things. It is Cap=1 for classification / judge / simple: bounded, single-turn, structured-output work is its sweet spot (drives the classifier + the acceptance judge). Don't read Cap=5 as "weak model" — read it as "wrong tool for complex builds."
 
@@ -59,7 +59,7 @@ Task E1 across every cell: *implement funnel-v2 §2 workspace eviction* (a real,
 | glm-4.6 | ✗ stalled | 4,772 (partial) | 1464 | thin PR #436 then idle-timeout; not a complex brain |
 
 ### What the numbers say
-1. **Effort is a real, monotonic cost dial.** sonnet-5: 11.7k → 18.7k → 36.7k for low → medium → high. The `--effort` knob (#425) works and *is* the primary cost lever within a brain.
+1. **Effort is a real, monotonic cost dial — but a Claude-only one.** sonnet-5: 11.7k → 18.7k → 36.7k for low → medium → high. The `--effort` knob (#425) works and *is* the primary cost lever within a brain. **Only Claude has a graded slider.** DeepSeek exposes no effort/budget parameter (reasoner reasons at a fixed depth; chat doesn't reason) — one fixed cost point, no curve. GLM and Ornith have at most a binary thinking on/off, not low/med/high. Consequently the `ORCHESTRATOR_ROLE_BRAINS` effort field is a **no-op (logged) on the `openai`/other provider shapes** — a `deepseek:...:low` brain silently ignores it — which is why the effort sweep is Claude-only and the deepseek/glm cells ran without an effort suffix. **Router implication:** the classifier (`AUTO-ROUTING-DESIGN.md` Unit 1) should emit `effort=""` for any non-Claude brain; effort is a lever it can only pull on the Claude rungs of the ladder.
 2. **Operator hypothesis confirmed locally:** sonnet-5 @high (36.7k) costs **more** output than opus-4.8 @low (28.4k). High-reasoning Sonnet is not the cheap option people assume.
 3. **Cheapest-that-clears complex = a low-effort Claude** (sonnet-4.6 @low ≈ sonnet-5 @low, ~11.5k) — not the biggest model, not the metered one.
 4. **DeepSeek reasoners clear but at ~8–13× the tokens**; metered-pennies makes that *affordable* but slow (1284s) and un-sovereign. v4-pro (newest) did **not** clear — "newer" bought nothing here.
@@ -69,6 +69,7 @@ Task E1 across every cell: *implement funnel-v2 §2 workspace eviction* (a real,
 - **n=1 per cell.** The `opus-4.8 @low (28.4k) > opus-4.8 default (19.9k)` inversion is almost certainly run-to-run variance, not "low effort costs more." Trust **buckets and within-brain trends** (the clean sonnet-5 effort ladder), not exact single values.
 - **Task-shape confound.** E1 implements a section that *already exists on main* (#422). A low-effort model can verify + open a thin PR and pass the gate cheaply, which flatters low-effort token counts. The transferable signal is the **relative ordering**, not the absolute floor.
 - The two deepseek-v4 cells and glm are messy (scraper misses, stalls) — treat their rows as directional, not precise.
+- **Harness asymmetry — the big confound for the deepseek/glm rows.** Claude brains run through the **claude-code CLI**: a purpose-built agent harness with its own tool loop, sandbox, and `--effort`. DeepSeek and GLM run as raw `openai`-shape chat completions driven by *our* funnel/bridle native-API loop. So a block/stall on those brains may reflect **harness fit, not raw capability**: (a) the newest deepseek-V4 models split output into `reasoning_content` with empty `content` (seen in smoke tests) — our funnel's response parsing may mishandle that; (b) glm-4.6 stalled at 4.7k tokens then idle-timed-out, which reads like a tool-call-format / streaming integration issue, not "can't do it." That deepseek-**reasoner v3** *did* clear (met=true) through the same loop shows the path works when the model's output shape matches our parser. **Before ranking the Chinese models as less capable, the fair test is to fix the harness fit (reasoning_content handling, tool-call format, idle-timeout) and re-run** — the current rows likely understate them.
 
 ## Capability ordering → the escalation ladder
 
