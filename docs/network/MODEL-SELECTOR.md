@@ -25,11 +25,14 @@ Scales are 1–5, lower = better. `Cap` = can it clear **complex**. `Tok` = outp
 | **opus-4.8 @low** | 1 | 3 | 2 | 3 | 1 | 2 | 1 | subscription |
 | **sonnet-5 @high** | 1 | 3 | 2 | 3 | 1 | 3 | 1 | subscription |
 | **sonnet-4.6** (default) | 1 | 4 | 2 | 3 | 1 | 3 | 1 | subscription |
-| **deepseek-reasoner** (v3) | 2 | 5 | 3 | 3 | 3 | 4 | 1 | metered-prepaid |
-| **deepseek-v4-pro** | 4 | 5 | 3 | 3 | 3 | 4 | 2 | metered-prepaid |
-| **deepseek-v4-flash** | 2? | 4? | 3 | 3 | 3 | 4 | 3 | metered-prepaid |
-| **deepseek-chat** | 4 | 4 | 3 | 3 | 3 | 2 | 1 | metered-prepaid |
+| **deepseek-v4-flash** · thinking (ran as `deepseek-reasoner`†) | 2 | 5 | 3 | 3 | 2 | 4 | 1 | metered-prepaid |
+| **deepseek-v4-flash** · non-thinking (ran as `deepseek-chat`†) | 5 | 4 | 3 | 3 | 2 | 2 | 1 | metered-prepaid |
+| **deepseek-v4-pro** (thinking not pinned ‡) | 3? | 5 | 3 | 3 | 2 | 4 | 2 | metered-prepaid |
 | **glm-4.6** | 5 | — | 2 | 3 | 2 | 4 | 2 | subscription |
+
+† **DeepSeek naming (verified against api-docs.deepseek.com, 2026-07-07):** `deepseek-reasoner` and `deepseek-chat` are **deprecating aliases (removed 2026-07-24)** — `deepseek-reasoner` = **deepseek-v4-flash in thinking mode**, `deepseek-chat` = **deepseek-v4-flash in non-thinking mode**. They were never V3. So two of the grid rows are the *same* v4-flash model at opposite thinking settings: thinking **clears** complex (153k tokens), non-thinking **blocks** it. The decisive DeepSeek variable is the (binary) **thinking toggle**, not the model — hence `Eff=2` (binary), same class as GLM/Ornith. **Action:** migrate the litellm routes off the deprecating names to explicit `deepseek-v4-flash`/`deepseek-v4-pro` with thinking mode pinned per route, before 2026-07-24.
+
+‡ `deepseek-v4-pro` ran via the explicit name with **thinking mode not pinned** and blocked at 155k output tokens (that high a count suggests it *was* reasoning, so the block is likely the `reasoning_content` parser confound below or a genuine miss — not proven either way). Cap=3? is provisional pending a clean re-run with thinking explicitly on.
 
 \* `ornith` Cap=5 is **for the complex tier only** — locally it fails at *building* hard things. It is Cap=1 for classification / judge / simple: bounded, single-turn, structured-output work is its sweet spot (drives the classifier + the acceptance judge). Don't read Cap=5 as "weak model" — read it as "wrong tool for complex builds."
 
@@ -52,18 +55,18 @@ Task E1 across every cell: *implement funnel-v2 §2 workspace eviction* (a real,
 | opus-4.8 @low | ✓ | 28,432 | 531 | > opus-default → see variance caveat |
 | sonnet-5 @high | ✓ | **36,659** | 652 | least token-efficient that clears |
 | sonnet-4.6 (default) | ✓ | 54,747 | 1103 | |
-| deepseek-reasoner (v3) | ✓ | 153,307 | 1284 | clears at ~13× the low-Claude token cost |
-| deepseek-v4-pro | ✗ blocked | 155,110 | 1494 | newer ≠ better: did NOT clear |
-| deepseek-v4-flash | ~ | (uncaptured) | 1825 | opened mergeable PR #430; verdict not scraped |
-| deepseek-chat | ✗ blocked | 60,800 | 532 | |
+| v4-flash · thinking (`deepseek-reasoner`†) | ✓ | 153,307 | 1284 | clears at ~13× the low-Claude token cost |
+| v4-flash · non-thinking (`deepseek-chat`†) | ✗ blocked | 60,800 | 532 | same model, thinking OFF → can't clear complex |
+| deepseek-v4-pro (thinking not pinned ‡) | ✗ blocked | 155,110 | 1494 | 155k out (was reasoning) yet blocked — re-run with thinking pinned |
+| deepseek-v4-flash (explicit, mode unknown) | ~ | (uncaptured) | 1825 | opened mergeable PR #430; verdict not scraped |
 | glm-4.6 | ✗ stalled | 4,772 (partial) | 1464 | thin PR #436 then idle-timeout; not a complex brain |
 
 ### What the numbers say
-1. **Effort is a real, monotonic cost dial — but a Claude-only one.** sonnet-5: 11.7k → 18.7k → 36.7k for low → medium → high. The `--effort` knob (#425) works and *is* the primary cost lever within a brain. **Only Claude has a graded slider.** DeepSeek exposes no effort/budget parameter (reasoner reasons at a fixed depth; chat doesn't reason) — one fixed cost point, no curve. GLM and Ornith have at most a binary thinking on/off, not low/med/high. Consequently the `ORCHESTRATOR_ROLE_BRAINS` effort field is a **no-op (logged) on the `openai`/other provider shapes** — a `deepseek:...:low` brain silently ignores it — which is why the effort sweep is Claude-only and the deepseek/glm cells ran without an effort suffix. **Router implication:** the classifier (`AUTO-ROUTING-DESIGN.md` Unit 1) should emit `effort=""` for any non-Claude brain; effort is a lever it can only pull on the Claude rungs of the ladder.
+1. **Effort is a real, monotonic cost dial — but a Claude-only one.** sonnet-5: 11.7k → 18.7k → 36.7k for low → medium → high. The `--effort` knob (#425) works and *is* the primary cost lever within a brain. **Only Claude has a graded slider.** DeepSeek V4, GLM, and Ornith all have at most a **binary thinking on/off** (for DeepSeek that toggle is exactly what the deprecating `reasoner`/`chat` aliases encode — thinking vs non-thinking on the same v4-flash) — on/off, not low/med/high, so no cost *curve*, just two points. Consequently the `ORCHESTRATOR_ROLE_BRAINS` effort field is a **no-op (logged) on the `openai`/other provider shapes** — a `deepseek:...:low` brain silently ignores it — which is why the effort sweep is Claude-only and the deepseek/glm cells ran without an effort suffix. **Router implication:** the classifier (`AUTO-ROUTING-DESIGN.md` Unit 1) should emit `effort=""` for any non-Claude brain; effort is a lever it can only pull on the Claude rungs of the ladder.
 2. **Operator hypothesis confirmed locally:** sonnet-5 @high (36.7k) costs **more** output than opus-4.8 @low (28.4k). High-reasoning Sonnet is not the cheap option people assume.
 3. **Cheapest-that-clears complex = a low-effort Claude** (sonnet-4.6 @low ≈ sonnet-5 @low, ~11.5k) — not the biggest model, not the metered one.
-4. **DeepSeek reasoners clear but at ~8–13× the tokens**; metered-pennies makes that *affordable* but slow (1284s) and un-sovereign. v4-pro (newest) did **not** clear — "newer" bought nothing here.
-5. **GLM-4.6 can't hold the complex tier** (stalled). Keep it for simple/cheap roles, not complex builds.
+4. **DeepSeek v4-flash clears complex — but only in thinking mode**, at ~13× the low-Claude tokens (metered-pennies makes that *affordable* but slow, 1284s, and un-sovereign). The *same* v4-flash in non-thinking mode blocks. So the DeepSeek lesson is **"turn thinking on," not "pick a bigger model"** — v4-pro (thinking not pinned) blocked at 155k, inconclusively. Migrate off the deprecating `reasoner`/`chat` names (gone 2026-07-24) with thinking pinned, and re-run v4-pro before ranking it.
+5. **GLM-4.6 can't hold the complex tier** on this run (stalled) — but see the harness-asymmetry caveat: it ran through our generic loop, not a native CLI. Keep it for simple/cheap roles until a clean re-run says otherwise.
 
 ### Caveats (read before trusting a single cell)
 - **n=1 per cell.** The `opus-4.8 @low (28.4k) > opus-4.8 default (19.9k)` inversion is almost certainly run-to-run variance, not "low effort costs more." Trust **buckets and within-brain trends** (the clean sonnet-5 effort ladder), not exact single values.
@@ -76,13 +79,14 @@ Task E1 across every cell: *implement funnel-v2 §2 workspace eviction* (a real,
 For `AUTO-ROUTING-DESIGN.md` Unit 2 (escalate-on-block), cheapest→dearest among brains that *can* clear complex:
 
 ```
-ornith(simple only) → sonnet-4.6:low → sonnet-5:low → sonnet-5:medium → opus-4.8:low → sonnet-5:high → opus-4.8:medium → deepseek-reasoner(metered fallback)
+ornith(simple only) → sonnet-4.6:low → sonnet-5:low → sonnet-5:medium → opus-4.8:low → sonnet-5:high → opus-4.8:medium → deepseek-v4-flash:thinking (metered fallback)
 ```
 
 - **Default complex brain:** `sonnet-5:low` (or `sonnet-4.6:low`) — cheapest-that-clears, fast.
 - **On honest block:** climb the ladder (bounded, cap 2 rungs per `AUTO-ROUTING-DESIGN.md`).
 - **Sovereignty-first runs:** try `ornith` for anything simple/bounded; only leave the GB10 when capability demands.
-- **Excluded from the complex ladder:** glm-4.6 (stalls), deepseek-v4-pro (blocked), deepseek-chat (blocked). Keep GLM/deepseek-chat for the *simple* tier where cheap-and-good-enough wins.
+- **Metered fallback = v4-flash with thinking ON** (the route that cleared) — NOT the deprecating `deepseek-reasoner` alias (gone 2026-07-24), and NOT non-thinking mode (which blocks).
+- **Excluded from the complex ladder:** glm-4.6 (stalled — pending clean re-run), deepseek-v4 non-thinking (blocks), deepseek-v4-pro (blocked, inconclusive — re-run with thinking pinned before ranking). Use v4-flash non-thinking / glm only on the *simple* tier where cheap-and-good-enough wins.
 
 ## Pipeline
 grid → **this doc** → classifier system-prompt (Unit 1 rubric) + escalation ladder (Unit 2). When a cell is re-measured, update the table here; the router picks it up with no code change.
