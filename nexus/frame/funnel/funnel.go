@@ -1877,6 +1877,13 @@ func (f *Funnel) evictOversizeResults(newCount int) {
 	}
 }
 
+// sweepMaxIterations is a defensive cap on the sweepContextPressure
+// loop — if we haven't brought the tail below budget after this many
+// eviction writes, stop and let compaction (or the next turn's sweep)
+// pick it up. Prevents a pathological tail from burning unbounded CPU
+// and disk I/O on a single sweep.
+const sweepMaxIterations = 50
+
 // sweepContextPressure implements funnel v2 §2's second eviction rule:
 // once a turn's bridle call has warned that the assembled prompt met
 // workspaceEviction.sweepBudgetTokens() (~85% of the model's window),
@@ -1889,11 +1896,18 @@ func (f *Funnel) sweepContextPressure() {
 	if budget <= 0 {
 		return
 	}
+	tokensBefore := func() int {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return estimateContextTokens(f.sessionTail, nil, "")
+	}()
+	var evicted int
 	for {
 		f.mu.Lock()
-		if estimateContextTokens(f.sessionTail, nil, "") < budget {
+		est := estimateContextTokens(f.sessionTail, nil, "")
+		if est < budget {
 			f.mu.Unlock()
-			return
+			break
 		}
 		idx, content := -1, ""
 		for i := range f.sessionTail {
@@ -1909,6 +1923,11 @@ func (f *Funnel) sweepContextPressure() {
 			// tool results). Give up rather than spin — compaction is
 			// the backstop for a tail that's oversized for other
 			// reasons (long assistant turns, e.g.).
+			f.log.Info("funnel: context-pressure sweep gave up (no evictable tool results remain)",
+				"aspect", f.cfg.AspectID,
+				"evicted", evicted,
+				"budget", budget,
+				"tail_estimated_tokens", est)
 			return
 		}
 		if !f.evictSessionTailEntry(idx, content) {
@@ -1916,6 +1935,29 @@ func (f *Funnel) sweepContextPressure() {
 			// retrying the same failure.
 			return
 		}
+		evicted++
+		if evicted >= sweepMaxIterations {
+			f.mu.Lock()
+			after := estimateContextTokens(f.sessionTail, nil, "")
+			f.mu.Unlock()
+			f.log.Info("funnel: context-pressure sweep hit iteration cap",
+				"aspect", f.cfg.AspectID,
+				"evicted", evicted,
+				"budget", budget,
+				"tail_estimated_tokens", after)
+			return
+		}
+	}
+	if evicted > 0 {
+		f.mu.Lock()
+		tokensAfter := estimateContextTokens(f.sessionTail, nil, "")
+		f.mu.Unlock()
+		f.log.Info("funnel: context-pressure sweep complete",
+			"aspect", f.cfg.AspectID,
+			"evicted", evicted,
+			"tail_tokens_before", tokensBefore,
+			"tail_tokens_after", tokensAfter,
+			"budget", budget)
 	}
 }
 
