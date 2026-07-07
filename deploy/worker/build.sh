@@ -15,7 +15,7 @@ CTX="$(mktemp -d)"
 
 echo "==> building nexus binaries from ${NEXUS_SRC}"
 ( cd "$NEXUS_SRC"
-  for b in agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp; do
+  for b in agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp nexus-vision-mcp; do
     go build -o "${CTX}/${b}" "./runtime/cmd/${b}"
   done )
 

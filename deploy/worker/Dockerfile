@@ -9,7 +9,7 @@
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl gnupg xz-utils \
-      ripgrep jq fd-find tree make \
+      ripgrep jq fd-find tree make ffmpeg \
    && rm -rf /var/lib/apt/lists/*
 
 # Go toolchain — builders compile Go work.
@@ -49,7 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends nano && rm -rf 
 # Prebuilt nexus binaries + cw (built on the host by build.sh, copied into
 # the context). agentfunnel runs the builder; the nexus-*-mcp servers + cw
 # are the aspect's tool surface.
-COPY agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp cw /usr/local/bin/
+COPY agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp nexus-vision-mcp cw /usr/local/bin/
 
 # Provider CLI: codex (standalone, installed via npm — fetches the linux
 # binary into the standalone layout).
