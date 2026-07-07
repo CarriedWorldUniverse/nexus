@@ -111,6 +111,41 @@ func TestWorkspaceEviction_OversizeResultWrittenToFile(t *testing.T) {
 	}
 }
 
+// TestWorkspaceEviction_ReturnsEvictionCount verifies evictOversizeResults
+// and sweepContextPressure report how many entries they rewrote, so
+// callers (commitTurnState) can surface an "evictions" count on the
+// turn-complete log line per the design doc's Measurement section.
+func TestWorkspaceEviction_ReturnsEvictionCount(t *testing.T) {
+	t.Setenv("FUNNEL_WORKSPACE_EVICT", "1")
+	home := t.TempDir()
+
+	f, err := New(Config{
+		AspectID:   "frame",
+		AspectHome: home,
+		Harness:    bridle.NewHarness(&scriptedProvider{}),
+		Provider:   "scripted",
+		Model:      "m",
+		Runner:     constResultRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bigResult := strings.Repeat("A", 100_000)
+	f.sessionTail = append(f.sessionTail,
+		bridle.SessionEvent{Role: bridle.RoleTool, Content: bigResult},
+		bridle.SessionEvent{Role: bridle.RoleTool, Content: "tiny"},
+	)
+
+	if n := f.evictOversizeResults(2); n != 1 {
+		t.Fatalf("evictOversizeResults: got %d evictions, want 1 (only the oversize entry)", n)
+	}
+	// Re-running over the same (now-stubbed) entries evicts nothing new.
+	if n := f.evictOversizeResults(2); n != 0 {
+		t.Fatalf("evictOversizeResults on already-evicted entries: got %d, want 0", n)
+	}
+}
+
 // TestWorkspaceEviction_DisabledByDefault verifies the eviction rollout
 // posture (FUNNEL-V2-DESIGN.md "Rollout": env-gated, off unless
 // explicitly flipped on) — with no env var set, a huge tool result

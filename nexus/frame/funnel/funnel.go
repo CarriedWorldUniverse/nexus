@@ -1320,6 +1320,13 @@ type deliberateState struct {
 	// exceeded workspaceEviction.sweepBudgetTokens()). commitTurnState
 	// reads it to decide whether to run the §2 context-pressure sweep.
 	sawContextBudgetWarning bool
+
+	// evictionsThisTurn counts sessionTail entries evictOversizeResults
+	// and sweepContextPressure rewrote to workspace pointers this turn
+	// (funnel v2 §2). dispatchReturn surfaces it on the turn-complete
+	// log line per the design doc's Measurement section ("Add a
+	// one-line per-run summary ... evictions").
+	evictionsThisTurn int
 }
 
 // popHeadForTurn pops the next inbox head (FIFO), builds the trigger
@@ -1790,9 +1797,9 @@ func (f *Funnel) commitTurnState(ctx context.Context, st *deliberateState, resul
 	// doc; Deliberate's single-caller guard is what makes this
 	// ordering safe without extra locking here).
 	if f.workspaceEviction.enabled {
-		f.evictOversizeResults(len(result.SessionDelta))
+		st.evictionsThisTurn += f.evictOversizeResults(len(result.SessionDelta))
 		if st.sawContextBudgetWarning {
-			f.sweepContextPressure()
+			st.evictionsThisTurn += f.sweepContextPressure()
 		}
 	}
 
@@ -1841,9 +1848,9 @@ func (f *Funnel) commitTurnState(ctx context.Context, st *deliberateState, resul
 // turn's commitTurnState just appended (result.SessionDelta) — a
 // single batched pass per turn, never per tool-call step, per §1's
 // prefix-cache-safety requirement.
-func (f *Funnel) evictOversizeResults(newCount int) {
+func (f *Funnel) evictOversizeResults(newCount int) int {
 	if newCount <= 0 {
-		return
+		return 0
 	}
 	type candidate struct {
 		idx     int
@@ -1872,9 +1879,13 @@ func (f *Funnel) evictOversizeResults(newCount int) {
 	}
 	f.mu.Unlock()
 
+	evicted := 0
 	for _, c := range candidates {
-		f.evictSessionTailEntry(c.idx, c.content)
+		if f.evictSessionTailEntry(c.idx, c.content) {
+			evicted++
+		}
 	}
+	return evicted
 }
 
 // sweepContextPressure implements funnel v2 §2's second eviction rule:
@@ -1884,16 +1895,17 @@ func (f *Funnel) evictOversizeResults(newCount int) {
 // the tail's estimated token count is back under that same budget. A
 // single batched pass per turn (never per-step), called once from
 // commitTurnState after this turn's own append lands.
-func (f *Funnel) sweepContextPressure() {
+func (f *Funnel) sweepContextPressure() int {
 	budget := f.workspaceEviction.sweepBudgetTokens()
 	if budget <= 0 {
-		return
+		return 0
 	}
+	evicted := 0
 	for {
 		f.mu.Lock()
 		if estimateContextTokens(f.sessionTail, nil, "") < budget {
 			f.mu.Unlock()
-			return
+			return evicted
 		}
 		idx, content := -1, ""
 		for i := range f.sessionTail {
@@ -1909,13 +1921,14 @@ func (f *Funnel) sweepContextPressure() {
 			// tool results). Give up rather than spin — compaction is
 			// the backstop for a tail that's oversized for other
 			// reasons (long assistant turns, e.g.).
-			return
+			return evicted
 		}
 		if !f.evictSessionTailEntry(idx, content) {
 			// Write failed (already logged); don't loop forever
 			// retrying the same failure.
-			return
+			return evicted
 		}
+		evicted++
 	}
 }
 
@@ -2095,6 +2108,7 @@ func (f *Funnel) dispatchReturn(ctx context.Context, st *deliberateState, result
 		"cache_read", result.Usage.CacheReadInputTokens,
 		"cache_create", result.Usage.CacheCreationInputTokens,
 		"cumulative", f.cumulativeTokens,
+		"evictions", st.evictionsThisTurn,
 		"stop_reason", result.StopReason,
 		"filter_post", decision.ShouldPost,
 		"filter_reason", decision.Reason)
