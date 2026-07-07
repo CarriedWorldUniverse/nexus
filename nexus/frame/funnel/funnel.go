@@ -766,6 +766,17 @@ type Funnel struct {
 	// guarded by mu — atomic is cheaper than taking the funnel lock
 	// just to bump a counter.
 	evictionSeq atomic.Int64
+
+	// evictionRunToken namespaces workspace filenames to this process
+	// instance. workspaceDir persists across restarts (it's keyed on
+	// AspectHome, not a per-run scratch dir), but evictionSeq always
+	// restarts at 0 — without this token a restart would silently
+	// overwrite a prior run's tool-result-000001.txt and permanently
+	// lose content the design doc promises stays recoverable
+	// ("eviction is lossless, just deferred", FUNNEL-V2-DESIGN.md §2).
+	// Resolved once in New() from the process start time, so every
+	// process instance gets a distinct namespace even if PIDs recycle.
+	evictionRunToken string
 }
 
 // compactionFailureLimit caps how many consecutive compact() errors
@@ -874,6 +885,7 @@ func New(cfg Config) (*Funnel, error) {
 		sessionHandle:     resolver.GlobalHandle(),
 		seenMsgIDs:        make(map[int64]struct{}),
 		workspaceEviction: resolveWorkspaceEviction(cfg.ContextWindowTokens),
+		evictionRunToken:  strconv.FormatInt(time.Now().UnixNano(), 36),
 	}
 	// Hydrate the seen-set from disk if a persistence file is configured.
 	// Best-effort: parse failure logs + continues with an empty set
@@ -1955,7 +1967,7 @@ func (f *Funnel) writeEvictedResult(content string) (string, error) {
 		return "", fmt.Errorf("funnel: workspace mkdir %s: %w", dir, err)
 	}
 	seq := f.evictionSeq.Add(1)
-	path := filepath.Join(dir, fmt.Sprintf("tool-result-%06d.txt", seq))
+	path := filepath.Join(dir, fmt.Sprintf("tool-result-%s-%06d.txt", f.evictionRunToken, seq))
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return "", fmt.Errorf("funnel: workspace write %s: %w", path, err)
 	}
