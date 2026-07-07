@@ -68,6 +68,25 @@ func AugmentOutputWithDiff(report, diff string) string {
 	return report + "\n\n" + acceptanceDiffHeader + "\n" + diff
 }
 
+// acceptanceToolsHeader delimits the tool-provenance section that
+// AppendToolProvenance adds and acceptanceJudgePrompt tells the judge to check
+// claimed results against. The two MUST agree on this exact string.
+const acceptanceToolsHeader = "=== TOOLS INVOKED THIS RUN ==="
+
+// AppendToolProvenance adds the run-level list of tools the agent actually
+// invoked, so the judge can catch a fabricated artifact — one that CLAIMS a
+// result "produced by" a tool/command that never ran (the vision smoke's
+// false pass: a file asserting a read_image result when read_image was never
+// available). Empty tools = no provenance data captured → append nothing, so
+// the judge falls back to prior behavior (fail-open: never a false block on a
+// run whose tool calls we couldn't observe).
+func AppendToolProvenance(input string, tools []string) string {
+	if len(tools) == 0 {
+		return input
+	}
+	return input + "\n\n" + acceptanceToolsHeader + "\n" + strings.Join(tools, ", ")
+}
+
 // acceptanceJudgePrompt instructs the cheap model to verify — skeptically —
 // a builder's completion claim against the work item's acceptance criteria.
 // Reply format is a single JSON object: {"met": bool, "reason": "..."}.
@@ -84,6 +103,8 @@ Respond with ONLY valid JSON (no markdown, no explanation):
 Be skeptical of the agent's own self-report — it may be inaccurate, incomplete, or confabulated (an agent has been observed to claim success in vivid detail without ever producing the required output).
 
 If the input contains a section headed "=== ACTUAL PR DIFF (ground truth) ===", that unified diff is AUTHORITATIVE — judge the acceptance criteria against the DIFF, treating the agent's narrative above it as context only. A change the criteria require MUST actually appear in the diff; if it does not, "met" MUST be false, no matter what the narrative claims. If NO such diff section is present, judge against the agent's reported output as below.
+
+PROVENANCE — guard against fabricated artifacts: if the input contains a section headed "=== TOOLS INVOKED THIS RUN ===", it lists EVERY tool the agent actually called. When the criteria require that a result be produced BY a specific tool, command, or computation (e.g. "the output of read_image", "the value returned by X", "passing tests"), that tool/command MUST appear in this list. If the artifact merely ASSERTS such a result (a file or message stating the answer) but the required tool is NOT in the list, the result was fabricated — "met" MUST be false, however plausible the artifact looks. A bare claim of a computed/tool-produced result, with no trace that the tool ran, is never sufficient. (Tool names may be prefixed, e.g. "mcp__nexus-vision__read_image" satisfies a "read_image" requirement.)
 
 Judge ONLY against the acceptance criteria provided and the evidence (diff when present, else the reported output):
 

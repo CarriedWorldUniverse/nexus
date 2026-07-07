@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -290,8 +291,9 @@ type builderRealOutputTracker struct {
 	next        funnel.ObservabilityHook
 	mu          sync.Mutex
 	text        strings.Builder
-	toolNames   map[string]string // ToolCallStart.ID -> Name, for labeling results
-	toolResults string            // capped, tail-kept accumulation of tool results this turn
+	toolNames   map[string]string   // ToolCallStart.ID -> Name, for labeling results (per turn)
+	toolResults string              // capped, tail-kept accumulation of tool results this turn
+	runTools    map[string]struct{} // RUN-level set of every tool name invoked (NOT reset per turn)
 }
 
 func (h *builderRealOutputTracker) BeginTurn(turnID, label, model, provider string, triggerMsg int64) {
@@ -317,6 +319,16 @@ func (h *builderRealOutputTracker) OnBridleEvent(ev bridle.Event) {
 			h.toolNames = make(map[string]string)
 		}
 		h.toolNames[e.ID] = e.Name
+		// Run-level accumulation (survives BeginTurn resets) — the
+		// provenance signal for the acceptance judge: which tools the agent
+		// ACTUALLY invoked across the whole run, so a claimed
+		// "produced by tool X" artifact can be checked against reality.
+		if e.Name != "" {
+			if h.runTools == nil {
+				h.runTools = make(map[string]struct{})
+			}
+			h.runTools[e.Name] = struct{}{}
+		}
 		h.mu.Unlock()
 	case bridle.ToolCallResult:
 		h.mu.Lock()
@@ -373,6 +385,24 @@ func (h *builderRealOutputTracker) toolResultsSnapshot() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.toolResults
+}
+
+// invokedTools returns the sorted set of every tool name the agent invoked
+// across the WHOLE run (not reset per turn) — the acceptance judge's
+// provenance signal: an artifact claiming a result "produced by" a tool that
+// never appears here was fabricated.
+func (h *builderRealOutputTracker) invokedTools() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.runTools) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(h.runTools))
+	for name := range h.runTools {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // snapshot returns the combined real-evidence signal for the current turn:

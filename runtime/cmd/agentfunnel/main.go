@@ -820,6 +820,10 @@ func main() {
 		acceptanceGate.repo = *repoFlag
 		acceptanceGate.branch = *branchFlag
 		acceptanceGate.ticket = *ticketFlag
+		// Provenance: let the gate see which tools the run actually invoked.
+		if realOutputTracker != nil {
+			acceptanceGate.invokedTools = realOutputTracker.invokedTools
+		}
 		onTaskDone = builderOnTaskDone(stop, log, res.AspectName, acceptanceGate,
 			func() string {
 				if realOutputTracker == nil {
@@ -1276,6 +1280,13 @@ type builderAcceptanceGate struct {
 	repo   string
 	branch string
 	ticket string
+
+	// invokedTools returns the run-level set of tools the agent actually
+	// called — the provenance signal the judge uses to reject a fabricated
+	// artifact (one claiming a result produced by a tool that never ran). Set
+	// post-construction from the realOutputTracker; nil (tests / no tracker)
+	// skips provenance, fail-open.
+	invokedTools func() []string
 }
 
 // newBuilderAcceptanceGate constructs the shared gate. verify may be nil
@@ -1305,9 +1316,15 @@ func (g *builderAcceptanceGate) Decide(ctx context.Context, output string, log *
 	var verr error
 	if g.hasCriteria && g.verify != nil {
 		// Unit 1: judge the actual PR diff (ground truth), not just the
-		// agent's self-report. Best-effort — augmentedForJudge returns the
-		// report unchanged when no diff is available (fail-open).
-		verdict, verr = g.verify(ctx, g.criteria, g.augmentedForJudge(output, log))
+		// agent's self-report. Provenance: append the run-level tool list so
+		// the judge can reject a fabricated "produced by tool X" artifact when
+		// X never ran. Both best-effort/fail-open (empty → judge input
+		// unchanged).
+		judgeInput := g.augmentedForJudge(output, log)
+		if g.invokedTools != nil {
+			judgeInput = funnel.AppendToolProvenance(judgeInput, g.invokedTools())
+		}
+		verdict, verr = g.verify(ctx, g.criteria, judgeInput)
 		if verr != nil {
 			log.Warn("agentfunnel: acceptance verification errored — failing open", "err", verr)
 		} else if verdict.Met && g.testEvidenceMissing(log) {

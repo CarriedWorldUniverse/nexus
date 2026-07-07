@@ -108,3 +108,18 @@ func TestAugmentOutputWithDiff(t *testing.T) {
 		}
 	})
 }
+
+// TestAppendToolProvenance — provenance section is added only when tools are
+// present (fail-open when we captured none).
+func TestAppendToolProvenance(t *testing.T) {
+	if got := AppendToolProvenance("judge input", nil); got != "judge input" {
+		t.Fatalf("empty tools should leave input unchanged, got %q", got)
+	}
+	got := AppendToolProvenance("judge input", []string{"Bash", "mcp__nexus-vision__read_image"})
+	if !strings.Contains(got, acceptanceToolsHeader) || !strings.Contains(got, "read_image") {
+		t.Fatalf("expected tools section, got:\n%s", got)
+	}
+	if !strings.HasPrefix(got, "judge input") {
+		t.Fatalf("original input should lead, got:\n%s", got)
+	}
+}
