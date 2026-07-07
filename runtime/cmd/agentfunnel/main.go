@@ -1310,6 +1310,15 @@ func (g *builderAcceptanceGate) Decide(ctx context.Context, output string, log *
 		verdict, verr = g.verify(ctx, g.criteria, g.augmentedForJudge(output, log))
 		if verr != nil {
 			log.Warn("agentfunnel: acceptance verification errored — failing open", "err", verr)
+		} else if verdict.Met && g.testEvidenceMissing(log) {
+			// Unit 3: the criteria require tests but the PR diff changes no
+			// test file — a claimed pass with no tests written (the keel
+			// confabulation class). Override the judge's met to false; the
+			// bounded reprompt/backstop then applies as for any not-met.
+			log.Info("agentfunnel: criteria require tests but PR diff changes no test file — not met (Unit 3)",
+				"repo", g.repo, "ticket", g.ticket)
+			verdict.Met = false
+			verdict.Reason = "acceptance criteria require tests but the PR diff changes no test file"
 		}
 	}
 	step := taskDoneDecide(g.hasCriteria, g.verify != nil, verr, verdict.Met, g.repromptsLeft)
@@ -1863,6 +1872,63 @@ func (g *builderAcceptanceGate) augmentedForJudge(output string, log *slog.Logge
 	}
 	log.Info("agentfunnel: acceptance judging against PR diff (Unit 1)", "repo", g.repo, "branch", builderBranch(g.branch, g.ticket))
 	return funnel.AugmentOutputWithDiff(output, diff)
+}
+
+// --- ACCEPTANCE-GATE-HARDENING Unit 3: test evidence, not test claims ---
+//
+// A criterion of "passing tests" is worthless if nothing checks that tests
+// were even written — an agent can narrate "all tests pass" having authored
+// none (the keel confabulation class). This uses the non-fabricatable PR diff
+// (the same diff Unit 1 fetches): when the criteria call for tests, the diff
+// must actually change a test file. Opt-in and fail-open — it only ever fires
+// when explicitly enabled and a diff is available. Verifying tests PASS/RAN
+// (vs merely exist) is the run-tests stretch, left dark pending confirmation
+// the builder image carries the toolchain (see ACCEPTANCE-GATE-HARDENING.md).
+
+// acceptanceRequireTestDiff gates Unit 3 (default OFF — the "criteria mention
+// tests" trigger is a heuristic, so this is opt-in). ACCEPTANCE_REQUIRE_TEST_DIFF=1
+// enables it.
+func acceptanceRequireTestDiff() bool {
+	return strings.TrimSpace(os.Getenv("ACCEPTANCE_REQUIRE_TEST_DIFF")) == "1"
+}
+
+// criteriaMentionsTests reports whether the acceptance criteria reference tests
+// (case-insensitive "test") — the trigger for requiring a test-file change.
+func criteriaMentionsTests(criteria string) bool {
+	return strings.Contains(strings.ToLower(criteria), "test")
+}
+
+// diffTouchesTestFile reports whether a unified diff adds/modifies a Go test
+// file — a `_test.go` on a `+++ ` new-file line or a `diff --git` header. The
+// fleet is Go; a non-Go repo simply would not enable this gate.
+func diffTouchesTestFile(diff string) bool {
+	for _, line := range strings.Split(diff, "\n") {
+		if (strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "diff --git ")) &&
+			strings.Contains(line, "_test.go") {
+			return true
+		}
+	}
+	return false
+}
+
+// testEvidenceMissing reports whether Unit 3 should override a met verdict to
+// not-met: enabled, the brief names a repo, the criteria call for tests, a PR
+// diff is available, and that diff changes no test file. Any missing
+// precondition (disabled, no repo, criteria silent on tests, diff unavailable)
+// returns false — fail-open; the exists/substance gates still guarantee a PR.
+func (g *builderAcceptanceGate) testEvidenceMissing(log *slog.Logger) bool {
+	if !acceptanceRequireTestDiff() || g.repo == "" || !criteriaMentionsTests(g.criteria) {
+		return false
+	}
+	diff, found, err := prDiffFn(g.repo, builderBranch(g.branch, g.ticket), g.ticket)
+	if err != nil {
+		log.Warn("agentfunnel: Unit 3 diff fetch errored — not enforcing test evidence", "err", err)
+		return false
+	}
+	if !found || strings.TrimSpace(diff) == "" {
+		return false
+	}
+	return !diffTouchesTestFile(diff)
 }
 
 func builderReplyTopic(builderMode bool, topic string) string {
