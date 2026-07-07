@@ -2,6 +2,7 @@ package funnel
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
@@ -72,4 +73,38 @@ func TestAcceptanceVerifier_ErrorsOnHarnessFailure(t *testing.T) {
 	if _, err := v.Verify(context.Background(), "criteria", "output"); err == nil {
 		t.Error("harness error must surface as an error (caller fails open, not Verify itself)")
 	}
+}
+
+// TestAugmentOutputWithDiff — Unit 1: the judge input carries the report plus
+// an authoritative-diff section; an empty diff leaves the report untouched;
+// each part is capped so the diff is never starved.
+func TestAugmentOutputWithDiff(t *testing.T) {
+	t.Run("empty diff returns report unchanged", func(t *testing.T) {
+		if got := AugmentOutputWithDiff("agent said done", "   "); got != "agent said done" {
+			t.Fatalf("empty diff should return report verbatim, got %q", got)
+		}
+	})
+	t.Run("non-empty diff appends the authoritative header + diff", func(t *testing.T) {
+		got := AugmentOutputWithDiff("agent said done", "--- a/x\n+++ b/x\n+line")
+		if !strings.Contains(got, acceptanceDiffHeader) {
+			t.Fatalf("missing diff header:\n%s", got)
+		}
+		if !strings.Contains(got, "+line") {
+			t.Fatalf("diff body missing:\n%s", got)
+		}
+		if !strings.HasPrefix(got, "agent said done") {
+			t.Fatalf("report should lead:\n%s", got)
+		}
+	})
+	t.Run("diff is capped and survives (not starved by a huge report)", func(t *testing.T) {
+		bigReport := strings.Repeat("R", 50000)
+		bigDiff := strings.Repeat("D", 50000)
+		got := AugmentOutputWithDiff(bigReport, bigDiff)
+		if len(got) > maxAcceptanceJudgeInputLen+len(acceptanceDiffHeader)+8 {
+			t.Fatalf("combined length %d exceeds ceiling", len(got))
+		}
+		if !strings.Contains(got, acceptanceDiffHeader) || !strings.Contains(got, "D") {
+			t.Fatalf("diff section starved out by the big report")
+		}
+	})
 }

@@ -815,6 +815,11 @@ func main() {
 			verify = acceptanceVerifier.Verify
 		}
 		acceptanceGate = newBuilderAcceptanceGate(acceptanceCriteria, verify)
+		// Unit 1: give the gate the context to fetch the run's PR diff so the
+		// judge verdicts on the actual diff, not the agent's self-report.
+		acceptanceGate.repo = *repoFlag
+		acceptanceGate.branch = *branchFlag
+		acceptanceGate.ticket = *ticketFlag
 		onTaskDone = builderOnTaskDone(stop, log, res.AspectName, acceptanceGate,
 			func() string {
 				if realOutputTracker == nil {
@@ -1262,6 +1267,15 @@ type builderAcceptanceGate struct {
 	hasCriteria   bool
 	verify        taskDoneVerifyFn
 	repromptsLeft int
+
+	// repo/branch/ticket give Decide the context to fetch the run's PR diff
+	// (ACCEPTANCE-GATE-HARDENING Unit 1 — judge the diff, not the narrative).
+	// Set post-construction at the main() wiring site; empty repo (every test
+	// caller, and repo-less dispatches) skips diff augmentation, so the judge
+	// sees the report only exactly as before this unit.
+	repo   string
+	branch string
+	ticket string
 }
 
 // newBuilderAcceptanceGate constructs the shared gate. verify may be nil
@@ -1290,7 +1304,10 @@ func (g *builderAcceptanceGate) Decide(ctx context.Context, output string, log *
 	var verdict funnel.AcceptanceVerdict
 	var verr error
 	if g.hasCriteria && g.verify != nil {
-		verdict, verr = g.verify(ctx, g.criteria, output)
+		// Unit 1: judge the actual PR diff (ground truth), not just the
+		// agent's self-report. Best-effort — augmentedForJudge returns the
+		// report unchanged when no diff is available (fail-open).
+		verdict, verr = g.verify(ctx, g.criteria, g.augmentedForJudge(output, log))
 		if verr != nil {
 			log.Warn("agentfunnel: acceptance verification errored — failing open", "err", verr)
 		}
@@ -1757,6 +1774,95 @@ func prSubstantial(repo, branch, ticket string, floor int) (bool, error) {
 		return false, nil
 	}
 	return stats.ChangedFiles >= 1 && (stats.Additions+stats.Deletions) >= floor, nil
+}
+
+// --- ACCEPTANCE-GATE-HARDENING Unit 1: judge the diff, not the narrative ---
+
+// prDiffFn returns the unified diff of the run's own PR. Own-branch first
+// (gh pr diff <branch>); on miss, the ticket fallback resolves a
+// provenance-valid PR number (Unit 4 rules) and diffs that. found=false means
+// no diff is available yet (no PR, or resolution failed) — the caller then
+// judges the report only (fail-open, unchanged from pre-Unit-1). Swappable in
+// tests.
+var prDiffFn = func(repo, branch, ticket string) (string, bool, error) {
+	out, err := exec.Command("gh", "pr", "diff", branch, "--repo", repo).CombinedOutput()
+	if err == nil {
+		return string(out), strings.TrimSpace(string(out)) != "", nil
+	}
+	// Own-branch diff failed (usually: no PR on that head). Fall back to the
+	// ticket search for a worker that opened its PR on a non-conventional
+	// branch (NET-46), reusing the Unit 4 provenance rules.
+	num, found, ferr := prNumberByTicketFn(repo, ticket)
+	if ferr != nil {
+		return "", false, ferr
+	}
+	if !found {
+		return "", false, nil
+	}
+	out2, err2 := exec.Command("gh", "pr", "diff", strconv.Itoa(num), "--repo", repo).CombinedOutput()
+	if err2 != nil {
+		return "", false, fmt.Errorf("gh pr diff #%d: %w: %s", num, err2, strings.TrimSpace(string(out2)))
+	}
+	return string(out2), strings.TrimSpace(string(out2)) != "", nil
+}
+
+// prNumberByTicketFn resolves the number of the first open PR carrying ticket
+// as a whole token AND clearing the Unit 4 provenance floor. Swappable in tests.
+var prNumberByTicketFn = func(repo, ticket string) (int, bool, error) {
+	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--state", "open",
+		"--json", "number,headRefName,title,createdAt").CombinedOutput()
+	if err != nil {
+		return 0, false, fmt.Errorf("gh pr list (diff number): %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return pickPRNumberByTicket(out, ticket, provenanceNotBefore)
+}
+
+// pickPRNumberByTicket is the pure core: the number of the first
+// prTicketSearchEntry that word-matches ticket and was created at/after
+// notBefore (same match + provenance rules as matchPRByTicket).
+func pickPRNumberByTicket(out []byte, ticket string, notBefore time.Time) (int, bool, error) {
+	var prs []prTicketSearchEntry
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return 0, false, fmt.Errorf("gh pr list (diff number): parse: %w", err)
+	}
+	for _, pr := range prs {
+		if !ticketWordMatch(pr.HeadRefName, ticket) && !ticketWordMatch(pr.Title, ticket) {
+			continue
+		}
+		if pr.CreatedAt.Before(notBefore) {
+			continue
+		}
+		return pr.Number, true, nil
+	}
+	return 0, false, nil
+}
+
+// acceptanceJudgeDiffEnabled gates Unit 1 (default ON). ACCEPTANCE_JUDGE_DIFF=0
+// reverts the judge to the agent's report only (pre-Unit-1 behavior).
+func acceptanceJudgeDiffEnabled() bool {
+	return strings.TrimSpace(os.Getenv("ACCEPTANCE_JUDGE_DIFF")) != "0"
+}
+
+// augmentedForJudge returns output augmented with the run's PR diff so the
+// acceptance judge verdicts on ground truth (Unit 1). Best-effort and
+// fail-open: no repo context, disabled, a gh error, or no diff yet all return
+// output unchanged (report-only, pre-Unit-1 behavior). It never blocks or
+// errors the gate — the substance/exists gates (Units 2/4) separately ensure a
+// real PR exists; this only sharpens what the judge reads when a diff is there.
+func (g *builderAcceptanceGate) augmentedForJudge(output string, log *slog.Logger) string {
+	if g.repo == "" || !acceptanceJudgeDiffEnabled() {
+		return output
+	}
+	diff, found, err := prDiffFn(g.repo, builderBranch(g.branch, g.ticket), g.ticket)
+	if err != nil {
+		log.Warn("agentfunnel: acceptance diff fetch errored — judging report only", "err", err)
+		return output
+	}
+	if !found {
+		return output
+	}
+	log.Info("agentfunnel: acceptance judging against PR diff (Unit 1)", "repo", g.repo, "branch", builderBranch(g.branch, g.ticket))
+	return funnel.AugmentOutputWithDiff(output, diff)
 }
 
 func builderReplyTopic(builderMode bool, topic string) string {
