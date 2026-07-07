@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"testing"
+	"time"
 )
 
 // TestBuilderPRVerifierSubstanceGate proves the Unit 2 wiring: a PR that
@@ -80,21 +81,67 @@ func TestParsePRDiffStatsHead(t *testing.T) {
 }
 
 func TestSelectPRDiffStatsByTicket(t *testing.T) {
+	var zero time.Time // Unit 4 createdAt guard inert; isolates the match rule
 	list := `[
 		{"headRefName":"anvil/workers-json-flag","title":"workers json","additions":12,"deletions":1,"changedFiles":2},
 		{"headRefName":"builder/NET-99","title":"NET-99 eviction","additions":80,"deletions":4,"changedFiles":3}
 	]`
-	// match by ticket in head branch
-	got, found, err := selectPRDiffStatsByTicket([]byte(list), "NET-99")
+	got, found, err := selectPRDiffStatsByTicket([]byte(list), "NET-99", zero)
 	if err != nil || !found || got.Additions != 80 || got.ChangedFiles != 3 {
 		t.Fatalf("NET-99 match: got=%+v found=%v err=%v", got, found, err)
 	}
-	// match by ticket in title (NET-99 also appears in title — same row, fine)
-	if _, found, _ := selectPRDiffStatsByTicket([]byte(list), "NOPE-1"); found {
+	if _, found, _ := selectPRDiffStatsByTicket([]byte(list), "NOPE-1", zero); found {
 		t.Fatalf("NOPE-1 should not match")
 	}
-	if _, _, err := selectPRDiffStatsByTicket([]byte(`bad`), "NET-99"); err == nil {
+	if _, _, err := selectPRDiffStatsByTicket([]byte(`bad`), "NET-99", zero); err == nil {
 		t.Fatalf("malformed json should error")
+	}
+}
+
+// TestTicketWordMatch — Unit 4: whole-token matching, so one ticket's run
+// can't be credited by another ticket's PR via a substring hit.
+func TestTicketWordMatch(t *testing.T) {
+	cases := []struct {
+		s, ticket string
+		want      bool
+	}{
+		{"builder/NET-66", "NET-66", true},
+		{"NET-66 add eviction", "NET-66", true},
+		{"fixes NET-66, closes NET-67", "NET-67", true},
+		{"builder/NET-66", "NET-6", false},   // substring, different ticket
+		{"builder/NET-661", "NET-66", false}, // longer ticket id
+		{"aNET-66", "NET-66", false},         // alnum before → not a token
+		{"NET-66x", "NET-66", false},         // alnum after → not a token
+		{"unrelated", "NET-66", false},
+		{"NET-66", "NET-66", true}, // exact whole string
+		{"anything", "", false},    // empty ticket never matches
+	}
+	for _, tc := range cases {
+		if got := ticketWordMatch(tc.s, tc.ticket); got != tc.want {
+			t.Errorf("ticketWordMatch(%q,%q) = %v, want %v", tc.s, tc.ticket, got, tc.want)
+		}
+	}
+}
+
+// TestMatchPRByTicketProvenance — Unit 4: a PR created before the run started
+// is not credited even when it word-matches the ticket; one created at/after
+// is. Guards the "credit a foreign/pre-existing PR that mentions the ticket"
+// hole.
+func TestMatchPRByTicketProvenance(t *testing.T) {
+	runStart, _ := time.Parse(time.RFC3339, "2026-07-07T12:00:00Z")
+	older := `[{"number":1,"headRefName":"builder/NET-66","title":"NET-66","createdAt":"2026-07-07T11:00:00Z"}]`
+	newer := `[{"number":2,"headRefName":"builder/NET-66","title":"NET-66","createdAt":"2026-07-07T12:30:00Z"}]`
+
+	if ok, _ := matchPRByTicket([]byte(older), "NET-66", runStart); ok {
+		t.Fatal("PR created BEFORE run start must not be credited (Unit 4)")
+	}
+	if ok, _ := matchPRByTicket([]byte(newer), "NET-66", runStart); !ok {
+		t.Fatal("PR created after run start should be credited")
+	}
+	// stats parallel
+	olderStats := `[{"headRefName":"builder/NET-66","title":"NET-66","additions":10,"deletions":1,"changedFiles":1,"createdAt":"2026-07-07T11:00:00Z"}]`
+	if _, found, _ := selectPRDiffStatsByTicket([]byte(olderStats), "NET-66", runStart); found {
+		t.Fatal("stats fallback must also reject a pre-run PR (Unit 4)")
 	}
 }
 
