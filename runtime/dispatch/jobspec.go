@@ -17,9 +17,13 @@ import (
 // floor 1, U1 judge-the-diff on, U3 test-evidence off). This makes the gate
 // operator-tunable via the broker deployment env, no per-knob code change.
 var acceptanceGateEnvKeys = []string{
-	"ACCEPTANCE_MIN_DIFF_LINES",   // Unit 2 floor (default 1; 0 disables)
-	"ACCEPTANCE_JUDGE_DIFF",       // Unit 1 (default on; 0 disables)
+	"ACCEPTANCE_MIN_DIFF_LINES",    // Unit 2 floor (default 1; 0 disables)
+	"ACCEPTANCE_JUDGE_DIFF",        // Unit 1 (default on; 0 disables)
 	"ACCEPTANCE_REQUIRE_TEST_DIFF", // Unit 3 (default off; 1 enables)
+	// CW_VCS rides the same broker-env→worker seam: set CW_VCS=cairn on the
+	// broker deployment to flip dispatched builders onto the cairn
+	// clone-per-run path (BUILDER-CAIRN-MIGRATION.md); unset = git default.
+	"CW_VCS",
 }
 
 type JobConfig struct {
