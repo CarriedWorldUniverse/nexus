@@ -46,10 +46,13 @@ RUN KUBECTL_VERSION=v1.35.5 \
 # nano - lightweight editor for hand-editing config inside the pod (e.g. croft).
 RUN apt-get update && apt-get install -y --no-install-recommends nano && rm -rf /var/lib/apt/lists/*
 
-# Prebuilt nexus binaries + cw (built on the host by build.sh, copied into
-# the context). agentfunnel runs the builder; the nexus-*-mcp servers + cw
-# are the aspect's tool surface.
-COPY agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp nexus-vision-mcp cw /usr/local/bin/
+# Prebuilt nexus binaries + cw + cairn (staged into the context by build.sh /
+# CI, copied into the image). agentfunnel runs the builder; the nexus-*-mcp
+# servers + cw are the aspect's tool surface; cairn is the CW_VCS=cairn builder
+# VCS (inert when CW_VCS!=cairn). cairn is COPY'd like the other binaries rather
+# than fetched in a RUN step: one staging path (build.sh/CI) owns all binary
+# versions, and the image build needs no network fetch for it.
+COPY agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp nexus-vision-mcp cw cairn /usr/local/bin/
 
 # Provider CLI: codex (standalone, installed via npm — fetches the linux
 # binary into the standalone layout).

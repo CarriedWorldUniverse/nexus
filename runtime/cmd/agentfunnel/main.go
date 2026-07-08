@@ -341,6 +341,16 @@ func main() {
 		} else {
 			log.Info("agentfunnel: cw setup-git github ok — gh/git bridged for builder")
 		}
+		// In cairn mode, bridge the same GitHub credential into GITHUB_TOKEN so
+		// `cairn push` (which ignores git's credential helper) authenticates.
+		if builderVCS() == vcsCairn && *repoFlag != "" {
+			if msg, err := bridgeCairnGitHubAuth(context.Background(), repoRemoteURL(*repoFlag)); err != nil {
+				log.Error("agentfunnel: cairn GitHub auth bridge failed — cairn push may fail",
+					"err", err)
+			} else {
+				log.Info("agentfunnel: cairn GitHub auth ready", "how", msg)
+			}
+		}
 		builderRepo, err = setupBuilderRepo(context.Background(), res.AspectName, os.Getenv("CW_DISPATCH_RUN_ID"), *repoFlag, builderBranch(*branchFlag, *ticketFlag))
 		if err != nil {
 			fail(log, "setup builder repo", err)
@@ -1007,7 +1017,7 @@ func main() {
 			stop()
 		}, log)
 		if builderRepo != nil {
-			go watchBuilderGitProgress(ctx, builderRepo.worktree, gitProgressPollInterval, recordBuilderProgress, log)
+			go watchBuilderCommitProgress(ctx, builderRepo.headFn(), gitProgressPollInterval, recordBuilderProgress, log)
 		}
 	}
 
@@ -1110,7 +1120,16 @@ func withBranchInstruction(content, repo, branch string) string {
 	if repo == "" || branch == "" {
 		return content
 	}
-	line := fmt.Sprintf("\n\n[HARNESS] Work on branch `%s` — commit and push your changes to this exact branch name so the harness can find your pull request.", branch)
+	var line string
+	if builderVCS() == vcsCairn {
+		// cairn working copy: the agent commits + pushes with cairn, not git.
+		// `commit && push` (exit-checked) so a failed/conflicted commit never
+		// ships an empty or broken branch — cairn commit returns exit 2 when it
+		// recorded conflicts (resolve then re-commit, do not push).
+		line = fmt.Sprintf("\n\n[HARNESS] This is a cairn working copy. Work on line `%s`. From the branch folder, publish with a single exit-checked step: `cairn commit %s -m \"<what + why>\" && cairn push origin %s`. Do NOT use git. Only push after a clean commit (exit 0); on exit 2 the line has recorded conflicts — run `cairn resolve %s <path>`, re-commit, then push. Push to this exact branch name so the harness can find your pull request.", branch, branch, branch, branch)
+	} else {
+		line = fmt.Sprintf("\n\n[HARNESS] Work on branch `%s` — commit and push your changes to this exact branch name so the harness can find your pull request.", branch)
+	}
 	return content + line
 }
 
