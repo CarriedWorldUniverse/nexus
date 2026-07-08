@@ -20,7 +20,7 @@ Pick model-invocation only when the agent must reach it on its own or another sk
 ## The description
 
 Two jobs: state what the skill is, and list the **branches** that trigger it. It earns the hardest pruning in the file:
-- Front-load the skill's **leading word**.
+- Put the skill's **leading word** first.
 - **One trigger per branch** — synonyms restating one branch are duplication; collapse them.
 - Cut identity that's already in the body; keep triggers + any "when another skill needs…" reach clause.
 
