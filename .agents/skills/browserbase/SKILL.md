@@ -1,12 +1,12 @@
 ---
 name: browserbase
-description: 'Use when shadow needs the web beyond plain HTTP — fetch/search pages, or drive a real cloud Chrome (JS-rendered sites, interactive flows, logins/auth) via the `browse` CLI + Stagehand from croft. Covers the command surface, the key location, the auth-flow pattern (Live View + Contexts), and the Free-tier caps (Model Gateway $5 token cap, no Proxies/Verified).'
+description: 'Use when shadow needs the web beyond plain HTTP — fetch/search pages, or drive a real cloud Chrome (JS-rendered sites, interactive flows, logins/auth) via the `browse` CLI + Stagehand from croft.'
 when_to_use: 'When shadow needs the web beyond plain HTTP — fetch/search pages or drive a real cloud Chrome (JS-rendered sites, interactive flows, logins) via the browse CLI from croft.'
 ---
 
 # Browserbase — shadow's cloud browser
 
-Browserbase runs real Chrome in the cloud that I drive from croft via the **`browse`** CLI (and Stagehand). It's how I reach more of the web — JS-rendered pages, interactive flows, and logged-in/auth-walled sites — without a local browser. Set up 2026-06-27 (operator: "a decent browser to access more web + use auth flows easier").
+Browserbase runs real Chrome in the cloud that I drive from croft via the **`browse`** CLI (and Stagehand). It's how I reach more of the web — JS-rendered pages, interactive flows, and logged-in/auth-walled sites — without a local browser.
 
 ## Setup (already done)
 - **CLI:** `~/.local/bin/browse` v0.9.1, on PATH (user-local install: `npm i -g --prefix ~/.local browse@latest` to update — NOT a system/sudo install; sudo npm runs as root and lands in `/root/.npm-global`, unusable). It's the official Browserbase CLI (`github.com/browserbase/stagehand`, `@browserbase.com` maintainers). Verified the package identity before trusting the generic name `browse`.
