@@ -36,10 +36,56 @@ const acceptanceJudgeTimeout = 30 * time.Second
 
 // maxAcceptanceCriteriaLen / maxAcceptanceOutputLen bound the prompt cost,
 // mirroring maxJudgeTriggerLen/maxJudgeCandidateLen in filter.go.
+// maxAcceptanceDiffLen bounds the ACTUAL PR DIFF section (Unit 1 — judge the
+// diff, not the narrative); maxAcceptanceJudgeInputLen is the combined ceiling
+// Verify truncates its whole output arg to, sized to fit report + delimiter +
+// diff so the diff is never silently cut away. The judge is ornith-judge
+// (local, free) so a larger prompt is cheap.
 const (
-	maxAcceptanceCriteriaLen = 4000
-	maxAcceptanceOutputLen   = 4000
+	maxAcceptanceCriteriaLen   = 4000
+	maxAcceptanceOutputLen     = 4000
+	maxAcceptanceDiffLen       = 12000
+	maxAcceptanceJudgeInputLen = 18000
 )
+
+// acceptanceDiffHeader delimits the authoritative-diff section that
+// AugmentOutputWithDiff appends and acceptanceJudgePrompt tells the judge to
+// treat as ground truth. The two MUST agree on this exact string.
+const acceptanceDiffHeader = "=== ACTUAL PR DIFF (ground truth) ==="
+
+// AugmentOutputWithDiff builds the judge input for Unit 1: the agent's
+// reported completion (context) followed by the authoritative unified diff of
+// its PR. Each part is capped independently so neither starves the other and
+// the total stays under maxAcceptanceJudgeInputLen. Callers pass the raw diff;
+// an empty diff returns the report unchanged (nothing to augment).
+func AugmentOutputWithDiff(report, diff string) string {
+	diff = strings.TrimSpace(diff)
+	if diff == "" {
+		return report
+	}
+	report = truncate(strings.TrimSpace(report), maxAcceptanceOutputLen)
+	diff = truncate(diff, maxAcceptanceDiffLen)
+	return report + "\n\n" + acceptanceDiffHeader + "\n" + diff
+}
+
+// acceptanceToolsHeader delimits the tool-provenance section that
+// AppendToolProvenance adds and acceptanceJudgePrompt tells the judge to check
+// claimed results against. The two MUST agree on this exact string.
+const acceptanceToolsHeader = "=== TOOLS INVOKED THIS RUN ==="
+
+// AppendToolProvenance adds the run-level list of tools the agent actually
+// invoked, so the judge can catch a fabricated artifact — one that CLAIMS a
+// result "produced by" a tool/command that never ran (the vision smoke's
+// false pass: a file asserting a read_image result when read_image was never
+// available). Empty tools = no provenance data captured → append nothing, so
+// the judge falls back to prior behavior (fail-open: never a false block on a
+// run whose tool calls we couldn't observe).
+func AppendToolProvenance(input string, tools []string) string {
+	if len(tools) == 0 {
+		return input
+	}
+	return input + "\n\n" + acceptanceToolsHeader + "\n" + strings.Join(tools, ", ")
+}
 
 // acceptanceJudgePrompt instructs the cheap model to verify — skeptically —
 // a builder's completion claim against the work item's acceptance criteria.
@@ -54,11 +100,17 @@ const acceptanceJudgePrompt = `You are verifying whether an AI agent's claimed t
 Respond with ONLY valid JSON (no markdown, no explanation):
 {"met": true|false, "reason": "one short phrase"}
 
-Be skeptical of the agent's own self-report — it may be inaccurate, incomplete, or confabulated (an agent has been observed to claim success in vivid detail without ever producing the required output). Judge ONLY against the acceptance criteria provided and the agent's reported output:
+Be skeptical of the agent's own self-report — it may be inaccurate, incomplete, or confabulated (an agent has been observed to claim success in vivid detail without ever producing the required output).
 
-- If the criteria name a specific required artifact, token, or string, and it is not present verbatim (or clearly produced) in the reported output, "met" MUST be false.
-- If the criteria are satisfied by what the agent reported, "met" is true.
-- When genuinely ambiguous (the criteria are satisfied by the report but you cannot independently confirm), prefer true — this check is a backstop against confabulation, not a re-run of the whole task; do not invent stricter requirements than the criteria state.
+If the input contains a section headed "=== ACTUAL PR DIFF (ground truth) ===", that unified diff is AUTHORITATIVE — judge the acceptance criteria against the DIFF, treating the agent's narrative above it as context only. A change the criteria require MUST actually appear in the diff; if it does not, "met" MUST be false, no matter what the narrative claims. If NO such diff section is present, judge against the agent's reported output as below.
+
+PROVENANCE — guard against fabricated TOOL OUTPUT (narrow check): if the input contains a section headed "=== TOOLS INVOKED THIS RUN ===", it lists every tool the agent called. Use it for ONE thing only: when the criteria require the artifact to contain the OUTPUT OF A SPECIFIC NAMED TOOL (e.g. "the description returned by read_image", "the result of the search_docs tool") and the artifact presents such output, that named tool MUST appear in the list — if it does not, the tool output was fabricated and "met" MUST be false, however plausible it looks. (Names may be prefixed: "mcp__nexus-vision__read_image" satisfies a "read_image" requirement.) Do NOT otherwise use this list to fail a criterion: generic work — writing code, editing files, building, running tests or shell commands — is verified by the DIFF, not by this list, so never block merely because "tests", "build", or some generic action is not itemized here. When unsure whether the criteria name a specific tool, do NOT fail on provenance.
+
+Judge ONLY against the acceptance criteria provided and the evidence (diff when present, else the reported output):
+
+- If the criteria name a specific required artifact, token, or string, and it is not present verbatim (or clearly produced) in the evidence, "met" MUST be false.
+- If the criteria are satisfied by the evidence, "met" is true.
+- When genuinely ambiguous (the criteria are satisfied by the evidence but you cannot independently confirm), prefer true — this check is a backstop against confabulation, not a re-run of the whole task; do not invent stricter requirements than the criteria state.
 
 Respond with ONLY the JSON object.`
 
@@ -103,7 +155,11 @@ func (v *AcceptanceVerifier) Verify(parent context.Context, criteria, output str
 		return AcceptanceVerdict{}, errors.New("acceptance verifier not configured")
 	}
 	criteria = truncate(strings.TrimSpace(criteria), maxAcceptanceCriteriaLen)
-	output = truncate(strings.TrimSpace(output), maxAcceptanceOutputLen)
+	// Unit 1: output may carry an appended authoritative-diff section
+	// (AugmentOutputWithDiff), so truncate to the combined ceiling, not the
+	// report-only cap — otherwise the diff would be cut off before the judge
+	// sees it. Report-only inputs are well under this and unaffected.
+	output = truncate(strings.TrimSpace(output), maxAcceptanceJudgeInputLen)
 
 	ctx, cancel := context.WithTimeout(parent, acceptanceJudgeTimeout)
 	defer cancel()

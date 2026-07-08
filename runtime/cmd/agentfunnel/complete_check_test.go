@@ -4,11 +4,19 @@ import (
 	"errors"
 	"log/slog"
 	"testing"
+	"time"
 )
 
 func TestBuilderCompleteCheck(t *testing.T) {
 	orig := prExistsFn
-	defer func() { prExistsFn = orig }()
+	origStats := prDiffStatsFn
+	defer func() { prExistsFn = orig; prDiffStatsFn = origStats }()
+	// Unit 2: the gate now also requires a non-empty diff. Stub the substance
+	// lookup to a substantial PR so the "pr exists" case exercises the stop
+	// path; the no-pr / error cases short-circuit at prExists before this runs.
+	prDiffStatsFn = func(string, string) (prDiffStats, bool, error) {
+		return prDiffStats{Additions: 20, Deletions: 2, ChangedFiles: 2}, true, nil
+	}
 	log := slog.Default()
 
 	cases := []struct {
@@ -79,13 +87,17 @@ func TestPrExistsFallsBackToTicketSearch(t *testing.T) {
 }
 
 func TestMatchPRByTicket(t *testing.T) {
+	// zero notBefore → the Unit 4 createdAt guard is inert (entries have no
+	// createdAt); this isolates the match rule. Provenance is covered by
+	// TestMatchPRByTicketProvenance.
+	var zero time.Time
 	out := []byte(`[{"number":413,"headRefName":"anvil/workers-json-flag","title":"NET-46 add workers json flag"},
 		{"number":9,"headRefName":"builder/OTHER-1","title":"unrelated"}]`)
-	ok, err := matchPRByTicket(out, "NET-46")
+	ok, err := matchPRByTicket(out, "NET-46", zero)
 	if err != nil || !ok {
 		t.Fatalf("matchPRByTicket = %v, %v; want true, nil", ok, err)
 	}
-	ok, err = matchPRByTicket(out, "NEX-999")
+	ok, err = matchPRByTicket(out, "NEX-999", zero)
 	if err != nil || ok {
 		t.Fatalf("matchPRByTicket = %v, %v; want false, nil", ok, err)
 	}
