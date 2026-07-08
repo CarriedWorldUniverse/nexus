@@ -223,16 +223,21 @@ func (g progressChatGateway) AnnounceFile(ctx context.Context, path, description
 	return msgID, err
 }
 
-func watchBuilderGitProgress(ctx context.Context, worktree string, interval time.Duration, progress builderProgressFunc, log *slog.Logger) {
-	if worktree == "" || interval <= 0 {
+// watchBuilderCommitProgress polls the builder line's tip commit via headFn and
+// signals "git_commit" progress on each change. headFn abstracts the VCS: git
+// rev-parse in the worktree (git mode) or `cairn log` on the line (cairn mode).
+// A nil headFn or an unavailable initial head disables the watcher (non-fatal;
+// other progress signals still fire).
+func watchBuilderCommitProgress(ctx context.Context, headFn func(context.Context) (string, error), interval time.Duration, progress builderProgressFunc, log *slog.Logger) {
+	if headFn == nil || interval <= 0 {
 		return
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	last, err := gitHead(ctx, worktree)
+	last, err := headFn(ctx)
 	if err != nil {
-		log.Debug("agentfunnel: builder git progress watcher disabled; initial HEAD unavailable", "worktree", worktree, "err", err)
+		log.Debug("agentfunnel: builder commit progress watcher disabled; initial head unavailable", "err", err)
 		return
 	}
 	t := time.NewTicker(interval)
@@ -242,9 +247,9 @@ func watchBuilderGitProgress(ctx context.Context, worktree string, interval time
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			head, err := gitHead(ctx, worktree)
+			head, err := headFn(ctx)
 			if err != nil {
-				log.Debug("agentfunnel: builder git progress HEAD check failed", "worktree", worktree, "err", err)
+				log.Debug("agentfunnel: builder commit progress head check failed", "err", err)
 				continue
 			}
 			if head != "" && head != last {
