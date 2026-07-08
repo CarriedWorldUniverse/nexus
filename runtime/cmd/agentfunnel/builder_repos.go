@@ -209,6 +209,7 @@ func builderBranch(branch, ticket string) string {
 }
 
 func repoRemoteURL(repo string) string {
+	repo = strings.TrimRight(repo, "/")
 	if filepath.IsAbs(repo) || strings.HasPrefix(repo, "file://") || strings.HasPrefix(repo, "http://") || strings.HasPrefix(repo, "https://") || strings.HasPrefix(repo, "git@") {
 		return repo
 	}
