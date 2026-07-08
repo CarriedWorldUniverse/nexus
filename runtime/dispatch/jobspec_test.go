@@ -620,3 +620,37 @@ func TestBuildJob_RoleBrainEffortEnv(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildJob_ForwardsAcceptanceGateEnv verifies the ACCEPTANCE-GATE-HARDENING
+// knobs are forwarded from the broker's env into the worker Job only when set
+// (the gate runs in the worker; a Job does not inherit the broker pod env).
+func TestBuildJob_ForwardsAcceptanceGateEnv(t *testing.T) {
+	cfg := JobConfig{Image: "img", Namespace: "nexus", BriefTimeout: "30m"}
+	b := Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "NEX-1"}
+
+	t.Run("set → forwarded", func(t *testing.T) {
+		t.Setenv("ACCEPTANCE_REQUIRE_TEST_DIFF", "1")
+		t.Setenv("ACCEPTANCE_MIN_DIFF_LINES", "5")
+		c := BuildJob(b, cfg, "t1", "claude-code").Spec.Template.Spec.Containers[0]
+		if !envValueEquals(c.Env, "ACCEPTANCE_REQUIRE_TEST_DIFF", "1") {
+			t.Errorf("ACCEPTANCE_REQUIRE_TEST_DIFF not forwarded: %v", c.Env)
+		}
+		if !envValueEquals(c.Env, "ACCEPTANCE_MIN_DIFF_LINES", "5") {
+			t.Errorf("ACCEPTANCE_MIN_DIFF_LINES not forwarded: %v", c.Env)
+		}
+	})
+
+	t.Run("unset → absent (worker uses code defaults)", func(t *testing.T) {
+		t.Setenv("ACCEPTANCE_REQUIRE_TEST_DIFF", "")
+		t.Setenv("ACCEPTANCE_JUDGE_DIFF", "")
+		t.Setenv("ACCEPTANCE_MIN_DIFF_LINES", "")
+		c := BuildJob(b, cfg, "t2", "claude-code").Spec.Template.Spec.Containers[0]
+		for _, k := range []string{"ACCEPTANCE_REQUIRE_TEST_DIFF", "ACCEPTANCE_JUDGE_DIFF", "ACCEPTANCE_MIN_DIFF_LINES"} {
+			for _, e := range c.Env {
+				if e.Name == k {
+					t.Errorf("%s should be absent when unset, got %q", k, e.Value)
+				}
+			}
+		}
+	})
+}

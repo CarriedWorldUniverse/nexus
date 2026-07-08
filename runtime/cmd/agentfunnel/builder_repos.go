@@ -16,12 +16,14 @@ const (
 )
 
 type builderRepoSession struct {
+	vcs      string // "git" (default) or "cairn"
 	reposDir string
 	repo     string
 	repoName string
 	remote   string
 	mirror   string
-	worktree string
+	worktree string // where the agent works + chdir target (git: worktree; cairn: expressed line folder)
+	cloneDir string // cairn only: the per-run clone root, disposed whole on despawn
 	branch   string
 }
 
@@ -38,6 +40,7 @@ func setupBuilderRepo(ctx context.Context, aspect, runID, repo, branch string) (
 		return nil, fmt.Errorf("builder repo: branch not set for repo %q", repo)
 	}
 	s := &builderRepoSession{
+		vcs:      builderVCS(),
 		reposDir: reposDir,
 		repo:     repo,
 		repoName: repoName,
@@ -46,13 +49,29 @@ func setupBuilderRepo(ctx context.Context, aspect, runID, repo, branch string) (
 		worktree: filepath.Join(reposDir, repoName, repoWorktreeName(aspect, runID)),
 		branch:   branch,
 	}
-	if err := s.spawn(ctx); err != nil {
+	if s.vcs == vcsCairn {
+		// Per-run clone lives at the same path the git worktree would; the
+		// expressed line folder inside it becomes s.worktree (the chdir target).
+		s.cloneDir = filepath.Join(reposDir, repoName, repoWorktreeName(aspect, runID))
+		if err := s.spawnCairn(ctx); err != nil {
+			return nil, err
+		}
+	} else if err := s.spawn(ctx); err != nil {
 		return nil, err
 	}
 	if err := os.Chdir(s.worktree); err != nil {
 		return nil, fmt.Errorf("chdir builder repo worktree: %w", err)
 	}
 	return s, nil
+}
+
+// builderVCS is the builder's VCS mode: CW_VCS=cairn opts into the cairn
+// clone-per-run path; anything else (default) keeps the git mirror+worktree path.
+func builderVCS() string {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("CW_VCS")), vcsCairn) {
+		return vcsCairn
+	}
+	return "git"
 }
 
 func (s *builderRepoSession) spawn(ctx context.Context) error {
@@ -123,6 +142,9 @@ func (s *builderRepoSession) worktreeBase(ctx context.Context) (string, error) {
 }
 
 func (s *builderRepoSession) cleanDespawn(ctx context.Context) error {
+	if s.vcs == vcsCairn {
+		return s.cleanDespawnCairn(ctx)
+	}
 	if cwd, err := os.Getwd(); err == nil && isWithinPath(cwd, s.worktree) {
 		if home := os.Getenv("HOME"); home != "" {
 			_ = os.Chdir(home)
@@ -150,13 +172,22 @@ func (s *builderRepoSession) gitWithRetry(ctx context.Context, dir string, args 
 		if !gitLockContention(string(out), err) || i == attempts-1 {
 			return last
 		}
-		select {
-		case <-ctx.Done():
+		if !sleepBackoff(ctx, i) {
 			return ctx.Err()
-		case <-time.After(time.Duration(i+1) * 200 * time.Millisecond):
 		}
 	}
 	return last
+}
+
+// sleepBackoff waits an increasing (attempt+1)*200ms before a retry, returning
+// false if ctx is cancelled first. Shared by the git and cairn retry wrappers.
+func sleepBackoff(ctx context.Context, attempt int) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(time.Duration(attempt+1) * 200 * time.Millisecond):
+		return true
+	}
 }
 
 func gitLockContention(out string, err error) bool {

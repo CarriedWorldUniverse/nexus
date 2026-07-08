@@ -157,6 +157,7 @@ func TestSkillsLint(t *testing.T) {
 	want := map[string]bool{
 		"workflow-basics": true, "spec": true, "planning": true, "development": true,
 		"review": true, "merge": true, "release": true, "house-style": true, "security": true,
+		"cairn": true,
 	}
 	names := map[string]bool{}
 	for _, s := range all {
