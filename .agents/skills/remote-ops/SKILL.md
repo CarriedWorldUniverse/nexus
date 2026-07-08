@@ -1,6 +1,6 @@
 ---
 name: remote-ops
-description: Use when constructing ssh/kubectl commands to dMon or robo-dog, or when waiting on long/background jobs — quoting patterns that survive the remote shell, the zsh traps, remote python-heredoc, background-wait discipline, and token sanitizing.
+description: 'Use when constructing ssh/kubectl commands to dMon or robo-dog, or when waiting on long/background jobs — quoting patterns that survive the remote shell, the zsh traps, remote python-heredoc, background-wait discipline, and token sanitizing.'
 when_to_use: 'When constructing ssh/kubectl commands to dMon or robo-dog, or waiting on long/background jobs — quoting patterns, zsh traps, remote heredocs, background-wait discipline, token sanitizing.'
 ---
 

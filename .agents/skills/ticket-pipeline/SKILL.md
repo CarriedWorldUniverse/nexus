@@ -1,6 +1,6 @@
 ---
 name: ticket-pipeline
-description: Use to run a whole ticket/prompt end-to-end, solo, as the orchestrator — intake+clarify with the operator, decompose and fan out to builder subagents, then reviewer → security-validator → assemble a PR → a free local-AI (Ornith) review pass with comments → out for external human review. The full ticket-to-PR lifecycle in one shadow session, operator kept in the loop only for questions. Builds on the `orchestrator` skill + the builder/reviewer/security-validator agent defs.
+description: 'Use to run a whole ticket/prompt end-to-end, solo, as the orchestrator — intake+clarify with the operator, decompose and fan out to builder subagents, then reviewer → security-validator → assemble a PR → a free local-AI (Ornith) review pass with comments → out for external human review. The full ticket-to-PR lifecycle in one shadow session, operator kept in the loop only for questions. Builds on the `orchestrator` skill + the builder/reviewer/security-validator agent defs.'
 when_to_use: 'When running a whole ticket/prompt end-to-end solo as the orchestrator — intake+clarify, fan out builders, review, security-validate, assemble a PR, Ornith comment pass, out for human review.'
 ---
 

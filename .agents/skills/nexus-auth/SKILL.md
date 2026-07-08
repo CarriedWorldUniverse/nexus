@@ -1,6 +1,6 @@
 ---
 name: nexus-auth
-description: Use when working with nexus/CWB authentication or access — operator passkey login to the dashboard, doing a broker admin op, cw config/cw kb mTLS, aspect keyfiles/tokens, the dormant herald IdP, the org-seed/custodian vault, or recovering dashboard/admin access. The map of who-authenticates-how across the personal cloud (dMon k3s: broker + CWB services), and the exact recipes + recovery levers. Read before changing any auth/credential/identity path.
+description: 'Use when working with nexus/CWB authentication or access — operator passkey login to the dashboard, doing a broker admin op, cw config/cw kb mTLS, aspect keyfiles/tokens, the dormant herald IdP, the org-seed/custodian vault, or recovering dashboard/admin access. The map of who-authenticates-how across the personal cloud (dMon k3s: broker + CWB services), and the exact recipes + recovery levers. Read before changing any auth/credential/identity path.'
 when_to_use: 'When working with nexus/CWB authentication or access — passkey login, broker admin ops, mTLS config paths, aspect keyfiles/tokens, or recovering dashboard/admin access.'
 ---
 

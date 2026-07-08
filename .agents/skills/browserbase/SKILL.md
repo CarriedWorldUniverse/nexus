@@ -1,6 +1,6 @@
 ---
 name: browserbase
-description: Use when shadow needs the web beyond plain HTTP — fetch/search pages, or drive a real cloud Chrome (JS-rendered sites, interactive flows, logins/auth) via the `browse` CLI + Stagehand from croft. Covers the command surface, the key location, the auth-flow pattern (Live View + Contexts), and the Free-tier caps (Model Gateway $5 token cap, no Proxies/Verified).
+description: 'Use when shadow needs the web beyond plain HTTP — fetch/search pages, or drive a real cloud Chrome (JS-rendered sites, interactive flows, logins/auth) via the `browse` CLI + Stagehand from croft. Covers the command surface, the key location, the auth-flow pattern (Live View + Contexts), and the Free-tier caps (Model Gateway $5 token cap, no Proxies/Verified).'
 when_to_use: 'When shadow needs the web beyond plain HTTP — fetch/search pages or drive a real cloud Chrome (JS-rendered sites, interactive flows, logins) via the browse CLI from croft.'
 ---
 

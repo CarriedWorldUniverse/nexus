@@ -1,6 +1,6 @@
 ---
 name: writing-skills
-description: Use when writing, editing, reviewing, or pruning a skill (SKILL.md) — the craft reference for making skills predictable: invocation choice, description writing, information hierarchy, leading words, and the named failure modes (premature completion, duplication, sediment). Also use for the periodic pruning pass over ~/.claude/skills/.
+description: 'Use when writing, editing, reviewing, or pruning a skill (SKILL.md) — the craft reference for making skills predictable: invocation choice, description writing, information hierarchy, leading words, and the named failure modes (premature completion, duplication, sediment). Also use for the periodic pruning pass over ~/.claude/skills/.'
 when_to_use: 'When writing, editing, reviewing, or pruning a skill (SKILL.md) — invocation choice, description writing, information hierarchy, leading words, failure modes, and the pruning pass.'
 ---
 

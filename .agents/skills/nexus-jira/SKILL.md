@@ -1,6 +1,6 @@
 ---
 name: nexus-jira
-description: Use when creating, updating, transitioning, or commenting on jira issues via the nexus-jira MCP tools — the exact param surface, valid transitions, and parent rules. ~35 transcript-audited errors came from guessing this surface.
+description: 'Use when creating, updating, transitioning, or commenting on jira issues via the nexus-jira MCP tools — the exact param surface, valid transitions, and parent rules. ~35 transcript-audited errors came from guessing this surface.'
 when_to_use: 'When creating, updating, transitioning, or commenting on jira issues via the nexus-jira MCP tools — exact param surface, valid transitions, parent rules.'
 ---
 
