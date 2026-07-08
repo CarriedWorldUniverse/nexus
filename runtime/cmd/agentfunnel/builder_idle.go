@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -222,16 +223,21 @@ func (g progressChatGateway) AnnounceFile(ctx context.Context, path, description
 	return msgID, err
 }
 
-func watchBuilderGitProgress(ctx context.Context, worktree string, interval time.Duration, progress builderProgressFunc, log *slog.Logger) {
-	if worktree == "" || interval <= 0 {
+// watchBuilderCommitProgress polls the builder line's tip commit via headFn and
+// signals "git_commit" progress on each change. headFn abstracts the VCS: git
+// rev-parse in the worktree (git mode) or `cairn log` on the line (cairn mode).
+// A nil headFn or an unavailable initial head disables the watcher (non-fatal;
+// other progress signals still fire).
+func watchBuilderCommitProgress(ctx context.Context, headFn func(context.Context) (string, error), interval time.Duration, progress builderProgressFunc, log *slog.Logger) {
+	if headFn == nil || interval <= 0 {
 		return
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	last, err := gitHead(ctx, worktree)
+	last, err := headFn(ctx)
 	if err != nil {
-		log.Debug("agentfunnel: builder git progress watcher disabled; initial HEAD unavailable", "worktree", worktree, "err", err)
+		log.Debug("agentfunnel: builder commit progress watcher disabled; initial head unavailable", "err", err)
 		return
 	}
 	t := time.NewTicker(interval)
@@ -241,9 +247,9 @@ func watchBuilderGitProgress(ctx context.Context, worktree string, interval time
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			head, err := gitHead(ctx, worktree)
+			head, err := headFn(ctx)
 			if err != nil {
-				log.Debug("agentfunnel: builder git progress HEAD check failed", "worktree", worktree, "err", err)
+				log.Debug("agentfunnel: builder commit progress head check failed", "err", err)
 				continue
 			}
 			if head != "" && head != last {
@@ -290,8 +296,9 @@ type builderRealOutputTracker struct {
 	next        funnel.ObservabilityHook
 	mu          sync.Mutex
 	text        strings.Builder
-	toolNames   map[string]string // ToolCallStart.ID -> Name, for labeling results
-	toolResults string            // capped, tail-kept accumulation of tool results this turn
+	toolNames   map[string]string   // ToolCallStart.ID -> Name, for labeling results (per turn)
+	toolResults string              // capped, tail-kept accumulation of tool results this turn
+	runTools    map[string]struct{} // RUN-level set of every tool name invoked (NOT reset per turn)
 }
 
 func (h *builderRealOutputTracker) BeginTurn(turnID, label, model, provider string, triggerMsg int64) {
@@ -317,6 +324,16 @@ func (h *builderRealOutputTracker) OnBridleEvent(ev bridle.Event) {
 			h.toolNames = make(map[string]string)
 		}
 		h.toolNames[e.ID] = e.Name
+		// Run-level accumulation (survives BeginTurn resets) — the
+		// provenance signal for the acceptance judge: which tools the agent
+		// ACTUALLY invoked across the whole run, so a claimed
+		// "produced by tool X" artifact can be checked against reality.
+		if e.Name != "" {
+			if h.runTools == nil {
+				h.runTools = make(map[string]struct{})
+			}
+			h.runTools[e.Name] = struct{}{}
+		}
 		h.mu.Unlock()
 	case bridle.ToolCallResult:
 		h.mu.Lock()
@@ -373,6 +390,24 @@ func (h *builderRealOutputTracker) toolResultsSnapshot() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.toolResults
+}
+
+// invokedTools returns the sorted set of every tool name the agent invoked
+// across the WHOLE run (not reset per turn) — the acceptance judge's
+// provenance signal: an artifact claiming a result "produced by" a tool that
+// never appears here was fabricated.
+func (h *builderRealOutputTracker) invokedTools() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.runTools) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(h.runTools))
+	for name := range h.runTools {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // snapshot returns the combined real-evidence signal for the current turn:

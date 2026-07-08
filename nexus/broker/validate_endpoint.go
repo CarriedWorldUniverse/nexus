@@ -608,14 +608,33 @@ func resolveMCPProfile(ctx context.Context, store *credentials.Store, aspect str
 	if store == nil {
 		return "", nil
 	}
+	// Exact spawn/aspect name first.
 	profile, err := store.GetMCPProfile(ctx, aspect)
 	if err != nil {
 		return "", err
 	}
-	if profile == "" {
-		return "", nil
+	if profile != "" {
+		return store.Substitute(ctx, aspect, profile)
 	}
-	return store.Substitute(ctx, aspect, profile)
+	// Pool fallback: a pool worker is named {personality}-{role} and resolves
+	// its persona/config/credentials to the PERSONALITY (aspects.PersonalityOf).
+	// The mcp_profile follows the same rule — a spawn with no profile of its
+	// own inherits its personality's, so ONE profile per personality (e.g.
+	// "anvil") covers every role that personality takes ("anvil-builder-complex"
+	// etc.). Without this, pool spawns silently get NO MCP servers (the
+	// personality-level profiles were dead for the pool). Substitute under the
+	// personality — the name any credential placeholders in that profile are
+	// scoped to.
+	if p := aspects.PersonalityOf(aspect); p != aspect {
+		pProfile, perr := store.GetMCPProfile(ctx, p)
+		if perr != nil {
+			return "", perr
+		}
+		if pProfile != "" {
+			return store.Substitute(ctx, p, pProfile)
+		}
+	}
+	return "", nil
 }
 
 // writeJSONError emits the spec §5 error shape. currentVersion is
