@@ -136,10 +136,17 @@ func TestBuilderDecide_AcceptanceGatesNonCompleteReasons(t *testing.T) {
 func TestBuilderPRVerifier(t *testing.T) {
 	orig := prExistsFn
 	origTicket := prExistsByTicketFn
-	defer func() { prExistsFn = orig; prExistsByTicketFn = origTicket }()
+	origStats := prDiffStatsFn
+	defer func() { prExistsFn = orig; prExistsByTicketFn = origTicket; prDiffStatsFn = origStats }()
 	// Head-branch miss/error falls back to a ticket search (NET-46); stub it
 	// to a hermetic "not found" so this test never shells out to real gh.
 	prExistsByTicketFn = func(repo, ticket string) (bool, error) { return false, nil }
+	// Unit 2: the "pr exists" case also runs the substance check — stub a
+	// substantial diff so it exercises the pass path (the no-pr/error cases
+	// short-circuit at prExists before this is reached).
+	prDiffStatsFn = func(string, string) (prDiffStats, bool, error) {
+		return prDiffStats{Additions: 20, Deletions: 2, ChangedFiles: 2}, true, nil
+	}
 	log := slog.Default()
 	cases := []struct {
 		name string
@@ -184,12 +191,17 @@ func TestBuilderPRVerifierRepoLessBypassesGate(t *testing.T) {
 
 func TestBuilderPRVerifierUsesCustomBranch(t *testing.T) {
 	orig := prExistsFn
-	defer func() { prExistsFn = orig }()
+	origStats := prDiffStatsFn
+	defer func() { prExistsFn = orig; prDiffStatsFn = origStats }()
 	var gotRepo, gotBranch string
 	prExistsFn = func(repo, branch string) (bool, error) {
 		gotRepo = repo
 		gotBranch = branch
 		return true, nil
+	}
+	// Unit 2 substance check runs after prExists passes — stub substantial.
+	prDiffStatsFn = func(string, string) (prDiffStats, bool, error) {
+		return prDiffStats{Additions: 10, Deletions: 1, ChangedFiles: 1}, true, nil
 	}
 	if ok := builderPRVerifier(slog.Default(), "plumb", "org/repo", "NEX-1", "feature/custom")(); !ok {
 		t.Fatal("verifier returned false")

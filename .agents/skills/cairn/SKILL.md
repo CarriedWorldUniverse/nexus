@@ -33,6 +33,17 @@ cairn fold village-life                         # merge the line into main (clea
 cairn push                                      # back up to GitHub origin
 ```
 
+## Pool builder use (`CW_VCS=cairn`) — clone-per-run
+When a dispatched builder runs with `CW_VCS=cairn`, the harness has **already** provisioned an isolated cairn working copy for the ticket before your turn: it `cairn clone`d a per-run copy, set the `nexus-cw` identity, pointed `origin` at the GitHub repo, and `cairn express`ed your line — and dropped you **inside that line's folder**. So you do NOT clone, express, or configure anything. You just:
+```
+… edit the files in this folder (your line) …
+cairn commit <branch> -m "<what + why>"  &&  cairn push origin <branch>
+```
+- **`commit && push`, exit-checked** — the `&&` is mandatory. `cairn commit` exit **0** = sealed clean (push it); exit **2** = it recorded conflicts against a `main` that moved under you (run `cairn resolve <branch> <path>`, re-commit, THEN push — never push a conflicted line); exit 1 = error (surface it). Never push unconditionally: a failed commit followed by a push ships an empty/broken branch.
+- **The branch name is fixed** — use the exact `builder/<ticket>` line the harness expressed; the acceptance gate finds your PR by it.
+- Open the PR with `gh` (git projection) exactly as the git path does. The clone is disposed on despawn — nothing to clean up.
+- This is *clone-per-run*: your copy is yours alone, so there is no cross-builder contention to think about. (Origin here is a **git remote** — GitHub — so `cairn push` publishes an ordinary-git projection that `gh` PRs against; nothing about the server/full-fidelity path applies.)
+
 ## Sync behaviour (commit / push / pull)
 - **`autosync` is the switch on commit.** With `autosync` set, `cairn commit` auto-syncs with origin (prints `auto-synced with origin` / `auto-sync skipped: …`). **Here it's UNSET**, so a commit is **local only** — you must `cairn push`. (A 22-commit arc once sat `ahead: 49` local-only until a push.)
 - **`push` auto-reconciles divergence.** Bare `cairn push` (from the root) publishes **all lines + tags** and, if the remote diverged, pulls + 3-way-merges + retries once so "push just works" (silent on success; a merge conflict surfaces "resolve, then push"). A **single-line** push — `cairn push [remote] [branch]`, or a bare push from *inside* a branch folder — pushes just that line and does **not** auto-retry.

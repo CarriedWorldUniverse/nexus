@@ -341,6 +341,16 @@ func main() {
 		} else {
 			log.Info("agentfunnel: cw setup-git github ok — gh/git bridged for builder")
 		}
+		// In cairn mode, bridge the same GitHub credential into GITHUB_TOKEN so
+		// `cairn push` (which ignores git's credential helper) authenticates.
+		if builderVCS() == vcsCairn && *repoFlag != "" {
+			if msg, err := bridgeCairnGitHubAuth(context.Background(), repoRemoteURL(*repoFlag)); err != nil {
+				log.Error("agentfunnel: cairn GitHub auth bridge failed — cairn push may fail",
+					"err", err)
+			} else {
+				log.Info("agentfunnel: cairn GitHub auth ready", "how", msg)
+			}
+		}
 		builderRepo, err = setupBuilderRepo(context.Background(), res.AspectName, os.Getenv("CW_DISPATCH_RUN_ID"), *repoFlag, builderBranch(*branchFlag, *ticketFlag))
 		if err != nil {
 			fail(log, "setup builder repo", err)
@@ -815,6 +825,15 @@ func main() {
 			verify = acceptanceVerifier.Verify
 		}
 		acceptanceGate = newBuilderAcceptanceGate(acceptanceCriteria, verify)
+		// Unit 1: give the gate the context to fetch the run's PR diff so the
+		// judge verdicts on the actual diff, not the agent's self-report.
+		acceptanceGate.repo = *repoFlag
+		acceptanceGate.branch = *branchFlag
+		acceptanceGate.ticket = *ticketFlag
+		// Provenance: let the gate see which tools the run actually invoked.
+		if realOutputTracker != nil {
+			acceptanceGate.invokedTools = realOutputTracker.invokedTools
+		}
 		onTaskDone = builderOnTaskDone(stop, log, res.AspectName, acceptanceGate,
 			func() string {
 				if realOutputTracker == nil {
@@ -998,7 +1017,7 @@ func main() {
 			stop()
 		}, log)
 		if builderRepo != nil {
-			go watchBuilderGitProgress(ctx, builderRepo.worktree, gitProgressPollInterval, recordBuilderProgress, log)
+			go watchBuilderCommitProgress(ctx, builderRepo.headFn(), gitProgressPollInterval, recordBuilderProgress, log)
 		}
 	}
 
@@ -1101,7 +1120,16 @@ func withBranchInstruction(content, repo, branch string) string {
 	if repo == "" || branch == "" {
 		return content
 	}
-	line := fmt.Sprintf("\n\n[HARNESS] Work on branch `%s` — commit and push your changes to this exact branch name so the harness can find your pull request.", branch)
+	var line string
+	if builderVCS() == vcsCairn {
+		// cairn working copy: the agent commits + pushes with cairn, not git.
+		// `commit && push` (exit-checked) so a failed/conflicted commit never
+		// ships an empty or broken branch — cairn commit returns exit 2 when it
+		// recorded conflicts (resolve then re-commit, do not push).
+		line = fmt.Sprintf("\n\n[HARNESS] This is a cairn working copy. Work on line `%s`. From the branch folder, publish with a single exit-checked step: `cairn commit %s -m \"<what + why>\" && cairn push origin %s`. Do NOT use git. Only push after a clean commit (exit 0); on exit 2 the line has recorded conflicts — run `cairn resolve %s <path>`, re-commit, then push. Push to this exact branch name so the harness can find your pull request.", branch, branch, branch, branch)
+	} else {
+		line = fmt.Sprintf("\n\n[HARNESS] Work on branch `%s` — commit and push your changes to this exact branch name so the harness can find your pull request.", branch)
+	}
 	return content + line
 }
 
@@ -1262,6 +1290,22 @@ type builderAcceptanceGate struct {
 	hasCriteria   bool
 	verify        taskDoneVerifyFn
 	repromptsLeft int
+
+	// repo/branch/ticket give Decide the context to fetch the run's PR diff
+	// (ACCEPTANCE-GATE-HARDENING Unit 1 — judge the diff, not the narrative).
+	// Set post-construction at the main() wiring site; empty repo (every test
+	// caller, and repo-less dispatches) skips diff augmentation, so the judge
+	// sees the report only exactly as before this unit.
+	repo   string
+	branch string
+	ticket string
+
+	// invokedTools returns the run-level set of tools the agent actually
+	// called — the provenance signal the judge uses to reject a fabricated
+	// artifact (one claiming a result produced by a tool that never ran). Set
+	// post-construction from the realOutputTracker; nil (tests / no tracker)
+	// skips provenance, fail-open.
+	invokedTools func() []string
 }
 
 // newBuilderAcceptanceGate constructs the shared gate. verify may be nil
@@ -1290,9 +1334,27 @@ func (g *builderAcceptanceGate) Decide(ctx context.Context, output string, log *
 	var verdict funnel.AcceptanceVerdict
 	var verr error
 	if g.hasCriteria && g.verify != nil {
-		verdict, verr = g.verify(ctx, g.criteria, output)
+		// Unit 1: judge the actual PR diff (ground truth), not just the
+		// agent's self-report. Provenance: append the run-level tool list so
+		// the judge can reject a fabricated "produced by tool X" artifact when
+		// X never ran. Both best-effort/fail-open (empty → judge input
+		// unchanged).
+		judgeInput := g.augmentedForJudge(output, log)
+		if g.invokedTools != nil {
+			judgeInput = funnel.AppendToolProvenance(judgeInput, g.invokedTools())
+		}
+		verdict, verr = g.verify(ctx, g.criteria, judgeInput)
 		if verr != nil {
 			log.Warn("agentfunnel: acceptance verification errored — failing open", "err", verr)
+		} else if verdict.Met && g.testEvidenceMissing(log) {
+			// Unit 3: the criteria require tests but the PR diff changes no
+			// test file — a claimed pass with no tests written (the keel
+			// confabulation class). Override the judge's met to false; the
+			// bounded reprompt/backstop then applies as for any not-met.
+			log.Info("agentfunnel: criteria require tests but PR diff changes no test file — not met (Unit 3)",
+				"repo", g.repo, "ticket", g.ticket)
+			verdict.Met = false
+			verdict.Reason = "acceptance criteria require tests but the PR diff changes no test file"
 		}
 	}
 	step := taskDoneDecide(g.hasCriteria, g.verify != nil, verr, verdict.Met, g.repromptsLeft)
@@ -1408,8 +1470,23 @@ func builderPRVerifier(log *slog.Logger, aspect, repo, ticket, branch string) fu
 		}
 		if !ok {
 			log.Info("agentfunnel: no PR found for builder branch", "aspect", aspect, "repo", repo, "branch", head)
+			return false
 		}
-		return ok
+		// ACCEPTANCE-GATE-HARDENING Unit 2: a PR that exists but changes
+		// nothing is not a completed build. Fail-closed on a gh error;
+		// disabled when ACCEPTANCE_MIN_DIFF_LINES=0.
+		floor := minAcceptanceDiffLines()
+		sub, serr := prSubstantial(repo, head, ticket, floor)
+		if serr != nil {
+			log.Warn("agentfunnel: PR substance check errored — treating as not-yet-complete", "aspect", aspect, "err", serr)
+			return false
+		}
+		if !sub {
+			log.Info("agentfunnel: PR exists but diff is empty/below floor — not complete",
+				"aspect", aspect, "repo", repo, "branch", head, "min_diff_lines", floor)
+			return false
+		}
+		return true
 	}
 }
 
@@ -1494,34 +1571,91 @@ func builderPROpener(log *slog.Logger, repo, ticket, branch string) func() (stri
 // (#413) that the head-branch-only check above missed entirely.
 var prExistsByTicketFn = func(repo, ticket string) (bool, error) {
 	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--state", "open",
-		"--json", "number,headRefName,title").CombinedOutput()
+		"--json", "number,headRefName,title,createdAt").CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("gh pr list (ticket fallback): %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return matchPRByTicket(out, ticket)
+	return matchPRByTicket(out, ticket, provenanceNotBefore)
 }
 
 // prTicketSearchEntry is one row of
-// `gh pr list --json number,headRefName,title`.
+// `gh pr list --json number,headRefName,title,createdAt`.
 type prTicketSearchEntry struct {
-	Number      int    `json:"number"`
-	HeadRefName string `json:"headRefName"`
-	Title       string `json:"title"`
+	Number      int       `json:"number"`
+	HeadRefName string    `json:"headRefName"`
+	Title       string    `json:"title"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// provenanceNotBefore is the ACCEPTANCE-GATE-HARDENING Unit 4 provenance floor
+// for the loose ticket-fallback PR credit. agentfunnel is one-shot per
+// dispatch, so the process start time IS this run's start; a PR credited via
+// the ticket search (not the exact own-branch head match) must have been
+// created at/after this, so a pre-existing or foreign PR that merely mentions
+// the ticket in its title/branch cannot be credited to this run. The exact
+// own-branch head match (prExistsFn) is deliberately NOT time-guarded — it is
+// this ticket's designated branch, and a re-dispatch legitimately inherits it.
+//
+// provenanceGrace slackens the floor by a few minutes so ordinary clock skew
+// between this pod and GitHub can't false-reject a legitimately just-opened
+// PR (the run does real work before opening a PR, so run-start and PR-creation
+// are already well separated; the grace only covers skew for very fast tasks).
+// A genuinely foreign/pre-existing PR is minutes-to-days older than run start,
+// so the grace does not let it through. Swappable in tests.
+const provenanceGrace = 5 * time.Minute
+
+var provenanceNotBefore = time.Now().Add(-provenanceGrace)
+
+// ticketWordMatch reports whether ticket occurs in s as a whole token —
+// bounded by string start/end or a non-alphanumeric byte on each side — so
+// "NET-6" does NOT match inside "NET-66" (the substring bug the raw
+// strings.Contains fallback had, which could credit one ticket's run with
+// another ticket's PR). Ticket IDs and branch names are ASCII (e.g. NET-66,
+// anvil/workers-json-flag); a multibyte title byte adjacent to a hit is >127,
+// hence non-alnum, hence a valid boundary.
+func ticketWordMatch(s, ticket string) bool {
+	if ticket == "" {
+		return false
+	}
+	for i := 0; i+len(ticket) <= len(s); {
+		j := strings.Index(s[i:], ticket)
+		if j < 0 {
+			return false
+		}
+		start := i + j
+		end := start + len(ticket)
+		beforeOK := start == 0 || !isAlnumByte(s[start-1])
+		afterOK := end == len(s) || !isAlnumByte(s[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		i = start + 1
+	}
+	return false
+}
+
+func isAlnumByte(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // matchPRByTicket is the pure decision core of the ticket-search fallback:
-// given the raw JSON of `gh pr list`, reports whether any PR's head branch
-// name or title contains ticket. Pulled out of prExistsByTicketFn so the
-// matching rule is unit-testable without shelling out to gh.
-func matchPRByTicket(out []byte, ticket string) (bool, error) {
+// reports whether any open PR's head branch or title carries ticket as a whole
+// token (ticketWordMatch) AND was created at/after notBefore (Unit 4
+// provenance — never credit a run with a PR opened before it started). Pulled
+// out of prExistsByTicketFn so both rules are unit-testable without gh.
+func matchPRByTicket(out []byte, ticket string, notBefore time.Time) (bool, error) {
 	var prs []prTicketSearchEntry
 	if err := json.Unmarshal(out, &prs); err != nil {
 		return false, fmt.Errorf("gh pr list (ticket fallback): parse: %w", err)
 	}
 	for _, pr := range prs {
-		if strings.Contains(pr.HeadRefName, ticket) || strings.Contains(pr.Title, ticket) {
-			return true, nil
+		if !ticketWordMatch(pr.HeadRefName, ticket) && !ticketWordMatch(pr.Title, ticket) {
+			continue
 		}
+		if pr.CreatedAt.Before(notBefore) {
+			continue // pre-existing/foreign PR — not this run's work
+		}
+		return true, nil
 	}
 	return false, nil
 }
@@ -1557,6 +1691,280 @@ func prExists(repo, branch, ticket string) (bool, error) {
 		return true, nil
 	}
 	return ok, err
+}
+
+// --- ACCEPTANCE-GATE-HARDENING Unit 2: objective substance precondition ---
+//
+// prExists proves a PR *exists*; it never inspects what's in it. A builder
+// can satisfy the PR gate with an empty/whitespace PR and a convincing
+// narrative (the judge reads self-reported prose, not the diff). prSubstantial
+// is the objective, pre-judge, fail-closed check that the run's PR actually
+// changes something. It gates the SAME PR prExists credits (own-branch first,
+// then the ticket fallback), so the two agree on which PR they're judging.
+
+// prDiffStats is the changed-line footprint of a PR — the substance signal.
+type prDiffStats struct {
+	Additions    int `json:"additions"`
+	Deletions    int `json:"deletions"`
+	ChangedFiles int `json:"changedFiles"`
+}
+
+// prDiffStatsFn fetches the diff footprint of the open PR on branch's head.
+// found=false means no such PR (distinct from a real PR with a zero diff).
+// Swappable in tests.
+var prDiffStatsFn = func(repo, branch string) (prDiffStats, bool, error) {
+	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open",
+		"--json", "additions,deletions,changedFiles").CombinedOutput()
+	if err != nil {
+		return prDiffStats{}, false, fmt.Errorf("gh pr list (diff stats): %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return parsePRDiffStatsHead(out)
+}
+
+// parsePRDiffStatsHead is the pure core: the first row of a `gh pr list --json
+// additions,deletions,changedFiles` array, or found=false for an empty list.
+func parsePRDiffStatsHead(out []byte) (prDiffStats, bool, error) {
+	var rows []prDiffStats
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return prDiffStats{}, false, fmt.Errorf("gh pr list (diff stats): parse: %w", err)
+	}
+	if len(rows) == 0 {
+		return prDiffStats{}, false, nil
+	}
+	return rows[0], true, nil
+}
+
+// prTicketStatsEntry is one row of the ticket-fallback stats query.
+type prTicketStatsEntry struct {
+	HeadRefName  string    `json:"headRefName"`
+	Title        string    `json:"title"`
+	Additions    int       `json:"additions"`
+	Deletions    int       `json:"deletions"`
+	ChangedFiles int       `json:"changedFiles"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+// prDiffStatsByTicketFn is the diff-footprint parallel of prExistsByTicketFn:
+// searches open PRs for one carrying ticket as a whole token and returns its
+// stats — subject to the same Unit 4 provenance floor. Swappable in tests.
+var prDiffStatsByTicketFn = func(repo, ticket string) (prDiffStats, bool, error) {
+	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--state", "open",
+		"--json", "headRefName,title,additions,deletions,changedFiles,createdAt").CombinedOutput()
+	if err != nil {
+		return prDiffStats{}, false, fmt.Errorf("gh pr list (diff stats, ticket): %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return selectPRDiffStatsByTicket(out, ticket, provenanceNotBefore)
+}
+
+// selectPRDiffStatsByTicket is the pure decision core of the ticket-fallback
+// stats lookup — same rules as matchPRByTicket (whole-token ticket match AND
+// created at/after notBefore), returning the matched PR's diff footprint.
+func selectPRDiffStatsByTicket(out []byte, ticket string, notBefore time.Time) (prDiffStats, bool, error) {
+	var rows []prTicketStatsEntry
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return prDiffStats{}, false, fmt.Errorf("gh pr list (diff stats, ticket): parse: %w", err)
+	}
+	for _, r := range rows {
+		if !ticketWordMatch(r.HeadRefName, ticket) && !ticketWordMatch(r.Title, ticket) {
+			continue
+		}
+		if r.CreatedAt.Before(notBefore) {
+			continue // pre-existing/foreign PR — not this run's work
+		}
+		return prDiffStats{Additions: r.Additions, Deletions: r.Deletions, ChangedFiles: r.ChangedFiles}, true, nil
+	}
+	return prDiffStats{}, false, nil
+}
+
+// minAcceptanceDiffLines is the floor (additions+deletions) a PR's diff must
+// clear to count as substantive. Default 1 — a literally-empty PR fails, any
+// real change passes, so on-by-default can never block legitimate work.
+// ACCEPTANCE_MIN_DIFF_LINES overrides; set it to 0 to DISABLE the substance
+// gate entirely (pure pre-Unit-2 back-compat). A malformed/negative value
+// falls back to the default rather than silently disabling.
+func minAcceptanceDiffLines() int {
+	v := strings.TrimSpace(os.Getenv("ACCEPTANCE_MIN_DIFF_LINES"))
+	if v == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 1
+	}
+	return n
+}
+
+// prSubstantial reports whether the run's PR has a non-empty diff clearing
+// floor — the objective, pre-judge substance precondition (Unit 2).
+// Fail-closed: a gh error returns (false, err). Resolves the same
+// own-branch-then-ticket PR that prExists credits. floor<=0 disables the
+// check (returns true — back-compat). found=false (no PR to measure) returns
+// (false, nil): prExists already reports not-verified in that case; this just
+// agrees without inventing an error.
+func prSubstantial(repo, branch, ticket string, floor int) (bool, error) {
+	if floor <= 0 {
+		return true, nil
+	}
+	stats, found, err := prDiffStatsFn(repo, branch)
+	if err != nil {
+		return false, err
+	}
+	if !found && strings.TrimSpace(ticket) != "" {
+		stats, found, err = prDiffStatsByTicketFn(repo, ticket)
+		if err != nil {
+			return false, err
+		}
+	}
+	if !found {
+		return false, nil
+	}
+	return stats.ChangedFiles >= 1 && (stats.Additions+stats.Deletions) >= floor, nil
+}
+
+// --- ACCEPTANCE-GATE-HARDENING Unit 1: judge the diff, not the narrative ---
+
+// prDiffFn returns the unified diff of the run's own PR. Own-branch first
+// (gh pr diff <branch>); on miss, the ticket fallback resolves a
+// provenance-valid PR number (Unit 4 rules) and diffs that. found=false means
+// no diff is available yet (no PR, or resolution failed) — the caller then
+// judges the report only (fail-open, unchanged from pre-Unit-1). Swappable in
+// tests.
+var prDiffFn = func(repo, branch, ticket string) (string, bool, error) {
+	out, err := exec.Command("gh", "pr", "diff", branch, "--repo", repo).CombinedOutput()
+	if err == nil {
+		return string(out), strings.TrimSpace(string(out)) != "", nil
+	}
+	// Own-branch diff failed (usually: no PR on that head). Fall back to the
+	// ticket search for a worker that opened its PR on a non-conventional
+	// branch (NET-46), reusing the Unit 4 provenance rules.
+	num, found, ferr := prNumberByTicketFn(repo, ticket)
+	if ferr != nil {
+		return "", false, ferr
+	}
+	if !found {
+		return "", false, nil
+	}
+	out2, err2 := exec.Command("gh", "pr", "diff", strconv.Itoa(num), "--repo", repo).CombinedOutput()
+	if err2 != nil {
+		return "", false, fmt.Errorf("gh pr diff #%d: %w: %s", num, err2, strings.TrimSpace(string(out2)))
+	}
+	return string(out2), strings.TrimSpace(string(out2)) != "", nil
+}
+
+// prNumberByTicketFn resolves the number of the first open PR carrying ticket
+// as a whole token AND clearing the Unit 4 provenance floor. Swappable in tests.
+var prNumberByTicketFn = func(repo, ticket string) (int, bool, error) {
+	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--state", "open",
+		"--json", "number,headRefName,title,createdAt").CombinedOutput()
+	if err != nil {
+		return 0, false, fmt.Errorf("gh pr list (diff number): %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return pickPRNumberByTicket(out, ticket, provenanceNotBefore)
+}
+
+// pickPRNumberByTicket is the pure core: the number of the first
+// prTicketSearchEntry that word-matches ticket and was created at/after
+// notBefore (same match + provenance rules as matchPRByTicket).
+func pickPRNumberByTicket(out []byte, ticket string, notBefore time.Time) (int, bool, error) {
+	var prs []prTicketSearchEntry
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return 0, false, fmt.Errorf("gh pr list (diff number): parse: %w", err)
+	}
+	for _, pr := range prs {
+		if !ticketWordMatch(pr.HeadRefName, ticket) && !ticketWordMatch(pr.Title, ticket) {
+			continue
+		}
+		if pr.CreatedAt.Before(notBefore) {
+			continue
+		}
+		return pr.Number, true, nil
+	}
+	return 0, false, nil
+}
+
+// acceptanceJudgeDiffEnabled gates Unit 1 (default ON). ACCEPTANCE_JUDGE_DIFF=0
+// reverts the judge to the agent's report only (pre-Unit-1 behavior).
+func acceptanceJudgeDiffEnabled() bool {
+	return strings.TrimSpace(os.Getenv("ACCEPTANCE_JUDGE_DIFF")) != "0"
+}
+
+// augmentedForJudge returns output augmented with the run's PR diff so the
+// acceptance judge verdicts on ground truth (Unit 1). Best-effort and
+// fail-open: no repo context, disabled, a gh error, or no diff yet all return
+// output unchanged (report-only, pre-Unit-1 behavior). It never blocks or
+// errors the gate — the substance/exists gates (Units 2/4) separately ensure a
+// real PR exists; this only sharpens what the judge reads when a diff is there.
+func (g *builderAcceptanceGate) augmentedForJudge(output string, log *slog.Logger) string {
+	if g.repo == "" || !acceptanceJudgeDiffEnabled() {
+		return output
+	}
+	diff, found, err := prDiffFn(g.repo, builderBranch(g.branch, g.ticket), g.ticket)
+	if err != nil {
+		log.Warn("agentfunnel: acceptance diff fetch errored — judging report only", "err", err)
+		return output
+	}
+	if !found {
+		return output
+	}
+	log.Info("agentfunnel: acceptance judging against PR diff (Unit 1)", "repo", g.repo, "branch", builderBranch(g.branch, g.ticket))
+	return funnel.AugmentOutputWithDiff(output, diff)
+}
+
+// --- ACCEPTANCE-GATE-HARDENING Unit 3: test evidence, not test claims ---
+//
+// A criterion of "passing tests" is worthless if nothing checks that tests
+// were even written — an agent can narrate "all tests pass" having authored
+// none (the keel confabulation class). This uses the non-fabricatable PR diff
+// (the same diff Unit 1 fetches): when the criteria call for tests, the diff
+// must actually change a test file. Opt-in and fail-open — it only ever fires
+// when explicitly enabled and a diff is available. Verifying tests PASS/RAN
+// (vs merely exist) is the run-tests stretch, left dark pending confirmation
+// the builder image carries the toolchain (see ACCEPTANCE-GATE-HARDENING.md).
+
+// acceptanceRequireTestDiff gates Unit 3 (default OFF — the "criteria mention
+// tests" trigger is a heuristic, so this is opt-in). ACCEPTANCE_REQUIRE_TEST_DIFF=1
+// enables it.
+func acceptanceRequireTestDiff() bool {
+	return strings.TrimSpace(os.Getenv("ACCEPTANCE_REQUIRE_TEST_DIFF")) == "1"
+}
+
+// criteriaMentionsTests reports whether the acceptance criteria reference tests
+// (case-insensitive "test") — the trigger for requiring a test-file change.
+func criteriaMentionsTests(criteria string) bool {
+	return strings.Contains(strings.ToLower(criteria), "test")
+}
+
+// diffTouchesTestFile reports whether a unified diff adds/modifies a Go test
+// file — a `_test.go` on a `+++ ` new-file line or a `diff --git` header. The
+// fleet is Go; a non-Go repo simply would not enable this gate.
+func diffTouchesTestFile(diff string) bool {
+	for _, line := range strings.Split(diff, "\n") {
+		if (strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "diff --git ")) &&
+			strings.Contains(line, "_test.go") {
+			return true
+		}
+	}
+	return false
+}
+
+// testEvidenceMissing reports whether Unit 3 should override a met verdict to
+// not-met: enabled, the brief names a repo, the criteria call for tests, a PR
+// diff is available, and that diff changes no test file. Any missing
+// precondition (disabled, no repo, criteria silent on tests, diff unavailable)
+// returns false — fail-open; the exists/substance gates still guarantee a PR.
+func (g *builderAcceptanceGate) testEvidenceMissing(log *slog.Logger) bool {
+	if !acceptanceRequireTestDiff() || g.repo == "" || !criteriaMentionsTests(g.criteria) {
+		return false
+	}
+	diff, found, err := prDiffFn(g.repo, builderBranch(g.branch, g.ticket), g.ticket)
+	if err != nil {
+		log.Warn("agentfunnel: Unit 3 diff fetch errored — not enforcing test evidence", "err", err)
+		return false
+	}
+	if !found || strings.TrimSpace(diff) == "" {
+		return false
+	}
+	return !diffTouchesTestFile(diff)
 }
 
 func builderReplyTopic(builderMode bool, topic string) string {
