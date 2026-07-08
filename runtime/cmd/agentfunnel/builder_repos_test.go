@@ -103,3 +103,62 @@ func TestBuilderRepoNaming(t *testing.T) {
 		t.Fatalf("builderBranch default = %q", got)
 	}
 }
+
+func TestRepoRemoteURL(t *testing.T) {
+	cases := []struct {
+		name, input, want string
+	}{
+		{
+			name: "ssh form unchanged",
+			input: "git@github.com:owner/repo.git",
+			want:  "git@github.com:owner/repo.git",
+		},
+		{
+			name: "owner/repo with trailing slash",
+			input: "owner/repo/",
+			want:  "https://github.com/owner/repo.git",
+		},
+		{
+			name: "http URL unchanged",
+			input: "http://example.com/repo",
+			want:  "http://example.com/repo",
+		},
+		{
+			name: "https URL unchanged",
+			input: "https://github.com/owner/repo.git",
+			want:  "https://github.com/owner/repo.git",
+		},
+		{
+			name: "file URL unchanged",
+			input: "file:///src/repo",
+			want:  "file:///src/repo",
+		},
+		{
+			name: "absolute path unchanged",
+			input: "/src/repo",
+			want:  "/src/repo",
+		},
+		{
+			name: "bare name gets default owner",
+			input: "nexus",
+			want:  "https://github.com/CarriedWorldUniverse/nexus.git",
+		},
+		{
+			name: "owner/repo without .git appends it",
+			input: "owner/repo",
+			want:  "https://github.com/owner/repo.git",
+		},
+		{
+			name: "owner/repo.git without scheme uses github",
+			input: "owner/repo.git",
+			want:  "https://github.com/owner/repo.git",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := repoRemoteURL(tc.input); got != tc.want {
+				t.Fatalf("repoRemoteURL(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}

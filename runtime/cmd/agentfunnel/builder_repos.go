@@ -209,6 +209,8 @@ func builderBranch(branch, ticket string) string {
 }
 
 func repoRemoteURL(repo string) string {
+	// Strip trailing slash so owner/repo shorthand normalises cleanly.
+	repo = strings.TrimSuffix(repo, "/")
 	if filepath.IsAbs(repo) || strings.HasPrefix(repo, "file://") || strings.HasPrefix(repo, "http://") || strings.HasPrefix(repo, "https://") || strings.HasPrefix(repo, "git@") {
 		return repo
 	}
