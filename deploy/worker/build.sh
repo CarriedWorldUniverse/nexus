@@ -23,6 +23,11 @@ echo "==> building cw from ${CW_SRC}"
 [ -d "$CW_SRC" ] || git clone --depth 1 https://github.com/CarriedWorldUniverse/cw "$CW_SRC"
 ( cd "$CW_SRC" && go build -o "${CTX}/cw" ./cmd/cw )
 
+echo "==> staging cairn CLI ${CAIRN_VERSION:=0.1.18} (release binary → COPY'd, not RUN-installed)"
+curl -fsSL "https://github.com/CarriedWorldUniverse/cairn/releases/download/v${CAIRN_VERSION}/cairn_${CAIRN_VERSION}_linux_amd64.tar.gz" -o "${CTX}/cairn.tgz"
+tar -C "${CTX}" -xzf "${CTX}/cairn.tgz" cairn
+rm -f "${CTX}/cairn.tgz"
+
 cp "$(dirname "$0")/Dockerfile" "${CTX}/Dockerfile"
 echo "==> podman build ${IMG}"
 ( cd "$CTX" && podman build -t "$IMG" . )
