@@ -35,6 +35,16 @@ RUN GH_VERSION=2.62.0 \
  && rm -rf /tmp/helm* /tmp/linux-amd64 \
  && gh --version && helm version --short
 
+# cairn — the sovereign git-replacement CLI (CW_VCS=cairn builder path,
+# docs/network/BUILDER-CAIRN-MIGRATION.md). Inert when CW_VCS!=cairn (git stays
+# default). Pinned to a released tag; bump alongside cairn releases.
+RUN CAIRN_VERSION=0.1.18 \
+ && curl -fsSL https://github.com/CarriedWorldUniverse/cairn/releases/download/v${CAIRN_VERSION}/cairn_${CAIRN_VERSION}_linux_amd64.tar.gz -o /tmp/cairn.tgz \
+ && tar -C /tmp -xzf /tmp/cairn.tgz \
+ && install /tmp/cairn /usr/local/bin/cairn \
+ && rm -rf /tmp/cairn* \
+ && command -v cairn
+
 # kubectl — cluster introspection for always-on infra aspects (e.g. keel as the
 # error-alert handler). Access is gated by RBAC/ServiceAccount, not the binary,
 # so it is inert for dispatch builders (default SA, no perms). Matches the k3s
