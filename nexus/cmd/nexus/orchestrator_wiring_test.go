@@ -459,3 +459,79 @@ func TestParseCSVOrDefault(t *testing.T) {
 		})
 	}
 }
+
+func TestParseRoleSkills(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want map[string][]string
+	}{
+		{"empty", "", map[string][]string{}},
+		{"whitespace only", "   ", map[string][]string{}},
+		{
+			"single entry",
+			"builder=development|cairn|merge",
+			map[string][]string{"builder": {"development", "cairn", "merge"}},
+		},
+		{
+			"multiple entries with spaces",
+			" builder = development|cairn , builder-complex = development|spec|review ",
+			map[string][]string{
+				"builder":         {"development", "cairn"},
+				"builder-complex": {"development", "spec", "review"},
+			},
+		},
+		{
+			"single-skill allowlist",
+			"security-reviewer=security",
+			map[string][]string{"security-reviewer": {"security"}},
+		},
+		{
+			"malformed entry (no =) skipped",
+			"builder development|cairn",
+			map[string][]string{},
+		},
+		{
+			"empty skill list (role=) skipped — refuses to silently ungate",
+			"builder=",
+			map[string][]string{},
+		},
+		{
+			"one malformed entry does not drop the rest",
+			"bad-no-equals,builder=development|cairn",
+			map[string][]string{"builder": {"development", "cairn"}},
+		},
+		{
+			"blank skills inside a list are dropped",
+			"builder=development||cairn| ",
+			map[string][]string{"builder": {"development", "cairn"}},
+		},
+		{
+			"unknown role still configured (warned, not dropped)",
+			"not-a-role=development",
+			map[string][]string{"not-a-role": {"development"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseRoleSkills(tc.in, testLogger(t))
+			if len(got) != len(tc.want) {
+				t.Fatalf("parseRoleSkills(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+			for role, wantList := range tc.want {
+				gotList, ok := got[role]
+				if !ok {
+					t.Fatalf("parseRoleSkills(%q) missing role %q", tc.in, role)
+				}
+				if len(gotList) != len(wantList) {
+					t.Fatalf("parseRoleSkills(%q)[%q] = %v, want %v", tc.in, role, gotList, wantList)
+				}
+				for i := range wantList {
+					if gotList[i] != wantList[i] {
+						t.Fatalf("parseRoleSkills(%q)[%q] = %v, want %v", tc.in, role, gotList, wantList)
+					}
+				}
+			}
+		})
+	}
+}
