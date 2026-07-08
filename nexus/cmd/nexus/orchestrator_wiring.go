@@ -141,6 +141,13 @@ func buildWorkgraphClient(logger *slog.Logger) *workgraph.Client {
 //	                             no overrides, every role dispatches with the leased
 //	                             personality's own aspects-row provider/model (unchanged
 //	                             pre-role-tier-brains behavior).
+//	ORCHESTRATOR_ROLE_SKILLS     role->skill-allowlist map (context-hygiene, 2026-07-07):
+//	                             comma-separated "role=skillA|skillB|skillC" entries, e.g.
+//	                             "builder=development|cairn|merge". Scopes a spawn's nexus-skills
+//	                             surface (search_skills/get_skill) to exactly these skills — see
+//	                             parseRoleSkills. A role absent from the map resolves to a nil
+//	                             allowlist = all skills (ungated back-compat default). Unset/empty
+//	                             → every role ungated, exactly as before this env existed.
 func buildOrchestrator(logger *slog.Logger, wg *workgraph.Client, dispatcher orchestrator.Dispatcher, workerStatus orchestrator.WorkerStatusStore) *orchestrator.Orchestrator {
 	if os.Getenv("ORCHESTRATOR_ENABLE") != "1" {
 		return nil
@@ -169,16 +176,18 @@ func buildOrchestrator(logger *slog.Logger, wg *workgraph.Client, dispatcher orc
 			logger.Warn("ORCHESTRATOR_STALE_AFTER invalid — using orchestrator default", "value", v, "err", derr)
 		}
 	}
-	// Role-brain overrides (role-tier-brains): a Resolver is wired only when
-	// at least one entry parses — an empty map would make o.resolve's
-	// (via RoleBrainResolver) return ("","") for every role anyway, but
-	// leaving Resolver nil in that case keeps DrainOnce's "no Resolver"
-	// zero-overhead path exactly as it was before this feature, matching
-	// how every other optional wiring in this file behaves (see
-	// ensurePoolPersonalities/HandProvider being fully opt-in above).
-	if brains := parseRoleBrains(os.Getenv("ORCHESTRATOR_ROLE_BRAINS"), logger); len(brains) > 0 {
-		orch.Resolver = orchestrator.RoleBrainResolver{Brains: brains}
-		logger.Info("orchestrator: role brains configured", "brains", brains)
+	// Role-brain overrides (role-tier-brains) + role skill allowlists
+	// (context-hygiene, 2026-07-07): a Resolver is wired only when at least
+	// one brain OR one skill-allowlist entry parses — both empty leaves
+	// Resolver nil, keeping DrainOnce's "no Resolver" zero-overhead path
+	// exactly as it was before these features, matching how every other
+	// optional wiring in this file behaves (see ensurePoolPersonalities/
+	// HandProvider being fully opt-in above).
+	brains := parseRoleBrains(os.Getenv("ORCHESTRATOR_ROLE_BRAINS"), logger)
+	skills := parseRoleSkills(os.Getenv("ORCHESTRATOR_ROLE_SKILLS"), logger)
+	if len(brains) > 0 || len(skills) > 0 {
+		orch.Resolver = orchestrator.RoleBrainResolver{Brains: brains, Skills: skills}
+		logger.Info("orchestrator: role overlay configured", "brains", brains, "skills", skills)
 	}
 	logger.Info("orchestrator ENABLED", "roles", roles)
 	return orch
@@ -247,6 +256,60 @@ func parseRoleBrains(raw string, logger *slog.Logger) map[string]orchestrator.Ro
 		brains[role] = orchestrator.RoleBrain{Provider: provider, Model: model, Effort: effort}
 	}
 	return brains
+}
+
+// parseRoleSkills parses ORCHESTRATOR_ROLE_SKILLS, the operator-configured
+// role->skill-allowlist map (context-hygiene, 2026-07-07): comma-separated
+// "role=skillA|skillB|skillC" entries, e.g.
+// "builder=development|cairn|merge,builder-complex=development|cairn|merge|spec|review|security|lean-design-standard".
+// The skill list within an entry is pipe-separated (comma already separates
+// entries). Each name should be an exact skill name from the .agents/skills
+// store (nexus-skills-mcp's FilterAllowlist/AllowedName match on exact
+// names); an unknown name simply never matches, gating that role to nothing
+// it can find — a warning would need the embedded store here, so this parser
+// stays name-agnostic (the store is authoritative at the MCP surface).
+//
+// A malformed entry (missing "=" or an empty role) is skipped with a
+// warning rather than aborting the whole parse — one bad entry never drops
+// every other role's allowlist. An entry with a role but an EMPTY skill list
+// ("role=") is also skipped with a warning: an empty allowlist would mean
+// "all skills" (nil semantics) which is almost never the intent of writing
+// the entry, so we refuse to silently ungate. Unset/empty input returns an
+// empty map — every role then resolves a nil allowlist (all skills, the
+// ungated back-compat default), identical to no Resolver being wired.
+func parseRoleSkills(raw string, logger *slog.Logger) map[string][]string {
+	skills := map[string][]string{}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return skills
+	}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		role, list, ok := strings.Cut(entry, "=")
+		role, list = strings.TrimSpace(role), strings.TrimSpace(list)
+		if !ok || role == "" {
+			logger.Warn("ORCHESTRATOR_ROLE_SKILLS: skipping malformed entry (want role=skillA|skillB)", "entry", entry)
+			continue
+		}
+		var allow []string
+		for _, s := range strings.Split(list, "|") {
+			if s = strings.TrimSpace(s); s != "" {
+				allow = append(allow, s)
+			}
+		}
+		if len(allow) == 0 {
+			logger.Warn("ORCHESTRATOR_ROLE_SKILLS: skipping entry with empty skill list (an empty allowlist would ungate to all skills — omit the role instead if that is intended)", "role", role)
+			continue
+		}
+		if !isKnownWorkerRole(role) {
+			logger.Warn("ORCHESTRATOR_ROLE_SKILLS: role is not a registered pool role — configuring it anyway (it will simply never be leased)", "role", role)
+		}
+		skills[role] = allow
+	}
+	return skills
 }
 
 // validEffort reports whether s is one of the reasoning-EFFORT knob's
