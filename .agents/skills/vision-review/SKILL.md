@@ -6,7 +6,7 @@ when_to_use: 'When you need to actually see an image — review a game screensho
 
 # Vision Review (qwen3.6 on robo-dog)
 
-shadow's own image reading is unreliable. **`qwen3.6` on the ATOM (robo-dog) is multimodal, reachable from shadow, and reads both scenes and on-screen HUD text accurately** — use it as the visual reviewer instead of guessing from a frame yourself. (Operator confirmed: more accurate + faster than the old gemma4.)
+shadow's own image reading is unreliable. **`qwen3.6` on the ATOM (robo-dog) is multimodal, reachable from shadow, and reads both scenes and on-screen HUD text accurately** — use it as the visual reviewer instead of guessing from a frame yourself.
 
 ## How to use
 
@@ -34,6 +34,5 @@ Relay the model's findings to the operator (don't just dump raw output); pull ou
 - **Reasoning model:** emits `<think>…</think>` before the answer — the script strips it; if you call the API yourself, keep text after the last `</think>` and use generous `max_tokens`.
 - **"burst"** (operator typing it / the game's burst key) writes 8 frames to dMon `/tmp/cw_seq_*.png`; the realm also writes `/tmp/cw_shot.png`. That's the frame source for `--dmon`.
 - **Limitation:** this reviews frames that already exist (operator's play/bursts land them in dMon `/tmp`). shadow still can't launch a *fresh* render itself — `voxelgodot` over SSH dies (needs dMon's render seat un-wedged via a real reboot/session-cycle). Once that's clear, shadow render + this skill = a fully autonomous visual-iteration loop.
-- It also works as a general local LLM for plain text (256k ctx) if needed.
 
 See memory: `reference_qwen_vision_reviewer`.
