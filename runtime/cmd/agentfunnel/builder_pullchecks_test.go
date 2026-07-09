@@ -128,11 +128,21 @@ func TestPullCheckDarkByDefault(t *testing.T) {
 	if pullCheckRun != nil {
 		t.Fatalf("pullCheckRun = %v, want nil (no test in this package should set it as a package-level default)", pullCheckRun)
 	}
-	origExists, origStats := prExistsFn, prDiffStatsFn
-	defer func() { prExistsFn, prDiffStatsFn = origExists, origStats }()
+	origExists, origStats, origURL := prExistsFn, prDiffStatsFn, prURLFn
+	defer func() { prExistsFn, prDiffStatsFn, prURLFn = origExists, origStats, origURL }()
 	prExistsFn = func(string, string) (bool, error) { return true, nil }
 	prDiffStatsFn = func(string, string) (prDiffStats, bool, error) {
 		return prDiffStats{Additions: 5, Deletions: 1, ChangedFiles: 1}, true, nil
+	}
+	// review finding (2nd pass): prURLBestEffort shells out via prURLFn
+	// (`gh pr list`) with no timeout — it must NEVER run when pull-checks is
+	// dark, not even to compute an evidence_url that a nil-recorder guard
+	// deeper in the call chain would just discard (Go evaluates a call's
+	// arguments before the callee's own nil check ever runs).
+	urlCalls := 0
+	prURLFn = func(string, string) (string, error) {
+		urlCalls++
+		return "https://should-not-be-called.example", nil
 	}
 
 	got := builderPRVerifier(slog.Default(), "plumb", "org/repo", "NET-1", "")()
@@ -141,6 +151,9 @@ func TestPullCheckDarkByDefault(t *testing.T) {
 	}
 	if pullCheckRun != nil {
 		t.Fatal("pullCheckRun became non-nil as a side effect of running the gate — dark default violated")
+	}
+	if urlCalls != 0 {
+		t.Fatalf("prURLFn was called %d times with pull-checks dark, want 0 (eager prURLBestEffort regression)", urlCalls)
 	}
 }
 
@@ -423,5 +436,40 @@ func TestPullCheckWiringBlockedServerDoesNotStallGate(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("builderPRVerifier() did not return — a blocked pull-checks server stalled the gate")
+	}
+}
+
+// TestDecideDarkDefaultNeverCallsPrURL is the acceptance-judge-path half of
+// the eager-prURLBestEffort regression (2nd review pass): with gate.pullCheck
+// left nil (dark), Decide's evidenceURL computation must not shell out via
+// prURLFn at all — pre-fix it did, on every acceptance-judge evaluation,
+// even with no recorder configured (the pre-existing TestDecideUnit3OverridesMet
+// exercised exactly this without ever noticing, since it never asserted on
+// prURLFn).
+func TestDecideDarkDefaultNeverCallsPrURL(t *testing.T) {
+	origURL := prURLFn
+	defer func() { prURLFn = origURL }()
+	urlCalls := 0
+	prURLFn = func(string, string) (string, error) {
+		urlCalls++
+		return "https://should-not-be-called.example", nil
+	}
+
+	verify := func(_ context.Context, _, _ string) (funnel.AcceptanceVerdict, error) {
+		return funnel.AcceptanceVerdict{Met: true, Reason: "judge says done"}, nil
+	}
+	gate := newBuilderAcceptanceGate("implement X", verify)
+	gate.repo, gate.ticket = "org/repo", "NET-1"
+	// gate.pullCheck deliberately left nil — dark default.
+
+	if gate.pullCheck != nil {
+		t.Fatal("gate.pullCheck != nil — test setup broken, this test requires the dark default")
+	}
+	_, verdict := gate.Decide(context.Background(), "done", slog.Default())
+	if !verdict.Met {
+		t.Fatalf("verdict.Met = false, want true")
+	}
+	if urlCalls != 0 {
+		t.Fatalf("prURLFn was called %d times with gate.pullCheck nil, want 0 (eager prURLBestEffort regression)", urlCalls)
 	}
 }

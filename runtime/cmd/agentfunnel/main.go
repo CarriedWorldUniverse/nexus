@@ -1386,8 +1386,14 @@ func (g *builderAcceptanceGate) Decide(ctx context.Context, output string, log *
 			} else if testDiffActive {
 				recordTestEvidenceCheck(ctx, g.pullCheck, log, g.repo, g.branch, g.ticket, true, "PR diff changes a test file")
 			}
+			// prURLBestEffort shells out (gh pr list) — only worth paying for
+			// when a pull-checks recorder is actually configured (dark
+			// default: g.pullCheck == nil must mean ZERO extra gh calls, not
+			// just zero PullService calls). Guarding here, not inside
+			// recordAcceptanceJudgeCheck, because Go evaluates a call's
+			// arguments before the callee's own nil check ever runs.
 			evidenceURL := ""
-			if g.repo != "" {
+			if g.pullCheck != nil && g.repo != "" {
 				evidenceURL = prURLBestEffort(g.repo, builderBranch(g.branch, g.ticket))
 			}
 			summary := verdict.Reason
@@ -1518,7 +1524,17 @@ func builderPRVerifier(log *slog.Logger, aspect, repo, ticket, branch string) fu
 			recordPRExistsCheck(log, repo, branch, ticket, false, "no open PR found for branch "+head, "")
 			return false
 		}
-		recordPRExistsCheck(log, repo, branch, ticket, true, "PR found for branch "+head, prURLBestEffort(repo, head))
+		// prURLBestEffort shells out (gh pr list) — only worth paying for
+		// when a pull-checks recorder is actually configured (dark default:
+		// pullCheckRun == nil must mean ZERO extra gh calls, not just zero
+		// PullService calls). Guarding here, not inside recordPRExistsCheck,
+		// because Go evaluates a call's arguments before the callee's own
+		// nil check ever runs.
+		prURL := ""
+		if pullCheckRun != nil {
+			prURL = prURLBestEffort(repo, head)
+		}
+		recordPRExistsCheck(log, repo, branch, ticket, true, "PR found for branch "+head, prURL)
 		// ACCEPTANCE-GATE-HARDENING Unit 2: a PR that exists but changes
 		// nothing is not a completed build. Fail-closed on a gh error;
 		// disabled when ACCEPTANCE_MIN_DIFF_LINES=0.
