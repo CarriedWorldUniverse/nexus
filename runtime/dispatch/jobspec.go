@@ -24,6 +24,24 @@ var acceptanceGateEnvKeys = []string{
 	// broker deployment to flip dispatched builders onto the cairn
 	// clone-per-run path; CW_VCS=git opts back to git (cairn is the code default).
 	"CW_VCS",
+	// CW_PULL_* configures the cairn pull-checks recorder (runtime/pullchecks)
+	// — the builder gates' verdicts recorded as cairn-server pull checks.
+	// Dark by default: CW_PULL_SERVER_ADDR unset means the recorder is never
+	// built and the gate path makes zero PullService calls. See
+	// docs/network/ACCEPTANCE-GATE-HARDENING.md.
+	"CW_PULL_SERVER_ADDR",
+	"CW_PULL_ORG",
+	"CW_PULL_SLUG",
+	"CW_PULL_PROJECT",
+	// CW_PULL_TARGET overrides the pull-checks target-branch resolution
+	// (default: the repo's actual default branch via `gh repo view`, falling
+	// back to "main") — set it when a repo's default branch can't be
+	// resolved that way or the operator wants a fixed target regardless.
+	"CW_PULL_TARGET",
+	"CW_PULL_TLS_CERT",
+	"CW_PULL_TLS_KEY",
+	"CW_PULL_TLS_CA",
+	"CW_PULL_DEV_INSECURE",
 }
 
 type JobConfig struct {

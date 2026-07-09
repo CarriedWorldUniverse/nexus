@@ -830,6 +830,14 @@ func main() {
 		acceptanceGate.repo = *repoFlag
 		acceptanceGate.branch = *branchFlag
 		acceptanceGate.ticket = *ticketFlag
+		// cairn pull-checks wiring (ACCEPTANCE-GATE-HARDENING, cairn#99): dark
+		// by default (nil unless CW_PULL_* is set — see buildPullCheckRun).
+		// Shared by both the PR-exists/PR-substantial gate (below, via the
+		// package-level pullCheckRun) and the acceptance-judge/test-evidence
+		// gate (acceptanceGate.pullCheck, set here) so every check this run
+		// produces lands on the SAME cairn pull.
+		pullCheckRun = buildPullCheckRun(log, *builderMode)
+		acceptanceGate.pullCheck = pullCheckRun
 		// Provenance: let the gate see which tools the run actually invoked.
 		if realOutputTracker != nil {
 			acceptanceGate.invokedTools = realOutputTracker.invokedTools
@@ -1306,6 +1314,14 @@ type builderAcceptanceGate struct {
 	// post-construction from the realOutputTracker; nil (tests / no tracker)
 	// skips provenance, fail-open.
 	invokedTools func() []string
+
+	// pullCheck is the run's cairn pull-check recorder (cairn#99 pull-checks
+	// wiring) — nil (dark) unless CW_PULL_* env config is present. Set
+	// post-construction alongside repo/branch/ticket at the main() wiring
+	// site; nil (every existing test, and any run with no cairn-pull
+	// addressing) skips recording entirely, so Decide's PullService call
+	// count is zero for every caller that doesn't explicitly wire this.
+	pullCheck *pullRunRecorder
 }
 
 // newBuilderAcceptanceGate constructs the shared gate. verify may be nil
@@ -1346,15 +1362,49 @@ func (g *builderAcceptanceGate) Decide(ctx context.Context, output string, log *
 		verdict, verr = g.verify(ctx, g.criteria, judgeInput)
 		if verr != nil {
 			log.Warn("agentfunnel: acceptance verification errored — failing open", "err", verr)
-		} else if verdict.Met && g.testEvidenceMissing(log) {
-			// Unit 3: the criteria require tests but the PR diff changes no
-			// test file — a claimed pass with no tests written (the keel
-			// confabulation class). Override the judge's met to false; the
-			// bounded reprompt/backstop then applies as for any not-met.
-			log.Info("agentfunnel: criteria require tests but PR diff changes no test file — not met (Unit 3)",
-				"repo", g.repo, "ticket", g.ticket)
-			verdict.Met = false
-			verdict.Reason = "acceptance criteria require tests but the PR diff changes no test file"
+		} else {
+			// test-evidence pull check: only recorded when Unit 3's test-diff
+			// requirement was actually active for this run (opt-in
+			// ACCEPTANCE_REQUIRE_TEST_DIFF=1, a repo to diff, and criteria
+			// that mention tests) — an inactive Unit 3 has no verdict to
+			// speak of, so nothing is recorded for it (per the pull-checks
+			// wiring's "record final verdicts per gate" contract: no
+			// contorting a gate that didn't run into recording a fake one).
+			testDiffActive := acceptanceRequireTestDiff() && g.repo != "" && criteriaMentionsTests(g.criteria)
+			if verdict.Met && g.testEvidenceMissing(log) {
+				// Unit 3: the criteria require tests but the PR diff changes no
+				// test file — a claimed pass with no tests written (the keel
+				// confabulation class). Override the judge's met to false; the
+				// bounded reprompt/backstop then applies as for any not-met.
+				log.Info("agentfunnel: criteria require tests but PR diff changes no test file — not met (Unit 3)",
+					"repo", g.repo, "ticket", g.ticket)
+				verdict.Met = false
+				verdict.Reason = "acceptance criteria require tests but the PR diff changes no test file"
+				if testDiffActive {
+					recordTestEvidenceCheck(ctx, g.pullCheck, log, g.repo, g.branch, g.ticket, false, verdict.Reason)
+				}
+			} else if testDiffActive {
+				recordTestEvidenceCheck(ctx, g.pullCheck, log, g.repo, g.branch, g.ticket, true, "PR diff changes a test file")
+			}
+			// prURLBestEffort shells out (gh pr list) — only worth paying for
+			// when a pull-checks recorder is actually configured (dark
+			// default: g.pullCheck == nil must mean ZERO extra gh calls, not
+			// just zero PullService calls). Guarding here, not inside
+			// recordAcceptanceJudgeCheck, because Go evaluates a call's
+			// arguments before the callee's own nil check ever runs.
+			evidenceURL := ""
+			if g.pullCheck != nil && g.repo != "" {
+				evidenceURL = prURLBestEffort(ctx, g.repo, builderBranch(g.branch, g.ticket))
+			}
+			summary := verdict.Reason
+			if summary == "" {
+				if verdict.Met {
+					summary = "acceptance criteria met"
+				} else {
+					summary = "acceptance criteria not met"
+				}
+			}
+			recordAcceptanceJudgeCheck(ctx, g.pullCheck, log, g.repo, g.branch, g.ticket, verdict.Met, summary, evidenceURL)
 		}
 	}
 	step := taskDoneDecide(g.hasCriteria, g.verify != nil, verr, verdict.Met, g.repromptsLeft)
@@ -1466,12 +1516,29 @@ func builderPRVerifier(log *slog.Logger, aspect, repo, ticket, branch string) fu
 		ok, err := prExists(repo, head, ticket)
 		if err != nil {
 			log.Warn("agentfunnel: PR check errored — treating as not-yet-open", "aspect", aspect, "err", err)
+			recordPRExistsCheck(log, repo, branch, ticket, false, "no PR found: "+err.Error(), "")
 			return false
 		}
 		if !ok {
 			log.Info("agentfunnel: no PR found for builder branch", "aspect", aspect, "repo", repo, "branch", head)
+			recordPRExistsCheck(log, repo, branch, ticket, false, "no open PR found for branch "+head, "")
 			return false
 		}
+		// prURLBestEffort shells out (gh pr list) — only worth paying for
+		// when a pull-checks recorder is actually configured (dark default:
+		// pullCheckRun == nil must mean ZERO extra gh calls, not just zero
+		// PullService calls). Guarding here, not inside recordPRExistsCheck,
+		// because Go evaluates a call's arguments before the callee's own
+		// nil check ever runs.
+		// builderPRVerifier's closure signature is fixed (existing tests call
+		// it directly) and carries no ctx, so this uses a fresh
+		// context.Background() — prURLBestEffort still bounds it with
+		// pullCheckRPCTimeout internally.
+		prURL := ""
+		if pullCheckRun != nil {
+			prURL = prURLBestEffort(context.Background(), repo, head)
+		}
+		recordPRExistsCheck(log, repo, branch, ticket, true, "PR found for branch "+head, prURL)
 		// ACCEPTANCE-GATE-HARDENING Unit 2: a PR that exists but changes
 		// nothing is not a completed build. Fail-closed on a gh error;
 		// disabled when ACCEPTANCE_MIN_DIFF_LINES=0.
@@ -1479,13 +1546,16 @@ func builderPRVerifier(log *slog.Logger, aspect, repo, ticket, branch string) fu
 		sub, serr := prSubstantial(repo, head, ticket, floor)
 		if serr != nil {
 			log.Warn("agentfunnel: PR substance check errored — treating as not-yet-complete", "aspect", aspect, "err", serr)
+			recordPRSubstantialCheck(log, repo, branch, ticket, false, floor, "PR substance check errored: "+serr.Error())
 			return false
 		}
 		if !sub {
 			log.Info("agentfunnel: PR exists but diff is empty/below floor — not complete",
 				"aspect", aspect, "repo", repo, "branch", head, "min_diff_lines", floor)
+			recordPRSubstantialCheck(log, repo, branch, ticket, false, floor, "PR diff is empty or below the substance floor")
 			return false
 		}
+		recordPRSubstantialCheck(log, repo, branch, ticket, true, floor, "PR diff clears the substance floor")
 		return true
 	}
 }
@@ -1513,6 +1583,36 @@ var prExistsFn = func(repo, branch string) (bool, error) {
 		return false, fmt.Errorf("gh pr list: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)) != "", nil
+}
+
+// prURLFn fetches the URL of the open PR for branch. Used ONLY as evidence_url
+// for a pull-checks recording (see prURLBestEffort) — never on the gate's own
+// pass/fail decision path, so a failure here can never affect completion.
+// Swappable in tests. Takes ctx (review finding: this gh subprocess, like the
+// PullService RPCs, must never be allowed to block a run indefinitely) —
+// callers are expected to bound it (see prURLBestEffort).
+var prURLFn = func(ctx context.Context, repo, branch string) (string, error) {
+	out, err := exec.CommandContext(ctx, "gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "url", "-q", ".[0].url").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh pr list (url): %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// prURLBestEffort returns the open PR's URL for branch, or "" on any error OR
+// timeout — only called when a pull-checks recorder is configured (see
+// recordPRExistsCheck), and only used for evidence_url, so a swallowed error
+// here never affects the PR-exists gate's own already-decided pass verdict.
+// Bounded by pullCheckRPCTimeout, derived from ctx, so a hung/unreachable gh
+// (network stall, credential prompt, etc.) can't stall the gate.
+func prURLBestEffort(ctx context.Context, repo, branch string) string {
+	rpcCtx, cancel := context.WithTimeout(ctx, pullCheckRPCTimeout)
+	defer cancel()
+	url, err := prURLFn(rpcCtx, repo, branch)
+	if err != nil {
+		return ""
+	}
+	return url
 }
 
 // prCreateFn opens a PR for branch via gh, filling title/body from the branch's
