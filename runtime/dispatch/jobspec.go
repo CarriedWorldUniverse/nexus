@@ -22,7 +22,7 @@ var acceptanceGateEnvKeys = []string{
 	"ACCEPTANCE_REQUIRE_TEST_DIFF", // Unit 3 (default off; 1 enables)
 	// CW_VCS rides the same broker-env→worker seam: set CW_VCS=cairn on the
 	// broker deployment to flip dispatched builders onto the cairn
-	// clone-per-run path (BUILDER-CAIRN-MIGRATION.md); unset = git default.
+	// clone-per-run path; CW_VCS=git opts back to git (cairn is the code default).
 	"CW_VCS",
 	// CW_PULL_* configures the cairn pull-checks recorder (runtime/pullchecks)
 	// — the builder gates' verdicts recorded as cairn-server pull checks.

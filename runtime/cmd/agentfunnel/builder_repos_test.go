@@ -16,6 +16,9 @@ func TestBuilderRepoLifecycleUsesSharedMirrorAndRunWorktree(t *testing.T) {
 		// has platform-specific file-locking behavior on Windows.
 		t.Skip("builder repo lifecycle is Linux-only")
 	}
+	// This test exercises the GIT mirror+worktree path specifically; cairn is
+	// the process default since 2026-07-09, so opt out explicitly.
+	t.Setenv("CW_VCS", "git")
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
