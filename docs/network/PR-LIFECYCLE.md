@@ -67,6 +67,7 @@ Rules:
 - The `<!-- pr-lifecycle: … -->` marker carries `verdict` (`approved` | `changes-requested`), `round` (int), `head` (the SHA reviewed). This is the watcher's entire memory.
 - An **approval** posts the marker with `verdict=approved` and an empty Outstanding section.
 - The reviewer reviews **the diff at `head`**, using the review/security/house-style skills (the reviewer role's audited allowlist).
+- The contract is posted as a **PR comment** (`gh pr comment`), never a formal GitHub review: all pool agents share the `nexus-cw` identity and GitHub rejects self-review (422, learned live on the first phase-2 run). The marker is the verdict's authority; GitHub review state is not used.
 
 ## Fix items
 
