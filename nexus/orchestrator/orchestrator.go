@@ -147,6 +147,18 @@ type Orchestrator struct {
 	// label only (see RoleResolver).
 	Resolver RoleResolver
 
+	// GateRunner, when non-nil, configures the #473 authoritative gate
+	// runner: OnJobDoneHook re-runs pr-exists/pr-substantial/
+	// acceptance-judge/test-evidence against the pushed artifact
+	// (RunAuthoritativeGates, gates.go) before the job's OK claim is
+	// trusted, and logs the verdicts (LogVerdicts). nil (default) is fully
+	// dark — no gh/judge calls, byte-identical to pre-#473 behavior. Note
+	// this is distinct from GateRunnerOptions.Enabled: BOTH must be set
+	// (a non-nil *GateRunnerOptions with Enabled=false is also a no-op) —
+	// the pointer gates whether OnJobDoneHook even looks up the work item,
+	// Enabled gates whether RunAuthoritativeGates itself does anything.
+	GateRunner *GateRunnerOptions
+
 	// Roles is the set of role labels this orchestrator's pool serves —
 	// DrainOnce calls workgraph.ListReady once per role, per stream.
 	Roles []string
