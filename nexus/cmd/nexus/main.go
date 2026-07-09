@@ -22,6 +22,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/autospawn"
 	"github.com/CarriedWorldUniverse/nexus/nexus/broker"
+	"github.com/CarriedWorldUniverse/nexus/nexus/cfgreconcile"
 	"github.com/CarriedWorldUniverse/nexus/nexus/chat"
 	"github.com/CarriedWorldUniverse/nexus/nexus/convene"
 	"github.com/CarriedWorldUniverse/nexus/nexus/credentials"
@@ -33,7 +34,6 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability"
 	"github.com/CarriedWorldUniverse/nexus/nexus/observability/jsonlsink"
 	"github.com/CarriedWorldUniverse/nexus/nexus/operator"
-	"github.com/CarriedWorldUniverse/nexus/nexus/cfgreconcile"
 	"github.com/CarriedWorldUniverse/nexus/nexus/roster"
 	"github.com/CarriedWorldUniverse/nexus/nexus/runs"
 	"github.com/CarriedWorldUniverse/nexus/nexus/sessions"
@@ -97,6 +97,9 @@ func main() {
 	}
 	if len(os.Args) >= 2 && os.Args[1] == "workitem" {
 		os.Exit(runWorkitemSubcommand(os.Args[2:]))
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "pr-watch" {
+		os.Exit(runPRWatchSubcommand(os.Args[2:]))
 	}
 	addr := flag.String("addr", ":7888", "broker listen address")
 	tokenEnv := flag.String("token-env", "NEXUS_TOKEN", "env var holding the shared bearer token")
