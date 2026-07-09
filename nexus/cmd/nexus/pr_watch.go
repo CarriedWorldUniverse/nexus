@@ -146,17 +146,21 @@ func pickReviewer(personalities []string, authors map[string]bool) string {
 // reviewBrief is the seeded reviewer task: diff-grounded review + the
 // comment contract of PR-LIFECYCLE.md.
 func reviewBrief(st prWatchState, round int) (task, criteria string) {
+	// The lifecycle verdict is posted as a PR COMMENT (gh pr comment), never a
+	// formal GitHub review: all pool agents share the nexus-cw identity and
+	// GitHub hard-rejects reviewing your own PR (422). The verdict's authority
+	// is our pr-lifecycle marker, which the watcher reads from comments too.
 	task = fmt.Sprintf(
 		"Review pull request %s (repo %s, branch %s, head %s) — lifecycle review round %d. "+
 			"Read the diff with: gh pr diff %d --repo %s. Judge the DIFF (correctness, security, house style), not the description. "+
-			"Then post ONE review with gh pr review %d --repo %s using --approve or --request-changes, whose body starts with the marker line "+
-			"\"<!-- pr-lifecycle: verdict=<approved|changes-requested> round=%d head=%s -->\" followed by an \"## Outstanding\" checklist. "+
+			"Then post ONE comment with gh pr comment %d --repo %s --body-file <file you write>, whose body starts with the marker line "+
+			"\"<!-- pr-lifecycle: verdict=<approved|changes-requested> round=%d head=%s -->\" (choose ONE verdict) followed by an \"## Outstanding\" checklist. "+
 			"Every outstanding item MUST be observable: file:line — defect — required change — how to verify from the diff. "+
 			"An approval has an empty Outstanding section. Include an \"## Context\" section with repo and branch. "+
-			"Do NOT merge, do NOT push commits, do NOT open PRs.",
+			"Do NOT use gh pr review (self-review is rejected), do NOT merge, do NOT push commits, do NOT open PRs.",
 		st.URL, st.Repo, st.Branch, st.HeadSHA, round, st.Number, st.Repo, st.Number, st.Repo, round, st.HeadSHA)
 	criteria = fmt.Sprintf(
-		"A review exists on PR #%d in %s whose body contains a pr-lifecycle marker with round=%d and head=%s, "+
+		"A comment exists on PR #%d in %s whose body contains a pr-lifecycle marker with round=%d and head=%s, "+
 			"and every Outstanding item names a file location and a verify clause.",
 		st.Number, st.Repo, round, st.HeadSHA)
 	return task, criteria
@@ -190,6 +194,8 @@ func runPRWatchSubcommand(args []string) int {
 	since := fs.Duration("since", 14*24*time.Hour, "only consider PRs updated in the last N")
 	ghPath := fs.String("gh-path", "gh", "path to the gh CLI binary")
 	branchPrefix := fs.String("branch-prefix", "builder/", "only PRs whose head branch has this prefix")
+	onlyPR := fs.Int("pr", 0, "act on this PR number only (0 = all) — for staged rollouts")
+	emitBriefs := fs.String("emit-briefs", "", "dry-run only: also write the full task/criteria of each would-seed action to DIR as <pr>-<kind>-{task,criteria}.txt (for manual staged seeding via --task-file/--criteria-file)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -218,6 +224,9 @@ func runPRWatchSubcommand(args []string) int {
 			if pr.Draft || !strings.HasPrefix(pr.Branch, *branchPrefix) {
 				continue
 			}
+			if *onlyPR != 0 && pr.Number != *onlyPR {
+				continue
+			}
 			st, err := loadPRWatchState(ctx, *ghPath, repo, pr)
 			if err != nil {
 				log.Error("pr-watch: load PR state", "repo", repo, "pr", pr.Number, "err", err)
@@ -225,6 +234,12 @@ func runPRWatchSubcommand(args []string) int {
 				continue
 			}
 			action := decidePRWatchAction(st, *maxRounds)
+			if *dryRun && *emitBriefs != "" {
+				if err := emitBriefFiles(*emitBriefs, st, action); err != nil {
+					log.Error("pr-watch: emit briefs", "pr", pr.Number, "err", err)
+					exitCode = 1
+				}
+			}
 			if err := applyPRWatchAction(ctx, *ghPath, st, action, personalities, *dryRun, log); err != nil {
 				log.Error("pr-watch: apply", "repo", repo, "pr", pr.Number, "action", action.Kind, "err", err)
 				exitCode = 1
@@ -343,8 +358,11 @@ func applyPRWatchAction(ctx context.Context, ghPath string, st prWatchState, act
 			return fmt.Errorf("no eligible reviewer personality (authors=%v)", st.Authors)
 		}
 		task, criteria := reviewBrief(st, action.Round)
+		// Deliberately NO --repo: a review's deliverable is a COMMENT, not a
+		// branch/PR. Repo-less items dispatch respond-only (no workspace, no
+		// branch instruction, no PR gate); the worker still gets gh bridged.
 		args := []string{"--role", "reviewer", "--personality", reviewer,
-			"--repo", st.Repo, "--task", task, "--criteria", criteria, "--dedupe"}
+			"--task", task, "--criteria", criteria, "--dedupe"}
 		if dryRun {
 			log.Info(prefix, "reason", action.Reason, "would-seed", "reviewer", "personality", reviewer)
 			fmt.Printf("%s DRY: workitem create %s\n", prefix, summarizeArgs(args))
@@ -380,6 +398,29 @@ func applyPRWatchAction(ctx context.Context, ghPath string, st prWatchState, act
 	default:
 		return fmt.Errorf("unknown action %q", action.Kind)
 	}
+}
+
+// emitBriefFiles writes the full task/criteria for a would-seed action so an
+// operator (or a staged rollout) can seed manually with --task-file /
+// --criteria-file, guaranteed byte-identical to what live seeding would send.
+func emitBriefFiles(dir string, st prWatchState, action prWatchAction) error {
+	var task, criteria string
+	switch action.Kind {
+	case "seed-review":
+		task, criteria = reviewBrief(st, action.Round)
+	case "seed-fix":
+		task, criteria = fixBrief(st, action.Round)
+	default:
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	base := fmt.Sprintf("%d-%s", st.Number, action.Kind)
+	if err := os.WriteFile(dir+"/"+base+"-task.txt", []byte(task), 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(dir+"/"+base+"-criteria.txt", []byte(criteria), 0o644)
 }
 
 // seedWorkItem funnels through the existing workitem-create CLI path.
