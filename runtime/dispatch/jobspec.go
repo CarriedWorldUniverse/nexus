@@ -33,6 +33,11 @@ var acceptanceGateEnvKeys = []string{
 	"CW_PULL_ORG",
 	"CW_PULL_SLUG",
 	"CW_PULL_PROJECT",
+	// CW_PULL_TARGET overrides the pull-checks target-branch resolution
+	// (default: the repo's actual default branch via `gh repo view`, falling
+	// back to "main") — set it when a repo's default branch can't be
+	// resolved that way or the operator wants a fixed target regardless.
+	"CW_PULL_TARGET",
 	"CW_PULL_TLS_CERT",
 	"CW_PULL_TLS_KEY",
 	"CW_PULL_TLS_CA",

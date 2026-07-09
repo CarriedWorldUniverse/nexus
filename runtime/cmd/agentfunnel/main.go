@@ -1381,10 +1381,10 @@ func (g *builderAcceptanceGate) Decide(ctx context.Context, output string, log *
 				verdict.Met = false
 				verdict.Reason = "acceptance criteria require tests but the PR diff changes no test file"
 				if testDiffActive {
-					recordTestEvidenceCheck(g.pullCheck, log, g.repo, g.branch, g.ticket, false, verdict.Reason)
+					recordTestEvidenceCheck(ctx, g.pullCheck, log, g.repo, g.branch, g.ticket, false, verdict.Reason)
 				}
 			} else if testDiffActive {
-				recordTestEvidenceCheck(g.pullCheck, log, g.repo, g.branch, g.ticket, true, "PR diff changes a test file")
+				recordTestEvidenceCheck(ctx, g.pullCheck, log, g.repo, g.branch, g.ticket, true, "PR diff changes a test file")
 			}
 			evidenceURL := ""
 			if g.repo != "" {
@@ -1398,7 +1398,7 @@ func (g *builderAcceptanceGate) Decide(ctx context.Context, output string, log *
 					summary = "acceptance criteria not met"
 				}
 			}
-			recordAcceptanceJudgeCheck(g.pullCheck, log, g.repo, g.branch, g.ticket, verdict.Met, summary, evidenceURL)
+			recordAcceptanceJudgeCheck(ctx, g.pullCheck, log, g.repo, g.branch, g.ticket, verdict.Met, summary, evidenceURL)
 		}
 	}
 	step := taskDoneDecide(g.hasCriteria, g.verify != nil, verr, verdict.Met, g.repromptsLeft)

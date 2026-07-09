@@ -53,9 +53,26 @@ func TestNewRecorderFromEnvMissingTLSStaysDark(t *testing.T) {
 	t.Setenv("CW_PULL_SERVER_ADDR", "cairn.example:443")
 	t.Setenv("CW_PULL_ORG", "org-1")
 	t.Setenv("CW_PULL_SLUG", "widgets")
+	t.Setenv("CW_PULL_PROJECT", "PROJ")
 	// No TLS material and no CW_PULL_DEV_INSECURE=1 opt-in.
 	if rec := NewRecorderFromEnv(slog.Default()); rec != nil {
 		t.Fatalf("NewRecorderFromEnv with no TLS config and no dev-insecure opt-in = %+v, want nil", rec)
+	}
+}
+
+// TestNewRecorderFromEnvMissingProjectStaysDark is the regression test for
+// review finding #3: ADDR+ORG+SLUG set but PROJECT unset must stay dark with
+// a clear log, not silently enable a Recorder whose every EnsurePull call
+// would permanently fail cairn-server's "project required" validation.
+func TestNewRecorderFromEnvMissingProjectStaysDark(t *testing.T) {
+	clearPullEnv(t)
+	t.Setenv("CW_PULL_SERVER_ADDR", "cairn.example:443")
+	t.Setenv("CW_PULL_ORG", "org-1")
+	t.Setenv("CW_PULL_SLUG", "widgets")
+	t.Setenv("CW_PULL_DEV_INSECURE", "1")
+	// CW_PULL_PROJECT deliberately left unset.
+	if rec := NewRecorderFromEnv(slog.Default()); rec != nil {
+		t.Fatalf("NewRecorderFromEnv with ADDR+ORG+SLUG set but PROJECT unset = %+v, want nil", rec)
 	}
 }
 

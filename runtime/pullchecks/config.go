@@ -25,10 +25,13 @@ import (
 //	CW_PULL_TLS_CERT/_KEY/_CA   mTLS material (see DialCreds).
 //	CW_PULL_DEV_INSECURE=1      dial without mTLS (local dev only).
 //
-// CW_PULL_SERVER_ADDR set but CW_PULL_ORG/CW_PULL_SLUG unset is also treated
-// as unconfigured (logged, nil) — OpenPull/RecordPullCheck both require org
-// and slug path params, so a Recorder without them could never make a valid
-// call.
+// CW_PULL_SERVER_ADDR set but CW_PULL_ORG/CW_PULL_SLUG/CW_PULL_PROJECT unset
+// is also treated as unconfigured (logged, nil) — OpenPull/RecordPullCheck
+// require org and slug path params, and cairn-server's OpenPull additionally
+// rejects an empty project with InvalidArgument (every EnsurePull call would
+// then fail permanently), so a Recorder missing any of the three could never
+// make a valid call. Requiring all three up front turns that into a clear
+// boot-time "DISABLED" log instead of a silent, permanent per-call failure.
 func NewRecorderFromEnv(log *slog.Logger) *Recorder {
 	if log == nil {
 		log = slog.Default()
@@ -45,6 +48,12 @@ func NewRecorderFromEnv(log *slog.Logger) *Recorder {
 		return nil
 	}
 	project := os.Getenv("CW_PULL_PROJECT")
+	if project == "" {
+		log.Warn("pullchecks: CW_PULL_SERVER_ADDR/_ORG/_SLUG set but CW_PULL_PROJECT unset — recorder DISABLED "+
+			"(cairn-server's OpenPull rejects an empty project; every EnsurePull would fail)",
+			"addr", addr, "org", org, "slug", slug)
+		return nil
+	}
 	dialCreds, err := DialCreds()
 	if err != nil {
 		log.Warn("pullchecks: TLS config error — recorder DISABLED", "err", err)

@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	cairnv1 "github.com/CarriedWorldUniverse/cwb-proto/gen/go/cwb/cairn/v1"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
@@ -29,24 +30,59 @@ type fakePullServer struct {
 
 	openErr   error
 	recordErr error
+
+	// openErrFn, when set, overrides openErr per call (given the 1-based
+	// call number) — lets a test simulate "fails the first N times, then
+	// succeeds" (review finding #1's retry-after-failure case: the run's
+	// branch/PR doesn't exist yet on the first EnsurePull).
+	openErrFn func(callNum int) error
+
+	// blockOpen/blockRecord, when true, make the corresponding RPC hang
+	// until the caller's context is canceled — simulating an
+	// unreachable/hung cairn-server, to prove the RPC-timeout wrapper
+	// (review finding #2) actually bounds the wait.
+	blockOpen   bool
+	blockRecord bool
 }
 
-func (f *fakePullServer) OpenPull(_ context.Context, req *cairnv1.OpenPullRequest) (*cairnv1.OpenPullResponse, error) {
+func (f *fakePullServer) OpenPull(ctx context.Context, req *cairnv1.OpenPullRequest) (*cairnv1.OpenPullResponse, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.openPullCalls++
-	if f.openErr != nil {
-		return nil, f.openErr
+	callNum := f.openPullCalls
+	errFn := f.openErrFn
+	staticErr := f.openErr
+	block := f.blockOpen
+	f.mu.Unlock()
+
+	if block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if errFn != nil {
+		if err := errFn(callNum); err != nil {
+			return nil, err
+		}
+	} else if staticErr != nil {
+		return nil, staticErr
 	}
 	return &cairnv1.OpenPullResponse{Pull: &cairnv1.Pull{Id: "pull-1", Repo: req.Slug, Source: req.Source, Target: req.Target}}, nil
 }
 
-func (f *fakePullServer) RecordPullCheck(_ context.Context, req *cairnv1.RecordPullCheckRequest) (*cairnv1.RecordPullCheckResponse, error) {
+func (f *fakePullServer) RecordPullCheck(ctx context.Context, req *cairnv1.RecordPullCheckRequest) (*cairnv1.RecordPullCheckResponse, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	block := f.blockRecord
+	err := f.recordErr
+	f.mu.Unlock()
+
+	if block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	f.mu.Lock()
 	f.recordCalls = append(f.recordCalls, req)
-	if f.recordErr != nil {
-		return nil, f.recordErr
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
 	}
 	return &cairnv1.RecordPullCheckResponse{Check: &cairnv1.PullCheck{Id: "check-1", PullId: req.Id, Name: req.Name, State: req.State}}, nil
 }
@@ -113,6 +149,7 @@ func TestPullCheckDarkByDefault(t *testing.T) {
 // exercised via two ensurePull calls under the hood — one per check) when a
 // recorder IS configured.
 func TestPullCheckWiringRecordsPRGateVerdicts(t *testing.T) {
+	t.Setenv("CW_PULL_TARGET", "main") // skip the gh default-branch lookup in tests
 	origExists, origStats := prExistsFn, prDiffStatsFn
 	defer func() { prExistsFn, prDiffStatsFn = origExists, origStats }()
 	prExistsFn = func(string, string) (bool, error) { return true, nil }
@@ -162,6 +199,7 @@ func TestPullCheckWiringRecordsPRGateVerdicts(t *testing.T) {
 // builderAcceptanceGate.Decide records the acceptance-judge check, and only
 // records test-evidence when Unit 3 was actually active.
 func TestPullCheckWiringRecordsAcceptanceJudgeVerdict(t *testing.T) {
+	t.Setenv("CW_PULL_TARGET", "main") // skip the gh default-branch lookup in tests
 	origDiff := prDiffFn
 	defer func() { prDiffFn = origDiff }()
 	t.Setenv("ACCEPTANCE_JUDGE_DIFF", "0")
@@ -198,6 +236,7 @@ func TestPullCheckWiringRecordsAcceptanceJudgeVerdict(t *testing.T) {
 // TestPullCheckWiringRecordsTestEvidenceWhenActive proves test-evidence IS
 // recorded once Unit 3 (ACCEPTANCE_REQUIRE_TEST_DIFF=1) is active.
 func TestPullCheckWiringRecordsTestEvidenceWhenActive(t *testing.T) {
+	t.Setenv("CW_PULL_TARGET", "main") // skip the gh default-branch lookup in tests
 	origDiff := prDiffFn
 	defer func() { prDiffFn = origDiff }()
 	t.Setenv("ACCEPTANCE_JUDGE_DIFF", "0")
@@ -243,6 +282,7 @@ func TestPullCheckWiringRecordsTestEvidenceWhenActive(t *testing.T) {
 // wiring layer: a PullService outage never changes the gate's own pass/fail
 // return value — only the recording side-effect is lost (and logged).
 func TestPullCheckWiringFailurePolicy(t *testing.T) {
+	t.Setenv("CW_PULL_TARGET", "main") // skip the gh default-branch lookup in tests
 	origExists, origStats := prExistsFn, prDiffStatsFn
 	defer func() { prExistsFn, prDiffStatsFn = origExists, origStats }()
 	prExistsFn = func(string, string) (bool, error) { return true, nil }
@@ -259,5 +299,129 @@ func TestPullCheckWiringFailurePolicy(t *testing.T) {
 	got := builderPRVerifier(slog.Default(), "plumb", "org/repo", "NET-1", "")()
 	if !got {
 		t.Fatal("builderPRVerifier() = false, want true — a pull-checks outage must never change the gate's own verdict")
+	}
+}
+
+// TestEnsurePullRetriesAfterFailure is the regression test for review
+// finding #1: the acceptance-judge gate's first call routinely lands BEFORE
+// the run's branch/PR exists (the exact case the gate exists to catch), so
+// the first EnsurePull legitimately 404s. That must NOT permanently latch
+// "ensured" — a later call, once the branch/PR is real, has to retry
+// EnsurePull and land its check, not silently no-op for the rest of the run.
+func TestEnsurePullRetriesAfterFailure(t *testing.T) {
+	t.Setenv("CW_PULL_TARGET", "main") // skip the gh default-branch lookup in tests
+	fake := &fakePullServer{
+		openErrFn: func(callNum int) error {
+			if callNum == 1 {
+				return errors.New("source branch not found yet")
+			}
+			return nil
+		},
+	}
+	run := dialFakePullServer(t, fake)
+	ctx := context.Background()
+	log := slog.Default()
+
+	// First attempt: branch/PR doesn't exist yet — EnsurePull fails.
+	id1, ok1 := run.ensurePull(ctx, log, "org/repo", "", "NET-1")
+	if ok1 || id1 != "" {
+		t.Fatalf("first ensurePull = (%q, %v), want (\"\", false)", id1, ok1)
+	}
+	run.mu.Lock()
+	stillUnensured := !run.ensured
+	run.mu.Unlock()
+	if !stillUnensured {
+		t.Fatal("ensured latched true after a FAILED EnsurePull — a later gate can never retry (finding #1 regression)")
+	}
+
+	// Second attempt (e.g. the PR-exists gate, once the branch/PR is real):
+	// must retry EnsurePull, not reuse a cached empty id.
+	id2, ok2 := run.ensurePull(ctx, log, "org/repo", "", "NET-1")
+	if !ok2 || id2 == "" {
+		t.Fatalf("second ensurePull = (%q, %v), want a real pull id now that OpenPull succeeds", id2, ok2)
+	}
+	run.mu.Lock()
+	nowEnsured := run.ensured
+	run.mu.Unlock()
+	if !nowEnsured {
+		t.Fatal("ensured not latched true after a SUCCESSFUL EnsurePull")
+	}
+
+	openCalls, _ := fake.snapshot()
+	if openCalls != 2 {
+		t.Fatalf("OpenPull calls = %d, want 2 (one failed attempt + one retry)", openCalls)
+	}
+
+	// And the check actually lands now that the pull is ensured.
+	run.record(ctx, log, "org/repo", "", "NET-1", pullCheckPRExists, pullchecks.StatePass, "PR found", "")
+	_, records := fake.snapshot()
+	if len(records) != 1 || records[0].Id != id2 {
+		t.Fatalf("records = %+v, want one check landed against pull id %q", records, id2)
+	}
+}
+
+// TestPullRunRecorderRecordRespectsRPCTimeout is the regression test for
+// review finding #2: a blocked/unreachable cairn-server must not stall
+// record() beyond pullCheckRPCTimeout.
+func TestPullRunRecorderRecordRespectsRPCTimeout(t *testing.T) {
+	t.Setenv("CW_PULL_TARGET", "main") // skip the gh default-branch lookup in tests
+	origTimeout := pullCheckRPCTimeout
+	pullCheckRPCTimeout = 200 * time.Millisecond
+	defer func() { pullCheckRPCTimeout = origTimeout }()
+
+	fake := &fakePullServer{blockOpen: true}
+	run := dialFakePullServer(t, fake)
+
+	done := make(chan struct{})
+	go func() {
+		run.record(context.Background(), slog.Default(), "org/repo", "", "NET-1",
+			pullCheckPRExists, pullchecks.StatePass, "s", "")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("record() did not return within the RPC timeout — a blocked cairn-server can stall a gate")
+	}
+}
+
+// TestPullCheckWiringBlockedServerDoesNotStallGate is the wiring-layer half
+// of finding #2's acceptance test: a blocked pull-checks server must not
+// change builderPRVerifier's own timing-sensitive return value, and the call
+// must complete within (a small multiple of) pullCheckRPCTimeout.
+func TestPullCheckWiringBlockedServerDoesNotStallGate(t *testing.T) {
+	t.Setenv("CW_PULL_TARGET", "main") // skip the gh default-branch lookup in tests
+	origExists, origStats := prExistsFn, prDiffStatsFn
+	defer func() { prExistsFn, prDiffStatsFn = origExists, origStats }()
+	prExistsFn = func(string, string) (bool, error) { return true, nil }
+	prDiffStatsFn = func(string, string) (prDiffStats, bool, error) {
+		return prDiffStats{Additions: 5, Deletions: 1, ChangedFiles: 1}, true, nil
+	}
+
+	origTimeout := pullCheckRPCTimeout
+	pullCheckRPCTimeout = 200 * time.Millisecond
+	defer func() { pullCheckRPCTimeout = origTimeout }()
+
+	fake := &fakePullServer{blockOpen: true}
+	run := dialFakePullServer(t, fake)
+	origRun := pullCheckRun
+	pullCheckRun = run
+	defer func() { pullCheckRun = origRun }()
+
+	done := make(chan bool)
+	start := time.Now()
+	go func() { done <- builderPRVerifier(slog.Default(), "plumb", "org/repo", "NET-1", "")() }()
+
+	select {
+	case got := <-done:
+		if !got {
+			t.Fatal("builderPRVerifier() = false, want true — a blocked pull-checks server must never change the gate's own verdict")
+		}
+		if elapsed := time.Since(start); elapsed > 3*time.Second {
+			t.Fatalf("builderPRVerifier() took %v, want bounded by pullCheckRPCTimeout (server was blocked)", elapsed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("builderPRVerifier() did not return — a blocked pull-checks server stalled the gate")
 	}
 }
