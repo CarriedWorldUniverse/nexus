@@ -31,6 +31,29 @@ jobs:
       - name: go test
         run: go test -race ./...
 
+  worm-guard:
+    name: worm guard (fresh-dep gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Build the go-gate guard from source (stdlib-only, pinned tag) and fail
+      # the build if go.sum introduces any THIRD-PARTY dependency published
+      # within the last fortnight that is not in the go-allowance ledger — the
+      # Stux-worm CI vector (a PR pulling a fresh malicious dep). Own modules
+      # (GOPRIVATE) are skipped; pre-worm deps pass without a ledger entry.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+      - name: build go-gate
+        run: |
+          git clone --depth 1 https://x-access-token:${{ secrets.NEXUS_CW_PAT }}@github.com/CarriedWorldUniverse/go-gate /tmp/go-gate
+          ( cd /tmp/go-gate && GOFLAGS=-mod=mod GOTOOLCHAIN=local go build -o /tmp/go-gate-bin . )
+      - name: fetch allowance ledger
+        run: |
+          git clone --depth 1 https://x-access-token:${{ secrets.NEXUS_CW_PAT }}@github.com/CarriedWorldUniverse/go-allowance /tmp/go-allowance
+      - name: guard go.sum
+        run: /tmp/go-gate-bin guard --gosum go.sum --allowlist /tmp/go-allowance/allowance.txt
+
   security-scan:
     name: security scan
     runs-on: ubuntu-latest
