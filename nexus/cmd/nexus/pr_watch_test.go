@@ -100,7 +100,7 @@ func TestBriefsCarryTheContract(t *testing.T) {
 	st := prWatchState{Repo: "o/r", Number: 7, URL: "https://github.com/o/r/pull/7",
 		Branch: "builder/NET-99", HeadSHA: "abc1234"}
 	task, criteria := reviewBrief(st, 2)
-	for _, want := range []string{"gh pr diff 7", "pr-lifecycle", "round=2", "head=abc1234", "Outstanding", "Do NOT merge"} {
+	for _, want := range []string{"gh pr diff 7", "gh pr comment 7", "pr-lifecycle", "round=2", "head=abc1234", "Outstanding", "NOT merge", "NOT use gh pr review"} {
 		if !strings.Contains(task, want) {
 			t.Errorf("review task missing %q", want)
 		}
