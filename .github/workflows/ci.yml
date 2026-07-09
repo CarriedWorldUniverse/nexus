@@ -49,7 +49,7 @@ jobs:
       # credential. nexus's deps are all pre-cutoff; when a fresh dep is
       # deliberately approved, pass -allowlist pointing at the synced ledger.
       - name: build wormguard
-        run: cd .github/wormguard && GOFLAGS=-mod=mod GOTOOLCHAIN=local go build -o /tmp/wormguard .
+        run: cd .github/wormguard && GOFLAGS=-mod=mod go build -o /tmp/wormguard .
       - name: guard go.sum
         run: /tmp/wormguard -gosum go.sum
 
