@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
@@ -233,4 +234,47 @@ func TestRecorderFailurePolicy(t *testing.T) {
 	}
 	// No panic, no goroutine leak, no infinite retry loop above — reaching
 	// this line at all is the proof of the non-fatal contract.
+}
+
+// TestEnsurePullSanitizesFields is the regression test for the review's LOW
+// finding: EnsurePull sent Source/Target/Title to OpenPull WITHOUT the
+// control-char-strip + cap sanitizer Record's fields go through. A ticket ID
+// (the usual source of source/title — see the agentfunnel wiring's "builder
+// gate checks: "+ticket convention) carrying control characters must arrive
+// at cairn-server clean, exactly like Record's name/summary/evidence_url do.
+func TestEnsurePullSanitizesFields(t *testing.T) {
+	fake := &fakePullServer{}
+	conn := startFakePullServer(t, fake)
+	rec := New(conn, "org-1", "widgets", "PROJ", slog.Default())
+
+	dirtySource := "builder/NET-1\x1b[31m"
+	dirtyTarget := "main\n"
+	dirtyTitle := "builder gate checks: NET-1\x1b[0m\r\n"
+
+	if _, err := rec.EnsurePull(context.Background(), dirtySource, dirtyTarget, dirtyTitle, ""); err != nil {
+		t.Fatalf("EnsurePull: %v", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.openPullCalls) != 1 {
+		t.Fatalf("OpenPull calls = %d, want 1", len(fake.openPullCalls))
+	}
+	got := fake.openPullCalls[0]
+	if strings.ContainsAny(got.Source, "\x1b\n\r") {
+		t.Errorf("Source not sanitized: %q", got.Source)
+	}
+	if strings.ContainsAny(got.Target, "\x1b\n\r") {
+		t.Errorf("Target not sanitized: %q", got.Target)
+	}
+	if strings.ContainsAny(got.Title, "\x1b\n\r") {
+		t.Errorf("Title not sanitized: %q", got.Title)
+	}
+	if len(got.Title) > maxNameBytes {
+		t.Errorf("Title length = %d, want <= %d (name cap)", len(got.Title), maxNameBytes)
+	}
+	wantSource := SanitizeName(dirtySource)
+	if got.Source != wantSource {
+		t.Errorf("Source = %q, want SanitizeName output %q", got.Source, wantSource)
+	}
 }

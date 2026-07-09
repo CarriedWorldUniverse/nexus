@@ -76,10 +76,21 @@ func (r *Recorder) callCtx(ctx context.Context) context.Context {
 // EnsurePull twice for the same run returns the SAME pull id, so callers
 // never need to cache it across gate invocations. project overrides
 // r.Project for this one call when non-empty; empty falls back to r.Project.
+//
+// source/target/title are sanitized through SanitizeName (the same
+// control-char-strip + cap path Record's name field uses — title is
+// name-capped at 128B since it plays the same "short label" role) before the
+// RPC, so a control-char-bearing ticket/branch name (source/title are both
+// commonly built from a ticket ID — see the agentfunnel wiring) can neither
+// trip cairn-server's InvalidArgument validation nor land ugly text on the
+// pull.
 func (r *Recorder) EnsurePull(ctx context.Context, source, target, title, project string) (string, error) {
 	if project == "" {
 		project = r.Project
 	}
+	source = SanitizeName(source)
+	target = SanitizeName(target)
+	title = SanitizeName(title)
 	resp, err := r.pull.OpenPull(r.callCtx(ctx), &cairnv1.OpenPullRequest{
 		Org:     r.Org,
 		Slug:    r.Slug,

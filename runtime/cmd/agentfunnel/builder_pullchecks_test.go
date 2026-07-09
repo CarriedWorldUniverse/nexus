@@ -140,7 +140,7 @@ func TestPullCheckDarkByDefault(t *testing.T) {
 	// deeper in the call chain would just discard (Go evaluates a call's
 	// arguments before the callee's own nil check ever runs).
 	urlCalls := 0
-	prURLFn = func(string, string) (string, error) {
+	prURLFn = func(context.Context, string, string) (string, error) {
 		urlCalls++
 		return "https://should-not-be-called.example", nil
 	}
@@ -171,7 +171,9 @@ func TestPullCheckWiringRecordsPRGateVerdicts(t *testing.T) {
 	}
 	origURL := prURLFn
 	defer func() { prURLFn = origURL }()
-	prURLFn = func(string, string) (string, error) { return "https://cairn.example/org-1/widgets/pulls/pull-1", nil }
+	prURLFn = func(context.Context, string, string) (string, error) {
+		return "https://cairn.example/org-1/widgets/pulls/pull-1", nil
+	}
 
 	fake := &fakePullServer{}
 	run := dialFakePullServer(t, fake)
@@ -450,7 +452,7 @@ func TestDecideDarkDefaultNeverCallsPrURL(t *testing.T) {
 	origURL := prURLFn
 	defer func() { prURLFn = origURL }()
 	urlCalls := 0
-	prURLFn = func(string, string) (string, error) {
+	prURLFn = func(context.Context, string, string) (string, error) {
 		urlCalls++
 		return "https://should-not-be-called.example", nil
 	}
@@ -471,5 +473,107 @@ func TestDecideDarkDefaultNeverCallsPrURL(t *testing.T) {
 	}
 	if urlCalls != 0 {
 		t.Fatalf("prURLFn was called %d times with gate.pullCheck nil, want 0 (eager prURLBestEffort regression)", urlCalls)
+	}
+}
+
+// TestPrURLBestEffortRespectsTimeout is the regression test for the
+// unbounded-gh-subprocess finding: a hung prURLFn (simulating a stalled `gh
+// pr list`) must not block prURLBestEffort past pullCheckRPCTimeout.
+func TestPrURLBestEffortRespectsTimeout(t *testing.T) {
+	origTimeout := pullCheckRPCTimeout
+	pullCheckRPCTimeout = 200 * time.Millisecond
+	defer func() { pullCheckRPCTimeout = origTimeout }()
+
+	origURL := prURLFn
+	defer func() { prURLFn = origURL }()
+	prURLFn = func(ctx context.Context, _, _ string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	done := make(chan string)
+	go func() { done <- prURLBestEffort(context.Background(), "org/repo", "builder/NET-1") }()
+
+	select {
+	case got := <-done:
+		if got != "" {
+			t.Fatalf("prURLBestEffort = %q, want \"\" (timed out)", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("prURLBestEffort did not return — a hung gh subprocess can stall the gate")
+	}
+}
+
+// TestPullCheckTargetRespectsTimeout is the same regression test for
+// pullCheckTarget's `gh repo view` call.
+func TestPullCheckTargetRespectsTimeout(t *testing.T) {
+	origTimeout := pullCheckRPCTimeout
+	pullCheckRPCTimeout = 200 * time.Millisecond
+	defer func() { pullCheckRPCTimeout = origTimeout }()
+
+	origTarget := pullCheckTargetFn
+	defer func() { pullCheckTargetFn = origTarget }()
+	pullCheckTargetFn = func(ctx context.Context, _ string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	done := make(chan string)
+	go func() { done <- pullCheckTarget(context.Background(), "org/repo") }()
+
+	select {
+	case got := <-done:
+		if got != "main" {
+			t.Fatalf("pullCheckTarget = %q, want \"main\" (fallback on timeout)", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pullCheckTarget did not return — a hung gh subprocess can stall the gate")
+	}
+}
+
+// TestPullCheckWiringBlockedGhDoesNotStallGate is the wiring-layer proof: a
+// hung `gh` call (via pullCheckTargetFn, exercised through
+// builderPRVerifier's ensurePull path) must not change the PR-exists gate's
+// own return value, and the whole call must complete within a small multiple
+// of pullCheckRPCTimeout — mirrors TestPullCheckWiringBlockedServerDoesNotStallGate
+// but for the gh side instead of the gRPC side.
+func TestPullCheckWiringBlockedGhDoesNotStallGate(t *testing.T) {
+	origExists, origStats := prExistsFn, prDiffStatsFn
+	defer func() { prExistsFn, prDiffStatsFn = origExists, origStats }()
+	prExistsFn = func(string, string) (bool, error) { return true, nil }
+	prDiffStatsFn = func(string, string) (prDiffStats, bool, error) {
+		return prDiffStats{Additions: 5, Deletions: 1, ChangedFiles: 1}, true, nil
+	}
+	origTarget := pullCheckTargetFn
+	defer func() { pullCheckTargetFn = origTarget }()
+	pullCheckTargetFn = func(ctx context.Context, _ string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	origTimeout := pullCheckRPCTimeout
+	pullCheckRPCTimeout = 200 * time.Millisecond
+	defer func() { pullCheckRPCTimeout = origTimeout }()
+
+	fake := &fakePullServer{}
+	run := dialFakePullServer(t, fake)
+	origRun := pullCheckRun
+	pullCheckRun = run
+	defer func() { pullCheckRun = origRun }()
+
+	done := make(chan bool)
+	start := time.Now()
+	go func() { done <- builderPRVerifier(slog.Default(), "plumb", "org/repo", "NET-1", "")() }()
+
+	select {
+	case got := <-done:
+		if !got {
+			t.Fatal("builderPRVerifier() = false, want true — a hung gh default-branch lookup must never change the gate's own verdict")
+		}
+		if elapsed := time.Since(start); elapsed > 3*time.Second {
+			t.Fatalf("builderPRVerifier() took %v, want bounded by pullCheckRPCTimeout (gh was hung)", elapsed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("builderPRVerifier() did not return — a hung gh call stalled the gate")
 	}
 }

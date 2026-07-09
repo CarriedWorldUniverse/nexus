@@ -1394,7 +1394,7 @@ func (g *builderAcceptanceGate) Decide(ctx context.Context, output string, log *
 			// arguments before the callee's own nil check ever runs.
 			evidenceURL := ""
 			if g.pullCheck != nil && g.repo != "" {
-				evidenceURL = prURLBestEffort(g.repo, builderBranch(g.branch, g.ticket))
+				evidenceURL = prURLBestEffort(ctx, g.repo, builderBranch(g.branch, g.ticket))
 			}
 			summary := verdict.Reason
 			if summary == "" {
@@ -1530,9 +1530,13 @@ func builderPRVerifier(log *slog.Logger, aspect, repo, ticket, branch string) fu
 		// PullService calls). Guarding here, not inside recordPRExistsCheck,
 		// because Go evaluates a call's arguments before the callee's own
 		// nil check ever runs.
+		// builderPRVerifier's closure signature is fixed (existing tests call
+		// it directly) and carries no ctx, so this uses a fresh
+		// context.Background() — prURLBestEffort still bounds it with
+		// pullCheckRPCTimeout internally.
 		prURL := ""
 		if pullCheckRun != nil {
-			prURL = prURLBestEffort(repo, head)
+			prURL = prURLBestEffort(context.Background(), repo, head)
 		}
 		recordPRExistsCheck(log, repo, branch, ticket, true, "PR found for branch "+head, prURL)
 		// ACCEPTANCE-GATE-HARDENING Unit 2: a PR that exists but changes
@@ -1584,21 +1588,27 @@ var prExistsFn = func(repo, branch string) (bool, error) {
 // prURLFn fetches the URL of the open PR for branch. Used ONLY as evidence_url
 // for a pull-checks recording (see prURLBestEffort) — never on the gate's own
 // pass/fail decision path, so a failure here can never affect completion.
-// Swappable in tests.
-var prURLFn = func(repo, branch string) (string, error) {
-	out, err := exec.Command("gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "url", "-q", ".[0].url").CombinedOutput()
+// Swappable in tests. Takes ctx (review finding: this gh subprocess, like the
+// PullService RPCs, must never be allowed to block a run indefinitely) —
+// callers are expected to bound it (see prURLBestEffort).
+var prURLFn = func(ctx context.Context, repo, branch string) (string, error) {
+	out, err := exec.CommandContext(ctx, "gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "url", "-q", ".[0].url").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("gh pr list (url): %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
-// prURLBestEffort returns the open PR's URL for branch, or "" on any error —
-// only called when a pull-checks recorder is configured (see
+// prURLBestEffort returns the open PR's URL for branch, or "" on any error OR
+// timeout — only called when a pull-checks recorder is configured (see
 // recordPRExistsCheck), and only used for evidence_url, so a swallowed error
 // here never affects the PR-exists gate's own already-decided pass verdict.
-func prURLBestEffort(repo, branch string) string {
-	url, err := prURLFn(repo, branch)
+// Bounded by pullCheckRPCTimeout, derived from ctx, so a hung/unreachable gh
+// (network stall, credential prompt, etc.) can't stall the gate.
+func prURLBestEffort(ctx context.Context, repo, branch string) string {
+	rpcCtx, cancel := context.WithTimeout(ctx, pullCheckRPCTimeout)
+	defer cancel()
+	url, err := prURLFn(rpcCtx, repo, branch)
 	if err != nil {
 		return ""
 	}

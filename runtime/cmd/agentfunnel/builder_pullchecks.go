@@ -107,7 +107,7 @@ func (p *pullRunRecorder) ensurePull(ctx context.Context, log *slog.Logger, repo
 	if title == "" {
 		title = source
 	}
-	target := pullCheckTarget(repo)
+	target := pullCheckTarget(ctx, repo)
 
 	rpcCtx, cancel := context.WithTimeout(ctx, pullCheckRPCTimeout)
 	defer cancel()
@@ -159,8 +159,11 @@ func (p *pullRunRecorder) record(ctx context.Context, log *slog.Logger, repo, br
 // Swappable in tests. Used only to pick the pull-checks target branch (see
 // pullCheckTarget) — never on any gate's own pass/fail decision path, so a
 // failure here can only ever widen to the "main" fallback, not affect a run.
-var pullCheckTargetFn = func(repo string) (string, error) {
-	out, err := exec.Command("gh", "repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name").CombinedOutput()
+// Takes ctx (review finding: this gh subprocess, like the PullService RPCs,
+// must never be allowed to block a run indefinitely) — callers are expected
+// to bound it (see pullCheckTarget).
+var pullCheckTargetFn = func(ctx context.Context, repo string) (string, error) {
+	out, err := exec.CommandContext(ctx, "gh", "repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("gh repo view (default branch): %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -172,17 +175,21 @@ var pullCheckTargetFn = func(repo string) (string, error) {
 // GetRef on a repo whose default branch is "master"). CW_PULL_TARGET, when
 // set, overrides resolution entirely (operator escape hatch — e.g. a repo
 // with an unconventional default). Otherwise resolves repo's actual default
-// branch via gh; any failure (gh unavailable, repo not found, empty result)
-// falls back to "main" — today's original hardcoded behavior, unchanged when
-// resolution isn't possible.
-func pullCheckTarget(repo string) string {
+// branch via gh; any failure OR TIMEOUT (gh unavailable, repo not found,
+// empty result, hung subprocess) falls back to "main" — today's original
+// hardcoded behavior, unchanged when resolution isn't possible. Bounded by
+// pullCheckRPCTimeout, derived from ctx, so a hung/unreachable gh can't stall
+// the gate (review finding, same class as the PullService RPC timeouts).
+func pullCheckTarget(ctx context.Context, repo string) string {
 	if v := strings.TrimSpace(os.Getenv("CW_PULL_TARGET")); v != "" {
 		return v
 	}
 	if repo == "" {
 		return "main"
 	}
-	branch, err := pullCheckTargetFn(repo)
+	rpcCtx, cancel := context.WithTimeout(ctx, pullCheckRPCTimeout)
+	defer cancel()
+	branch, err := pullCheckTargetFn(rpcCtx, repo)
 	if err != nil || branch == "" {
 		return "main"
 	}
