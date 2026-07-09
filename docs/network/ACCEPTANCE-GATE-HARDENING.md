@@ -75,6 +75,24 @@ Unit 2 (cheapest, pure-objective) → Unit 4 (provenance, pure-objective) → Un
 
 ## Pull-checks wiring — gate verdicts recorded on the cairn pull (cairn#99)
 
+> **⚠️ Production enablement BLOCKED pending cairn#99.** This wiring is
+> feature-complete and dark by default, but is NOT cleared for production
+> `CW_PULL_*` enablement yet. The gate's mTLS identity (the `broker-gate`
+> credential — see "Broker-gate subject convention" below) currently rides
+> into the worker/builder pod as env-forwarded material (the same
+> broker-env→worker seam `CW_VCS` and every other `acceptanceGateEnvKeys`
+> knob uses), which means a builder process — the very thing being gated,
+> and a process where the model can shell out — could in principle reach the
+> credential that attests gate verdicts as authoritative. Production
+> enablement is deferred until cairn#99 establishes that the attesting
+> process runs somewhere the gated code cannot read its own credential
+> (a separate attestation identity/scope, not the worker pod). Until then,
+> treat `CW_PULL_SERVER_ADDR` et al. as dev/staging-only, and see the
+> ship-dark guard below for the one enforcement point already in place
+> (refusing `CW_PULL_DEV_INSECURE=1` inside a builder process specifically,
+> which is a narrower, already-necessary fix — not a substitute for #99's
+> broader attestation-placement fix).
+
 Every gate above decides `pass`/`fail`/`block` **broker-side**; that verdict is
 already authoritative. Once a run carries **cairn-pull addressing** (its repo
 lives in cairn, not bare GitHub), the SAME verdicts are additionally recorded
@@ -117,7 +135,15 @@ dispatched builder Jobs only when set):
 - `CW_PULL_TLS_CERT` / `CW_PULL_TLS_KEY` / `CW_PULL_TLS_CA` — cwb mesh mTLS
   material for the cairn-server dial (same convention as `WORKGRAPH_TLS_*` —
   see `nexus/workgraph/dial.go`).
-- `CW_PULL_DEV_INSECURE=1` — dial without mTLS (local dev only).
+- `CW_PULL_DEV_INSECURE=1` — dial without mTLS (local dev only). **Refused in
+  a builder/worker process**: `buildPullCheckRun` treats
+  `CW_PULL_DEV_INSECURE=1` as a FATAL misconfiguration when running as a
+  builder (`*builderMode` — the same worker-pod context the blocker banner
+  above describes) — it logs loudly and stays dark (nil) rather than dialing
+  insecure, because an insecure dial from inside the gated pod would let any
+  shell in that pod reach `RecordPullCheck` unauthenticated and forge a gate
+  pass. The guard is scoped to builder/worker context, not global — non-worker
+  contexts (and this package's own bufconn-based unit tests) are unaffected.
 
 Implementation: `runtime/pullchecks` (client + `Recorder` + sanitizer),
 `pullchecks.NewRecorderFromEnv` is the single dark-by-default entry point.

@@ -577,3 +577,51 @@ func TestPullCheckWiringBlockedGhDoesNotStallGate(t *testing.T) {
 		t.Fatal("builderPRVerifier() did not return — a hung gh call stalled the gate")
 	}
 }
+
+// TestBuildPullCheckRunRefusesDevInsecureInBuilderMode is the regression test
+// for the operator's ship-dark guard (cairn#99 security finding #1): a
+// builder/worker process runs inside the pod where the model being gated can
+// shell out, so CW_PULL_DEV_INSECURE=1 there would let any shell reach
+// RecordPullCheck unauthenticated and forge a gate pass. buildPullCheckRun
+// must refuse to construct an insecure recorder in that context — stay dark
+// (nil), log loudly, never panic.
+func TestBuildPullCheckRunRefusesDevInsecureInBuilderMode(t *testing.T) {
+	for _, k := range []string{"CW_PULL_SERVER_ADDR", "CW_PULL_ORG", "CW_PULL_SLUG", "CW_PULL_PROJECT",
+		"CW_PULL_TLS_CERT", "CW_PULL_TLS_KEY", "CW_PULL_TLS_CA", "CW_PULL_DEV_INSECURE"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("CW_PULL_SERVER_ADDR", "cairn.example:443")
+	t.Setenv("CW_PULL_ORG", "org-1")
+	t.Setenv("CW_PULL_SLUG", "widgets")
+	t.Setenv("CW_PULL_PROJECT", "PROJ")
+	t.Setenv("CW_PULL_DEV_INSECURE", "1")
+
+	run := buildPullCheckRun(slog.Default(), true /* builderMode */)
+	if run != nil {
+		t.Fatalf("buildPullCheckRun(builderMode=true) with CW_PULL_DEV_INSECURE=1 = %+v, want nil (ship-dark guard)", run)
+	}
+}
+
+// TestBuildPullCheckRunAllowsDevInsecureOutsideBuilderMode proves the guard
+// is scoped to builder/worker context, not a global DEV_INSECURE ban — with
+// builderMode=false, the same env still resolves to a live (non-nil)
+// recorder. (The pullchecks package's own bufconn-based unit tests exercise
+// DEV_INSECURE via pullchecks.NewRecorderFromEnv directly and never go
+// through this guard at all — this test covers buildPullCheckRun's own
+// contract instead.)
+func TestBuildPullCheckRunAllowsDevInsecureOutsideBuilderMode(t *testing.T) {
+	for _, k := range []string{"CW_PULL_SERVER_ADDR", "CW_PULL_ORG", "CW_PULL_SLUG", "CW_PULL_PROJECT",
+		"CW_PULL_TLS_CERT", "CW_PULL_TLS_KEY", "CW_PULL_TLS_CA", "CW_PULL_DEV_INSECURE"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("CW_PULL_SERVER_ADDR", "cairn.example:443")
+	t.Setenv("CW_PULL_ORG", "org-1")
+	t.Setenv("CW_PULL_SLUG", "widgets")
+	t.Setenv("CW_PULL_PROJECT", "PROJ")
+	t.Setenv("CW_PULL_DEV_INSECURE", "1")
+
+	run := buildPullCheckRun(slog.Default(), false /* builderMode */)
+	if run == nil {
+		t.Fatal("buildPullCheckRun(builderMode=false) with CW_PULL_DEV_INSECURE=1 = nil, want a live recorder (guard must not be global)")
+	}
+}

@@ -836,7 +836,7 @@ func main() {
 		// package-level pullCheckRun) and the acceptance-judge/test-evidence
 		// gate (acceptanceGate.pullCheck, set here) so every check this run
 		// produces lands on the SAME cairn pull.
-		pullCheckRun = buildPullCheckRun(log)
+		pullCheckRun = buildPullCheckRun(log, *builderMode)
 		acceptanceGate.pullCheck = pullCheckRun
 		// Provenance: let the gate see which tools the run actually invoked.
 		if realOutputTracker != nil {

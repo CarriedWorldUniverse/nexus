@@ -56,7 +56,27 @@ type pullRunRecorder struct {
 // buildPullCheckRun constructs the run's pull-check recorder from env
 // (CW_PULL_SERVER_ADDR/_ORG/_SLUG/_PROJECT/_TLS_*/_DEV_INSECURE — see
 // pullchecks.NewRecorderFromEnv). Returns nil (dark) when unconfigured.
-func buildPullCheckRun(log *slog.Logger) *pullRunRecorder {
+//
+// builderMode is the SAME condition main() already gates this call on
+// (*builderMode — see main.go's builder wiring). Ship-dark guard (operator
+// decision on cairn#99's security finding #1, folded into #99's broader
+// separation-of-duties story rather than fixed standalone here): a builder
+// process runs inside the worker pod where the model being gated can shell
+// out, so CW_PULL_DEV_INSECURE=1 there would let ANY shell in that pod reach
+// RecordPullCheck unauthenticated and forge a gate pass. In builder mode,
+// DEV_INSECURE is therefore treated as a FATAL misconfiguration: log loudly
+// and stay dark (return nil) rather than dialing insecure. Outside builder
+// mode (builderMode=false — non-worker contexts, and this package's own
+// tests that construct a *pullRunRecorder directly, not via this function)
+// DEV_INSECURE is unaffected; the pullchecks package's own bufconn-based
+// unit tests call pullchecks.NewRecorderFromEnv directly and never go
+// through this guard at all, so they are unaffected either way.
+func buildPullCheckRun(log *slog.Logger, builderMode bool) *pullRunRecorder {
+	if builderMode && os.Getenv("CW_PULL_DEV_INSECURE") == "1" {
+		log.Error("CW_PULL_DEV_INSECURE must not be enabled in a builder/worker process — " +
+			"it exposes an unauthenticated pull-check forgery path; see cairn#99")
+		return nil
+	}
 	rec := pullchecks.NewRecorderFromEnv(log)
 	if rec == nil {
 		return nil
