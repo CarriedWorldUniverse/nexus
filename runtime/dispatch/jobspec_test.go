@@ -654,3 +654,31 @@ func TestBuildJob_ForwardsAcceptanceGateEnv(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildJob_ForwardsCvcsEnv verifies the CW_VCS broker-env passthrough:
+// when the broker deployment sets CW_VCS, BuildJob injects it into the
+// worker Job env (so agentfunnel can select the cairn clone path); when
+// CW_VCS is unset in the broker env it must be absent from the Job spec.
+// Rides the same os.Getenv seam as the ACCEPTANCE_* knobs.
+func TestBuildJob_ForwardsCvcsEnv(t *testing.T) {
+	cfg := JobConfig{Image: "img", Namespace: "nexus", BriefTimeout: "30m"}
+	b := Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "NEX-1"}
+
+	t.Run("set → forwarded with broker value", func(t *testing.T) {
+		t.Setenv("CW_VCS", "cairn")
+		c := BuildJob(b, cfg, "t1", "codex-cli").Spec.Template.Spec.Containers[0]
+		if !envValueEquals(c.Env, "CW_VCS", "cairn") {
+			t.Errorf("CW_VCS not forwarded with broker value 'cairn': %v", c.Env)
+		}
+	})
+
+	t.Run("unset → absent (agentfunnel uses git default)", func(t *testing.T) {
+		t.Setenv("CW_VCS", "")
+		c := BuildJob(b, cfg, "t2", "codex-cli").Spec.Template.Spec.Containers[0]
+		for _, e := range c.Env {
+			if e.Name == "CW_VCS" {
+				t.Errorf("CW_VCS should be absent when unset in broker env, got %q", e.Value)
+			}
+		}
+	})
+}
