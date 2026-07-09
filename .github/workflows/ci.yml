@@ -44,15 +44,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.4'
-      - name: build go-gate
-        run: |
-          git clone --depth 1 https://x-access-token:${{ secrets.NEXUS_CW_PAT }}@github.com/CarriedWorldUniverse/go-gate /tmp/go-gate
-          ( cd /tmp/go-gate && GOFLAGS=-mod=mod GOTOOLCHAIN=local go build -o /tmp/go-gate-bin . )
-      - name: fetch allowance ledger
-        run: |
-          git clone --depth 1 https://x-access-token:${{ secrets.NEXUS_CW_PAT }}@github.com/CarriedWorldUniverse/go-allowance /tmp/go-allowance
+      # Self-contained: the guard is a vendored stdlib-only tool in this repo
+      # (.github/wormguard, isolated go.mod), so CI needs no cross-repo clone or
+      # credential. nexus's deps are all pre-cutoff; when a fresh dep is
+      # deliberately approved, pass -allowlist pointing at the synced ledger.
+      - name: build wormguard
+        run: cd .github/wormguard && GOFLAGS=-mod=mod GOTOOLCHAIN=local go build -o /tmp/wormguard .
       - name: guard go.sum
-        run: /tmp/go-gate-bin guard --gosum go.sum --allowlist /tmp/go-allowance/allowance.txt
+        run: /tmp/wormguard -gosum go.sum
 
   security-scan:
     name: security scan
