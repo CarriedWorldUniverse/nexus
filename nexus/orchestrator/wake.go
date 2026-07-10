@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/workgraph"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
@@ -31,6 +32,17 @@ func (o *Orchestrator) OnJobDoneHook() func(dispatch.JobDone) {
 		if done.Ticket == "" {
 			return
 		}
+		ctx := context.Background()
+
+		// NEX-473: re-run the authoritative gates BEFORE trusting done.OK —
+		// synchronous-on-job-done, so a later drain/dependent-item decision
+		// never runs ahead of ground-truth verification. Dark by default
+		// (o.GateRunner nil): zero gh/judge calls, byte-identical to
+		// pre-#473 behavior. #474 will additionally record these verdicts
+		// as durable cairn pull checks; for now they are only logged (see
+		// RunAuthoritativeGates/LogVerdicts doc in gates.go).
+		o.runAuthoritativeGates(ctx, done.Ticket)
+
 		result := workgraph.Result{
 			WorkItemID: done.Ticket,
 			Verdict:    workgraph.VerdictDone,
@@ -39,8 +51,34 @@ func (o *Orchestrator) OnJobDoneHook() func(dispatch.JobDone) {
 			result.Verdict = workgraph.VerdictBlocked
 			result.Reasons = []string{"job did not complete successfully"}
 		}
-		if _, err := o.RecordJobResult(context.Background(), done.Ticket, result); err != nil {
+		if _, err := o.RecordJobResult(ctx, done.Ticket, result); err != nil {
 			slog.Error("orchestrator: OnJobDoneHook: RecordJobResult failed", "work_item", done.Ticket, "err", err)
 		}
 	}
+}
+
+// runAuthoritativeGates is OnJobDoneHook's #473 wiring, split out so it's
+// independently testable: it looks up the work item's repo/criteria, derives
+// its builder branch (the builder/<ticket> convention — see
+// runtime/cmd/agentfunnel builderBranch), runs RunAuthoritativeGates, and
+// slogs the verdicts. A no-op (zero gh/judge calls) whenever o.GateRunner is
+// nil (dark default) or the work item carries no Repo (respond-only work,
+// no PR to gate — mirrors agentfunnel's own Repo=="" short-circuit).
+func (o *Orchestrator) runAuthoritativeGates(ctx context.Context, ticket string) {
+	if o.GateRunner == nil {
+		return
+	}
+	item, err := o.Graph.GetWorkItem(ctx, ticket)
+	if err != nil {
+		slog.Warn("orchestrator: authoritative gates: GetWorkItem failed — skipping", "work_item", ticket, "err", err)
+		return
+	}
+	if item.Repo == "" {
+		return
+	}
+	branch := "builder/" + ticket
+	criteria := strings.Join(item.AcceptanceCriteria, "\n")
+
+	verdicts := RunAuthoritativeGates(ctx, item.Repo, branch, ticket, criteria, *o.GateRunner)
+	LogVerdicts(slog.Default(), ticket, verdicts)
 }
