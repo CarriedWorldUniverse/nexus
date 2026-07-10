@@ -7,13 +7,17 @@
 // model being gated cannot forge the verdict by shelling out or narrating.
 //
 // This is the "produce the verdicts" half of the separation-of-duties story
-// cairn#99 calls for: today's agentfunnel gates are advisory (the worker
-// self-reports and the worker process itself decides whether it's done);
-// this package additionally recomputes the objective gates broker-side.
-// Recording those verdicts durably (as cairn pull checks, superseding the
-// dark f57c370/#468 wiring that currently rides an insecure trust boundary)
-// is #474 — deliberately NOT done here. RunAuthoritativeGates only produces
-// + slogs the verdicts.
+// cairn#99 calls for: agentfunnel's own gates stay advisory (the worker
+// self-reports and reprompts itself in-session); this package additionally
+// recomputes the objective gates broker-side. RunAuthoritativeGates itself
+// only produces the verdicts (LogVerdicts slogs them) — recording them
+// durably as cairn pull checks is RecordVerdicts (pullrecord.go, #474),
+// called from wake.go's runAuthoritativeGates right after LogVerdicts. #474
+// also relocated the recorder ITSELF here from the worker pod (superseding
+// the dark f57c370/#468 wiring, which rode a worker-side mesh credential the
+// gated model's own pod could read) and stopped forwarding CW_PULL_* onto
+// worker Jobs (runtime/dispatch/jobspec.go) — see
+// docs/network/ACCEPTANCE-GATE-HARDENING.md "Pull-checks wiring".
 //
 // Shares its decision logic with agentfunnel via
 // nexus/frame/funnel/gates — see that package's doc comment.
@@ -321,11 +325,12 @@ func gateState(pass bool) string {
 	return GateStateFail
 }
 
-// LogVerdicts is the THIS-TICKET consumer of RunAuthoritativeGates' output:
-// structured slog lines, one per verdict. #474 additionally records these as
-// cairn pull checks (relocating runtime/pullchecks.Recorder here) — until
-// that lands, logging is the only sink, which is sufficient for this
-// ticket's scope (produce the verdicts; #474 records them durably).
+// LogVerdicts is the always-on consumer of RunAuthoritativeGates' output:
+// structured slog lines, one per verdict, regardless of whether a
+// PullRecorder is configured. RecordVerdicts (pullrecord.go, #474) is the
+// SEPARATE, dark-by-default consumer that additionally records these as
+// durable cairn pull checks — see wake.go's runAuthoritativeGates, which
+// calls both.
 func LogVerdicts(log *slog.Logger, workItemID string, verdicts []GateVerdict) {
 	if log == nil {
 		log = slog.Default()

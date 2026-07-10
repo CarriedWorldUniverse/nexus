@@ -151,13 +151,26 @@ type Orchestrator struct {
 	// runner: OnJobDoneHook re-runs pr-exists/pr-substantial/
 	// acceptance-judge/test-evidence against the pushed artifact
 	// (RunAuthoritativeGates, gates.go) before the job's OK claim is
-	// trusted, and logs the verdicts (LogVerdicts). nil (default) is fully
-	// dark — no gh/judge calls, byte-identical to pre-#473 behavior. Note
-	// this is distinct from GateRunnerOptions.Enabled: BOTH must be set
-	// (a non-nil *GateRunnerOptions with Enabled=false is also a no-op) —
-	// the pointer gates whether OnJobDoneHook even looks up the work item,
-	// Enabled gates whether RunAuthoritativeGates itself does anything.
+	// trusted, logs the verdicts (LogVerdicts), and — when PullRecorder is
+	// also set — durably records them as cairn pull checks (RecordVerdicts,
+	// pullrecord.go, #474). nil (default) is fully dark — no gh/judge calls,
+	// byte-identical to pre-#473 behavior. Note this is distinct from
+	// GateRunnerOptions.Enabled: BOTH must be set (a non-nil
+	// *GateRunnerOptions with Enabled=false is also a no-op) — the pointer
+	// gates whether OnJobDoneHook even looks up the work item, Enabled gates
+	// whether RunAuthoritativeGates itself does anything.
 	GateRunner *GateRunnerOptions
+
+	// PullRecorder, when non-nil, records RunAuthoritativeGates' verdicts as
+	// durable cairn pull checks (RecordVerdicts, pullrecord.go — #474,
+	// cairn#99 Option B's final unit: this recorder runs HERE, orchestrator
+	// side, superseding the worker-side recorder #468 originally wired and
+	// #474 removed). nil (default) is dark — RecordVerdicts makes ZERO
+	// PullService calls, so a GateRunner configured without a PullRecorder
+	// behaves exactly like pre-#474: verdicts are computed and logged, never
+	// recorded durably. Build one via NewPullRecorderFromEnv (CW_PULL_* env
+	// — see its doc) or supply a fake in tests.
+	PullRecorder PullCheckRecorder
 
 	// Roles is the set of role labels this orchestrator's pool serves —
 	// DrainOnce calls workgraph.ListReady once per role, per stream.
