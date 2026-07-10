@@ -180,11 +180,23 @@ Every `OpenPull`/`RecordPullCheck` call a `Recorder` makes presents
 `cwb-subject=broker-gate` (`pullchecks.BrokerGateSubject`), **not** the
 builder aspect's own identity — unchanged by the #474 relocation. A pull
 check must be attributable to the gate that produced the verdict, not the
-worker being gated. Per #105, `RecordPullCheck` now requires the narrower
-`checks:attest` scope (not `repo:write`) — presenting that scope from the
-orchestrator's mesh identity/cert is operator configuration (the cairn-side
-credential/scope grant for the `broker-gate` mesh cert), not something this
-code hardcodes.
+worker being gated.
+
+Per #105, `RecordPullCheck` requires the narrower `checks:attest` scope,
+split off `OpenPull`'s `repo:write`. cairn-server reads scope from the
+**self-asserted `cwb-scopes` gRPC metadata** the caller presents, not from
+the mTLS cert (`cairn` `internal/grpcapi/grpcapi.go` `identityFromCtx` /
+`authed()`/`hasScope()`) — so the CODE, not just operator config, decides
+what scope goes out on the wire. `Recorder.callCtx` takes the scope
+per-call: `EnsurePull` presents `repo:write` on `OpenPull`, `Record` presents
+`checks:attest` on `RecordPullCheck` (`runtime/pullchecks/recorder.go`,
+fixed post-#474 review — the original code hardcoded `repo:write` for both
+calls, so every `RecordPullCheck` PermissionDenied'd and no check ever
+recorded; see `TestRecorderPresentsCorrectPerCallScope`). What IS operator
+configuration is granting the orchestrator's `broker-gate` mesh
+identity/cert the underlying authorization to hold and assert both scopes in
+the first place — the code presents the scope, the operator provisions the
+credential that's allowed to claim it.
 
 ### Sanitize-before-send
 `RecordPullCheckRequest.name` is capped at 128 bytes and must contain no
