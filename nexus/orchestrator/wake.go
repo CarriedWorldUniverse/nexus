@@ -79,10 +79,6 @@ func (o *Orchestrator) runAuthoritativeGates(ctx context.Context, ticket string)
 	branch := "builder/" + ticket
 	criteria := strings.Join(item.AcceptanceCriteria, "\n")
 
-	verdicts, err := RunAuthoritativeGates(ctx, item.Repo, branch, ticket, criteria, *o.GateRunner)
-	if err != nil {
-		slog.Error("orchestrator: authoritative gates: run failed", "work_item", ticket, "repo", item.Repo, "branch", branch, "err", err)
-		return
-	}
+	verdicts := RunAuthoritativeGates(ctx, item.Repo, branch, ticket, criteria, *o.GateRunner)
 	LogVerdicts(slog.Default(), ticket, verdicts)
 }

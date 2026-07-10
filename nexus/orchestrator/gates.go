@@ -64,15 +64,33 @@ type GateVerdict struct {
 	EvidenceURL string
 }
 
+// authGateRPCTimeout bounds every INDIVIDUAL default gh subprocess call the
+// gate runner issues (mirrors runtime/cmd/agentfunnel/builder_pullchecks.go
+// pullCheckRPCTimeout). OnJobDoneHook (wake.go) runs inside WatchJobs'
+// single-goroutine namespace-wide select loop (runtime/dispatch/k8s.go) —
+// there is no external kill switch on this path the way a worker pod has
+// activeDeadlineSeconds, so a hung/unreachable `gh` (GitHub outage,
+// rate-limit, an interactive auth prompt) would otherwise wedge job-done
+// processing for EVERY builder in the namespace. Bounding per-call (rather
+// than once around the whole RunAuthoritativeGates ctx) means one slow gate
+// eats only its own budget, not the next gate's too. A var (not a const) so
+// tests can shrink it instead of sleeping 5s+ per case.
+var authGateRPCTimeout = 5 * time.Second
+
 // PRExistsFunc/PRExistsByTicketFunc/PRDiffStatsFunc/PRDiffStatsByTicketFunc/
 // PRDiffFunc are the ctx-aware gh-backed lookups RunAuthoritativeGates uses —
 // context-aware (exec.CommandContext, matching the #468 arc's convention:
 // see runtime/cmd/agentfunnel/main.go prURLFn) so a hung/unreachable gh can
-// never stall the orchestrator's job-done path indefinitely. Swappable via
-// GateRunnerOptions (tests inject fakes the same way agentfunnel's
-// prExistsFn/prDiffStatsFn package vars do — just parameterized here instead
-// of package-global, since Orchestrator is a shared, potentially-concurrent
-// library, not agentfunnel's one-shot-per-dispatch process).
+// never stall the orchestrator's job-done path indefinitely: every DEFAULT
+// implementation below derives its own bounded sub-context from ctx via
+// authGateRPCTimeout before it shells out. Swappable via GateRunnerOptions
+// (tests inject fakes the same way agentfunnel's prExistsFn/prDiffStatsFn
+// package vars do — just parameterized here instead of package-global, since
+// Orchestrator is a shared, potentially-concurrent library, not
+// agentfunnel's one-shot-per-dispatch process) — an INJECTED fn is the
+// caller's own responsibility to bound; RunAuthoritativeGates itself imposes
+// no timeout on a caller-supplied fn (it already receives ctx and can derive
+// its own deadline), only on its own defaults.
 type (
 	PRExistsFunc            func(ctx context.Context, repo, branch string) (bool, error)
 	PRExistsByTicketFunc    func(ctx context.Context, repo, ticket string) (bool, error)
@@ -157,11 +175,18 @@ type GateRunnerOptions struct {
 //   - test-evidence:    only when opts.RequireTestEvidence, criteria
 //     mentions tests, AND a diff was fetched.
 //
-// opts.Enabled=false is the dark default: returns (nil, nil) immediately,
-// no gh/judge calls at all.
-func RunAuthoritativeGates(ctx context.Context, repo, branch, ticket, criteria string, opts GateRunnerOptions) ([]GateVerdict, error) {
+// opts.Enabled=false is the dark default: returns nil immediately, no
+// gh/judge calls at all.
+//
+// No error return: every gate below is fail-closed-to-a-verdict or
+// fail-open-to-silence internally (see the per-gate comments) — there is no
+// hard-failure mode that isn't already expressed as a GateVerdict (a "fail"
+// state) or an absent verdict. An earlier revision carried an (unused)
+// error return; dropped rather than left dead (review finding, NEX-473
+// follow-up).
+func RunAuthoritativeGates(ctx context.Context, repo, branch, ticket, criteria string, opts GateRunnerOptions) []GateVerdict {
 	if !opts.Enabled {
-		return nil, nil
+		return nil
 	}
 
 	// notBefore threads opts.NotBefore into the DEFAULT ticket-fallback
@@ -286,7 +311,7 @@ func RunAuthoritativeGates(ctx context.Context, repo, branch, ticket, criteria s
 		})
 	}
 
-	return verdicts, nil
+	return verdicts
 }
 
 func gateState(pass bool) string {
@@ -315,14 +340,19 @@ func LogVerdicts(log *slog.Logger, workItemID string, verdicts []GateVerdict) {
 //
 // These mirror runtime/cmd/agentfunnel/main.go's prExistsFn/
 // prExistsByTicketFn/prDiffStatsFn/prDiffStatsByTicketFn/prDiffFn exactly,
-// made ctx-aware via exec.CommandContext (the #468 arc's convention for any
-// gh subprocess reachable from a hook that must not block indefinitely —
-// see main.go prURLFn's doc comment). They are package-level funcs (not
-// vars) since GateRunnerOptions is how callers/tests substitute behavior
-// here, not global reassignment.
+// made ctx-aware via exec.CommandContext AND bounded by authGateRPCTimeout
+// on every individual gh call (the #468 arc's convention for any gh
+// subprocess reachable from a hook that must not block indefinitely — see
+// main.go prURLFn's doc comment; here the bound is load-bearing rather than
+// best-effort, since OnJobDoneHook has no other backstop — see
+// authGateRPCTimeout's doc). They are package-level funcs (not vars) since
+// GateRunnerOptions is how callers/tests substitute behavior here, not
+// global reassignment.
 
 func defaultPRExistsFn(ctx context.Context, repo, branch string) (bool, error) {
-	out, err := exec.CommandContext(ctx, "gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open",
+	rpcCtx, cancel := context.WithTimeout(ctx, authGateRPCTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(rpcCtx, "gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open",
 		"--json", "url", "-q", ".[0].url").CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("gh pr list: %w: %s", err, strings.TrimSpace(string(out)))
@@ -331,7 +361,9 @@ func defaultPRExistsFn(ctx context.Context, repo, branch string) (bool, error) {
 }
 
 func defaultPRExistsByTicketFn(ctx context.Context, repo, ticket string, notBefore time.Time) (bool, error) {
-	out, err := exec.CommandContext(ctx, "gh", "pr", "list", "--repo", repo, "--state", "open",
+	rpcCtx, cancel := context.WithTimeout(ctx, authGateRPCTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(rpcCtx, "gh", "pr", "list", "--repo", repo, "--state", "open",
 		"--json", "number,headRefName,title,createdAt").CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("gh pr list (ticket fallback): %w: %s", err, strings.TrimSpace(string(out)))
@@ -340,7 +372,9 @@ func defaultPRExistsByTicketFn(ctx context.Context, repo, ticket string, notBefo
 }
 
 func defaultPRDiffStatsFn(ctx context.Context, repo, branch string) (gates.PRDiffStats, bool, error) {
-	out, err := exec.CommandContext(ctx, "gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open",
+	rpcCtx, cancel := context.WithTimeout(ctx, authGateRPCTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(rpcCtx, "gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open",
 		"--json", "additions,deletions,changedFiles").CombinedOutput()
 	if err != nil {
 		return gates.PRDiffStats{}, false, fmt.Errorf("gh pr list (diff stats): %w: %s", err, strings.TrimSpace(string(out)))
@@ -349,7 +383,9 @@ func defaultPRDiffStatsFn(ctx context.Context, repo, branch string) (gates.PRDif
 }
 
 func defaultPRDiffStatsByTicketFn(ctx context.Context, repo, ticket string, notBefore time.Time) (gates.PRDiffStats, bool, error) {
-	out, err := exec.CommandContext(ctx, "gh", "pr", "list", "--repo", repo, "--state", "open",
+	rpcCtx, cancel := context.WithTimeout(ctx, authGateRPCTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(rpcCtx, "gh", "pr", "list", "--repo", repo, "--state", "open",
 		"--json", "headRefName,title,additions,deletions,changedFiles,createdAt").CombinedOutput()
 	if err != nil {
 		return gates.PRDiffStats{}, false, fmt.Errorf("gh pr list (diff stats, ticket): %w: %s", err, strings.TrimSpace(string(out)))
@@ -357,13 +393,23 @@ func defaultPRDiffStatsByTicketFn(ctx context.Context, repo, ticket string, notB
 	return gates.SelectPRDiffStatsByTicket(out, ticket, notBefore)
 }
 
+// defaultPRDiffFn issues up to THREE sequential gh subprocesses (own-branch
+// diff, then — only on miss — the ticket-fallback list + diff-by-number);
+// each gets its OWN authGateRPCTimeout-bounded sub-context (not one shared
+// budget across all three), so a slow-but-eventually-successful own-branch
+// call doesn't starve the fallback's time, and vice versa.
 func defaultPRDiffFn(ctx context.Context, repo, branch, ticket string, notBefore time.Time) (string, bool, error) {
-	out, err := exec.CommandContext(ctx, "gh", "pr", "diff", branch, "--repo", repo).CombinedOutput()
+	diffCtx, cancel := context.WithTimeout(ctx, authGateRPCTimeout)
+	out, err := exec.CommandContext(diffCtx, "gh", "pr", "diff", branch, "--repo", repo).CombinedOutput()
+	cancel()
 	if err == nil {
 		return string(out), strings.TrimSpace(string(out)) != "", nil
 	}
-	numOut, nerr := exec.CommandContext(ctx, "gh", "pr", "list", "--repo", repo, "--state", "open",
+
+	listCtx, cancel := context.WithTimeout(ctx, authGateRPCTimeout)
+	numOut, nerr := exec.CommandContext(listCtx, "gh", "pr", "list", "--repo", repo, "--state", "open",
 		"--json", "number,headRefName,title,createdAt").CombinedOutput()
+	cancel()
 	if nerr != nil {
 		return "", false, fmt.Errorf("gh pr list (diff number): %w: %s", nerr, strings.TrimSpace(string(numOut)))
 	}
@@ -374,7 +420,10 @@ func defaultPRDiffFn(ctx context.Context, repo, branch, ticket string, notBefore
 	if !found {
 		return "", false, nil
 	}
-	out2, err2 := exec.CommandContext(ctx, "gh", "pr", "diff", strconv.Itoa(num), "--repo", repo).CombinedOutput()
+
+	numDiffCtx, cancel := context.WithTimeout(ctx, authGateRPCTimeout)
+	out2, err2 := exec.CommandContext(numDiffCtx, "gh", "pr", "diff", strconv.Itoa(num), "--repo", repo).CombinedOutput()
+	cancel()
 	if err2 != nil {
 		return "", false, fmt.Errorf("gh pr diff #%d: %w: %s", num, err2, strings.TrimSpace(string(out2)))
 	}

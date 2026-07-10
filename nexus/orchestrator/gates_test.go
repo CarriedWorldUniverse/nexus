@@ -3,12 +3,26 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/gates"
 	"github.com/CarriedWorldUniverse/nexus/nexus/workgraph"
 	"github.com/CarriedWorldUniverse/nexus/runtime/dispatch"
 )
+
+// writeFakeGh drops an executable named "gh" (containing script) into dir,
+// so a test can put dir first on PATH and have exec.CommandContext("gh",
+// ...) run the fake instead of a real gh binary.
+func writeFakeGh(t *testing.T, dir, script string) {
+	t.Helper()
+	path := filepath.Join(dir, "gh")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("writeFakeGh: %v", err)
+	}
+}
 
 // seedGates returns a GateRunnerOptions wired to fake gh lookups, seeded
 // with a substantial diff on the run's own branch — the "everything real"
@@ -53,10 +67,7 @@ func verdictByName(vs []GateVerdict, name string) (GateVerdict, bool) {
 // test-evidence is silent too.
 func TestRunAuthoritativeGatesAllPass(t *testing.T) {
 	opts := seedGates("diff --git a/x.go b/x.go\n+++ b/x.go\n+func X(){}\n")
-	verdicts, err := RunAuthoritativeGates(context.Background(), "org/repo", "builder/NET-1", "NET-1", "do the thing", opts)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
+	verdicts := RunAuthoritativeGates(context.Background(), "org/repo", "builder/NET-1", "NET-1", "do the thing", opts)
 	exists, ok := verdictByName(verdicts, GatePRExists)
 	if !ok || exists.State != GateStatePass {
 		t.Fatalf("pr-exists verdict = %+v, ok=%v; want pass", exists, ok)
@@ -84,10 +95,7 @@ func TestRunAuthoritativeGatesGroundTruthNotClaim(t *testing.T) {
 	// empty — the "worker opened an empty/token PR and narrated success"
 	// failure mode ACCEPTANCE-GATE-HARDENING.md Unit 2 exists to catch.
 	opts := seedGates("")
-	verdicts, err := RunAuthoritativeGates(context.Background(), "org/repo", "builder/NET-1", "NET-1", "do the thing", opts)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
+	verdicts := RunAuthoritativeGates(context.Background(), "org/repo", "builder/NET-1", "NET-1", "do the thing", opts)
 
 	exists, ok := verdictByName(verdicts, GatePRExists)
 	if !ok || exists.State != GateStatePass {
@@ -120,10 +128,7 @@ func TestRunAuthoritativeGatesPRSubstantialSkippedWhenNoPR(t *testing.T) {
 		},
 		DiffFn: func(context.Context, string, string, string) (string, bool, error) { return "", false, nil },
 	}
-	verdicts, err := RunAuthoritativeGates(context.Background(), "org/repo", "builder/NET-1", "NET-1", "criteria", opts)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
+	verdicts := RunAuthoritativeGates(context.Background(), "org/repo", "builder/NET-1", "NET-1", "criteria", opts)
 	exists, ok := verdictByName(verdicts, GatePRExists)
 	if !ok || exists.State != GateStateFail {
 		t.Fatalf("pr-exists = %+v ok=%v; want fail", exists, ok)
@@ -138,10 +143,7 @@ func TestRunAuthoritativeGatesPRSubstantialSkippedWhenNoPR(t *testing.T) {
 func TestRunAuthoritativeGatesTestEvidence(t *testing.T) {
 	opts := seedGates("diff --git a/x.go b/x.go\n+++ b/x.go\n+func X(){}\n")
 	opts.RequireTestEvidence = true
-	verdicts, err := RunAuthoritativeGates(context.Background(), "org/repo", "builder/NET-1", "NET-1", "must have passing tests", opts)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
+	verdicts := RunAuthoritativeGates(context.Background(), "org/repo", "builder/NET-1", "NET-1", "must have passing tests", opts)
 	te, ok := verdictByName(verdicts, GateTestEvidence)
 	if !ok || te.State != GateStateFail {
 		t.Fatalf("test-evidence = %+v ok=%v; want fail (diff has no _test.go)", te, ok)
@@ -149,10 +151,7 @@ func TestRunAuthoritativeGatesTestEvidence(t *testing.T) {
 
 	opts2 := seedGates("diff --git a/x_test.go b/x_test.go\n+++ b/x_test.go\n+func TestX(){}\n")
 	opts2.RequireTestEvidence = true
-	verdicts2, err := RunAuthoritativeGates(context.Background(), "org/repo", "builder/NET-1", "NET-1", "must have passing tests", opts2)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
+	verdicts2 := RunAuthoritativeGates(context.Background(), "org/repo", "builder/NET-1", "NET-1", "must have passing tests", opts2)
 	te2, ok := verdictByName(verdicts2, GateTestEvidence)
 	if !ok || te2.State != GateStatePass {
 		t.Fatalf("test-evidence = %+v ok=%v; want pass (diff touches a _test.go file)", te2, ok)
@@ -183,21 +182,68 @@ func TestRunAuthoritativeGatesDarkWhenDisabled(t *testing.T) {
 			return "", false, nil
 		},
 	}
-	verdicts, err := RunAuthoritativeGates(context.Background(), "org/repo", "builder/NET-1", "NET-1", "criteria", opts)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
+	verdicts := RunAuthoritativeGates(context.Background(), "org/repo", "builder/NET-1", "NET-1", "criteria", opts)
 	if verdicts != nil {
 		t.Fatalf("disabled runner should return nil verdicts, got %v", verdicts)
 	}
 }
 
+// TestRunAuthoritativeGatesDefaultsAreBounded proves the review must-fix:
+// with NO opts.*Fn overrides (so RunAuthoritativeGates falls back to its own
+// default gh-backed implementations), a `gh` subprocess that never returns
+// must not hang RunAuthoritativeGates past authGateRPCTimeout. Shrinks
+// authGateRPCTimeout to keep the test fast, then execs a real subprocess
+// (`sleep 30`, aliased as PATH's "gh") that would otherwise block for far
+// longer than the bound — proving the timeout is enforced on the actual
+// exec.CommandContext call, not merely plumbed through unused.
+func TestRunAuthoritativeGatesDefaultsAreBounded(t *testing.T) {
+	origTimeout := authGateRPCTimeout
+	authGateRPCTimeout = 200 * time.Millisecond
+	defer func() { authGateRPCTimeout = origTimeout }()
+
+	fakeGhDir := t.TempDir()
+	// `exec sleep 30` (not a plain `sleep 30`) REPLACES the shell process
+	// rather than forking a child — so exec.CommandContext's kill-on-
+	// timeout hits the actual sleeping process directly, with no orphaned
+	// grandchild left holding the stdout/stderr pipes open (the classic
+	// os/exec gotcha: a killed shell whose forked child inherited the
+	// pipes leaves Cmd.Wait() blocked on that child's exit, defeating the
+	// timeout for the TEST regardless of whether the production code is
+	// correctly bounded).
+	writeFakeGh(t, fakeGhDir, "#!/bin/sh\nexec sleep 30\n")
+	t.Setenv("PATH", fakeGhDir+":"+os.Getenv("PATH"))
+
+	opts := GateRunnerOptions{Enabled: true} // no overrides -> hits defaultPRExistsFn -> the fake gh above
+
+	start := time.Now()
+	verdicts := RunAuthoritativeGates(context.Background(), "org/repo", "builder/NET-1", "NET-1", "criteria", opts)
+	elapsed := time.Since(start)
+
+	// Generous multiple of the shrunk timeout (not a tight bound) — this is
+	// asserting "returned promptly", not measuring exact latency; CI/test
+	// scheduling jitter should never flake this.
+	if elapsed > 3*time.Second {
+		t.Fatalf("RunAuthoritativeGates took %v with a %v gh timeout — the hang was NOT bounded", elapsed, authGateRPCTimeout)
+	}
+
+	// The bounded call errors (context deadline exceeded) -> pr-exists
+	// reports a fail verdict, not a hang and not a crash.
+	exists, ok := verdictByName(verdicts, GatePRExists)
+	if !ok || exists.State != GateStateFail {
+		t.Fatalf("pr-exists = %+v ok=%v; want fail (bounded gh call timed out)", exists, ok)
+	}
+}
+
 // TestOnJobDoneHookGateRunnerDark: with Orchestrator.GateRunner nil (the
-// package default), OnJobDoneHook must never call GetWorkItem's gate-running
-// path with a live gh/judge lookup — asserted by a WorkGraph fake whose
-// GetWorkItem would fatal if called from the gate path with real repo data,
-// combined with confirming the job-done intake (RecordJobResult) still ran
-// exactly as before #473.
+// package default), runAuthoritativeGates' own nil-pointer guard (wake.go:
+// `if o.GateRunner == nil { return }`) short-circuits BEFORE it ever calls
+// o.Graph.GetWorkItem — so no gh/judge lookup happens, by construction, not
+// by anything this test itself observes (the fake GetWorkItem below would
+// happily answer if called; this test does not spy on it). What this test
+// DOES assert is the thing that matters externally: job-done intake
+// (RecordJobResult -> the item transitions to Done) still runs exactly as
+// before #473, proving the dark-default gate wiring changed nothing
+// observable about that path.
 func TestOnJobDoneHookGateRunnerDark(t *testing.T) {
 	graph := newFakeGraph()
 	graph.addReady("wi-1", workgraph.WorkItem{Role: "builder", TaskSpec: "build", Repo: "org/repo"})
