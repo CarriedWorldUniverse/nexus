@@ -38,9 +38,11 @@ func (o *Orchestrator) OnJobDoneHook() func(dispatch.JobDone) {
 		// synchronous-on-job-done, so a later drain/dependent-item decision
 		// never runs ahead of ground-truth verification. Dark by default
 		// (o.GateRunner nil): zero gh/judge calls, byte-identical to
-		// pre-#473 behavior. #474 will additionally record these verdicts
-		// as durable cairn pull checks; for now they are only logged (see
-		// RunAuthoritativeGates/LogVerdicts doc in gates.go).
+		// pre-#473 behavior. #474: the verdicts are also recorded as
+		// durable cairn pull checks when o.PullRecorder is configured (see
+		// RunAuthoritativeGates/LogVerdicts/RecordVerdicts doc in gates.go
+		// and pullrecord.go) — dark by default (nil PullRecorder), same
+		// posture as o.GateRunner itself.
 		o.runAuthoritativeGates(ctx, done.Ticket)
 
 		result := workgraph.Result{
@@ -60,10 +62,14 @@ func (o *Orchestrator) OnJobDoneHook() func(dispatch.JobDone) {
 // runAuthoritativeGates is OnJobDoneHook's #473 wiring, split out so it's
 // independently testable: it looks up the work item's repo/criteria, derives
 // its builder branch (the builder/<ticket> convention — see
-// runtime/cmd/agentfunnel builderBranch), runs RunAuthoritativeGates, and
-// slogs the verdicts. A no-op (zero gh/judge calls) whenever o.GateRunner is
-// nil (dark default) or the work item carries no Repo (respond-only work,
-// no PR to gate — mirrors agentfunnel's own Repo=="" short-circuit).
+// runtime/cmd/agentfunnel builderBranch), runs RunAuthoritativeGates, slogs
+// the verdicts, and — #474 — records them as durable cairn pull checks via
+// o.PullRecorder. A no-op (zero gh/judge/PullService calls) whenever
+// o.GateRunner is nil (dark default) or the work item carries no Repo
+// (respond-only work, no PR to gate — mirrors agentfunnel's own Repo==""
+// short-circuit); RecordVerdicts is separately dark whenever o.PullRecorder
+// is nil, so a GateRunner configured without a PullRecorder still makes zero
+// PullService calls (verdicts are computed and logged only).
 func (o *Orchestrator) runAuthoritativeGates(ctx context.Context, ticket string) {
 	if o.GateRunner == nil {
 		return
@@ -81,4 +87,5 @@ func (o *Orchestrator) runAuthoritativeGates(ctx context.Context, ticket string)
 
 	verdicts := RunAuthoritativeGates(ctx, item.Repo, branch, ticket, criteria, *o.GateRunner)
 	LogVerdicts(slog.Default(), ticket, verdicts)
+	RecordVerdicts(ctx, o.PullRecorder, slog.Default(), item.Repo, branch, ticket, verdicts)
 }
