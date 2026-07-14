@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	filippo.io/edwards25519 v1.2.0
-	github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260706220245-f8401bbe2a71
+	github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260714230409-8db4798df01b
 	github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603092700-bad238fd9d58
 	github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260709011750-a445f3e9b825
 	github.com/CarriedWorldUniverse/ledger v0.1.4
@@ -49,6 +49,7 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
+	github.com/mattn/go-sqlite3 v1.14.47 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect

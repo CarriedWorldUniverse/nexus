@@ -174,10 +174,17 @@ func main() {
 		AspectID:  cfg.Name,
 	}
 
+	// The aspect runs the whole process against one long-lived harness.
+	// Optionally attach ctxmap working memory (off unless CTXMAP_ENABLED and the
+	// ctxmap_llama build tag; fail-open). Closed at process shutdown.
+	harness := bridle.NewHarness(provider)
+	ctxmapCloser := attachCtxmap(harness, resolveCtxmapConfig(absHome, cfg.Name), log)
+	defer ctxmapCloser.Close()
+
 	f, err := funnel.New(funnel.Config{
 		AspectID:   cfg.Name,
 		AspectHome: absHome,
-		Harness:    bridle.NewHarness(provider),
+		Harness:    harness,
 		Provider:   bridle.ProviderID(cfg.Provider),
 		Model:      model,
 		// ContextMode (#226.5): sourced from aspect.json. Values match
