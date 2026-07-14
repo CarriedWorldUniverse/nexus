@@ -15,7 +15,10 @@ CMD_nexus-skills-mcp := ./runtime/cmd/nexus-skills-mcp
 CMD_nexus-watch     := ./runtime/cmd/nexus-watch
 CMD_outpost         := ./nexus/cmd/outpost
 
-.PHONY: build $(BINS) test vet version clean all
+# Path to a llama.cpp checkout for the optional ctxmap-enabled aspect build.
+LLAMA_CPP ?= $(HOME)/src/llama.cpp
+
+.PHONY: build $(BINS) test vet version clean all vendor-llama aspect-ctxmap
 
 all: $(BINS)
 
@@ -40,3 +43,18 @@ version:
 
 clean:
 	rm -rf bin/
+
+# --- optional: ctxmap working-memory-enabled aspect binary ---------------------
+# The default aspect build carries no cgo. `aspect-ctxmap` builds it WITH the
+# ctxmap_llama tag, linking the llama.cpp libs the in-harness extractor needs.
+# Requires a llama.cpp checkout (LLAMA_CPP); build its shared libs first with
+# `make vendor-llama`. At runtime the feature is still gated on CTXMAP_ENABLED.
+vendor-llama:
+	cd $(LLAMA_CPP) && cmake -B build -DBUILD_SHARED_LIBS=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DCMAKE_BUILD_TYPE=Release && cmake --build build -j $$(nproc) --target llama
+
+aspect-ctxmap:
+	@mkdir -p bin
+	CGO_ENABLED=1 \
+	CGO_CFLAGS="-I$(LLAMA_CPP)/include -I$(LLAMA_CPP)/ggml/include" \
+	CGO_LDFLAGS="-L$(LLAMA_CPP)/build/bin -Wl,-rpath,$(LLAMA_CPP)/build/bin" \
+	go build -tags ctxmap_llama -ldflags '$(LDFLAGS)' -o bin/aspect-ctxmap $(CMD_aspect)
