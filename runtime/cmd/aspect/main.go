@@ -55,6 +55,7 @@ import (
 	codexcliprovider "github.com/CarriedWorldUniverse/bridle/provider/codexcli"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
 	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
+	"github.com/CarriedWorldUniverse/nexus/runtime/ctxmapwire"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
 	"github.com/google/uuid"
 )
@@ -178,8 +179,9 @@ func main() {
 	// Optionally attach ctxmap working memory (off unless CTXMAP_ENABLED and the
 	// ctxmap_llama build tag; fail-open). Closed at process shutdown.
 	harness := bridle.NewHarness(provider)
-	ctxmapCloser := attachCtxmap(harness, resolveCtxmapConfig(absHome, cfg.Name), log)
-	defer ctxmapCloser.Close()
+	ctxmapHandle := ctxmapwire.Build(ctxmapwire.Resolve(absHome, cfg.Name), log)
+	ctxmapHandle.AttachTo(harness)
+	defer ctxmapHandle.Close()
 
 	f, err := funnel.New(funnel.Config{
 		AspectID:   cfg.Name,
