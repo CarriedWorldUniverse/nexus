@@ -18,7 +18,7 @@ CMD_outpost         := ./nexus/cmd/outpost
 # Path to a llama.cpp checkout for the optional ctxmap-enabled aspect build.
 LLAMA_CPP ?= $(HOME)/src/llama.cpp
 
-.PHONY: build $(BINS) test vet version clean all vendor-llama aspect-ctxmap
+.PHONY: build $(BINS) test vet version clean all vendor-llama aspect-ctxmap agentfunnel-ctxmap
 
 all: $(BINS)
 
@@ -52,9 +52,17 @@ clean:
 vendor-llama:
 	cd $(LLAMA_CPP) && cmake -B build -DBUILD_SHARED_LIBS=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DCMAKE_BUILD_TYPE=Release && cmake --build build -j $$(nproc) --target llama
 
+CTXMAP_CGO_CFLAGS := -I$(LLAMA_CPP)/include -I$(LLAMA_CPP)/ggml/include
+CTXMAP_CGO_LDFLAGS := -L$(LLAMA_CPP)/build/bin -Wl,-rpath,$(LLAMA_CPP)/build/bin
+
 aspect-ctxmap:
 	@mkdir -p bin
-	CGO_ENABLED=1 \
-	CGO_CFLAGS="-I$(LLAMA_CPP)/include -I$(LLAMA_CPP)/ggml/include" \
-	CGO_LDFLAGS="-L$(LLAMA_CPP)/build/bin -Wl,-rpath,$(LLAMA_CPP)/build/bin" \
+	CGO_ENABLED=1 CGO_CFLAGS="$(CTXMAP_CGO_CFLAGS)" CGO_LDFLAGS="$(CTXMAP_CGO_LDFLAGS)" \
 	go build -tags ctxmap_llama -ldflags '$(LDFLAGS)' -o bin/aspect-ctxmap $(CMD_aspect)
+
+# agentfunnel WITH ctxmap working memory (the production interactive runtime).
+# Same requirements as aspect-ctxmap. Memory still gates on CTXMAP_ENABLED.
+agentfunnel-ctxmap:
+	@mkdir -p bin
+	CGO_ENABLED=1 CGO_CFLAGS="$(CTXMAP_CGO_CFLAGS)" CGO_LDFLAGS="$(CTXMAP_CGO_LDFLAGS)" \
+	go build -tags ctxmap_llama -ldflags '$(LDFLAGS)' -o bin/agentfunnel-ctxmap $(CMD_agentfunnel)

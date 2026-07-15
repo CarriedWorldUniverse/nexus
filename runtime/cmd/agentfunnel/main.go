@@ -70,6 +70,7 @@ import (
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/rewriter"
 	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
 	"github.com/CarriedWorldUniverse/nexus/runtime/brokercreds"
+	"github.com/CarriedWorldUniverse/nexus/runtime/ctxmapwire"
 	"github.com/CarriedWorldUniverse/nexus/runtime/keyfile"
 	"github.com/CarriedWorldUniverse/nexus/runtime/obsforward"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
@@ -454,6 +455,17 @@ func main() {
 	if os.Getenv("CW_PROMPT_MODE") == "replace" {
 		promptMode = bridle.SystemPromptReplace
 	}
+
+	// ctxmap working memory: build the shared engine ONCE for the always-on
+	// interactive path (never in builder/drain one-shot modes — dialogue memory
+	// is for multi-turn conversation). newBindingHarness attaches it to each
+	// harness; the engine and its turn counter survive binding refreshes. Off
+	// unless CTXMAP_ENABLED + the ctxmap_llama build tag; fail-open.
+	if !*builderMode && !*drainMode {
+		ctxmapHandle = ctxmapwire.Build(ctxmapwire.Resolve(cwd, res.AspectName), log)
+		defer ctxmapHandle.Close()
+	}
+
 	bindingCache := &atomic.Pointer[funnel.Binding]{}
 	bindingCache.Store(&funnel.Binding{
 		Provider:   bridle.ProviderID(res.Provider),
@@ -2325,6 +2337,12 @@ func stageAntigravityCreds(log *slog.Logger) {
 // store (before the client is constructed) passes nil, which makes any
 // escalate verdict fail-safe to deny until the escalator-equipped
 // harness is re-stored.
+// ctxmapHandle is the process-lifetime working-memory engine, built once in the
+// always-on path (Nop in builder/drain modes and in the default non-llama
+// build). newBindingHarness attaches it to every harness it constructs so the
+// memory survives binding refreshes.
+var ctxmapHandle = ctxmapwire.Nop()
+
 func newBindingHarness(provider bridle.Provider, providerName string, esc *funnel.Escalator, policy funnel.ToolPolicy) *bridle.Harness {
 	h := bridle.NewHarness(provider)
 	switch providerName {
@@ -2333,6 +2351,7 @@ func newBindingHarness(provider bridle.Provider, providerName string, esc *funne
 	default:
 		h.RegisterBeforeToolCall(funnel.PermissionHook(policy, esc))
 	}
+	ctxmapHandle.AttachTo(h)
 	return h
 }
 
