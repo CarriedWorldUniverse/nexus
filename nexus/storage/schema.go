@@ -88,6 +88,20 @@ func ResolveOpenConfig(dir string) OpenConfig {
 	}
 }
 
+// sqldHranaStreamIdleCap is the ceiling for database/sql idle connection
+// lifetime when the broker talks to a remote sqld over hrana. sqld expires
+// the underlying hrana stream after its default of 10s, but database/sql's
+// default idle cap (2 minutes) lets a connection sit in the pool far longer
+// than that. On next use the driver has to tear down the dead stream and
+// rebuild it — sqld logs Stream handle for <id> is expired on that
+// transition, and the operator's fix is to keep idle connections shorter
+// than the stream TTL so the pool hands back a live stream.
+//
+// 5s leaves a comfortable margin under the 10s sqld default and is short
+// enough that even a future operator-tune of the stream TTL upward still
+// keeps us under it. See NEX-768.
+const sqldHranaStreamIdleCap = 5 * time.Second
+
 // Open resolves the data directory (NEXUS_DATA_DIR env or dir arg, falling
 // back to DefaultDataDir), creates it if missing, opens nexus.db inside
 // it (SQLite creates the file if absent), and runs Bootstrap.
@@ -107,6 +121,22 @@ func Open(ctx context.Context, dir string, log *slog.Logger) (*sql.DB, error) {
 	db, err := sql.Open(cfg.DriverName, cfg.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("storage: sql.Open %q: %w", cfg.openTarget(), err)
+	}
+
+	// sqld idle-stream guard (NEX-768): when the broker drives a remote
+	// sqld over hrana, database/sql's default idle-connection lifetime
+	// (120s) easily outlives sqld's stream TTL (~10s). An idle connection
+	// sitting in the pool past stream expiry returns a dead hrana stream
+	// handle on its next use — sqld logs "Stream handle for <id> is
+	// expired" and the driver has to tear down and rebuild the stream,
+	// even though the next query would have succeeded on a fresh handle.
+	// Bounding the idle lifetime to less than the stream TTL means the
+	// pool hands back a live connection on every use, at the cost of a
+	// small reconnect on each query. That's the right trade-off for a
+	// stateless broker whose drain pass cadence is 30s and whose idle
+	// window between passes is well under 5s.
+	if cfg.DriverName == "libsql" {
+		db.SetConnMaxIdleTime(sqldHranaStreamIdleCap)
 	}
 
 	pingCtx, pingCancel := context.WithTimeout(ctx, 10*time.Second)
