@@ -433,8 +433,9 @@ func TestOpen_LibSQLDriverAppliesPoolIdleCap(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, DBFileName)
 	// libsql-client-go requires a URL scheme; file:// opens a local
-	// SQLite file the same way http:// opens a remote sqld.
-	dsn := "file://" + dbPath
+	// SQLite file the same way http:// opens a remote sqld. file:/// (three slashes) is required for absolute paths.
+	slashPath := filepath.ToSlash(dbPath)
+	dsn := "file:///" + slashPath
 
 	t.Setenv(EnvDBDSN, dsn)
 
