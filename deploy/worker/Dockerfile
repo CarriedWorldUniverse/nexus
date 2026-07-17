@@ -46,6 +46,14 @@ RUN KUBECTL_VERSION=v1.35.5 \
 # nano - lightweight editor for hand-editing config inside the pod (e.g. croft).
 RUN apt-get update && apt-get install -y --no-install-recommends nano && rm -rf /var/lib/apt/lists/*
 
+# Chrome — the browser head (NEX tier-1 head for croft; usable by any worker).
+# Playwright MCP expects the stable channel at /opt/google/chrome/chrome; the
+# deb pulls the full headless-capable dependency set. No GPU needed (swiftshader).
+RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+ && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+ && apt-get update && apt-get install -y --no-install-recommends google-chrome-stable fonts-liberation \
+ && rm -rf /var/lib/apt/lists/* && google-chrome --version
+
 # Prebuilt nexus binaries + cw + cairn (staged into the context by build.sh /
 # CI, copied into the image). agentfunnel runs the builder; the nexus-*-mcp
 # servers + cw are the aspect's tool surface; cairn is the CW_VCS=cairn builder
