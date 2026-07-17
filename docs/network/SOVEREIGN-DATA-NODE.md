@@ -38,8 +38,8 @@ Intersects the rebuild: ledger here is ALSO the work-graph store (MIGRATION M1/M
 ## STAND-UP PROVEN 2026-07-04 (non-destructive, alongside cwb-core)
 
 All three services deployed on robo-dog and validated — every technical unknown resolved:
-- **ledger-rd** (svc ledger-rd:8081) — gRPC serving, fresh ledger.db on /data/sovereign/ledger.
-- **herald-rd** (svc herald-rd:8098/8099) — serving; surfaced the REQUIRED identity migration (fresh herald = ephemeral signing key + "genesis skipped, no admin org" → no identities). herald.db + signing key MUST migrate from cwb-core (or re-seed genesis + re-mint), else auth chain is empty.
+- **ledger-rd** (transitional svc ledger-rd:8081 — removed 2026-07-16, see note below) — gRPC serving, fresh ledger.db on /data/sovereign/ledger.
+- **herald-rd** (transitional svc herald-rd:8098/8099 — removed 2026-07-16, see note below) — serving; surfaced the REQUIRED identity migration (fresh herald = ephemeral signing key + "genesis skipped, no admin org" → no identities). herald.db + signing key MUST migrate from cwb-core (or re-seed genesis + re-mint), else auth chain is empty.
 - **cairn-rd** (ssh:2222 grpc:8102 http:8100) — pointed at the REAL herald.cwb.svc + ledger.cwb.svc, connected over mTLS (cert SANs matched cross-node), serving. Fresh cairn.db + repos on /data. Reuses cairn-secrets/ssh_host_key for stable host identity.
 
 Proven: arm64 :main images boot on GB10; /data hostPath works; mesh TLS certs verify; normal pod networking + cross-node ClusterIP + cluster DNS all work on robo-dog (the ollama hostNetwork was egress-only). The cert-SAN problem DISSOLVED — services use standard .cwb.svc names, existing certs match.
@@ -53,6 +53,9 @@ Proven: arm64 :main images boot on GB10; /data hostPath works; mesh TLS certs ve
 6. **GitHub mirror CronJob** (per-repo mirror push).
 
 Nexus-rebuild tie-in: this ledger IS the work-graph store (MIGRATION M1/M2) — point nexus's ledger consumption here.
+
+## Transitional -rd Services REMOVED 2026-07-16
+Cutover step 3 is in effect: the canonical Services `herald`/`ledger`/`cairn` (.cwb.svc) select the `app=*-rd` pods, and `cairn-ssh` LB targets cairn-rd on robo-dog (100.92.111.3). The duplicate transitional Services `herald-rd` and `ledger-rd` were deleted after a reference sweep (in-cluster workloads/configmaps, almanac config, croft + dMon manifests: zero address references). Canonical rule: internal names are the generation-free `.cwb.svc` names; rebuilds swap Service selectors, never DNS names.
 
 ## herald identity root MIGRATED 2026-07-04 (operator: "migrate")
 Copied cwb-core's live herald.db (1.3MB) → robo-dog /data/sovereign/herald (quiesced herald-rd to 0 during copy; single db file, no WAL sidecar). Injected persistent identity config into herald-rd: HERALD_SIGNING_KEY + HERALD_GENESIS_OWNER_PASSWORD (both from herald-secrets), HERALD_ISSUER (dmonextreme gateway, unchanged for token continuity), HERALD_GATEWAY_URL, HERALD_OIDC_CLIENTS. Verified: clean boot (no ephemeral-key warning, no genesis-skip), and DB content — 3 orgs (cwb-admin/carriedworld/docs), 5 users, 10 scope_grants, 2952 refresh_tokens. herald-rd is now the real identity authority. NOTE: HERALD_ISSUER still points at the dMon gateway — revisit if the gateway also moves; for now keeps token `iss` continuity through cutover.
