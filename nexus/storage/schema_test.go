@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestResolveOpenConfigDefaultsToSQLiteFile(t *testing.T) {
@@ -400,5 +401,72 @@ func TestBackfillChatThreadRoots_Idempotent(t *testing.T) {
 		if err := backfillChatThreadRoots(ctx, db); err != nil {
 			t.Fatalf("backfill iter %d: %v", i, err)
 		}
+	}
+}
+
+// TestLibSQLPoolIdleCap_Structure verifies the configured idle cap is
+// bounded to stay below sqld's default hrana stream TTL (10s). This is
+// the structural invariant that keeps the fix from re-introducing the
+// expired-stream log flood if anyone later raises the cap.
+func TestLibSQLPoolIdleCap_Structure(t *testing.T) {
+	const sqldDefaultStreamTTL = 10 * time.Second
+	if sqldHranaStreamIdleCap <= 0 {
+		t.Fatalf("sqldHranaStreamIdleCap = %v, want > 0", sqldHranaStreamIdleCap)
+	}
+	if sqldHranaStreamIdleCap >= sqldDefaultStreamTTL {
+		t.Fatalf("sqldHranaStreamIdleCap = %v, want < sqld default stream TTL (%v)",
+			sqldHranaStreamIdleCap, sqldDefaultStreamTTL)
+	}
+}
+
+// TestOpen_LibSQLDriverAppliesPoolIdleCap verifies that Open applies the
+// sqldHranaStreamIdleCap to the database/sql pool when the driver is
+// "libsql". We exercise the production code path with libsql-client-go's
+// local file mode (no live sqld required) and observe the cap's effect:
+// an idle connection released past the 5s cap is closed by the pool,
+// which database/sql surfaces via Stats.MaxIdleTimeClosed.
+//
+// If SetConnMaxIdleTime were not called (e.g. the libsql branch were
+// skipped), the released connection would remain in the pool past 6s
+// and MaxIdleTimeClosed would stay 0 — this test would fail.
+func TestOpen_LibSQLDriverAppliesPoolIdleCap(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, DBFileName)
+	// libsql-client-go requires a URL scheme; file:// opens a local
+	// SQLite file the same way http:// opens a remote sqld.
+	dsn := "file://" + dbPath
+
+	t.Setenv(EnvDBDSN, dsn)
+
+	ctx := context.Background()
+	db, err := Open(ctx, dir, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	// Bound the idle pool to one slot so we have a single connection
+	// to watch — the cap only closes the oldest idle connection when
+	// the pool is at its idle limit.
+	db.SetMaxIdleConns(1)
+
+	// Acquire a connection from the pool, then release it. After this
+	// the pool holds exactly one idle connection.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire conn: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("release conn: %v", err)
+	}
+
+	// Wait past the idle cap (5s) plus a second of margin so the
+	// pool's idle-connection sweep has a chance to close it.
+	time.Sleep(sqldHranaStreamIdleCap + time.Second)
+
+	stats := db.Stats()
+	if stats.MaxIdleTimeClosed == 0 {
+		t.Errorf("MaxIdleTimeClosed = 0, want >= 1 — the idle cap (%v) was not applied to the pool",
+			sqldHranaStreamIdleCap)
 	}
 }
