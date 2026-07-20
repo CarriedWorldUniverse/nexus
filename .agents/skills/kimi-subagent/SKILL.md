@@ -14,6 +14,30 @@ memory `feedback-kimi-design-subagent`, `project-river-barrier`.
 
 ## BUILD mode — Claude specs, kimi implements (default)
 
+**Harness path (preferred): headless Claude Code running ON kimi.** LiteLLM exposes the
+Anthropic `/v1/messages` route, so the Claude Code harness itself can run with kimi-k3 as
+the model — kimi gets Read/Edit/Write (and the agent loop) and edits the worktree itself:
+
+```bash
+cd <worktree> && env ANTHROPIC_BASE_URL=http://litellm.model-stack.svc.cluster.local:4000 \
+  ANTHROPIC_API_KEY=litellm-local \
+  claude -p "<orchestrator-style spec: goal, files, conventions, acceptance criteria>" \
+  --model kimi-k3 --max-turns 16 --permission-mode acceptEdits \
+  --strict-mcp-config --mcp-config '{"mcpServers":{}}'
+```
+
+- `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` is **required** — the Meshy MCP
+  tool schemas use `$ref`, which Moonshot's validator rejects (400 on every request).
+- `--permission-mode bypassPermissions` is classifier-blocked from a nested session; stay
+  on `acceptEdits`. Kimi therefore edits but does not run commands — Claude runs the gate.
+- Kimi reasons heavily per turn: run real units with `run_in_background` and a generous
+  timeout. Spec discipline is the same as the API path below (kimi still can't ask back).
+- After the run: Claude gates and adversarially reviews the diff exactly as steps 4-5 below.
+- Honesty note: kimi-k3 routes gateway → OpenRouter → Moonshot — owned *gateway*, remote
+  *model*. Smoke-proven 2026-07-20 (file task, DONE, verified on disk).
+
+**API path (fallback — harness unavailable, or a one-shot authoring call is enough):**
+
 1. **Spec** the unit like an orchestrator builder ticket: goal, constraints and conventions
    (for Carried World GDScript always include: tabs; never `:=` on a Variant right-hand
    side; match surrounding idiom), acceptance criteria, and the **full current text of every
