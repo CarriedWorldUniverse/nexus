@@ -6,11 +6,12 @@ when_to_use: 'Delegate work to kimi-k3: Claude specs and kimi implements (BUILD,
 
 # Kimi subagent (kimi-k3 via LiteLLM)
 
-Kimi has **no tools and no filesystem — Claude is its hands.** Everything kimi needs goes in
-the prompt; everything kimi produces, Claude applies, gates, and verifies. Exploration,
-architecture, and final judgment stay with Claude (same split rule as the orchestrator skill).
-Why kimi: operator decree + sovereignty — the work runs on the owned gateway. History:
-memory `feedback-kimi-design-subagent`, `project-river-barrier`.
+Two postures. **Harness posture** (BUILD preferred path): headless Claude Code runs ON kimi,
+so kimi has the full tool harness and edits the worktree itself. **API posture** (DESIGN, and
+the BUILD fallback): kimi is a bare endpoint — no tools, no filesystem, Claude is its hands.
+In both, architecture, the gate, and final judgment stay with Claude (same split rule as the
+orchestrator skill). Why kimi: operator decree. History: memory
+`feedback-kimi-design-subagent`, `project-river-barrier`.
 
 ## BUILD mode — Claude specs, kimi implements (default)
 
