@@ -730,6 +730,28 @@ func TestSubmitSpawnDefaultsProviderWhenNoInheritance(t *testing.T) {
 	}
 }
 
+// NEX-818 regression: a hand that FAILS must still reach its parent. Three
+// hands died in 40-75s on 2026-07-23 and the parent learned nothing, because
+// the summary carried no mention and runner posts use replyTo=0 — the
+// recipient policy computed an empty set and delivered the news to nobody.
+func TestHandFailureIsAddressedToParent(t *testing.T) {
+	fk := &fakeK8s{}
+	r, poster, _, rec := newSpawnFixture(fk)
+
+	if _, err := r.SubmitSpawn(context.Background(), "plumb", "work", 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	r.OnJobDone(dispatch.JobDone{Ticket: rec.starts[0].ticket, OK: false})
+
+	got := poster.posts[len(poster.posts)-1]
+	if !strings.HasPrefix(got, "@plumb ") {
+		t.Fatalf("a hand's DEATH must be addressed to its parent; got %q", got)
+	}
+	if !strings.Contains(got, "failed") {
+		t.Errorf("failure summary must say so; got %q", got)
+	}
+}
+
 // OnJobDone's completion post for a hand carries the lineage, not the
 // builder branch/PR block.
 func TestHandCompletionSummaryCarriesLineage(t *testing.T) {
@@ -742,8 +764,16 @@ func TestHandCompletionSummaryCarriesLineage(t *testing.T) {
 	r.OnJobDone(dispatch.JobDone{Ticket: rec.starts[0].ticket, OK: true})
 
 	got := poster.posts[len(poster.posts)-1]
-	if !strings.Contains(got, "hand done: plumb.bob (hand of plumb)") {
+	if !strings.Contains(got, "hand done: plumb.bob") {
 		t.Errorf("summary = %q", got)
+	}
+	// NEX-818: the summary MUST address the parent. The broker's
+	// RecipientPolicy delivers a post only via @all, thread participants
+	// (looked up by replyTo, which runner posts leave 0), or an explicit
+	// @mention — so without this the recipient set is empty and the parent
+	// never learns the hand finished OR died.
+	if !strings.HasPrefix(got, "@plumb ") {
+		t.Errorf("hand summary must be addressed to its parent so it is delivered; got %q", got)
 	}
 	if strings.Contains(got, "PR:") || strings.Contains(got, "branch:") {
 		t.Errorf("hand summary must not carry the builder PR block: %q", got)
