@@ -32,6 +32,17 @@ func (o *Orchestrator) OnJobDoneHook() func(dispatch.JobDone) {
 		if done.Ticket == "" {
 			return
 		}
+		// NEX-818: a SPAWNED HAND is not a work item. dispatch mints its
+		// ticket synthetically ("hand-<run-id>", spawn.go handTicket) and
+		// never files it in the ledger, so recording a result against it
+		// fails with `ledger: issue not found` — which is exactly what
+		// buried three hand outcomes on 2026-07-23. Hands report to their
+		// parent through the completion summary (runner.completionSummary,
+		// which addresses the parent so the recipient policy delivers it);
+		// the graph has nothing to say about them.
+		if strings.HasPrefix(done.Ticket, dispatch.HandTicketPrefix) {
+			return
+		}
 		ctx := context.Background()
 
 		// NEX-473: re-run the authoritative gates BEFORE trusting done.OK —
