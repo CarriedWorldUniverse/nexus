@@ -34,6 +34,26 @@ Edit here, review as a normal change, then apply:
     NEXUS_ADMIN_TOKEN_FILE=~/.nexus/admin-token \
       ./promptsync.sh apply-central central/composed-aspect.draft.md --yes
 
+**On that token.** `/api/admin/*` requires an **operator JWT**, and there is
+no standing admin token — by design (see the `nexus-auth` skill). The JWT
+exists only after a dashboard passkey ceremony, so `apply-*` needs the
+operator present and cannot run unattended. That is the right default for a
+write that changes how every identity in the network sees itself.
+
+It does mean the API path is unavailable exactly when the dashboard is what's
+broken, so there is an escape hatch:
+
+    ./promptsync.sh break-glass-central central/composed-aspect.draft.md --yes
+
+which writes the DB row directly. What it bypasses, precisely: the API handler
+bumps the version and then fires `Config.OnNexusMDChange` — a callback wired
+**nowhere in production** (only in `admin_nexus_md_test.go`). Central content
+reaches an identity through the validate handshake at boot
+(`runtime/keyfile`), not through a push, so there is no cache to invalidate
+and no broadcast to miss. Today the two paths are equivalent in observable
+effect. If `OnNexusMDChange` is ever wired, the break-glass verb must fire it
+too — and the comment on it says so.
+
 **If you edit a prompt live, capture it back the same day.** A live edit that
 never lands here restores the old problem, silently.
 
