@@ -96,11 +96,11 @@ func ResolveByName(ctx context.Context, cfg ResolveConfigByName, name string) (*
 	var centralVersion int64
 	if cfg.Settings != nil {
 		if ns, sErr := cfg.Settings.Get(ctx); sErr == nil {
-			// NEX-826: headless runs get the worker variant when one is
-			// configured. Keyed on the FULL name, not BaseName — the
-			// derivation is precisely what distinguishes a hand from the
-			// aspect it belongs to, so basing it here would resolve every
-			// hand as its parent and defeat the split.
+			// NEX-826: dispatched runs get the worker variant when one
+			// is configured. Keyed on the FULL name, not BaseName — the
+			// derivation is precisely what distinguishes a dispatched
+			// run from the aspect it belongs to, so basing it here would
+			// resolve every run as its parent and defeat the split.
 			centralContent = ns.CentralFor(name)
 			centralVersion = ns.Version
 		}

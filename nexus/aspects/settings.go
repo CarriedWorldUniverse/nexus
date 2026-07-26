@@ -24,9 +24,10 @@ import (
 // NexusSettings is the loaded single-row nexus_settings state.
 type NexusSettings struct {
 	NexusMD string
-	// NexusMDWorker is the central policy for HEADLESS runs — derived
-	// hands and pool workers. Empty means "not configured", and every
-	// identity falls back to NexusMD (see CentralFor).
+	// NexusMDWorker is the central policy for DISPATCHED runs — the
+	// workers the dispatch system launches. Empty means "not
+	// configured", and every identity falls back to NexusMD (see
+	// CentralFor).
 	NexusMDWorker string
 	Version       int64
 	UpdatedAt     string // ISO 8601
@@ -38,14 +39,14 @@ type NexusSettings struct {
 // The split exists because the two audiences need contradictory
 // instructions, not merely different emphasis. The clearest case: an
 // aspect persists, so "surface to the operator rather than guess" is
-// good advice — the answer reaches it and it carries on. A headless run
+// good advice — the answer reaches it and it carries on. A dispatched run
 // has no operator watching and no channel to one, so the same sentence
 // tells it to stop and produce nothing, which is indistinguishable from
 // the run having died. That shape cost six days of apparently-broken
 // pool in July 2026.
 //
 // IsDerivedName is the discriminator rather than anything invented here:
-// it already recognises BOTH headless shapes — dotted hands
+// it already recognises BOTH dispatched shapes — derived run identities
 // (`shadow.umbra`) and pool workers (`<personality>-<role>`) — and it is
 // the same predicate the rest of the package uses to decide what a name
 // means.

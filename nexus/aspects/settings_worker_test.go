@@ -29,9 +29,9 @@ func TestCentralFor(t *testing.T) {
 			why: "a long-lived aspect must never receive worker policy",
 		},
 		{
-			name: "dotted hand gets worker", identity: "shadow.umbra",
+			name: "derived run gets worker", identity: "shadow.umbra",
 			aspect: interactive, worker: headless, want: headless,
-			why: "a derived hand is headless",
+			why: "a derived name is a dispatched run",
 		},
 		{
 			name: "pool worker gets worker", identity: "anvil-builder",
@@ -39,7 +39,7 @@ func TestCentralFor(t *testing.T) {
 			why: "<personality>-<role> is the other headless shape",
 		},
 		{
-			name: "hand falls back when variant unset", identity: "shadow.umbra",
+			name: "run falls back when variant unset", identity: "shadow.umbra",
 			aspect: interactive, worker: "", want: interactive,
 			why: "empty variant must reproduce the single-prompt behaviour",
 		},
@@ -48,7 +48,7 @@ func TestCentralFor(t *testing.T) {
 			aspect: interactive, worker: "", want: interactive,
 		},
 		{
-			name: "hand with only worker set", identity: "shadow.umbra",
+			name: "run with only worker set", identity: "shadow.umbra",
 			aspect: "", worker: headless, want: headless,
 		},
 		{
@@ -119,7 +119,7 @@ func TestSetNexusMDWorker_RoundTrip(t *testing.T) {
 }
 
 // Clearing the variant is the rollback, so it must be a supported write
-// and must restore the single-prompt shape for hands.
+// and must restore the single-prompt shape for dispatched runs.
 func TestSetNexusMDWorker_ClearRestoresFallback(t *testing.T) {
 	ss, _ := freshSettingsRig(t)
 	ctx := context.Background()
@@ -139,7 +139,7 @@ func TestSetNexusMDWorker_ClearRestoresFallback(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	if got := ns.CentralFor("shadow.umbra"); got != "## interactive" {
-		t.Errorf("after clearing the variant a hand got %q, want the interactive text", got)
+		t.Errorf("after clearing the variant a run got %q, want the interactive text", got)
 	}
 }
 

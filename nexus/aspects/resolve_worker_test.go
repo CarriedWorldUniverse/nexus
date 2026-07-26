@@ -6,7 +6,7 @@ import (
 )
 
 // resolveWorkerRig stands up a base aspect plus a settings row carrying
-// both central variants. ResolveByName is the path a JWT-booted hand
+// both central variants. ResolveByName is the path a JWT-booted worker
 // takes (broker/validate_endpoint.go calls it for exactly this case), so
 // this is where the NEX-826 split has to hold or the feature does
 // nothing for the identities it was built for.
@@ -39,11 +39,11 @@ func resolveWorkerRig(t *testing.T, interactive, worker string) (*SQLStore, *SQL
 	return store, settings
 }
 
-// A hand must receive worker policy while still inheriting its parent's
+// A dispatched run must receive worker policy while still inheriting its parent's
 // persona. Those two facts pull in opposite directions — persona keys on
 // BaseName, policy keys on the full name — so they are asserted together
 // to keep a future "simplification" from collapsing both onto one key.
-func TestResolveByName_HandGetsWorkerCentral(t *testing.T) {
+func TestResolveByName_DispatchedRunGetsWorkerCentral(t *testing.T) {
 	store, settings := resolveWorkerRig(t, "## interactive", "## headless")
 
 	got, err := ResolveByName(context.Background(),
@@ -52,10 +52,10 @@ func TestResolveByName_HandGetsWorkerCentral(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.CentralNexusMD != "## headless" {
-		t.Errorf("hand got central %q, want the worker variant", got.CentralNexusMD)
+		t.Errorf("dispatched run got central %q, want the worker variant", got.CentralNexusMD)
 	}
 	if got.Personality == nil || got.Personality.SoulMD != "shadow soul" {
-		t.Errorf("hand must still inherit the parent persona, got %+v", got.Personality)
+		t.Errorf("dispatched run must still inherit the parent persona, got %+v", got.Personality)
 	}
 }
 
@@ -104,7 +104,7 @@ func TestResolveByName_PoolWorkerGetsWorkerCentral(t *testing.T) {
 	}
 }
 
-// The migration-safety case: with no worker variant configured, a hand
+// The migration-safety case: with no worker variant configured, a run
 // resolves exactly as it did before NEX-826. Deploying the schema change
 // must not alter a single identity's prompt until content is written.
 func TestResolveByName_NoWorkerVariant_UnchangedBehaviour(t *testing.T) {

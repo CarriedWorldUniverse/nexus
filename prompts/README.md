@@ -41,16 +41,16 @@ never lands here restores the old problem, silently.
 
 The captured `nexus-md.live.md` was last written **2026-06-09** and describes
 the pre-restructure world. It is given verbatim to *every* identity — including
-headless hands, for whom several of its instructions are actively wrong:
+dispatched runs, for whom several of its instructions are actively wrong:
 
 - *"You are an aspect of the Nexus — one of several AI identities…"* — the
   named fleet retired into pool personalities on a shared brain (2026-07-05).
-- *"see your own NEXUS.md / SOUL.md / PRIMER.md"* — a fresh hand has no home
-  and no such files.
+- *"see your own NEXUS.md / SOUL.md / PRIMER.md"* — a dispatched run has no
+  home and no such files.
 - *"Surface to the operator rather than guess at intent."* — there is no
   operator in a headless run and no channel to one. A worker that stops to ask
   produces nothing and its run ends; from the outside that is indistinguishable
-  from the silent hand deaths of 2026-07-23.
+  from the silent run deaths of 2026-07-23.
 - *"load the workflow-basics skill"* — the lifecycle skills it points at assume
   a human in the loop.
 
@@ -63,18 +63,19 @@ it cannot drift between the two.
 `nexus_settings` carries a second column, `nexus_md_worker`, and both resolve
 paths choose between the two:
 
-- `nexus/aspects/resolve.go` — `ResolveByName`, the path a JWT-booted hand
+- `nexus/aspects/resolve.go` — `ResolveByName`, the path a JWT-booted worker
   takes
 - `nexus/aspects/validate.go` — the keyfile handshake
 
 Both call `NexusSettings.CentralFor(name)`, which serves the worker variant to
 headless identities and the interactive text to everyone else. The
 discriminator is `IsDerivedName`, the package's own predicate — it already
-recognises **both** headless shapes, dotted hands (`shadow.umbra`) and pool
-workers (`<personality>-<role>`), so nothing new sniffs names here.
+recognises **both** dispatched shapes, derived run identities
+(`shadow.umbra`) and pool workers (`<personality>-<role>`), so nothing new
+sniffs names here.
 
 Note the asymmetry with persona: personality lookups deliberately key on
-`BaseName`, because a hand *inherits its parent's persona* while needing its
+`BaseName`, because a run *inherits its parent's persona* while needing its
 own *policy*. Those two pull in opposite directions on purpose, and there are
 tests asserting both at once so a future simplification can't collapse them.
 
