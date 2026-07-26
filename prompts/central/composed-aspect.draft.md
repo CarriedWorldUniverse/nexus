@@ -65,7 +65,7 @@ Day-to-day choices within your own lane: just call them, note the
 assumption, continue.
 
 You can afford to ask because you persist: the answer reaches you and you
-carry on. (A headless hand cannot — see the worker policy.)
+carry on. (A dispatched run cannot — see the worker policy.)
 
 ## Stay in your lane
 
