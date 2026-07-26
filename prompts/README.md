@@ -58,25 +58,37 @@ So the same string cannot serve both audiences. The drafts split it into
 `common` + one of `aspect` / `worker`, keeping the shared half in one file so
 it cannot drift between the two.
 
-## What applying the split still needs (not built)
+## How the split is delivered (NEX-826, built)
 
-The schema has **one** central column, so today every identity gets the same
-string. Delivering the split needs a variant choice at resolve time:
+`nexus_settings` carries a second column, `nexus_md_worker`, and both resolve
+paths choose between the two:
 
-- `nexus/aspects/resolve.go` — `ResolveByName` reads `ns.NexusMD` and returns
-  it as `CentralNexusMD`
-- `nexus/aspects/validate.go` — same read on the validate path (this is the
-  one a booting hand goes through)
+- `nexus/aspects/resolve.go` — `ResolveByName`, the path a JWT-booted hand
+  takes
+- `nexus/aspects/validate.go` — the keyfile handshake
 
-Both would pick `aspect` vs `worker` from the identity's kind. A derived hand
-is already distinguishable — it carries a parent and a dotted name
-(`shadow.umbra`), and pool workers are `{personality}-{role}` — but the clean
-fix is an explicit column rather than name-sniffing, plus a second settings
-column (or a `scope` key) so both variants are storable.
+Both call `NexusSettings.CentralFor(name)`, which serves the worker variant to
+headless identities and the interactive text to everyone else. The
+discriminator is `IsDerivedName`, the package's own predicate — it already
+recognises **both** headless shapes, dotted hands (`shadow.umbra`) and pool
+workers (`<personality>-<role>`), so nothing new sniffs names here.
 
-Until that lands, `composed-aspect.draft.md` is applicable as-is (it is a
-strict improvement on the live text for interactive aspects), and
-`composed-worker.draft.md` is a draft awaiting somewhere to put it.
+Note the asymmetry with persona: personality lookups deliberately key on
+`BaseName`, because a hand *inherits its parent's persona* while needing its
+own *policy*. Those two pull in opposite directions on purpose, and there are
+tests asserting both at once so a future simplification can't collapse them.
+
+**The fallback is one-directional.** An empty `nexus_md_worker` means every
+identity gets `nexus_md`, exactly as before — so deploying the migration
+changes nothing until content is written. There is no fallback the other way:
+an aspect never receives worker policy.
+
+Write it with:
+
+    PUT /api/admin/nexus-md-worker   {"nexus_md_worker": "..."}
+
+Posting `""` clears the variant, which is the rollback: every identity returns
+to the single-prompt shape.
 
 ## Caveats — what has and has not been exercised
 

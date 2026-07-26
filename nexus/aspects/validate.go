@@ -327,7 +327,14 @@ func Validate(ctx context.Context, cfg ValidateConfig, encryptedPayloadB64 strin
 			centralVersion = 0
 			_ = sErr // intentional: graceful degrade on transient read
 		} else {
-			centralContent = ns.NexusMD
+			// NEX-826: headless runs get the worker variant when one is
+			// configured. This is the path a booting hand actually takes
+			// (dispatch -> agentfunnel -> validate), so it is the one that
+			// decides what a pool worker is told it is. Keyed on the FULL
+			// name — note the personality lookup above deliberately uses
+			// BaseName, because a hand inherits its parent's persona while
+			// needing its own POLICY.
+			centralContent = ns.CentralFor(p.AspectName)
 			centralVersion = ns.Version
 		}
 	}

@@ -212,6 +212,9 @@ func (b *Broker) registerAdmin(mux *http.ServeMux) {
 	if b.cfg.KeyfileValidator != nil && b.cfg.KeyfileValidator.Settings != nil {
 		mux.Handle("PUT /api/admin/nexus-md",
 			b.requireAdmin(http.HandlerFunc(b.handleAdminNexusMDEdit)))
+		// NEX-826 — the headless-run variant of the same document.
+		mux.Handle("PUT /api/admin/nexus-md-worker",
+			b.requireAdmin(http.HandlerFunc(b.handleAdminNexusMDWorkerEdit)))
 	}
 
 	// Surface switching — admin-gated, requires the aspects store.

@@ -23,9 +23,45 @@ import (
 
 // NexusSettings is the loaded single-row nexus_settings state.
 type NexusSettings struct {
-	NexusMD   string
-	Version   int64
-	UpdatedAt string // ISO 8601
+	NexusMD string
+	// NexusMDWorker is the central policy for HEADLESS runs — derived
+	// hands and pool workers. Empty means "not configured", and every
+	// identity falls back to NexusMD (see CentralFor).
+	NexusMDWorker string
+	Version       int64
+	UpdatedAt     string // ISO 8601
+}
+
+// CentralFor returns the central policy the named identity should boot
+// with (NEX-826).
+//
+// The split exists because the two audiences need contradictory
+// instructions, not merely different emphasis. The clearest case: an
+// aspect persists, so "surface to the operator rather than guess" is
+// good advice — the answer reaches it and it carries on. A headless run
+// has no operator watching and no channel to one, so the same sentence
+// tells it to stop and produce nothing, which is indistinguishable from
+// the run having died. That shape cost six days of apparently-broken
+// pool in July 2026.
+//
+// IsDerivedName is the discriminator rather than anything invented here:
+// it already recognises BOTH headless shapes — dotted hands
+// (`shadow.umbra`) and pool workers (`<personality>-<role>`) — and it is
+// the same predicate the rest of the package uses to decide what a name
+// means.
+//
+// Fallback is deliberate and one-directional: an unset worker variant
+// yields the interactive text, so the column being empty reproduces
+// pre-NEX-826 behaviour exactly. There is no fallback the other way —
+// an aspect never receives worker policy.
+func (ns *NexusSettings) CentralFor(name string) string {
+	if ns == nil {
+		return ""
+	}
+	if IsDerivedName(name) && ns.NexusMDWorker != "" {
+		return ns.NexusMDWorker
+	}
+	return ns.NexusMD
 }
 
 // SettingsStore is the read/write interface for nexus_settings. Kept
@@ -44,6 +80,13 @@ type SettingsStore interface {
 	// firing the network-wide refresh callback (Part 9d). Returns the
 	// new version.
 	SetNexusMD(ctx context.Context, content string) (int64, error)
+
+	// SetNexusMDWorker writes the headless-run variant (NEX-826). Same
+	// contract as SetNexusMD — bumps the SAME version counter, because
+	// the row is one settings record and a reader asking "has central
+	// changed?" wants yes for either column. Writing "" disables the
+	// variant, returning every identity to the single-prompt shape.
+	SetNexusMDWorker(ctx context.Context, content string) (int64, error)
 }
 
 // SQLSettingsStore is the *sql.DB-backed implementation.
@@ -73,10 +116,10 @@ func (s *SQLSettingsStore) Get(ctx context.Context) (*NexusSettings, error) {
 		return nil, fmt.Errorf("settings.Get: ensure row: %w", err)
 	}
 	row := s.db.QueryRowContext(ctx, `
-		SELECT nexus_md, version, updated_at FROM nexus_settings WHERE id = 1
+		SELECT nexus_md, nexus_md_worker, version, updated_at FROM nexus_settings WHERE id = 1
 	`)
 	var ns NexusSettings
-	if err := row.Scan(&ns.NexusMD, &ns.Version, &ns.UpdatedAt); err != nil {
+	if err := row.Scan(&ns.NexusMD, &ns.NexusMDWorker, &ns.Version, &ns.UpdatedAt); err != nil {
 		return nil, fmt.Errorf("settings.Get: scan: %w", err)
 	}
 	return &ns, nil
@@ -104,6 +147,32 @@ func (s *SQLSettingsStore) SetNexusMD(ctx context.Context, content string) (int6
 	`, content).Scan(&newVersion)
 	if err != nil {
 		return 0, fmt.Errorf("settings.SetNexusMD: %w", err)
+	}
+	return newVersion, nil
+}
+
+// SetNexusMDWorker implements SettingsStore for the headless-run variant
+// (NEX-826). Mirrors SetNexusMD's upsert exactly, including the
+// version-bump semantics — one row, one counter, so "central changed"
+// stays a single question for readers.
+//
+// Note the INSERT arm leaves nexus_md at its schema default, the empty
+// string: writing the worker variant into a bare table must not
+// fabricate interactive content. CentralFor then serves empty to
+// aspects, which is what an uninitialised row has always served them.
+func (s *SQLSettingsStore) SetNexusMDWorker(ctx context.Context, content string) (int64, error) {
+	var newVersion int64
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO nexus_settings (id, nexus_md_worker, version)
+		VALUES (1, ?, 1)
+		ON CONFLICT(id) DO UPDATE SET
+			nexus_md_worker = excluded.nexus_md_worker,
+			version         = nexus_settings.version + 1,
+			updated_at      = datetime('now')
+		RETURNING version
+	`, content).Scan(&newVersion)
+	if err != nil {
+		return 0, fmt.Errorf("settings.SetNexusMDWorker: %w", err)
 	}
 	return newVersion, nil
 }
