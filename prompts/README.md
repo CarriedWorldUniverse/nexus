@@ -34,6 +34,26 @@ Edit here, review as a normal change, then apply:
     NEXUS_ADMIN_TOKEN_FILE=~/.nexus/admin-token \
       ./promptsync.sh apply-central central/composed-aspect.draft.md --yes
 
+**On that token.** `/api/admin/*` requires an **operator JWT**, and there is
+no standing admin token — by design (see the `nexus-auth` skill). The JWT
+exists only after a dashboard passkey ceremony, so `apply-*` needs the
+operator present and cannot run unattended. That is the right default for a
+write that changes how every identity in the network sees itself.
+
+It does mean the API path is unavailable exactly when the dashboard is what's
+broken, so there is an escape hatch:
+
+    ./promptsync.sh break-glass-central central/composed-aspect.draft.md --yes
+
+which writes the DB row directly. What it bypasses, precisely: the API handler
+bumps the version and then fires `Config.OnNexusMDChange` — a callback wired
+**nowhere in production** (only in `admin_nexus_md_test.go`). Central content
+reaches an identity through the validate handshake at boot
+(`runtime/keyfile`), not through a push, so there is no cache to invalidate
+and no broadcast to miss. Today the two paths are equivalent in observable
+effect. If `OnNexusMDChange` is ever wired, the break-glass verb must fire it
+too — and the comment on it says so.
+
 **If you edit a prompt live, capture it back the same day.** A live edit that
 never lands here restores the old problem, silently.
 
@@ -93,11 +113,22 @@ to the single-prompt shape.
 
 ## Caveats — what has and has not been exercised
 
-- `capture` and `diff` were **run against the live broker** and round-trip
-  cleanly (central v4 + 9 aspects).
-- `apply-central` / `apply-aspect` are **untested**: they need an admin token,
-  and running them would bump the live version before anyone reviewed the
-  drafts. Treat the first apply as the test, with `git` as the rollback.
+- `capture` and `diff` are **run against the live broker** and round-trip
+  cleanly (central v5 + 9 aspects).
+- `break-glass-central` **has been used in anger**: it applied
+  `composed-aspect.draft.md` on 2026-07-26, taking central v4 → v5. Verified
+  end to end — the row came back byte-identical to the draft (sha256
+  `51d64865…`), and a freshly dispatched run booted reporting
+  `central_version=5` with `system_prompt_bytes` 5751 → 5934, a delta matching
+  the new text exactly. Row-changed and identity-received are different
+  claims; both were checked.
+- `apply-central` / `apply-aspect` (the API path) remain **untested**. They
+  need an operator JWT, and there is no standing admin token by design, so
+  they cannot run unattended. The first use is still the test.
+- The **worker** variant has plumbing (NEX-827) but **no content applied**:
+  `nexus_md_worker` is empty, so every identity still gets the interactive
+  text. Applying `composed-worker.draft.md` is a live decision nobody has
+  taken yet.
 - Reads go through the DB, not the API, because **the admin surface has no GET
   for prompt content** — only `PUT`. Two small GET endpoints would let
   `capture` drop its cluster dependency; worth doing.
