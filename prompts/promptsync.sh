@@ -9,8 +9,15 @@
 #
 #   ./promptsync.sh capture [dir]   live -> repo (then `git diff` shows drift)
 #   ./promptsync.sh diff            capture to a temp dir and diff; changes nothing
-#   ./promptsync.sh apply-central <file> --yes         repo -> live central
-#   ./promptsync.sh apply-aspect <name> <dir> --yes    repo -> live personality
+#   ./promptsync.sh apply-central <file> --yes         repo -> live central   (API)
+#   ./promptsync.sh apply-aspect <name> <dir> --yes    repo -> live personality (API)
+#   ./promptsync.sh break-glass-central <file> --yes   repo -> live central   (DB-direct)
+#
+# The apply-* verbs need an OPERATOR JWT. There is no standing admin token by
+# design — the JWT exists only after a dashboard passkey ceremony — so those
+# verbs cannot run unattended, and cannot run at all when the dashboard is the
+# thing that is broken. break-glass-central is the escape hatch for that case;
+# see its comment for exactly what it bypasses (today: nothing observable).
 #
 # READ and WRITE deliberately take different routes, because the broker only
 # has one of them:
@@ -158,10 +165,60 @@ print(json.dumps({col: (open(os.path.join(d, fn), encoding="utf-8").read()
   echo
 }
 
+# cmd_break_glass_central — write the central prompt DIRECTLY to the DB,
+# bypassing the admin API.
+#
+# Why this verb exists: /api/admin/* requires an OPERATOR JWT, and there is no
+# standing admin token by design (see the nexus-auth skill). The JWT only
+# exists after a dashboard passkey ceremony, so the API path cannot be driven
+# unattended — which is the point, but it also means a prompt cannot be
+# restored when the dashboard is the thing that is broken.
+#
+# What it skips, precisely: the API handler bumps the version, then fires
+# Config.OnNexusMDChange. That callback is wired NOWHERE in production (only
+# in admin_nexus_md_test.go), so it is a no-op today. Central content reaches
+# an identity through the validate handshake at boot (runtime/keyfile), not
+# through a push — so there is no cache to invalidate and no broadcast to
+# miss. This write is therefore equivalent to the API path in observable
+# effect. If OnNexusMDChange ever gets wired, this comment is a lie and this
+# verb needs to fire it too.
+#
+# Rollback is git: apply an older file from history.
+cmd_break_glass_central() {
+  local file="${1:-}"; shift || true
+  [[ -f "$file" ]] || die "usage: promptsync.sh break-glass-central <file> --yes"
+  confirm "$@"
+  local tmpb; tmpb="$(mktemp -d)"
+  # CURRENT_TIMESTAMP rather than datetime('now'): no nested quoting to survive
+  # ssh -> kubectl exec -> bash -c -> printf.
+  python3 - "$file" > "${tmpb}/body.json" <<'PY'
+import json, sys
+content = open(sys.argv[1], encoding="utf-8").read()
+if not content.strip():
+    sys.exit("refusing to write an empty central prompt")
+print(json.dumps({"statements": [{
+    "q": "update nexus_settings set nexus_md = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP",
+    "params": [content],
+}]}))
+PY
+  echo "promptsync: writing $(wc -c < "$file") bytes to nexus_settings.nexus_md (break-glass)" >&2
+  ssh -o ConnectTimeout=20 "${NEXUS_SSH}" "
+    P=\$(sudo k3s kubectl get pods -n ${NEXUS_NS} -l app=nexus-control -o jsonpath='{.items[0].metadata.name}')
+    sudo k3s kubectl exec -i \$P -n ${NEXUS_NS} -c broker -- bash -c '
+      Q=\$(cat)
+      exec 3<>/dev/tcp/localhost/8080
+      printf \"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: \${#Q}\r\nConnection: close\r\n\r\n%s\" \"\$Q\" >&3
+      cat <&3 | tail -2
+    '" < "${tmpb}/body.json"
+  rm -rf "${tmpb}"
+  echo "promptsync: now verify — ./promptsync.sh diff, and check a fresh identity boots with the new central_version" >&2
+}
+
 case "${1:-}" in
-  capture)       shift; cmd_capture "$@" ;;
-  diff)          shift; cmd_diff "$@" ;;
-  apply-central) shift; cmd_apply_central "$@" ;;
-  apply-aspect)  shift; cmd_apply_aspect "$@" ;;
+  capture)             shift; cmd_capture "$@" ;;
+  diff)                shift; cmd_diff "$@" ;;
+  apply-central)       shift; cmd_apply_central "$@" ;;
+  apply-aspect)        shift; cmd_apply_aspect "$@" ;;
+  break-glass-central) shift; cmd_break_glass_central "$@" ;;
   *) sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
