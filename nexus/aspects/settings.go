@@ -34,7 +34,7 @@ type NexusSettings struct {
 }
 
 // CentralFor returns the central policy the named identity should boot
-// with (NEX-826).
+// with (NEX-827).
 //
 // The split exists because the two audiences need contradictory
 // instructions, not merely different emphasis. The clearest case: an
@@ -53,7 +53,7 @@ type NexusSettings struct {
 //
 // Fallback is deliberate and one-directional: an unset worker variant
 // yields the interactive text, so the column being empty reproduces
-// pre-NEX-826 behaviour exactly. There is no fallback the other way —
+// pre-NEX-827 behaviour exactly. There is no fallback the other way —
 // an aspect never receives worker policy.
 func (ns *NexusSettings) CentralFor(name string) string {
 	if ns == nil {
@@ -82,7 +82,7 @@ type SettingsStore interface {
 	// new version.
 	SetNexusMD(ctx context.Context, content string) (int64, error)
 
-	// SetNexusMDWorker writes the headless-run variant (NEX-826). Same
+	// SetNexusMDWorker writes the headless-run variant (NEX-827). Same
 	// contract as SetNexusMD — bumps the SAME version counter, because
 	// the row is one settings record and a reader asking "has central
 	// changed?" wants yes for either column. Writing "" disables the
@@ -153,7 +153,7 @@ func (s *SQLSettingsStore) SetNexusMD(ctx context.Context, content string) (int6
 }
 
 // SetNexusMDWorker implements SettingsStore for the headless-run variant
-// (NEX-826). Mirrors SetNexusMD's upsert exactly, including the
+// (NEX-827). Mirrors SetNexusMD's upsert exactly, including the
 // version-bump semantics — one row, one counter, so "central changed"
 // stays a single question for readers.
 //

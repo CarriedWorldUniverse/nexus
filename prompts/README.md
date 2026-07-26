@@ -58,7 +58,7 @@ So the same string cannot serve both audiences. The drafts split it into
 `common` + one of `aspect` / `worker`, keeping the shared half in one file so
 it cannot drift between the two.
 
-## How the split is delivered (NEX-826, built)
+## How the split is delivered (NEX-827, built)
 
 `nexus_settings` carries a second column, `nexus_md_worker`, and both resolve
 paths choose between the two:

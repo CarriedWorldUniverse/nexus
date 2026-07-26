@@ -397,7 +397,7 @@ var columnsToAdd = []columnAddition{
 		column: "topic",
 		ddl:    "ALTER TABLE chat_messages ADD COLUMN topic TEXT",
 	},
-	// NEX-826 — central policy variant for HEADLESS runs. Existing
+	// NEX-827 — central policy variant for HEADLESS runs. Existing
 	// databases get the column empty, and an empty worker variant falls
 	// back to nexus_md, so this migration is behaviour-preserving until
 	// an operator writes content into it.

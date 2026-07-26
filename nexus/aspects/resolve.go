@@ -96,7 +96,7 @@ func ResolveByName(ctx context.Context, cfg ResolveConfigByName, name string) (*
 	var centralVersion int64
 	if cfg.Settings != nil {
 		if ns, sErr := cfg.Settings.Get(ctx); sErr == nil {
-			// NEX-826: dispatched runs get the worker variant when one
+			// NEX-827: dispatched runs get the worker variant when one
 			// is configured. Keyed on the FULL name, not BaseName — the
 			// derivation is precisely what distinguishes a dispatched
 			// run from the aspect it belongs to, so basing it here would

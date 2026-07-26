@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// NEX-826 adds nexus_settings.nexus_md_worker. Production runs an
+// NEX-827 adds nexus_settings.nexus_md_worker. Production runs an
 // EXISTING database, so the case that matters is not the fresh-schema
 // path (schema.sql) but the migration path (columnsToAdd) — and the
 // requirement is stronger than "the column appears": the row's existing
@@ -17,7 +17,7 @@ func TestNexusSettingsWorkerColumn_MigratesExistingDB(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	// Build a PRE-NEX-826 database by hand: the old table shape, with
+	// Build a PRE-NEX-827 database by hand: the old table shape, with
 	// content in it, exactly as a deployed broker would have.
 	// Same driver + DSN the real Open uses, so this exercises the actual
 	// migration path rather than a differently-configured lookalike.

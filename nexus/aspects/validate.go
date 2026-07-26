@@ -327,7 +327,7 @@ func Validate(ctx context.Context, cfg ValidateConfig, encryptedPayloadB64 strin
 			centralVersion = 0
 			_ = sErr // intentional: graceful degrade on transient read
 		} else {
-			// NEX-826: headless runs get the worker variant when one is
+			// NEX-827: headless runs get the worker variant when one is
 			// configured. This is the path a booting worker actually takes
 			// (dispatch -> agentfunnel -> validate), so it is the one that
 			// decides what a pool worker is told it is. Keyed on the FULL

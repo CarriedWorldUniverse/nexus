@@ -373,7 +373,7 @@ CREATE TABLE IF NOT EXISTS nexus_settings (
   nexus_md   TEXT NOT NULL DEFAULT '',
   -- Central policy for HEADLESS runs (derived hands, pool workers).
   -- Empty means "no worker variant configured" and every identity falls
-  -- back to nexus_md above — the pre-NEX-826 behaviour, so adding the
+  -- back to nexus_md above — the pre-NEX-827 behaviour, so adding the
   -- column changes nothing until an operator writes content into it.
   --
   -- Why a second column rather than one string for everyone: the two

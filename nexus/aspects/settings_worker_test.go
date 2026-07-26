@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// CentralFor is the whole NEX-826 decision, so it is tested as a truth
+// CentralFor is the whole NEX-827 decision, so it is tested as a truth
 // table rather than by example. The fallback row is the one that matters
-// most: an unset worker variant must reproduce pre-NEX-826 behaviour
+// most: an unset worker variant must reproduce pre-NEX-827 behaviour
 // exactly, or shipping the migration changes what every identity boots
 // with before anyone has written a word of worker policy.
 func TestCentralFor(t *testing.T) {

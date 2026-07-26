@@ -88,7 +88,7 @@ func (b *Broker) handleAdminNexusMDEdit(w http.ResponseWriter, r *http.Request) 
 }
 
 // adminNexusMDWorkerRequest is the PUT body shape for the headless-run
-// variant (NEX-826). Separate type from adminNexusMDRequest so
+// variant (NEX-827). Separate type from adminNexusMDRequest so
 // DisallowUnknownFields keeps posting to the wrong endpoint an error
 // rather than a silent no-op write of "".
 type adminNexusMDWorkerRequest struct {

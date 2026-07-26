@@ -8,7 +8,7 @@ import (
 // resolveWorkerRig stands up a base aspect plus a settings row carrying
 // both central variants. ResolveByName is the path a JWT-booted worker
 // takes (broker/validate_endpoint.go calls it for exactly this case), so
-// this is where the NEX-826 split has to hold or the feature does
+// this is where the NEX-827 split has to hold or the feature does
 // nothing for the identities it was built for.
 func resolveWorkerRig(t *testing.T, interactive, worker string) (*SQLStore, *SQLSettingsStore) {
 	t.Helper()
@@ -105,7 +105,7 @@ func TestResolveByName_PoolWorkerGetsWorkerCentral(t *testing.T) {
 }
 
 // The migration-safety case: with no worker variant configured, a run
-// resolves exactly as it did before NEX-826. Deploying the schema change
+// resolves exactly as it did before NEX-827. Deploying the schema change
 // must not alter a single identity's prompt until content is written.
 func TestResolveByName_NoWorkerVariant_UnchangedBehaviour(t *testing.T) {
 	store, settings := resolveWorkerRig(t, "## interactive", "")
@@ -117,7 +117,7 @@ func TestResolveByName_NoWorkerVariant_UnchangedBehaviour(t *testing.T) {
 			t.Fatal(err)
 		}
 		if got.CentralNexusMD != "## interactive" {
-			t.Errorf("%s got central %q, want the interactive text (pre-NEX-826 behaviour)",
+			t.Errorf("%s got central %q, want the interactive text (pre-NEX-827 behaviour)",
 				name, got.CentralNexusMD)
 		}
 	}
