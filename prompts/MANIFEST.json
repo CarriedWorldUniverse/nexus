@@ -1,0 +1,14 @@
+{
+  "aspects": {
+    "anvil": 8,
+    "forge": 6,
+    "harrow": 7,
+    "keel": 8,
+    "maren": 6,
+    "plumb": 6,
+    "shadow": 1,
+    "verity": 7,
+    "wren": 6
+  },
+  "central_version": 4
+}
