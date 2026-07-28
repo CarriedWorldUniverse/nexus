@@ -31,6 +31,28 @@ jobs:
       - name: go test
         run: go test -race ./...
 
+  worm-guard:
+    name: worm guard (fresh-dep gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Build the go-gate guard from source (stdlib-only, pinned tag) and fail
+      # the build if go.sum introduces any THIRD-PARTY dependency published
+      # within the last fortnight that is not in the go-allowance ledger — the
+      # Stux-worm CI vector (a PR pulling a fresh malicious dep). Own modules
+      # (GOPRIVATE) are skipped; pre-worm deps pass without a ledger entry.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+      # Self-contained: the guard is a vendored stdlib-only tool in this repo
+      # (.github/wormguard, isolated go.mod), so CI needs no cross-repo clone or
+      # credential. nexus's deps are all pre-cutoff; when a fresh dep is
+      # deliberately approved, pass -allowlist pointing at the synced ledger.
+      - name: build wormguard
+        run: cd .github/wormguard && GOFLAGS=-mod=mod go build -o /tmp/wormguard .
+      - name: guard go.sum
+        run: /tmp/wormguard -gosum go.sum
+
   security-scan:
     name: security scan
     runs-on: ubuntu-latest

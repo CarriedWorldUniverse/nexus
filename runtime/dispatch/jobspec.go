@@ -24,6 +24,14 @@ var acceptanceGateEnvKeys = []string{
 	// broker deployment to flip dispatched builders onto the cairn
 	// clone-per-run path; CW_VCS=git opts back to git (cairn is the code default).
 	"CW_VCS",
+	// CW_PULL_* is deliberately NOT forwarded here (#474, cairn#99 Option B):
+	// the cairn pull-checks recorder (runtime/pullchecks) now runs
+	// ORCHESTRATOR-side, driven by the authoritative gate runner's verdicts
+	// (nexus/orchestrator/gates.go), not in the worker Job. Forwarding
+	// CW_PULL_* onto a worker Job would hand the gated model's own pod the
+	// mesh credential that authenticates cairn pull-check writes — exactly
+	// the trust-boundary violation cairn#99 flags. See
+	// docs/network/ACCEPTANCE-GATE-HARDENING.md.
 }
 
 type JobConfig struct {

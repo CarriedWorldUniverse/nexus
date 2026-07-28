@@ -70,3 +70,149 @@ Guard the ticket-fallback so a *pre-existing* PR can never be credited to a new 
 
 ## Sequencing
 Unit 2 (cheapest, pure-objective) → Unit 4 (provenance, pure-objective) → Unit 1 (judge-the-diff) → Unit 3 evidence-check, then the gated run-tests stretch. Each is independently landable and each only makes a *pass* harder — never blocks work that today legitimately completes.
+
+---
+
+## Pull-checks wiring — gate verdicts recorded on the cairn pull (cairn#99)
+
+Two-layer topology (cairn#99 Option B, closed by #105/#473/#474):
+
+1. **Worker gates stay advisory.** `runtime/cmd/agentfunnel`'s `builderPRVerifier`/
+   `builderAcceptanceGate.Decide` still run pr-exists/pr-substantial/
+   acceptance-judge/test-evidence in-session, and still reprompt/block the
+   model on a fail — but as of #474 they record NOTHING to cairn. The worker
+   Job's env carries no `CW_PULL_*` key at all (`runtime/dispatch/jobspec.go`
+   `acceptanceGateEnvKeys` — see below); there is no credential in that pod
+   for the gated model to reach.
+2. **The orchestrator is authoritative and attests.** The orchestrator's
+   authoritative gate runner (`RunAuthoritativeGates`, `nexus/orchestrator/gates.go`,
+   #473) re-runs the same four gates against the pushed artifact (`gh`, the
+   real PR diff) on every job-done (`OnJobDoneHook` → `runAuthoritativeGates`,
+   `nexus/orchestrator/wake.go`), from the broker/orchestrator process — a
+   surface the gated model never runs on. `RecordVerdicts`
+   (`nexus/orchestrator/pullrecord.go`, #474) then records those verdicts as
+   durable cairn pull checks: `EnsurePull` once per job-done, then one
+   `RecordPullCheck` per verdict, via `runtime/pullchecks.Recorder` — the SAME
+   client package the worker used to use, just constructed and invoked
+   ORCHESTRATOR-side now (`orchestrator.NewPullRecorderFromEnv`, mirroring the
+   worker's removed `buildPullCheckRun` but without a worker-mode guard, since
+   the orchestrator is the trusted side of this split, not the gated one).
+
+This satisfies the cairn#99 invariant directly: the attester (the recorder
+dialing cairn-server with the `broker-gate` credential) now runs on the SAME
+side as the authoritative gate decision, and structurally cannot run inside
+the pod whose output it's grading.
+
+Every gate decides `pass`/`fail` broker/orchestrator-side; that verdict is
+authoritative. Once the orchestrator carries **cairn-pull addressing**
+(`CW_PULL_*` configured on the orchestrator/broker process — never forwarded
+to a worker), the SAME verdicts are additionally recorded as **cairn-server
+pull checks** (`PullService.RecordPullCheck`) — a durable, cairn-native
+record of what each gate decided, independent of the broker's own logs, and
+the precondition `MergePull` needs to refuse a merge on a non-`pass` check.
+This is pure observability/enforcement plumbing on cairn's side; it changes
+nothing about how a gate reaches its own verdict.
+
+### Check-name vocabulary
+Fixed literals, one per gate, matching this doc's units exactly (also
+mirrored as `orchestrator.GatePRExists`/`GatePRSubstantial`/
+`GateAcceptanceJudge`/`GateTestEvidence` in `nexus/orchestrator/gates.go`):
+
+| Check name | Gate | Recorded when |
+|---|---|---|
+| `pr-exists` | `RunAuthoritativeGates` (`gates.PRExists`) | Every authoritative-gate run (`GateRunnerOptions.Enabled`), pass or fail |
+| `pr-substantial` | `RunAuthoritativeGates` (`gates.PRSubstantial`, Unit 2) | Only reached after `pr-exists` passes |
+| `acceptance-judge` | `RunAuthoritativeGates` via the configured `Verifier` | Only when `Verifier` is set, criteria is non-empty, AND the run's own-PR diff was fetched successfully — ground truth or nothing |
+| `test-evidence` | `RunAuthoritativeGates` (Unit 3) | Only when `RequireTestEvidence` is opted in, criteria mention tests, AND a diff was fetched |
+
+State is always `pass` or `fail` (RecordPullCheck also accepts `pending`, but
+no gate in this codebase has a use for it — every gate above resolves to a
+definite verdict by the time it records). `summary` carries the judge's
+reason / the gate's own explanation; `evidence_url`, when set on the
+`GateVerdict`, is forwarded through to the recorded check.
+
+### Env config (dark by default, orchestrator-side only)
+`CW_PULL_*` is read ONLY by the orchestrator/broker process
+(`orchestrator.NewPullRecorderFromEnv` → `pullchecks.NewRecorderFromEnv`) —
+it is deliberately **excluded** from `runtime/dispatch/jobspec.go`
+`acceptanceGateEnvKeys` (the broker-env→worker forwarding seam `CW_VCS` and
+the `ACCEPTANCE_*` knobs still use), closing the #474 finding that a
+dispatched worker Job could otherwise read the gate's own attestation
+credential:
+
+- `CW_PULL_SERVER_ADDR` — cairn-server gRPC address. **Unset →
+  `orchestrator.NewPullRecorderFromEnv` returns nil (`Orchestrator.PullRecorder`
+  stays nil) and `RecordVerdicts` makes zero PullService calls.** This is the
+  back-compat contract: every orchestrator without this set behaves
+  byte-identical to before this wiring existed (verdicts are still computed
+  by `RunAuthoritativeGates` and logged by `LogVerdicts`, never recorded
+  durably).
+- `CW_PULL_ORG` / `CW_PULL_SLUG` — the cwb-org and cairn repo slug pull checks
+  are recorded against. Both required (with `CW_PULL_SERVER_ADDR`) or the
+  recorder stays dark, logged.
+- `CW_PULL_PROJECT` — default ledger project key `EnsurePull` opens the pull
+  under.
+- `CW_PULL_TARGET` — overrides the pull-checks target-branch resolution
+  (default `"main"` — the orchestrator does not shell out to resolve a
+  repo's actual default branch the way the removed worker-side wiring did,
+  to avoid adding another `gh` call to the job-done path).
+- `CW_PULL_TLS_CERT` / `CW_PULL_TLS_KEY` / `CW_PULL_TLS_CA` — cwb mesh mTLS
+  material for the cairn-server dial (same convention as `WORKGRAPH_TLS_*` —
+  see `nexus/workgraph/dial.go`).
+- `CW_PULL_DEV_INSECURE=1` — dial without mTLS (local dev only). The
+  worker-mode FATAL guard the original wiring carried (`buildPullCheckRun`
+  refusing `CW_PULL_DEV_INSECURE=1` inside a builder process) is gone along
+  with the worker-side recorder it protected — `NewPullRecorderFromEnv` runs
+  only in the orchestrator process, which is the trusted side of this split,
+  so `CW_PULL_DEV_INSECURE=1` here is an ordinary local-dev opt-in.
+
+Implementation: `runtime/pullchecks` (client + `Recorder` + sanitizer,
+unchanged by #474 — it is now an orchestrator-only consumer instead of a
+worker-only one) and `nexus/orchestrator/pullrecord.go` (`PullCheckRecorder`
+interface, `NewPullRecorderFromEnv`, `RecordVerdicts` — the orchestrator-side
+wiring, called from `wake.go`'s `runAuthoritativeGates` right after
+`LogVerdicts`). `Orchestrator.PullRecorder` nil (the default) is the dark
+contract; every existing orchestrator test that doesn't set it makes zero
+PullService calls.
+
+### Broker-gate subject convention
+Every `OpenPull`/`RecordPullCheck` call a `Recorder` makes presents
+`cwb-subject=broker-gate` (`pullchecks.BrokerGateSubject`), **not** the
+builder aspect's own identity — unchanged by the #474 relocation. A pull
+check must be attributable to the gate that produced the verdict, not the
+worker being gated.
+
+Per #105, `RecordPullCheck` requires the narrower `checks:attest` scope,
+split off `OpenPull`'s `repo:write`. cairn-server reads scope from the
+**self-asserted `cwb-scopes` gRPC metadata** the caller presents, not from
+the mTLS cert (`cairn` `internal/grpcapi/grpcapi.go` `identityFromCtx` /
+`authed()`/`hasScope()`) — so the CODE, not just operator config, decides
+what scope goes out on the wire. `Recorder.callCtx` takes the scope
+per-call: `EnsurePull` presents `repo:write` on `OpenPull`, `Record` presents
+`checks:attest` on `RecordPullCheck` (`runtime/pullchecks/recorder.go`,
+fixed post-#474 review — the original code hardcoded `repo:write` for both
+calls, so every `RecordPullCheck` PermissionDenied'd and no check ever
+recorded; see `TestRecorderPresentsCorrectPerCallScope`). What IS operator
+configuration is granting the orchestrator's `broker-gate` mesh
+identity/cert the underlying authorization to hold and assert both scopes in
+the first place — the code presents the scope, the operator provisions the
+credential that's allowed to claim it.
+
+### Sanitize-before-send
+`RecordPullCheckRequest.name` is capped at 128 bytes and must contain no
+non-printable rune (cairn's stricter check-name rule); `summary`/
+`evidence_url` are capped at 8192/2048 bytes and must contain no control
+character — cairn-server rejects violations with `codes.InvalidArgument`.
+`runtime/pullchecks.SanitizeName/SanitizeSummary/SanitizeEvidenceURL` strip
+and truncate (with a small margin below each cap) before every RPC, so the
+broker's recorder can never trip this validation regardless of what a gate's
+summary text happens to contain (e.g. a judge's raw reason string).
+
+### Failure policy — best-effort, never fails the run
+A `RecordPullCheck`/`OpenPull` failure (cairn-server down, network blip) is
+logged loudly (`slog.Error`, inside `Recorder` itself) and simply drops the
+recording — it **never** fails the run or changes a gate's own pass/fail
+return value. The broker gate's verdict is already authoritative broker-side;
+`MergePull`'s enforcement on non-`pass` checks is a cairn-side backstop for
+runs that DO carry cairn-pull addressing, not a second copy of the broker's
+own decision logic.

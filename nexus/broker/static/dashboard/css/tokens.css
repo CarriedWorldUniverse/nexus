@@ -1,4 +1,6 @@
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400;1,600&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;700&display=swap');
+/* Typefaces are self-hosted — see css/fonts.css, linked before this file
+ * in index.html. Do not reintroduce a remote font import here: it puts a
+ * third party on the load-bearing path and fails silently offline. */
 
 :root {
   /* Background depths */
