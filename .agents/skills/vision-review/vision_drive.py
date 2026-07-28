@@ -6,8 +6,8 @@ Perception->action loop: grab the current frame + HUD -> qwen calls the `step` n
 repeat. qwen is the vision engine (it identifies what it sees); this orchestrates and logs.
 
 Requires the game running on dMon in --drive mode (persistent, polls /tmp/cw_cmd). Render seat must be
-live (logged-in graphical session). Each step ~1.4k image tokens; a sliding window of frames keeps the
-256k context bounded over long runs.
+live (logged-in graphical session). Each step ~1.4k image tokens; a sliding window of frames (KEEP_FRAMES)
+keeps context bounded over long runs — needed, since qwen3.6 is now 64k ctx (was 256k before 2026-07-28).
 
 Usage:
   vision_drive.py [--steps N] [--goal "..."] [--start "goto HUB"]
@@ -16,8 +16,9 @@ Writes a markdown report to /tmp/cw_drive_report.md.
 """
 import argparse, base64, json, os, subprocess, sys, time, urllib.request
 
-BASE = os.environ.get("OPENAI_BASE_URL", "http://robo-dog:30803/v1")
-MODEL = os.environ.get("OPENAI_MODEL", "gemma-4-12b")
+BASE = os.environ.get("OPENAI_BASE_URL", "http://100.92.111.3:30800/v1")  # vllm-qwen36, robo-dog tailnet NodePort (2026-07-28: qwen3.6 back up at 64k ctx, co-resident with Ornith)
+MODEL = os.environ.get("OPENAI_MODEL", "qwen3.6")
+# FALLBACK if qwen36 is scaled down: OPENAI_BASE_URL=http://10.43.73.157:8000/v1 OPENAI_MODEL=gemma-4-12b
 DMON = os.environ.get("CW_DMON_HOST", "jacinta@100.91.185.71")
 KEEP_FRAMES = 8                       # sliding window: keep only the last N frames as images in context
 

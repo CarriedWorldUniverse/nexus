@@ -11,13 +11,15 @@ Usage:
   vision_review.py --dmon ["custom prompt"]        # grab dMon's freshest /tmp/cw_shot|cw_seq frame first
   vision_review.py --dmon-seq N ["custom prompt"]  # grab /tmp/cw_seq_N.png from dMon
 
-Env overrides: OPENAI_BASE_URL (default http://robo-dog:30803/v1), OPENAI_MODEL (gemma-4-12b),
+Env overrides: OPENAI_BASE_URL (default http://100.92.111.3:30800/v1), OPENAI_MODEL (qwen3.6),
 CW_DMON_HOST (default jacinta@100.91.185.71).
 """
 import base64, json, os, subprocess, sys, urllib.request, urllib.error
 
-BASE = os.environ.get("OPENAI_BASE_URL", "http://robo-dog:30803/v1")
-MODEL = os.environ.get("OPENAI_MODEL", "gemma-4-12b")
+BASE = os.environ.get("OPENAI_BASE_URL", "http://100.92.111.3:30800/v1")  # vllm-qwen36, robo-dog tailnet NodePort (2026-07-28: qwen3.6 back up at 64k ctx, co-resident with Ornith)
+MODEL = os.environ.get("OPENAI_MODEL", "qwen3.6")
+# FALLBACK if qwen36 is scaled down: OPENAI_BASE_URL=http://10.43.73.157:8000/v1 OPENAI_MODEL=gemma-4-12b
+# (vllm-gemma4-vision-dmon ClusterIP, runs on dMon, 32k ctx, less accurate)
 DMON = os.environ.get("CW_DMON_HOST", "jacinta@100.91.185.71")
 
 DEFAULT_PROMPT = (
