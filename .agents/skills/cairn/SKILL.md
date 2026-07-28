@@ -7,7 +7,7 @@ when_to_use: 'When committing, pushing, branching, or managing Carried World cod
 # cairn — the Carried World VCS
 
 cairn is a **go-git-backed** version-control system (org `CarriedWorldUniverse`). Two halves:
-- **Working-copy CLI** — `github.com/CarriedWorldUniverse/cairn`, source `cmd/cairn/main.go` (a thin dispatcher over `internal/worktree.Repo`; the engine is `internal/{worktree,change,release,version,credstore,userconfig}`). The binary is `/usr/local/bin/cairn`. **This is what you run.** (Note: the local checkout at dMon `~/src/cairn` is a *stale, server-only* clone — `cmd/cairn-server` only; read the CLI from the GitHub repo's `main`.)
+- **Working-copy CLI** — `github.com/CarriedWorldUniverse/cairn`, source `cmd/cairn/main.go` (a thin dispatcher over `internal/worktree.Repo`; the engine is `internal/{worktree,change,release,version,credstore,userconfig}`). The binary is `/usr/local/bin/cairn`; since v0.1.20 it self-updates — `sudo cairn update` on dMon installs the latest GitHub release (checksum-verified; `cairn update --check` just reports), so never rebuild/download by hand. **This is what you run.** (Note: the local checkout at dMon `~/src/cairn` is a *stale, server-only* clone — `cmd/cairn-server` only; read the CLI from the GitHub repo's `main`.)
 - **Server** — `cmd/cairn-server`: a go-git host (SSH casket-key → herald agent; HTTP via mTLS gateway, `X-CWB-*` identity), per-agent push attribution, `repo:read/write` scopes, branch protection (no force-push on the default branch), PRs-as-ledger-issues, **fast-forward-only server-side merge**.
 
 Carried World is cairn-managed on dMon at **`~/Projects/carried-world-cairn/main`**, and **cairn's origin IS the GitHub repo `CarriedWorldUniverse/carried-world-godot`** — `cairn commit` writes local history; `cairn push` lands it on GitHub (a `git pull` then refreshes any backup clone). Identity = `nexus-cw` / `nexus@darksoft.co.nz` (`cairn config user.name|email`); the `github.com` token is in the credstore (`~/.config/cairn/credentials`), so pushes need no PAT on the command line.
@@ -70,7 +70,7 @@ cairn commit <branch> -m "<what + why>"  &&  cairn push origin <branch>
 - **History (edit — rebases, can conflict → exit 2):** `reword <commit> <msg>`, `squash <commit>`, `drop <commit>`, `cherry-pick <commit> [branch]`, `reauthor --old-email <glob> --name <n> --email <e> [--dry-run]`.
 - **Stash:** `stash [-m] [branch]`, `stash pop|list|drop [id]`.
 - **Identity/auth:** `setup`, `config [--global] <key> [val]` (keys: `user.name`, `user.email`, `autosync`), `login <host>` (token on stdin), `logout <host>`, `auth`.
-- **Versioning:** `tag <name> [branch]`, `version [--target npm|nuget|pypi|oci|go] [--release]`, `version bump <major|minor|patch>`, `release --target <eco> [--dry-run]`.
+- **Versioning:** `tag <name> [branch]`, `version [--target npm|nuget|pypi|oci|go] [--release]`, `version bump <major|minor|patch>`, `release --target <eco> [--dry-run]`, `update [--check|--force]` (self-update the binary from the latest GitHub release).
 - **Privacy/embargo:** `private <path> [--shape-only]` / `private ls` (withhold a path from every push — omit, or placeholder bytes), `embargo <commit>` / `embargo ls` (hold a commit + descendants out of the *public projection* — gated, distinct from private), `disclose <path|commit>` (lift either).
 - **Bisect:** `bisect start --good <c> --bad <c> [branch]`, `bisect good|bad|skip|status|reset`, `bisect run -- <cmd>` (0=good, 125=skip, else=bad).
 
