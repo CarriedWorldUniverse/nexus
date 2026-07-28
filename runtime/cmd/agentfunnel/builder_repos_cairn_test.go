@@ -27,17 +27,17 @@ func TestBuilderVCS(t *testing.T) {
 	if got := builderVCS(); got != vcsCairn {
 		t.Errorf("CW_VCS=cairn: got %q", got)
 	}
-	t.Setenv("CW_VCS", "CAIRN")
-	if got := builderVCS(); got != vcsCairn {
-		t.Errorf("CW_VCS=CAIRN (case-insensitive): got %q", got)
-	}
 	t.Setenv("CW_VCS", "")
-	if got := builderVCS(); got != "git" {
-		t.Errorf("CW_VCS unset: got %q, want git (default)", got)
+	if got := builderVCS(); got != vcsCairn {
+		t.Errorf("CW_VCS unset: got %q, want cairn (the default since 2026-07-09)", got)
 	}
 	t.Setenv("CW_VCS", "git")
 	if got := builderVCS(); got != "git" {
-		t.Errorf("CW_VCS=git: got %q", got)
+		t.Errorf("CW_VCS=git (the opt-out): got %q", got)
+	}
+	t.Setenv("CW_VCS", "GIT")
+	if got := builderVCS(); got != "git" {
+		t.Errorf("CW_VCS=GIT (case-insensitive opt-out): got %q", got)
 	}
 }
 

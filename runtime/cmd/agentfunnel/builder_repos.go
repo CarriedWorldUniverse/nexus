@@ -68,10 +68,14 @@ func setupBuilderRepo(ctx context.Context, aspect, runID, repo, branch string) (
 // builderVCS is the builder's VCS mode: CW_VCS=cairn opts into the cairn
 // clone-per-run path; anything else (default) keeps the git mirror+worktree path.
 func builderVCS() string {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("CW_VCS")), vcsCairn) {
-		return vcsCairn
+	// cairn is the DEFAULT since 2026-07-09 (BUILDER-CAIRN-MIGRATION.md rollout
+	// complete: single-ticket NET-75/#462 + concurrent-pair NET-80,81/#463,#464
+	// validated live). CW_VCS=git opts a dispatch back onto the git
+	// mirror+worktree path; any other/unset value = cairn clone-per-run.
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("CW_VCS")), "git") {
+		return "git"
 	}
-	return "git"
+	return vcsCairn
 }
 
 func (s *builderRepoSession) spawn(ctx context.Context) error {
@@ -209,7 +213,8 @@ func builderBranch(branch, ticket string) string {
 }
 
 func repoRemoteURL(repo string) string {
-	if filepath.IsAbs(repo) || strings.HasPrefix(repo, "file://") || strings.HasPrefix(repo, "http://") || strings.HasPrefix(repo, "https://") || strings.HasPrefix(repo, "git@") {
+	repo = strings.TrimRight(repo, "/")
+	if filepath.IsAbs(repo) || strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "file://") || strings.HasPrefix(repo, "http://") || strings.HasPrefix(repo, "https://") || strings.HasPrefix(repo, "git@") {
 		return repo
 	}
 	if strings.Count(repo, "/") == 0 {

@@ -16,6 +16,9 @@ func TestBuilderRepoLifecycleUsesSharedMirrorAndRunWorktree(t *testing.T) {
 		// has platform-specific file-locking behavior on Windows.
 		t.Skip("builder repo lifecycle is Linux-only")
 	}
+	// This test exercises the GIT mirror+worktree path specifically; cairn is
+	// the process default since 2026-07-09, so opt out explicitly.
+	t.Setenv("CW_VCS", "git")
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -101,5 +104,42 @@ func TestBuilderRepoNaming(t *testing.T) {
 	}
 	if got := builderBranch("", "NEX-1"); got != "builder/NEX-1" {
 		t.Fatalf("builderBranch default = %q", got)
+	}
+}
+
+func TestRepoRemoteURL(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		// Bare owner/name — no trailing slash, normal case.
+		{"CarriedWorldUniverse/nexus", "https://github.com/CarriedWorldUniverse/nexus.git"},
+		// Trailing slash must be stripped, not passed into the URL.
+		{"CarriedWorldUniverse/nexus/", "https://github.com/CarriedWorldUniverse/nexus.git"},
+		// Double trailing slash also stripped.
+		{"CarriedWorldUniverse/nexus//", "https://github.com/CarriedWorldUniverse/nexus.git"},
+		// SSH form passed through unchanged.
+		{"git@github.com:CarriedWorldUniverse/nexus.git", "git@github.com:CarriedWorldUniverse/nexus.git"},
+		// SSH form without .git still passed through.
+		{"git@github.com:CarriedWorldUniverse/nexus", "git@github.com:CarriedWorldUniverse/nexus"},
+		// Explicit HTTPS passed through unchanged.
+		{"https://github.com/CarriedWorldUniverse/nexus.git", "https://github.com/CarriedWorldUniverse/nexus.git"},
+		// Explicit HTTP passed through unchanged.
+		{"http://example.com/owner/repo.git", "http://example.com/owner/repo.git"},
+		// file:// passed through unchanged.
+		{"file:///tmp/remote.git", "file:///tmp/remote.git"},
+		// Absolute path passed through unchanged.
+		{"/tmp/remote.git", "/tmp/remote.git"},
+		// Bare name (no slash) is prefixed with the default owner.
+		{"nexus", "https://github.com/CarriedWorldUniverse/nexus.git"},
+		// Bare name with trailing slash still gets prefixed.
+		{"nexus/", "https://github.com/CarriedWorldUniverse/nexus.git"},
+		// .git suffix on owner/name form preserved (no extra .git appended).
+		{"CarriedWorldUniverse/nexus.git", "https://github.com/CarriedWorldUniverse/nexus.git"},
+	}
+	for _, c := range cases {
+		got := repoRemoteURL(c.in)
+		if got != c.want {
+			t.Errorf("repoRemoteURL(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

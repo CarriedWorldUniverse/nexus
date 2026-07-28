@@ -24,8 +24,9 @@ import (
 // the run's line, let the agent work + `cairn commit && cairn push`, then
 // rm -rf the whole per-run clone on despawn.
 //
-// This path is gated behind CW_VCS=cairn (default git) so it is dark until
-// proven on a live pool ticket.
+// This path is the DEFAULT since 2026-07-09 (validated live: single ticket
+// NET-75/#462 + concurrent pair NET-80,81/#463,#464). CW_VCS=git opts a
+// dispatch back onto the git mirror+worktree path.
 
 const vcsCairn = "cairn"
 
