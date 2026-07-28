@@ -270,8 +270,14 @@ func (r *Runner) handNamePool(parent string) []string {
 
 // handTicket derives a hand's unique ticket (the Job correlation key +
 // OnJobDone lookup) from a fresh run-style id.
+// HandTicketPrefix marks a synthetic hand ticket. Exported so consumers can
+// tell a hand apart from a real ledger work item WITHOUT string-literal
+// duplication — the orchestrator's job-done hook must skip hands (NEX-818:
+// recording one against the graph fails `ledger: issue not found`).
+const HandTicketPrefix = "hand-"
+
 func handTicket(id string) string {
-	return "hand-" + strings.TrimPrefix(id, "run-")
+	return HandTicketPrefix + strings.TrimPrefix(id, "run-")
 }
 
 // briefHead is the first line of the brief, bounded, for audit posts.

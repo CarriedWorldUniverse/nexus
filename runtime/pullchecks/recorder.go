@@ -28,7 +28,9 @@ type pullServiceClient interface {
 }
 
 // Recorder is the broker's client to cairn-server's PullService, scoped to
-// one cwb-org/repo-slug. Every call presents cwb-subject=BrokerGateSubject.
+// one cwb-org/repo-slug. Every call presents cwb-subject=BrokerGateSubject
+// and a per-RPC cwb-scopes value (see callCtx) — NOT a single blanket scope:
+// OpenPull needs repo:write, RecordPullCheck needs checks:attest (#105).
 type Recorder struct {
 	pull pullServiceClient
 
@@ -61,14 +63,39 @@ func New(conn grpc.ClientConnInterface, org, slug, project string, log *slog.Log
 	}
 }
 
+// Scope literals cairn-server's authed()/hasScope() check against
+// cwb-scopes (internal/grpcapi/grpcapi.go identityFromCtx —
+// `strings.Fields(get("cwb-scopes"))`, a self-asserted gRPC metadata value,
+// NOT derived from the mTLS cert). Per-RPC, NOT interchangeable post-#105:
+//
+//   - OpenPull (EnsurePull's call) still requires repo:write — unchanged by
+//     #105's scope split.
+//   - RecordPullCheck (Record's call) requires checks:attest — #105 narrowed
+//     this off repo:write specifically so a credential that can open/write a
+//     pull is not automatically trusted to attest gate verdicts on it.
+//   - ListPullChecks (unused by this package today) would require repo:read.
+//
+// Presenting the wrong scope on a call is silently swallowed by this
+// package's own best-effort failure policy (Record logs and returns an
+// error, but the caller — orchestrator.RecordVerdicts — treats that as "the
+// check didn't land" and moves on) — cairn#99 review found exactly this:
+// callCtx used to hardcode repo:write for every call, so every Record call
+// PermissionDenied'd on missing checks:attest and no check ever recorded.
+const (
+	scopeRepoWrite    = "repo:write"
+	scopeChecksAttest = "checks:attest"
+)
+
 // callCtx attaches the cwb-subject/cwb-org/cwb-scopes identity metadata
 // cairn-server's gateway-trust model requires (see cairn internal/grpcapi's
-// identityFromCtx) — mirrors nexus/workgraph.Client.ctxAs. repo:write is the
-// only scope a Recorder ever needs (OpenPull + RecordPullCheck both require
-// it; ListPullChecks, unused here, would need repo:read).
-func (r *Recorder) callCtx(ctx context.Context) context.Context {
+// identityFromCtx) — mirrors nexus/workgraph.Client.ctxAs. scope is the
+// exact (space-separated, if more than one) scope literal THIS call needs —
+// see the scope* consts above; callers must pass the minimum scope for the
+// specific RPC, not a blanket value, since #105 split RecordPullCheck's
+// requirement (checks:attest) off OpenPull's (repo:write).
+func (r *Recorder) callCtx(ctx context.Context, scope string) context.Context {
 	ctx = metadata.AppendToOutgoingContext(ctx, "cwb-subject", BrokerGateSubject, "cwb-org", r.Org)
-	return metadata.AppendToOutgoingContext(ctx, "cwb-scopes", "repo:write")
+	return metadata.AppendToOutgoingContext(ctx, "cwb-scopes", scope)
 }
 
 // EnsurePull opens the pull for (repo, source, target), returning its id.
@@ -91,7 +118,7 @@ func (r *Recorder) EnsurePull(ctx context.Context, source, target, title, projec
 	source = SanitizeName(source)
 	target = SanitizeName(target)
 	title = SanitizeName(title)
-	resp, err := r.pull.OpenPull(r.callCtx(ctx), &cairnv1.OpenPullRequest{
+	resp, err := r.pull.OpenPull(r.callCtx(ctx, scopeRepoWrite), &cairnv1.OpenPullRequest{
 		Org:     r.Org,
 		Slug:    r.Slug,
 		Source:  source,
@@ -120,7 +147,7 @@ func (r *Recorder) Record(ctx context.Context, pullID, name, state, summary, evi
 	name = SanitizeName(name)
 	summary = SanitizeSummary(summary)
 	evidenceURL = SanitizeEvidenceURL(evidenceURL)
-	_, err := r.pull.RecordPullCheck(r.callCtx(ctx), &cairnv1.RecordPullCheckRequest{
+	_, err := r.pull.RecordPullCheck(r.callCtx(ctx, scopeChecksAttest), &cairnv1.RecordPullCheckRequest{
 		Org:         r.Org,
 		Slug:        r.Slug,
 		Id:          pullID,
