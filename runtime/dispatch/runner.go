@@ -474,6 +474,28 @@ func (r *Runner) OnJobDone(done JobDone) {
 		}
 	}
 
+	// NEX-818: a FAILED run's logs go to the broker's own stderr as well as
+	// the runs store. Builder Jobs are deleted 5 minutes after they finish
+	// (builderJobTTLSeconds), so by the time anyone investigates there is
+	// nothing left to `kubectl logs` — three hands died on 2026-07-23 and
+	// left no autopsy at all. The broker log is the one place an operator
+	// reliably reaches, so the tail of a failed run's output belongs there,
+	// bounded so a chatty failure cannot flood it.
+	if !done.OK && r.K8sIface != nil && run.JobName != "" {
+		lctx := r.ctx
+		if lctx == nil {
+			lctx = context.Background()
+		}
+		if logs, err := r.K8sIface.GetPodLogs(lctx, run.JobName); err == nil {
+			slog.Warn("dispatch: FAILED run — pod log tail",
+				"run_id", run.ID, "agent", run.Brief.Agent, "ticket", run.Brief.Ticket,
+				"parent", run.Brief.SpawnParent, "logs", tailLines(logs, failedRunLogTailLines))
+		} else {
+			slog.Warn("dispatch: FAILED run — pod logs unavailable (job may already be TTL-deleted)",
+				"run_id", run.ID, "agent", run.Brief.Agent, "job", run.JobName, "err", err)
+		}
+	}
+
 	if r.Recorder != nil {
 		ctx := r.ctx
 		if ctx == nil {
@@ -511,8 +533,10 @@ func (r *Runner) completionSummary(run *Run, done JobDone) string {
 		if !done.OK {
 			status = "failed"
 		}
+		// Same NEX-818 delivery rule as the hand branch below: address the
+		// personality that owns this worker, or the summary reaches nobody.
 		return strings.Join([]string{
-			"pool " + status + ": worker=" + run.Brief.Agent + " role=" + run.Brief.Role + " work_item=" + run.Brief.WorkItemID,
+			"@" + run.Brief.SpawnParent + " pool " + status + ": worker=" + run.Brief.Agent + " role=" + run.Brief.Role + " work_item=" + run.Brief.WorkItemID,
 			"duration: " + formatDuration(done.StartedAt, done.CompletedAt),
 			"turns: " + formatCount(r.countActivityTurns(done.Agent, done.StartedAt, done.CompletedAt)),
 		}, "\n")
@@ -526,8 +550,16 @@ func (r *Runner) completionSummary(run *Run, done JobDone) string {
 		if !done.OK {
 			status = "failed"
 		}
+		// NEX-818: ADDRESS THE PARENT. The broker's RecipientPolicy.Compute
+		// only delivers a chat to (a) @all, (b) thread participants looked up
+		// via replyTo, or (c) explicit @mentions. Runner posts go through
+		// wsPoster.Post with replyTo=0, so (a) and (b) are both out — without
+		// a mention the recipient set is EMPTY and this summary is written to
+		// the thread and delivered to NOBODY. That is how three hands died in
+		// 40-75s on 2026-07-23 with the parent none the wiser. The mention is
+		// what makes a hand's outcome — success OR death — reach its parent.
 		return strings.Join([]string{
-			"hand " + status + ": " + run.Brief.Agent + " (hand of " + run.Brief.SpawnParent + ")",
+			"@" + run.Brief.SpawnParent + " hand " + status + ": " + run.Brief.Agent,
 			"duration: " + formatDuration(done.StartedAt, done.CompletedAt),
 			"turns: " + formatCount(r.countActivityTurns(done.Agent, done.StartedAt, done.CompletedAt)),
 		}, "\n")
@@ -841,6 +873,19 @@ func (r *Runner) launch(ctx context.Context, run *Run) error {
 	}
 	r.post(run.Brief.Thread, kind+" spawned as "+run.Brief.Agent+" ("+job.Name+")")
 	return nil
+}
+
+// failedRunLogTailLines bounds the failed-run excerpt pushed to the broker
+// log — enough to see a crash/auth error, not enough to flood.
+const failedRunLogTailLines = 40
+
+// tailLines returns at most n trailing lines of s.
+func tailLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (r *Runner) post(thread, text string) {

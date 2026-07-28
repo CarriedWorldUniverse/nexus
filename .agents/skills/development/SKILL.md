@@ -32,7 +32,7 @@ NO FIXES WITHOUT FINDING THE ROOT CAUSE.
 
 ## Platform
 - Branch `builder/<TICKET>` off latest `main`. Rebase, don't merge `main` in.
-- **VCS depends on `CW_VCS`.** Default (git): `git` branch/commit/push as usual. When `CW_VCS=cairn`, the harness has already provisioned an isolated cairn working copy and dropped you inside your `builder/<TICKET>` line's folder — do **not** git-clone/branch; publish with `cairn commit <branch> -m "…" && cairn push origin <branch>` (exit-checked: exit 2 = conflicts, `cairn resolve` then re-commit before pushing). Load the `cairn` skill for the model. Open the PR with `gh` either way.
+- **VCS depends on `CW_VCS` (default: cairn since 2026-07-09; `CW_VCS=git` opts out).** In cairn mode the harness has already provisioned an isolated cairn working copy and dropped you inside your `builder/<TICKET>` line's folder — do **not** git-clone/branch; publish with `cairn commit <branch> -m "…" && cairn push origin <branch>` (exit-checked: exit 2 = conflicts, `cairn resolve` then re-commit before pushing). Load the `cairn` skill for the model. Open the PR with `gh` either way.
 - `go build ./...` and `go test ./...` must be green before the PR.
 - Frontend: browser-verify it (Playwright) before shipping. Don't ship UI you haven't seen rendered.
 - Before you finish, load the security skill and load the house-style skill, and apply them.

@@ -1,13 +1,13 @@
 filippo.io/edwards25519 v1.2.0 h1:crnVqOiS4jqYleHd9vaKZ+HKtHfllngJIiOpNpoJsjo=
 filippo.io/edwards25519 v1.2.0/go.mod h1:xzAOLCNug/yB62zG1bQ8uziwrIqIuxhctzJT18Q77mc=
-github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260706220245-f8401bbe2a71 h1:yjuwJS/sF2BjDlJudOKFo6/BZADhukvJAsz3s1uCp8E=
-github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260706220245-f8401bbe2a71/go.mod h1:nEWWic3aiWRjyUzmjdafUtqXoqS9f92KuUuuKpT5NYE=
+github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260715011521-5fc4f293eeff h1:RDX8LyyHeQ5efnrZ7k/TRcOXM/mC7AJbzoP9rSRNAy0=
+github.com/CarriedWorldUniverse/bridle v0.1.4-0.20260715011521-5fc4f293eeff/go.mod h1:MUWUL/YVn2nLq9nrJjABPKLa90so2iSl2fCa3uVbt8s=
 github.com/CarriedWorldUniverse/casket-go v0.1.0 h1:t+DvXs8vhaNcTfkSS/sqK47fBTNVRdHfF7DT/ur0jtY=
 github.com/CarriedWorldUniverse/casket-go v0.1.0/go.mod h1:v0y8kPW/WmusBw+Q3ZtRYhVwoK/WVVVXHWSc/oRVWBo=
 github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603092700-bad238fd9d58 h1:EOFOdPFVNdmtqoJEDwRGJAdy1/yQid8VVeaJ4goQN6I=
 github.com/CarriedWorldUniverse/cwb-client v0.0.0-20260603092700-bad238fd9d58/go.mod h1:mYs7BzEiFdFx5hDaahzRutND9gjxixt++t/S+XbQQvA=
-github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260613191908-362c19c9dfd7 h1:L3fcQpEUvRAsRaKqGGOvIBUXKa+ErQ50Tha9i88Cz0g=
-github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260613191908-362c19c9dfd7/go.mod h1:SBXfS7WeuwK80SZrysL1YC0oDrNlNYoXqgWKkeK80wE=
+github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260709011750-a445f3e9b825 h1:MzA89eWNgjNpsfa7Pn0ZkuTyB/uQkMGwUIuCUKQ6xso=
+github.com/CarriedWorldUniverse/cwb-proto v0.0.0-20260709011750-a445f3e9b825/go.mod h1:SBXfS7WeuwK80SZrysL1YC0oDrNlNYoXqgWKkeK80wE=
 github.com/CarriedWorldUniverse/ledger v0.1.4 h1:gtu/8E1f2yRXMubTaS5IiG6mUmjYuuHObWZJos+2OGA=
 github.com/CarriedWorldUniverse/ledger v0.1.4/go.mod h1:2aeFr46SOJ19rDnwsSwGJA9CZqNrtYXY1BQ6vfzMEog=
 github.com/anthropics/anthropic-sdk-go v1.38.0 h1:bA4DcK+91gorIX+5VTONnynyt9LRU4nnN6rRQ+j/NIg=
@@ -110,6 +110,8 @@ github.com/mailru/easyjson v0.7.7 h1:UGYAvKxe3sBsEDzO8ZeWOSlIQfWFlxbzLZe7hwFURr0
 github.com/mailru/easyjson v0.7.7/go.mod h1:xzfreul335JAWq5oZzymOObrkdz5UnU4kGfJJLY9Nlc=
 github.com/mark3labs/mcp-go v0.54.1 h1:Ap/ptEB9FtWzFKM8NDsTA7QDxerQOC06eZigrTldVj0=
 github.com/mark3labs/mcp-go v0.54.1/go.mod h1:+8WclSK1ZUweCP3hvktSji8n8ABG/95QaEkeVE/Uwas=
+github.com/mattn/go-sqlite3 v1.14.47 h1:jOBI62gS7nKeZv+as1oGEy0+1qISgXwH/QBlR6KbfIo=
+github.com/mattn/go-sqlite3 v1.14.47/go.mod h1:6JTjA44L93a0QCyJef5YvlPoKXntQPjzWv5gtm9sB6w=
 github.com/modern-go/concurrent v0.0.0-20180228061459-e0a39a4cb421/go.mod h1:6dJC0mAP4ikYIbvyc7fijjWJddQyLn8Ig3JB5CqoB9Q=
 github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd h1:TRLaZ9cD/w8PVh93nsPXa1VrQ6jlwL5oN8l14QlcNfg=
 github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd/go.mod h1:6dJC0mAP4ikYIbvyc7fijjWJddQyLn8Ig3JB5CqoB9Q=
