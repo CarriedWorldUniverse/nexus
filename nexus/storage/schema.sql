@@ -371,6 +371,17 @@ CREATE TABLE IF NOT EXISTS nexus_identity (
 CREATE TABLE IF NOT EXISTS nexus_settings (
   id         INTEGER PRIMARY KEY CHECK (id = 1),
   nexus_md   TEXT NOT NULL DEFAULT '',
+  -- Central policy for HEADLESS runs (derived hands, pool workers).
+  -- Empty means "no worker variant configured" and every identity falls
+  -- back to nexus_md above — the pre-NEX-827 behaviour, so adding the
+  -- column changes nothing until an operator writes content into it.
+  --
+  -- Why a second column rather than one string for everyone: the two
+  -- audiences need contradictory instructions. An aspect persists and can
+  -- afford "surface to the operator and wait"; a headless run has no
+  -- operator and no channel to one, so the same sentence tells it to stop
+  -- and produce nothing.
+  nexus_md_worker TEXT NOT NULL DEFAULT '',
   -- version starts at 0 so the first SetNexusMD always lands at >=1.
   -- Lets refresh-callback subscribers (Part 9d) reliably detect the
   -- first write — without this, a fresh-table SetNexusMD would land

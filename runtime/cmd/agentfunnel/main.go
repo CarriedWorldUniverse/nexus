@@ -65,10 +65,12 @@ import (
 	toolrunner "github.com/CarriedWorldUniverse/bridle/toolrunner"
 	"github.com/CarriedWorldUniverse/nexus/nexus/aspects"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel"
+	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/gates"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/judge"
 	"github.com/CarriedWorldUniverse/nexus/nexus/frame/funnel/rewriter"
 	"github.com/CarriedWorldUniverse/nexus/runtime/aspect/wsasp"
 	"github.com/CarriedWorldUniverse/nexus/runtime/brokercreds"
+	"github.com/CarriedWorldUniverse/nexus/runtime/ctxmapwire"
 	"github.com/CarriedWorldUniverse/nexus/runtime/keyfile"
 	"github.com/CarriedWorldUniverse/nexus/runtime/obsforward"
 	"github.com/CarriedWorldUniverse/nexus/shared/schemas"
@@ -453,6 +455,17 @@ func main() {
 	if os.Getenv("CW_PROMPT_MODE") == "replace" {
 		promptMode = bridle.SystemPromptReplace
 	}
+
+	// ctxmap working memory: build the shared engine ONCE for the always-on
+	// interactive path (never in builder/drain one-shot modes — dialogue memory
+	// is for multi-turn conversation). newBindingHarness attaches it to each
+	// harness; the engine and its turn counter survive binding refreshes. Off
+	// unless CTXMAP_ENABLED + the ctxmap_llama build tag; fail-open.
+	if !*builderMode && !*drainMode {
+		ctxmapHandle = ctxmapwire.Build(ctxmapwire.Resolve(cwd, res.AspectName), log)
+		defer ctxmapHandle.Close()
+	}
+
 	bindingCache := &atomic.Pointer[funnel.Binding]{}
 	bindingCache.Store(&funnel.Binding{
 		Provider:   bridle.ProviderID(res.Provider),
@@ -830,6 +843,15 @@ func main() {
 		acceptanceGate.repo = *repoFlag
 		acceptanceGate.branch = *branchFlag
 		acceptanceGate.ticket = *ticketFlag
+		// #474 (cairn#99 Option B, final unit): the worker no longer
+		// records cairn pull checks — that recorder now lives
+		// orchestrator-side (nexus/orchestrator, driven by the
+		// authoritative gate runner's verdicts — see gates.go), because
+		// the worker pod is exactly the surface the gated model can shell
+		// out from (the #99 invariant this relocation closes). These
+		// gates below stay advisory-only: they still compute pass/fail to
+		// reprompt the model in-session, they just no longer dial
+		// cairn-server. See docs/network/ACCEPTANCE-GATE-HARDENING.md.
 		// Provenance: let the gate see which tools the run actually invoked.
 		if realOutputTracker != nil {
 			acceptanceGate.invokedTools = realOutputTracker.invokedTools
@@ -1350,7 +1372,10 @@ func (g *builderAcceptanceGate) Decide(ctx context.Context, output string, log *
 			// Unit 3: the criteria require tests but the PR diff changes no
 			// test file — a claimed pass with no tests written (the keel
 			// confabulation class). Override the judge's met to false; the
-			// bounded reprompt/backstop then applies as for any not-met.
+			// bounded reprompt/backstop then applies as for any not-met. This
+			// stays advisory (in-session reprompt only) — #474 relocated the
+			// durable cairn recording of this verdict to the orchestrator's
+			// authoritative gate runner (nexus/orchestrator/gates.go).
 			log.Info("agentfunnel: criteria require tests but PR diff changes no test file — not met (Unit 3)",
 				"repo", g.repo, "ticket", g.ticket)
 			verdict.Met = false
@@ -1475,6 +1500,12 @@ func builderPRVerifier(log *slog.Logger, aspect, repo, ticket, branch string) fu
 		// ACCEPTANCE-GATE-HARDENING Unit 2: a PR that exists but changes
 		// nothing is not a completed build. Fail-closed on a gh error;
 		// disabled when ACCEPTANCE_MIN_DIFF_LINES=0.
+		//
+		// #474: this gate stays advisory-only (in-session reprompt via the
+		// return value below) — the durable cairn recording of pr-exists/
+		// pr-substantial verdicts moved to the orchestrator's authoritative
+		// gate runner (nexus/orchestrator/gates.go), so nothing here dials
+		// cairn-server any more.
 		floor := minAcceptanceDiffLines()
 		sub, serr := prSubstantial(repo, head, ticket, floor)
 		if serr != nil {
@@ -1578,15 +1609,6 @@ var prExistsByTicketFn = func(repo, ticket string) (bool, error) {
 	return matchPRByTicket(out, ticket, provenanceNotBefore)
 }
 
-// prTicketSearchEntry is one row of
-// `gh pr list --json number,headRefName,title,createdAt`.
-type prTicketSearchEntry struct {
-	Number      int       `json:"number"`
-	HeadRefName string    `json:"headRefName"`
-	Title       string    `json:"title"`
-	CreatedAt   time.Time `json:"createdAt"`
-}
-
 // provenanceNotBefore is the ACCEPTANCE-GATE-HARDENING Unit 4 provenance floor
 // for the loose ticket-fallback PR credit. agentfunnel is one-shot per
 // dispatch, so the process start time IS this run's start; a PR credited via
@@ -1606,91 +1628,23 @@ const provenanceGrace = 5 * time.Minute
 
 var provenanceNotBefore = time.Now().Add(-provenanceGrace)
 
-// ticketWordMatch reports whether ticket occurs in s as a whole token —
-// bounded by string start/end or a non-alphanumeric byte on each side — so
-// "NET-6" does NOT match inside "NET-66" (the substring bug the raw
-// strings.Contains fallback had, which could credit one ticket's run with
-// another ticket's PR). Ticket IDs and branch names are ASCII (e.g. NET-66,
-// anvil/workers-json-flag); a multibyte title byte adjacent to a hit is >127,
-// hence non-alnum, hence a valid boundary.
-func ticketWordMatch(s, ticket string) bool {
-	if ticket == "" {
-		return false
-	}
-	for i := 0; i+len(ticket) <= len(s); {
-		j := strings.Index(s[i:], ticket)
-		if j < 0 {
-			return false
-		}
-		start := i + j
-		end := start + len(ticket)
-		beforeOK := start == 0 || !isAlnumByte(s[start-1])
-		afterOK := end == len(s) || !isAlnumByte(s[end])
-		if beforeOK && afterOK {
-			return true
-		}
-		i = start + 1
-	}
-	return false
-}
+// ticketWordMatch, matchPRByTicket, prExists: thin delegations to the
+// shared nexus/frame/funnel/gates package (NEX-473 — factored so the SAME
+// decision logic is callable from both this worker-advisory path and the
+// orchestrator's authoritative gate runner, see gates.PRExists doc). Kept
+// as package-level funcs here (rather than calling gates.* at every call
+// site) so every existing test in this package — which calls these by
+// their original unqualified names, and swaps the
+// prExistsFn/prExistsByTicketFn package vars — is unchanged; only the body
+// moved.
+func ticketWordMatch(s, ticket string) bool { return gates.TicketWordMatch(s, ticket) }
 
-func isAlnumByte(b byte) bool {
-	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
-}
-
-// matchPRByTicket is the pure decision core of the ticket-search fallback:
-// reports whether any open PR's head branch or title carries ticket as a whole
-// token (ticketWordMatch) AND was created at/after notBefore (Unit 4
-// provenance — never credit a run with a PR opened before it started). Pulled
-// out of prExistsByTicketFn so both rules are unit-testable without gh.
 func matchPRByTicket(out []byte, ticket string, notBefore time.Time) (bool, error) {
-	var prs []prTicketSearchEntry
-	if err := json.Unmarshal(out, &prs); err != nil {
-		return false, fmt.Errorf("gh pr list (ticket fallback): parse: %w", err)
-	}
-	for _, pr := range prs {
-		if !ticketWordMatch(pr.HeadRefName, ticket) && !ticketWordMatch(pr.Title, ticket) {
-			continue
-		}
-		if pr.CreatedAt.Before(notBefore) {
-			continue // pre-existing/foreign PR — not this run's work
-		}
-		return true, nil
-	}
-	return false, nil
+	return gates.MatchPRByTicket(out, ticket, notBefore)
 }
 
-// prExists reports whether a PR exists for branch in repo. Missing repo/branch
-// returns an error so the builder does not exit on an unverifiable
-// "complete" (fail-closed toward NEX-468).
-//
-// Checks the conventional branch head first; when that misses (or errors)
-// and ticket is non-empty, falls back to searching open PRs by ticket ID in
-// the head branch name or title (NET-46: a worker may have committed to its
-// own branch name instead of the conventional one, opening a real PR the
-// head-only check can't find).
 func prExists(repo, branch, ticket string) (bool, error) {
-	if repo == "" || branch == "" {
-		return false, fmt.Errorf("prExists: repo/branch not set (repo=%q branch=%q)", repo, branch)
-	}
-	ok, err := prExistsFn(repo, branch)
-	if err == nil && ok {
-		return true, nil
-	}
-	if strings.TrimSpace(ticket) == "" {
-		return ok, err
-	}
-	found, ferr := prExistsByTicketFn(repo, ticket)
-	if ferr != nil {
-		if err != nil {
-			return false, err
-		}
-		return false, ferr
-	}
-	if found {
-		return true, nil
-	}
-	return ok, err
+	return gates.PRExists(repo, branch, ticket, prExistsFn, prExistsByTicketFn)
 }
 
 // --- ACCEPTANCE-GATE-HARDENING Unit 2: objective substance precondition ---
@@ -1703,11 +1657,10 @@ func prExists(repo, branch, ticket string) (bool, error) {
 // then the ticket fallback), so the two agree on which PR they're judging.
 
 // prDiffStats is the changed-line footprint of a PR — the substance signal.
-type prDiffStats struct {
-	Additions    int `json:"additions"`
-	Deletions    int `json:"deletions"`
-	ChangedFiles int `json:"changedFiles"`
-}
+// Type alias onto gates.PRDiffStats (NEX-473) so existing struct literals
+// (prDiffStats{Additions: ...}) and field access in this package and its
+// tests keep compiling unchanged.
+type prDiffStats = gates.PRDiffStats
 
 // prDiffStatsFn fetches the diff footprint of the open PR on branch's head.
 // found=false means no such PR (distinct from a real PR with a zero diff).
@@ -1721,27 +1674,13 @@ var prDiffStatsFn = func(repo, branch string) (prDiffStats, bool, error) {
 	return parsePRDiffStatsHead(out)
 }
 
-// parsePRDiffStatsHead is the pure core: the first row of a `gh pr list --json
-// additions,deletions,changedFiles` array, or found=false for an empty list.
+// parsePRDiffStatsHead, prDiffStatsByTicketFn's decision core
+// (selectPRDiffStatsByTicket), minAcceptanceDiffLines, and prSubstantial:
+// thin delegations to the shared gates package (NEX-473 — see the
+// ticketWordMatch/matchPRByTicket/prExists comment above for the rationale;
+// same convention here).
 func parsePRDiffStatsHead(out []byte) (prDiffStats, bool, error) {
-	var rows []prDiffStats
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return prDiffStats{}, false, fmt.Errorf("gh pr list (diff stats): parse: %w", err)
-	}
-	if len(rows) == 0 {
-		return prDiffStats{}, false, nil
-	}
-	return rows[0], true, nil
-}
-
-// prTicketStatsEntry is one row of the ticket-fallback stats query.
-type prTicketStatsEntry struct {
-	HeadRefName  string    `json:"headRefName"`
-	Title        string    `json:"title"`
-	Additions    int       `json:"additions"`
-	Deletions    int       `json:"deletions"`
-	ChangedFiles int       `json:"changedFiles"`
-	CreatedAt    time.Time `json:"createdAt"`
+	return gates.ParsePRDiffStatsHead(out)
 }
 
 // prDiffStatsByTicketFn is the diff-footprint parallel of prExistsByTicketFn:
@@ -1756,24 +1695,8 @@ var prDiffStatsByTicketFn = func(repo, ticket string) (prDiffStats, bool, error)
 	return selectPRDiffStatsByTicket(out, ticket, provenanceNotBefore)
 }
 
-// selectPRDiffStatsByTicket is the pure decision core of the ticket-fallback
-// stats lookup — same rules as matchPRByTicket (whole-token ticket match AND
-// created at/after notBefore), returning the matched PR's diff footprint.
 func selectPRDiffStatsByTicket(out []byte, ticket string, notBefore time.Time) (prDiffStats, bool, error) {
-	var rows []prTicketStatsEntry
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return prDiffStats{}, false, fmt.Errorf("gh pr list (diff stats, ticket): parse: %w", err)
-	}
-	for _, r := range rows {
-		if !ticketWordMatch(r.HeadRefName, ticket) && !ticketWordMatch(r.Title, ticket) {
-			continue
-		}
-		if r.CreatedAt.Before(notBefore) {
-			continue // pre-existing/foreign PR — not this run's work
-		}
-		return prDiffStats{Additions: r.Additions, Deletions: r.Deletions, ChangedFiles: r.ChangedFiles}, true, nil
-	}
-	return prDiffStats{}, false, nil
+	return gates.SelectPRDiffStatsByTicket(out, ticket, notBefore)
 }
 
 // minAcceptanceDiffLines is the floor (additions+deletions) a PR's diff must
@@ -1795,30 +1718,11 @@ func minAcceptanceDiffLines() int {
 }
 
 // prSubstantial reports whether the run's PR has a non-empty diff clearing
-// floor — the objective, pre-judge substance precondition (Unit 2).
-// Fail-closed: a gh error returns (false, err). Resolves the same
-// own-branch-then-ticket PR that prExists credits. floor<=0 disables the
-// check (returns true — back-compat). found=false (no PR to measure) returns
-// (false, nil): prExists already reports not-verified in that case; this just
-// agrees without inventing an error.
+// floor — the objective, pre-judge substance precondition (Unit 2). See
+// gates.PRSubstantial for the full doc; delegated here (NEX-473) so this
+// package's existing call sites/tests are unchanged.
 func prSubstantial(repo, branch, ticket string, floor int) (bool, error) {
-	if floor <= 0 {
-		return true, nil
-	}
-	stats, found, err := prDiffStatsFn(repo, branch)
-	if err != nil {
-		return false, err
-	}
-	if !found && strings.TrimSpace(ticket) != "" {
-		stats, found, err = prDiffStatsByTicketFn(repo, ticket)
-		if err != nil {
-			return false, err
-		}
-	}
-	if !found {
-		return false, nil
-	}
-	return stats.ChangedFiles >= 1 && (stats.Additions+stats.Deletions) >= floor, nil
+	return gates.PRSubstantial(repo, branch, ticket, floor, prDiffStatsFn, prDiffStatsByTicketFn)
 }
 
 // --- ACCEPTANCE-GATE-HARDENING Unit 1: judge the diff, not the narrative ---
@@ -1862,24 +1766,10 @@ var prNumberByTicketFn = func(repo, ticket string) (int, bool, error) {
 	return pickPRNumberByTicket(out, ticket, provenanceNotBefore)
 }
 
-// pickPRNumberByTicket is the pure core: the number of the first
-// prTicketSearchEntry that word-matches ticket and was created at/after
-// notBefore (same match + provenance rules as matchPRByTicket).
+// pickPRNumberByTicket: thin delegation to the shared gates package
+// (NEX-473 — same convention as ticketWordMatch above).
 func pickPRNumberByTicket(out []byte, ticket string, notBefore time.Time) (int, bool, error) {
-	var prs []prTicketSearchEntry
-	if err := json.Unmarshal(out, &prs); err != nil {
-		return 0, false, fmt.Errorf("gh pr list (diff number): parse: %w", err)
-	}
-	for _, pr := range prs {
-		if !ticketWordMatch(pr.HeadRefName, ticket) && !ticketWordMatch(pr.Title, ticket) {
-			continue
-		}
-		if pr.CreatedAt.Before(notBefore) {
-			continue
-		}
-		return pr.Number, true, nil
-	}
-	return 0, false, nil
+	return gates.PickPRNumberByTicket(out, ticket, notBefore)
 }
 
 // acceptanceJudgeDiffEnabled gates Unit 1 (default ON). ACCEPTANCE_JUDGE_DIFF=0
@@ -1928,24 +1818,11 @@ func acceptanceRequireTestDiff() bool {
 	return strings.TrimSpace(os.Getenv("ACCEPTANCE_REQUIRE_TEST_DIFF")) == "1"
 }
 
-// criteriaMentionsTests reports whether the acceptance criteria reference tests
-// (case-insensitive "test") — the trigger for requiring a test-file change.
-func criteriaMentionsTests(criteria string) bool {
-	return strings.Contains(strings.ToLower(criteria), "test")
-}
+// criteriaMentionsTests, diffTouchesTestFile: thin delegations to the
+// shared gates package (NEX-473 — same convention as ticketWordMatch above).
+func criteriaMentionsTests(criteria string) bool { return gates.CriteriaMentionsTests(criteria) }
 
-// diffTouchesTestFile reports whether a unified diff adds/modifies a Go test
-// file — a `_test.go` on a `+++ ` new-file line or a `diff --git` header. The
-// fleet is Go; a non-Go repo simply would not enable this gate.
-func diffTouchesTestFile(diff string) bool {
-	for _, line := range strings.Split(diff, "\n") {
-		if (strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "diff --git ")) &&
-			strings.Contains(line, "_test.go") {
-			return true
-		}
-	}
-	return false
-}
+func diffTouchesTestFile(diff string) bool { return gates.DiffTouchesTestFile(diff) }
 
 // testEvidenceMissing reports whether Unit 3 should override a met verdict to
 // not-met: enabled, the brief names a repo, the criteria call for tests, a PR
@@ -2460,6 +2337,12 @@ func stageAntigravityCreds(log *slog.Logger) {
 // store (before the client is constructed) passes nil, which makes any
 // escalate verdict fail-safe to deny until the escalator-equipped
 // harness is re-stored.
+// ctxmapHandle is the process-lifetime working-memory engine, built once in the
+// always-on path (Nop in builder/drain modes and in the default non-llama
+// build). newBindingHarness attaches it to every harness it constructs so the
+// memory survives binding refreshes.
+var ctxmapHandle = ctxmapwire.Nop()
+
 func newBindingHarness(provider bridle.Provider, providerName string, esc *funnel.Escalator, policy funnel.ToolPolicy) *bridle.Harness {
 	h := bridle.NewHarness(provider)
 	switch providerName {
@@ -2468,6 +2351,7 @@ func newBindingHarness(provider bridle.Provider, providerName string, esc *funne
 	default:
 		h.RegisterBeforeToolCall(funnel.PermissionHook(policy, esc))
 	}
+	ctxmapHandle.AttachTo(h)
 	return h
 }
 

@@ -2,7 +2,8 @@
 """qwen NPC-journey TOUR — feed the captured walk frames to qwen3.6 (multimodal) in one request and
 get a flowing running commentary + a world overview. qwen is the vision engine (more accurate at
 identifying things); this just orchestrates. ~1.4k tokens/frame (qwen caps per-image internally), so
-a ~16-frame journey is ~23k tokens — well inside the 256k context.
+a ~16-frame journey is ~23k tokens — comfortable inside qwen3.6's current 64k ctx. If you fall back to
+the 32k gemma endpoint it gets TIGHT; lower CW_TOUR_MAX if you hit a context-length error.
 
 Usage: vision_tour.py                # pull /tmp/cw_seq_*.png from dMon, narrate
        vision_tour.py <dir-or-glob>  # narrate local frames
@@ -10,8 +11,9 @@ Env: OPENAI_BASE_URL, OPENAI_MODEL, CW_DMON_HOST, CW_TOUR_MAX (default 16)
 """
 import base64, glob, json, os, subprocess, sys, urllib.request
 
-BASE = os.environ.get("OPENAI_BASE_URL", "http://robo-dog:30803/v1")
-MODEL = os.environ.get("OPENAI_MODEL", "gemma-4-12b")
+BASE = os.environ.get("OPENAI_BASE_URL", "http://100.92.111.3:30800/v1")  # vllm-qwen36, robo-dog tailnet NodePort (2026-07-28: qwen3.6 back up at 64k ctx, co-resident with Ornith)
+MODEL = os.environ.get("OPENAI_MODEL", "qwen3.6")
+# FALLBACK if qwen36 is scaled down: OPENAI_BASE_URL=http://10.43.73.157:8000/v1 OPENAI_MODEL=gemma-4-12b (32k ctx — lower CW_TOUR_MAX)
 DMON = os.environ.get("CW_DMON_HOST", "jacinta@100.91.185.71")
 MAX = int(os.environ.get("CW_TOUR_MAX", "16"))
 

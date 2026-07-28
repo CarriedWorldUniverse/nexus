@@ -654,3 +654,37 @@ func TestBuildJob_ForwardsAcceptanceGateEnv(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildJob_NeverForwardsCWPull is #474 (cairn#99 Option B): the cairn
+// pull-checks recorder now runs orchestrator-side, driven by the
+// authoritative gate runner's verdicts (nexus/orchestrator/gates.go) — a
+// dispatched worker Job must NEVER receive any CW_PULL_* env var, even when
+// the broker process itself is fully configured with them, since that env
+// carries the mesh credential that authenticates cairn pull-check writes
+// (the exact trust-boundary widening cairn#99 flags: the gated model's own
+// pod must not be able to read the gate's own attestation credential).
+func TestBuildJob_NeverForwardsCWPull(t *testing.T) {
+	cfg := JobConfig{Image: "img", Namespace: "nexus", BriefTimeout: "30m"}
+	b := Brief{Agent: "anvil", Ticket: "NEX-1", Thread: "NEX-1"}
+
+	for _, kv := range []struct{ k, v string }{
+		{"CW_PULL_SERVER_ADDR", "cairn-server:443"},
+		{"CW_PULL_ORG", "org-1"},
+		{"CW_PULL_SLUG", "widgets"},
+		{"CW_PULL_PROJECT", "WID"},
+		{"CW_PULL_TARGET", "main"},
+		{"CW_PULL_TLS_CERT", "/etc/cert.pem"},
+		{"CW_PULL_TLS_KEY", "/etc/key.pem"},
+		{"CW_PULL_TLS_CA", "/etc/ca.pem"},
+		{"CW_PULL_DEV_INSECURE", "1"},
+	} {
+		t.Setenv(kv.k, kv.v)
+	}
+
+	c := BuildJob(b, cfg, "t3", "claude-code").Spec.Template.Spec.Containers[0]
+	for _, e := range c.Env {
+		if strings.HasPrefix(e.Name, "CW_PULL_") {
+			t.Errorf("worker Job env must never carry a CW_PULL_* key, found %s=%q", e.Name, e.Value)
+		}
+	}
+}
