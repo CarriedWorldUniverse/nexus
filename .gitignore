@@ -53,6 +53,9 @@ nexus-jira-mcp
 # above. Do NOT add bare-named root ignores per binary — they shadow
 # same-named source dirs (e.g. /nexus vs the nexus/ package tree). Build
 # with `make` or `-o bin/`, not a bare `go build ./cmd/x` from the root.
+# Exception: agentfunnel is a builder-produced binary that builders have committed by accident; ignore to prevent repeat.
+agentfunnel
+
 
 # Skill artifacts (writing-plans, brainstorming, etc.) live in shadow's
 # working tree, not in this repo. Defensive ignore in case they leak.
