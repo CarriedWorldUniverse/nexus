@@ -427,6 +427,15 @@ var columnsToAdd = []columnAddition{
 		column: "topic",
 		ddl:    "ALTER TABLE chat_messages ADD COLUMN topic TEXT",
 	},
+	// NEX-827 — central policy variant for HEADLESS runs. Existing
+	// databases get the column empty, and an empty worker variant falls
+	// back to nexus_md, so this migration is behaviour-preserving until
+	// an operator writes content into it.
+	{
+		table:  "nexus_settings",
+		column: "nexus_md_worker",
+		ddl:    "ALTER TABLE nexus_settings ADD COLUMN nexus_md_worker TEXT NOT NULL DEFAULT ''",
+	},
 }
 
 func addMissingColumns(ctx context.Context, db *sql.DB) error {
