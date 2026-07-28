@@ -8,6 +8,14 @@
  *   1. Destructive bash patterns
  *   2. Writes to protected paths
  *   3. Writes containing credentials/secrets
+ *   4. Bash commands that PRINT a credential into the transcript
+ *
+ * (4) is the mirror of (3). (3) stops a secret being written into a
+ * file; (4) stops one being read out into the transcript, which is
+ * just as durable — transcripts persist and are ingested downstream,
+ * so a leak is not undone by noticing it afterwards. A bare
+ * `git remote get-url` printed a live GitHub PAT three times on croft
+ * (2026-07-17 twice, 2026-07-28), which is what prompted this.
  *
  * Fails closed on error: if the hook crashes, the action is denied
  * rather than silently allowed.
@@ -74,11 +82,33 @@ const SECRET_PATTERNS = [
   { pattern: /secret\s*[:=]\s*['"][^'"]{8,}['"]/i, label: "Hardcoded secret" },
 ];
 
+// Commands whose OUTPUT can contain an embedded credential — chiefly
+// https://user:TOKEN@host git remote URLs. Matched across the whole command
+// string, pipes included, so a redaction later in the pipeline is visible.
+const LEAKY_INSPECTION = [
+  { pattern: /\bgit\b.*\bremote\b.*(\bget-url\b|\s-v\b|--verbose\b)/, label: "git remote -v / get-url" },
+  { pattern: /\bgit\b.*\bconfig\b.*(--get-regexp|--list|--get-all|\s-l\b)/, label: "git config --list / --get-regexp" },
+  { pattern: /\bgit\b.*\bconfig\b.*\b(credential|url)\./, label: "git config on a credential/url key" },
+  { pattern: /\b(cat|bat|less|more|head|tail|grep|rg|awk|sed|strings)\b.*\.git\/config\b/, label: "reading a .git/config" },
+  { pattern: /\bgit\b.*\bsubmodule\b.*\b(status|foreach)\b.*\burl\b/, label: "git submodule url inspection" },
+];
+
+// Ways the output is made safe. Narrow on purpose: over-triggering costs one
+// pipe, under-triggering costs a credential. `gh\[a-z\]_` is the literal text
+// of the sanitizing sed's character class.
+const REDACTION_PRESENT = /gh\[a-z\]_|\[REDACTED\]|REDACTED|_redact|sanitize/;
+const OUTPUT_DISCARDED = /(?:^|[^0-9])>\s*\/dev\/null/;
+const OUTPUT_HASHED = /\|\s*(sha\d+sum|md5sum|cksum|wc\b)/;
+
 function deny(reason) {
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
+      // claude-code reads `permissionDecisionReason`; `reason` alone was
+      // silently dropped, so every denial reached the aspect with no
+      // explanation and nothing to correct. Both emitted for compatibility.
+      permissionDecisionReason: reason,
       reason
     }
   }));
@@ -106,6 +136,22 @@ process.stdin.on("end", () => {
       for (const pattern of BLOCKED_COMMANDS) {
         if (pattern.test(cmd)) {
           return deny("Blocked: destructive command pattern");
+        }
+      }
+
+      const madeSafe = REDACTION_PRESENT.test(cmd)
+        || OUTPUT_DISCARDED.test(cmd)
+        || OUTPUT_HASHED.test(cmd);
+      if (!madeSafe) {
+        for (const { pattern, label } of LEAKY_INSPECTION) {
+          if (pattern.test(cmd)) {
+            return deny(
+              `Blocked: \`${label}\` can print an embedded credential into the ` +
+              `transcript. Re-run with the redaction pipe appended: ` +
+              `| sed -E "s/gh[a-z]_[A-Za-z0-9_]+/[REDACTED]/g" — or send output ` +
+              `to /dev/null if you only need the exit status.`
+            );
+          }
         }
       }
     }
