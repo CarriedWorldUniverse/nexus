@@ -1,13 +1,13 @@
 ---
 name: cairn
-description: Use when committing, pushing, branching, or managing Carried World code with the cairn VCS — the go-git-backed dogfood version control on dMon whose origin IS the carried-world-godot GitHub repo. Covers the working-change / line / express / fold model, the daily commit→push loop, the autosync + push-auto-reconcile behaviour, the full command surface, and the hard-won gotchas (commit ≠ push, message quoting over ssh, token-free push, protected-branch rejection, validating against the live tree not a stale clone).
+description: Use when committing, pushing, branching, or managing Carried World code with the cairn VCS — the go-git-backed dogfood version control on dMon whose origin IS the carried-world-godot GitHub repo. Covers the working-change / line / express / fold model, the daily commit→push loop, the autosync + push-auto-reconcile behaviour, the full command surface, and the hard-won gotchas (commit ≠ push, message quoting over ssh, token-free push, protected-branch rejection, validating against the live tree not a stale clone, and checking WHICH cairn binary is on PATH before trusting odd behaviour).
 when_to_use: 'When committing, pushing, branching, or managing Carried World code with the cairn VCS (the go-git dogfood VCS on dMon).'
 ---
 
 # cairn — the Carried World VCS
 
 cairn is a **go-git-backed** version-control system (org `CarriedWorldUniverse`). Two halves:
-- **Working-copy CLI** — `github.com/CarriedWorldUniverse/cairn`, source `cmd/cairn/main.go` (a thin dispatcher over `internal/worktree.Repo`; the engine is `internal/{worktree,change,release,version,credstore,userconfig}`). The binary is `/usr/local/bin/cairn`. **This is what you run.** (Note: the local checkout at dMon `~/src/cairn` is a *stale, server-only* clone — `cmd/cairn-server` only; read the CLI from the GitHub repo's `main`.)
+- **Working-copy CLI** — `github.com/CarriedWorldUniverse/cairn`, source `cmd/cairn/main.go` (a thin dispatcher over `internal/worktree.Repo`; the engine is `internal/{worktree,change,release,version,credstore,userconfig}`). The binary is `/usr/local/bin/cairn`; since v0.1.20 it self-updates — `sudo cairn update` installs the latest GitHub release (checksum-verified; `cairn update --check` just reports), so **never rebuild or hand-install the binary you run** (gotcha 8). **This is what you run.** (A source checkout — dMon `~/src/cairn`, croft likewise — is a FULL clone of the repo and will happily build a working `cairn`: it is for READING code, never for producing the binary on your PATH.)
 - **Server** — `cmd/cairn-server`: a go-git host (SSH casket-key → herald agent; HTTP via mTLS gateway, `X-CWB-*` identity), per-agent push attribution, `repo:read/write` scopes, branch protection (no force-push on the default branch), PRs-as-ledger-issues, **fast-forward-only server-side merge**.
 
 Carried World is cairn-managed on dMon at **`~/Projects/carried-world-cairn/main`**, and **cairn's origin IS the GitHub repo `CarriedWorldUniverse/carried-world-godot`** — `cairn commit` writes local history; `cairn push` lands it on GitHub (a `git pull` then refreshes any backup clone). Identity = `nexus-cw` / `nexus@darksoft.co.nz` (`cairn config user.name|email`); the `github.com` token is in the credstore (`~/.config/cairn/credentials`), so pushes need no PAT on the command line.
@@ -57,6 +57,10 @@ cairn commit <branch> -m "<what + why>"  &&  cairn push origin <branch>
 5. **Identity, or you get a placeholder.** Commits with no identity are stamped `…@users.noreply.cairn`; fix the whole history with `cairn reauthor --old-email '*@users.noreply.cairn' --name nexus-cw --email nexus@darksoft.co.nz`. cairn owns its identity (repo→global→`CAIRN_AUTHOR` env); never silently from git.
 6. **`--repo <dir>`** for any subcommand if not at the repo root (default `.`; cairn walks up to `.cairn` like git). Run from `~/Projects/carried-world-cairn/main`.
 7. **Validate against the cairn tree, NOT a stale clone.** A separate clone (`~/Projects/carried-world`, a shadow copy) goes stale until `git pull` — review/verify agents reading it see OLD code and raise false "won't compile / too many arguments" alarms. The live build **is** the cairn tree; audit there.
+8. **Check WHICH cairn you run before debugging any cairn behaviour.** `~/.local/bin` precedes `/usr/local/bin` on PATH, so a hand-built binary there silently wins every invocation. That shadowed the real install for three weeks and produced a bogus "deletions don't survive commit OR pull" report (cairn #134) against a build 9 days older than the fix that closed it. Two cheap checks:
+   - `which -a cairn` — more than one hit is a shadow; rename/remove everything that is not `/usr/local/bin/cairn`.
+   - `cairn --version` — a number (`cairn 0.1.22`) is a release build. **`cairn dev` is a source build**: no version to compare, so `cairn update` refuses it without `--force`. It cannot self-heal out of this state, and updating `/usr/local/bin` does nothing while the shadow stands.
+   Below v0.1.20 there is no `update` subcommand, so bootstrap once by hand: download `cairn_<ver>_linux_amd64.tar.gz` + `checksums.txt` from the release, `sha256sum -c`, then `sudo install -o root -g root -m 0755 cairn /usr/local/bin/cairn`. `cairn update` carries it from there.
 
 ## Carried World deploy loop
 - Edit working copies (`/tmp/bush/*.gd`, scratchpad `layout/*.gd`) → `scp` to `…/carried-world-cairn/main/stream/` → `cairn commit main -m` → `cairn push`.
@@ -70,7 +74,7 @@ cairn commit <branch> -m "<what + why>"  &&  cairn push origin <branch>
 - **History (edit — rebases, can conflict → exit 2):** `reword <commit> <msg>`, `squash <commit>`, `drop <commit>`, `cherry-pick <commit> [branch]`, `reauthor --old-email <glob> --name <n> --email <e> [--dry-run]`.
 - **Stash:** `stash [-m] [branch]`, `stash pop|list|drop [id]`.
 - **Identity/auth:** `setup`, `config [--global] <key> [val]` (keys: `user.name`, `user.email`, `autosync`), `login <host>` (token on stdin), `logout <host>`, `auth`.
-- **Versioning:** `tag <name> [branch]`, `version [--target npm|nuget|pypi|oci|go] [--release]`, `version bump <major|minor|patch>`, `release --target <eco> [--dry-run]`.
+- **Versioning:** `tag <name> [branch]`, `version [--target npm|nuget|pypi|oci|go] [--release]`, `version bump <major|minor|patch>`, `release --target <eco> [--dry-run]`, `update [--check|--force]` (self-update the binary from the latest GitHub release).
 - **Privacy/embargo:** `private <path> [--shape-only]` / `private ls` (withhold a path from every push — omit, or placeholder bytes), `embargo <commit>` / `embargo ls` (hold a commit + descendants out of the *public projection* — gated, distinct from private), `disclose <path|commit>` (lift either).
 - **Bisect:** `bisect start --good <c> --bad <c> [branch]`, `bisect good|bad|skip|status|reset`, `bisect run -- <cmd>` (0=good, 125=skip, else=bad).
 
