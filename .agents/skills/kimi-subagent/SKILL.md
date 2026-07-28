@@ -1,6 +1,6 @@
 ---
 name: kimi-subagent
-description: Kimi-k3 as a subagent via LiteLLM, two modes (operator decrees 2026-07-19). BUILD (default): Claude specs and plans, kimi implements — bounded code units, GDScript/shader work, mechanical multi-file changes. DESIGN: kimi designs visual/layout systems and gives frame SHIP/ITERATE verdicts, Claude implements. Trigger when delegating a spec'd implementation unit, on a visual-design problem, or when another skill needs a multimodal design review. (Merely SEEING an image → vision-review.)
+description: 'Kimi-k3 as a subagent via LiteLLM, two modes (operator decrees 2026-07-19). BUILD (default): Claude specs and plans, kimi implements — bounded code units, GDScript/shader work, mechanical multi-file changes. DESIGN: kimi designs visual/layout systems and gives frame SHIP/ITERATE verdicts, Claude implements. Trigger when delegating a spec''d implementation unit, on a visual-design problem, or when another skill needs a multimodal design review. (Merely SEEING an image → vision-review.)'
 when_to_use: 'Delegate work to kimi-k3: Claude specs and kimi implements (BUILD, default), or kimi designs visual/layout systems and judges frames (DESIGN).'
 ---
 
