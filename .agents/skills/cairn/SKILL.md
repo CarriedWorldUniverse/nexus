@@ -1,6 +1,6 @@
 ---
 name: cairn
-description: Use when committing, pushing, branching, or managing Carried World code with the cairn VCS — the go-git-backed dogfood version control on dMon whose origin IS the carried-world-godot GitHub repo. Covers the working-change / line / express / fold model, the daily commit→push loop, the autosync + push-auto-reconcile behaviour, the full command surface, and the hard-won gotchas (commit ≠ push, message quoting over ssh, token-free push, protected-branch rejection, validating against the live tree not a stale clone, and checking WHICH cairn binary is on PATH before trusting odd behaviour).
+description: Use when committing, pushing, branching, or managing Carried World code with the cairn VCS — the go-git-backed dogfood version control on dMon whose origin IS the carried-world-godot GitHub repo. Covers the working-change / line / express / fold model, the git-reflex→cairn translation table (no staging, express not branch, fold not merge), the daily commit→push loop, the autosync + push-auto-reconcile behaviour, the full command surface, and the hard-won gotchas (commit ≠ push, message quoting over ssh, token-free push, protected-branch rejection, validating against the live tree not a stale clone, and checking WHICH cairn binary is on PATH before trusting odd behaviour).
 when_to_use: 'When committing, pushing, branching, or managing Carried World code with the cairn VCS (the go-git dogfood VCS on dMon).'
 ---
 
@@ -19,6 +19,22 @@ Carried World is cairn-managed on dMon at **`~/Projects/carried-world-cairn/main
 - **commit reconciles against the parent.** Because it's git-backed, sealing reconciles the line against the latest parent — **you are always writing against the latest committed code**, branch or not. No stale-branch drift; conflicts surface early (`cairn resolve <branch> <path>`) instead of as a big-bang merge. Commit returns **exit 2** (not 1) when it recorded conflicts, so `cairn commit && cairn push` is script-safe.
 - **fold = merge a line into its parent.** `cairn fold <branch>` (must be conflict-free; the server permits only ff on the default branch). Clean because the line never diverged.
 - **Two remote fidelities.** A plain **git remote gets a projection** (ordinary git history — what GitHub sees). A **`--cairn` remote gets full fidelity** (the line tree + change-ids + open conflicts). `cairn remote add <name> <url> [--cairn]`.
+
+## Git reflex → cairn translation (corpus-gradient corrections)
+Your training pulls toward git spellings. Where semantics match, cairn is already git-shaped (`status`, `log`, `diff`, `push`, `pull`, `stash`, `cherry-pick`, `tag`, `bisect` — use them as normal). Where they don't, translate — do NOT type the git verb:
+
+| Git reflex | cairn reality |
+|---|---|
+| `git add` / staging | **Does not exist.** On-disk edits ARE the open working change; go straight to `cairn commit <branch> -m`. |
+| `git branch <n>` / `checkout -b` / `switch -c` | `cairn express <n>` (materializes the line as a folder). |
+| `git checkout <branch>` / `switch` | `cd <repo>/<branch>/` — lines are folders; being inside one selects it. |
+| `git merge <branch>` | `cairn fold <branch>` (from the parent; must be conflict-free). |
+| `git rebase` | Automatic — every `commit` reconciles against the latest parent. Never needed. |
+| `git commit -a` / `--amend` | Plain `commit` covers `-a` (no staging). Amend-a-message = `cairn reword <commit> <msg>`. |
+| `git reset` / `revert last op` | `cairn undo` (op-level), `cairn oplog` to see what to undo. |
+| `git rm` / `mv` | Just delete/move files on disk — the working change tracks it. |
+
+(Overloading cairn's dispatcher with git aliases — `merge`→`fold` etc. + corpus-aware unknown-command errors — is a planned P6 improvement, not shipped; until then the translation above is on you.)
 
 ## Two workflows
 **Daily (small change):**

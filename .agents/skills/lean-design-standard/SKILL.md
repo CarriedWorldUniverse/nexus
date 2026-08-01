@@ -6,7 +6,7 @@ when_to_use: 'When designing or cutting a module, system, or seam — or reviewi
 
 # Lean Design Standard
 
-Five verified design rules distilled from Parnas '72, Liskov & Zilles '74, Dijkstra '68, Hoare '69, Brooks '86.
+Five verified design rules distilled from Parnas '72, Liskov & Zilles '74, Dijkstra '68, Hoare '69, Brooks '86 — plus one operator-derived rule (P6, corpus conservatism, 2026-08-01; evidence: cairn adopted near-error-free by riding git's command surface, `uv` spreading through agent workflows by keeping pip's interface, vs Mojo/fast-subset non-adoption).
 
 **Core idea:** draw boundaries around what is *likely to change*; define them by their operations, not their representation; keep control flow and contracts checkable; spend scarce effort on *essence* (the game) not *accident* (plumbing). These are **heuristics, not gates** — advisory, and always subordinate to the game and the perf doctrine (GPU-first / CPU-off-frame).
 
@@ -26,6 +26,7 @@ Five verified design rules distilled from Parnas '72, Liskov & Zilles '74, Dijks
 | **P3** Dijkstra | Control flow you can **map to execution** — lifecycles as explicit state enums; kernels straight-line. | If it stalls, can I name *which state* it's in from the text? | A guard-clause early return can be clearer *and* faster. Branch-minimal helps **GPU warps** (a hardware fact) — it is **not** a Dijkstra speed proof; branchy CPU code is often fine. |
 | **P4** Hoare | State the **invariant**; assert it in **debug** (pre/post + invariants). | High-value seams: CA conservation (sum buffer before/after a tick); producer-post == consumer-pre at the GPU fence. | Debug-flag guarded, never on the shipping hot path. A bug-**detector**, not a guarantee (float drift). **Never fold latency into a correctness assert** — perf is a separate empirical budget on the real target GPU. No theorem provers. |
 | **P5** Brooks | Spend on **essence**; build **accident** once, then stop. | Essential (CA rules, water, belief, NPC, economy, world model) → your hours. Accidental (GPU plumbing, scheduling, sampling, serialization) → solve once, freeze. | No tool/framework/platform 10x's the essence — no silver bullet. Sunk cost is about the past; authority must be checked against local constraints. Ignore Brooks's large-team apparatus. |
+| **P6** Corpus (operator, 2026-08-01) | For any surface an **AI will operate** (CLI, API, command set): match the shape the training corpus already knows; spend your novelty budget **below** the interface. | Would a model trained only on the incumbent (git, pip, POSIX, REST) drive this correctly on first contact? Every surface deviation costs skill-file lines + a residual error rate roughly ∝ semantic distance from the corpus-expected behavior. | Only applies to AI-operated surfaces — human-only or machine-to-machine seams owe the corpus nothing. Don't clone an incumbent's *bad* semantics just to match; deviate where it matters and pay the documentation cost knowingly. |
 
 **M0 · Subordinate to the game and the perf doctrine.** Heuristics, not gates. Never override GPU-first/CPU-off-frame. Don't stop game work for theoretical purity — fix a seam where a real change *keeps rippling*, not as a standing audit. **The cure for bloat is deletion, not more abstraction.**
 
@@ -36,7 +37,8 @@ Walk these briefly:
 3. **P3** — Is the control flow / lifecycle nameable as states?
 4. **P4** — What invariant must hold at this seam? (assert in debug)
 5. **P5** — Essential or accidental? If accidental and it works, stop.
-6. **M0** — Serves the game without overriding the perf doctrine?
+6. **P6** — Will an AI operate this surface? If so, does it ride an interface the corpus already knows (and is every deviation deliberate + documented)?
+7. **M0** — Serves the game without overriding the perf doctrine?
 
 ## Review mode — advisory, auditing a diff/file
 For each of P1–P5, mark `✓ / ✗ / ⚠` with the **specific seam** + one line of rationale. Then an **over-application** pass: speculative seams, sealed reps in hot loops, proof ceremony, tool-shopping, framework-building. Output is advisory — the operator decides.
