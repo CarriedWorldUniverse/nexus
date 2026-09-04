@@ -1,6 +1,6 @@
 ---
 name: cairn
-description: Use when committing, pushing, branching, or managing Carried World code with the cairn VCS — the go-git-backed dogfood version control on dMon whose origin IS the carried-world-godot GitHub repo. Covers the working-change / line / express / fold model, the daily commit→push loop, the autosync + push-auto-reconcile behaviour, the full command surface, and the hard-won gotchas (commit ≠ push, message quoting over ssh, token-free push, protected-branch rejection, validating against the live tree not a stale clone, and checking WHICH cairn binary is on PATH before trusting odd behaviour).
+description: Use when committing, pushing, branching, or managing Carried World code with the cairn VCS — the go-git-backed dogfood version control on dMon whose origin IS the carried-world-godot GitHub repo. Covers the working-change / line / express / fold model, the git-reflex→cairn translation table (no staging, express not branch, fold not merge), the daily commit→push loop, the autosync + push-auto-reconcile behaviour, the full command surface, and the hard-won gotchas (commit ≠ push, message quoting over ssh, token-free push, protected-branch rejection, validating against the live tree not a stale clone, and checking WHICH cairn binary is on PATH before trusting odd behaviour).
 when_to_use: 'When committing, pushing, branching, or managing Carried World code with the cairn VCS (the go-git dogfood VCS on dMon).'
 ---
 
@@ -19,6 +19,28 @@ Carried World is cairn-managed on dMon at **`~/Projects/carried-world-cairn/main
 - **commit reconciles against the parent.** Because it's git-backed, sealing reconciles the line against the latest parent — **you are always writing against the latest committed code**, branch or not. No stale-branch drift; conflicts surface early (`cairn resolve <branch> <path>`) instead of as a big-bang merge. Commit returns **exit 2** (not 1) when it recorded conflicts, so `cairn commit && cairn push` is script-safe.
 - **fold = merge a line into its parent.** `cairn fold <branch>` (must be conflict-free; the server permits only ff on the default branch). Clean because the line never diverged.
 - **Two remote fidelities.** A plain **git remote gets a projection** (ordinary git history — what GitHub sees). A **`--cairn` remote gets full fidelity** (the line tree + change-ids + open conflicts). `cairn remote add <name> <url> [--cairn]`.
+
+## Git reflex → cairn translation (corpus-gradient corrections)
+Your training pulls toward git spellings. Where semantics match, cairn is already git-shaped (`status`, `log`, `diff`, `push`, `pull`, `stash`, `cherry-pick`, `tag`, `bisect` — use them as normal). Elsewhere, type the cairn verb from this table:
+
+| Git reflex | cairn reality |
+|---|---|
+| `git add` / staging | **Does not exist.** On-disk edits ARE the open working change; go straight to `cairn commit <branch> -m`. |
+| `git branch <n>` / `checkout -b <n>` / `switch -c <n>` | `cairn express <n>` (materializes the line as a folder). **Aliased.** |
+| `git branch` (bare, to LIST) | `cairn tree` (the line tree) / `cairn ls` (expressed folders). |
+| `git checkout <branch>` / `switch <branch>` | `cd <repo>/<branch>/` — lines are folders; being inside one selects it. |
+| `git merge <branch>` | `cairn fold <branch>` (from the parent; must be conflict-free). **Aliased.** |
+| `git rebase` | Automatic — every `commit` reconciles against the latest parent. Never needed. |
+| `git commit -a` / `--amend` | Plain `commit` covers `-a` (no staging). Amend-a-message = `cairn reword <commit> <msg>`. |
+| `git reset` / `git revert` | `cairn undo` (op-level) + `cairn oplog` to see what to undo; `cairn drop <commit>` removes a sealed commit. |
+| `git rm` / `mv` | Just delete/move files on disk — the working change tracks it. |
+| `git worktree` | Every expressed line already IS a folder — `cairn express` / `cairn ls`. |
+
+**Since v0.1.24 typing the git verb is no longer a dead end** (cairn #139 / PR #144). The two rows marked **Aliased** (four spellings) are real synonyms that just run — `cairn merge x` IS `cairn fold x`, flags and all. Every other git verb above answers with its one-line translation *instead of* the 60-line usage wall, and exits 1. So a reflex miss now self-corrects in one shot — but the cairn verb is still the one to reach for, and the table is what you reach with.
+
+Two edges worth knowing:
+- **`checkout -b <name> <start-point>` is deliberately NOT aliased.** The start point names a parent, which express spells `--from`; cairn refuses and prints `cairn express <name> --from <start-point>` rather than silently forking off the wrong line.
+- **Aliases need v0.1.24+.** On an older binary every git spelling is still a bare `unknown subcommand` + usage dump. `cairn --version` to check, `sudo cairn update` to fix (gotcha 8).
 
 ## Two workflows
 **Daily (small change):**
@@ -60,7 +82,25 @@ cairn commit <branch> -m "<what + why>"  &&  cairn push origin <branch>
 8. **Check WHICH cairn you run before debugging any cairn behaviour.** `~/.local/bin` precedes `/usr/local/bin` on PATH, so a hand-built binary there silently wins every invocation. That shadowed the real install for three weeks and produced a bogus "deletions don't survive commit OR pull" report (cairn #134) against a build 9 days older than the fix that closed it. Two cheap checks:
    - `which -a cairn` — more than one hit is a shadow; rename/remove everything that is not `/usr/local/bin/cairn`.
    - `cairn --version` — a number (`cairn 0.1.22`) is a release build. **`cairn dev` is a source build**: no version to compare, so `cairn update` refuses it without `--force`. It cannot self-heal out of this state, and updating `/usr/local/bin` does nothing while the shadow stands.
-   Below v0.1.20 there is no `update` subcommand, so bootstrap once by hand: download `cairn_<ver>_linux_amd64.tar.gz` + `checksums.txt` from the release, `sha256sum -c`, then `sudo install -o root -g root -m 0755 cairn /usr/local/bin/cairn`. `cairn update` carries it from there.
+   Below v0.1.20 there is no `update` subcommand, so bootstrap once by hand: download `cairn_<ver>_linux_amd64.tar.gz` + `checksums.txt` from the release, `sha256sum -c`, then `sudo install -o root -g root -m 0755 cairn /usr/local/bin/cairn`. `cairn update` carries it from there. **Also check it is CURRENT: `cairn update --check`.** On 2026-09-04 croft's binary was found at 0.1.24 with 0.1.36 released — twelve releases of fixes missing, including the pull data-loss below — after a whole session of using it to push cairn's own PRs.
+9. **A squash-merged PR leaves empty duplicates on local `main` that you CANNOT drop.** After GitHub squash-merges your line, `cairn pull` rebases your original commits on top of the squashed ones. Their diffs are empty (`cairn show <c>` prints the message and no hunks), the tree is byte-identical to origin (`cairn diff <local-tip> <origin-sha>` is empty) — but `ahead` inflates and `cairn drop` refuses them, because `main` is the root line. Harmless: pushes to a protected `main` are rejected anyway and a line expressed off `main` still diffs clean. Do NOT go walking `cairn undo` back through the pull to tidy it — that reverts express/unexpress bookkeeping too. Live with it, or re-clone the working copy. (Observed 2026-09-01 landing cairn #142/#139.)
+10. **`abandon` unexpresses for you, and an abandoned name is dead.** `cairn abandon <b> --force` removes the folder itself — running `unexpress` first makes abandon fail with *"not expressed"*. Since v0.1.37 `express <b>` on an abandoned line is refused (*line is abandoned*): express under a NEW name with `--from` the old parent. Since v0.1.33 `push origin <b>` refuses it too (before that it printed *pushed* and pushed nothing). Only `status`/`commit`/`push` infer the branch from the folder you are in; `fold`/`unexpress`/`abandon` always take `<branch>`.
+11. **Below v0.1.37, `cairn pull` DISCARDS un-sealed edits in every expressed folder** (cairn #182: reverted edits, deleted new files, silently). On an older binary run `cairn status <line>` — which snapshots — before ANY pull. And before opening a PR from a pushed line, assert the pushed diff is non-empty: `gh api repos/<o>/<r>/compare/main...<line> --jq '.files|length'`. A stale binary once pushed a tip identical to main and the PR merged +0 −0; nothing in the push output said so.
+
+## Big repos: what is slow, and how to SEE it (measured 2026-09-02)
+Do not guess which phase is slow — cairn now tells you. `clone` prints a timed line per phase and a total the phases must add up to (v0.1.25 announced them, v0.1.29 timed them); `express`/`unexpress`/`fold`/`pull` print theirs too, including the working-copy sync. Quick read-only verbs stay silent and scriptable.
+
+```
+cairn: fetched objects in 2.8s
+cairn: resolving the remote's default branch … 1ms
+cairn: mapping branches onto the line tree … 999/999 1.2s
+cairn: materializing … 40000/40000 files 11.4s
+cairn: clone total 14.9s
+```
+
+- **`mapping branches` was O(branches × history)** until v0.1.26 — one full history walk per branch. On a repo with many branches and deep history that phase alone dominated the clone (52x faster after cairn #148). If an OLD binary is slow there, update before investigating anything else.
+- **`materializing` scales with FILE COUNT, not bytes.** Reference points: 40k files / 259MB is ~11s on Linux/btrfs, but ~5ms/file on **NTFS with Defender** (≈3m16s for 40k) because every file creation is AV-scanned. `CAIRN_MATERIALIZE_WORKERS=<n>` overrides the pool (default 4, chosen from Linux where go-git's object store caps the gain); on a latency-bound filesystem try 16 or 32. A Defender exclusion on the repo directory is the other lever, and it is the operator's call.
+- **`synced working copy` is paid before nearly EVERY command**, not just clone — it scans every expressed folder. v0.1.30 skips re-snapshotting a branch whose scan is unchanged AND whose working head has not moved, which took a 40k-file `status` from 3.5s to ~1.1s. If it is still slow, the branch genuinely changed or an old wc-cache is being upgraded (the first run after v0.1.30 re-records and is slower once).
 
 ## Carried World deploy loop
 - Edit working copies (`/tmp/bush/*.gd`, scratchpad `layout/*.gd`) → `scp` to `…/carried-world-cairn/main/stream/` → `cairn commit main -m` → `cairn push`.
@@ -68,10 +108,10 @@ cairn commit <branch> -m "<what + why>"  &&  cairn push origin <branch>
 - **Before relaunch, headless-validate the real compile**: `voxelgodot.bin --headless --path ./stream 2>&1 | grep -iE "SCRIPT ERROR|Parse Error|Compilation failed|Nonexistent|infer the type"` — `--check-only` MISSES GDScript type-inference errors (see `feedback_godot_validate_headless_compile`). Relaunch with `~/cw_console_up.sh`.
 
 ## Full command surface (grouped)
-- **Working copy:** `init [dir]`, `clone <url> [dir]`, `express <branch> [--from p]`, `unexpress [--force]`, `commit <branch> -m`, `fold [--force]`, `reparent <branch> <parent>`, `abandon [--force]`, `status [branch]`, `diff [branch] | <a> <b>`, `tree`, `ls`, `resolve <branch> <path>`.
+- **Working copy:** `init [dir]`, `clone <url> [dir]`, `express <branch> [--from p]`, `unexpress <branch> [--force]`, `commit [branch] -m` (branch inferred inside a folder), `fold <branch> [--force]`, `reparent <branch> <parent>`, `abandon <branch> [--force]`, `status [branch]`, `diff [branch] | <a> <b>`, `tree`, `ls`, `resolve <branch> <path>`.
 - **Remotes:** `remote [add <name> <url> [--cairn]]`, `push [remote] [branch] [--all] [--force]`, `fetch [remote]`, `pull [remote]`.
 - **History (read):** `log [branch] [-n N]`, `show <commit>`, `blame <path> [branch]` (per-line change-id), `undo` (revert last op), `oplog`.
-- **History (edit — rebases, can conflict → exit 2):** `reword <commit> <msg>`, `squash <commit>`, `drop <commit>`, `cherry-pick <commit> [branch]`, `reauthor --old-email <glob> --name <n> --email <e> [--dry-run]`.
+- **History (edit — rebases, can conflict → exit 2):** `reword <commit> <msg>`, `squash <commit>`, `drop <commit>`, `cherry-pick <commit> [branch]`, `reauthor --old-email <glob> --name <n> --email <e> [--dry-run]`. **`reword`/`squash`/`drop` are REFUSED on the root line** — `cairn: cannot edit history on the root line`. So a stray commit on `main` cannot be dropped; edit history on a child line, or live with it (see gotcha 9).
 - **Stash:** `stash [-m] [branch]`, `stash pop|list|drop [id]`.
 - **Identity/auth:** `setup`, `config [--global] <key> [val]` (keys: `user.name`, `user.email`, `autosync`), `login <host>` (token on stdin), `logout <host>`, `auth`.
 - **Versioning:** `tag <name> [branch]`, `version [--target npm|nuget|pypi|oci|go] [--release]`, `version bump <major|minor|patch>`, `release --target <eco> [--dry-run]`, `update [--check|--force]` (self-update the binary from the latest GitHub release).
