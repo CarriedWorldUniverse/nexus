@@ -7,11 +7,14 @@
 # expected alongside this Dockerfile (see build.sh, which builds them on the
 # host first — the host has the git auth for cw's private modules).
 FROM debian:bookworm-slim
-# Set by buildx per --platform (amd64 / arm64); defaults to amd64 for a plain
-# single-arch `podman build` (deploy/worker/build.sh). Every download below
-# selects its artifact by it — the arm64 image must carry arm64 binaries, not
-# amd64 ones that cannot execute on robo-dog.
-ARG TARGETARCH=amd64
+# Set by buildx per --platform (amd64 / arm64). Declared WITHOUT a default on
+# purpose: a Dockerfile default beat buildx's automatic per-platform value, so
+# the arm64 stage saw TARGETARCH=amd64 and took the amd64 branches. The plain
+# single-arch `podman build` path (deploy/worker/build.sh) passes it
+# explicitly with --build-arg. Every download below selects its artifact by
+# it — the arm64 image must carry arm64 binaries, not amd64 ones that cannot
+# execute on robo-dog.
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl gnupg xz-utils \
       ripgrep jq fd-find tree make ffmpeg \
