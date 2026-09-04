@@ -31,7 +31,13 @@ on:
     - cron: '17 3 * * 1'
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/nexus-runner
+  # Hardcoded lowercase, NOT ${{ github.repository_owner }}: that expands to
+  # "CarriedWorldUniverse", and an image reference must be lowercase, so
+  # buildx rejected the tag ("repository name must be lowercase") on every
+  # run since the workflow was added — it never once pushed an image, and the
+  # scheduled skip check (docker manifest inspect on the same name) could
+  # never match either. Same convention as cairn's release-image.yml.
+  IMAGE: ghcr.io/carriedworlduniverse/nexus-runner
 
 permissions:
   contents: read
