@@ -13,24 +13,29 @@ TAG="${TAG:-dev}"
 IMG="localhost/nexus-builder:${TAG}"
 CTX="$(mktemp -d)"
 
-echo "==> building nexus binaries from ${NEXUS_SRC}"
+ARCH="$(go env GOARCH)"                 # the Dockerfile COPYs ctx/${TARGETARCH}/
+BIN="${CTX}/ctx/${ARCH}"
+mkdir -p "$BIN"
+
+echo "==> building nexus binaries from ${NEXUS_SRC} (${ARCH})"
 ( cd "$NEXUS_SRC"
   for b in agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp nexus-vision-mcp; do
-    go build -o "${CTX}/${b}" "./runtime/cmd/${b}"
+    go build -o "${BIN}/${b}" "./runtime/cmd/${b}"
   done )
 
 echo "==> building cw from ${CW_SRC}"
 [ -d "$CW_SRC" ] || git clone --depth 1 https://github.com/CarriedWorldUniverse/cw "$CW_SRC"
-( cd "$CW_SRC" && go build -o "${CTX}/cw" ./cmd/cw )
+( cd "$CW_SRC" && go build -o "${BIN}/cw" ./cmd/cw )
 
-echo "==> staging cairn CLI ${CAIRN_VERSION:=0.1.18} (release binary → COPY'd, not RUN-installed)"
-curl -fsSL "https://github.com/CarriedWorldUniverse/cairn/releases/download/v${CAIRN_VERSION}/cairn_${CAIRN_VERSION}_linux_amd64.tar.gz" -o "${CTX}/cairn.tgz"
-tar -C "${CTX}" -xzf "${CTX}/cairn.tgz" cairn
+: "${CAIRN_VERSION:=$(curl -fsSL https://api.github.com/repos/CarriedWorldUniverse/cairn/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')}"
+echo "==> staging cairn CLI ${CAIRN_VERSION} (${ARCH}; release binary → COPY'd, not RUN-installed)"
+curl -fsSL "https://github.com/CarriedWorldUniverse/cairn/releases/download/v${CAIRN_VERSION}/cairn_${CAIRN_VERSION}_linux_${ARCH}.tar.gz" -o "${CTX}/cairn.tgz"
+tar -C "${BIN}" -xzf "${CTX}/cairn.tgz" cairn
 rm -f "${CTX}/cairn.tgz"
 
 cp "$(dirname "$0")/Dockerfile" "${CTX}/Dockerfile"
 echo "==> podman build ${IMG}"
-( cd "$CTX" && podman build -t "$IMG" . )
+( cd "$CTX" && podman build --build-arg TARGETARCH="${ARCH}" -t "$IMG" . )
 
 echo "==> import into k3s containerd"
 podman save "$IMG" | sudo k3s ctr images import -
