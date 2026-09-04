@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# nexus-image-distribute — the ONLY thing the CI deploy key may run (it is
+# installed as a forced command in authorized_keys). Pulls one runner image
+# tag from GHCR into this node's k3s containerd and re-tags it for the
+# PullNever dispatch convention. See .github/workflows/README-runner-images.md.
+#
+#   ssh -i <deploy key> jacinta@<node> "<version>"  <<< "<ghcr token>"
+#
+# The version arrives as SSH_ORIGINAL_COMMAND (validated strictly); the GHCR
+# token arrives on stdin so it never appears in argv or process listings.
+set -euo pipefail
+IMAGE="ghcr.io/carriedworlduniverse/nexus-runner"
+VER="${SSH_ORIGINAL_COMMAND:-}"
+[[ "${VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]] || { echo "nexus-image-distribute: refusing version '${VER}'" >&2; exit 2; }
+TOKEN="$(head -c 4096)"
+[[ -n "${TOKEN}" ]] || { echo "nexus-image-distribute: no token on stdin" >&2; exit 2; }
+case "$(uname -m)" in x86_64) ARCH=amd64;; aarch64) ARCH=arm64;; *) echo "unsupported arch $(uname -m)" >&2; exit 2;; esac
+echo "==> ${IMAGE}:cli-${VER} (linux/${ARCH}) -> localhost/nexus-runner"
+sudo -n k3s ctr images pull --platform "linux/${ARCH}" --user "x:${TOKEN}" "${IMAGE}:cli-${VER}" >/dev/null
+sudo -n k3s ctr images tag --force "${IMAGE}:cli-${VER}" "localhost/nexus-runner:cli-${VER}" >/dev/null
+sudo -n k3s ctr images tag --force "${IMAGE}:cli-${VER}" "localhost/nexus-runner:latest" >/dev/null
+sudo -n k3s ctr images ls | awk '/nexus-runner/ {print "   " $1}'

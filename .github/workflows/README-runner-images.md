@@ -97,31 +97,51 @@ and the top-level unit-7 report for the full almanac-source / k8s-secret-
 delivery design and why the dark almanac client wasn't activated wholesale
 for this unit.
 
-## Required secrets (if/when enabling this workflow for real)
+## Required secrets (the distribute leg is wired; it skips cleanly when these are unset)
 
-| Secret | Purpose |
-|---|---|
-| `NEXUS_CW_PAT` | Clones the private `CarriedWorldUniverse/cw` module to build `cw` for the image (mirrors `deploy/worker/build.sh`'s host-build pattern). |
-| `DMON_SSH_HOST` | dMon's SSH host/IP for the `distribute` job's amd64 leg. |
-| `ROBODOG_SSH_HOST` | robo-dog's SSH host/IP for the `distribute` job's arm64 leg. |
-| `NODE_DEPLOY_SSH_KEY` | Private key authorized on both nodes for the `k3s ctr images pull`/`tag` steps. Scope narrowly (a dedicated deploy key, not the operator's own). |
+| Secret | Purpose | Status |
+|---|---|---|
+| `NEXUS_CW_PAT` | Clones the private `CarriedWorldUniverse/cw` module to build `cw` (org-level). | in place |
+| `DMON_SSH_HOST` / `ROBODOG_SSH_HOST` | The nodes' **tailnet** IPs (`100.x`) — a GitHub-hosted runner cannot reach them any other way. | in place |
+| `NODE_DEPLOY_SSH_KEY` | Private half of a dedicated ed25519 deploy key. On each node the public half sits in `~jacinta/.ssh/authorized_keys` with `command="/usr/local/bin/nexus-image-distribute",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty` — the key can do exactly one thing. | in place |
+| `NODE_SSH_KNOWN_HOSTS` | Both nodes' `ssh-ed25519` host keys (`ssh-keyscan -t ed25519 <ip>`), so the runner pins them rather than trusting on first use. | in place |
+| `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET` | A Tailscale OAuth client (`auth_keys` write scope, tag `tag:ci`) so the runner can join the tailnet ephemerally via `tailscale/github-action`. Create it in the Tailscale admin console (Settings → OAuth clients); `tag:ci` must exist in the ACL with a `tagOwners` entry allowing the client. | **operator** |
 
-GHCR push itself uses the workflow-scoped `GITHUB_TOKEN` (no extra secret) —
-`packages: write` is already granted at the top of the workflow file.
+GHCR push and the node-side pull both use the workflow-scoped `GITHUB_TOKEN`:
+the package is private and linked to this repo, and the token reaches the
+forced command on stdin.
+
+## The node side: `deploy/node/nexus-image-distribute`
+
+Installed at `/usr/local/bin/nexus-image-distribute` on dMon (amd64) and
+robo-dog (arm64); the forced command behind the deploy key. It takes the
+version from `SSH_ORIGINAL_COMMAND` (strictly validated — anything that is not
+a version is refused), the GHCR token from stdin, pulls
+`ghcr.io/carriedworlduniverse/nexus-runner:cli-<ver>` for the node's own
+architecture with `k3s ctr images pull`, and re-tags it
+`localhost/nexus-runner:cli-<ver>` and `localhost/nexus-runner:latest`. It
+relies on the existing passwordless `sudo k3s` posture on both nodes.
+
+From any host inside the tailnet that holds the key:
+
+```
+printf '%s' "$GHCR_TOKEN" | ssh -i deploy_key jacinta@<node-ip> "2.1.260"
+```
 
 ## Enabling this for real
 
-1. Provision the four secrets above in the repo's Actions secrets.
-2. Confirm both nodes' SSH users can run `sudo k3s ctr images pull/tag`
-   passwordless (mirrors the existing dMon passwordless-sudo posture — see
-   memory `reference_dmon_ssh.md`).
-3. Dry-run via `workflow_dispatch` with `distribute: false` first (build +
-   push only), inspect the pushed manifest (`docker buildx imagetools
-   inspect ghcr.io/.../nexus-runner:cli-<ver>`), THEN re-run with
-   `distribute: true`.
-4. Point `CW_BUILDER_IMAGE` at `localhost/nexus-runner:latest` (already the
-   convention) and confirm a normal dispatch still schedules + runs after
-   the first live `distribute` pass.
+1. Everything above except the Tailscale OAuth client is in place. Create that
+   client and set `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET`; until then the leg
+   prints a notice and skips.
+2. Dry-run via `workflow_dispatch` with `distribute: false`, then re-run with
+   `distribute: true` and check `sudo k3s ctr images ls | grep nexus-runner` on
+   both nodes.
+3. **The broker does not use this image yet.** `CW_BUILDER_IMAGE` on the
+   `nexus` Deployment points at `localhost/nexus-builder:li1`, the hand-built
+   image from `deploy/worker/build.sh`. Repointing it at
+   `localhost/nexus-runner:latest` (and confirming a normal dispatch still
+   schedules and runs) is the actual cutover — a deliberate step, since it
+   changes which image every builder Job runs.
 
 ## Live-verify path (this unit, end to end)
 

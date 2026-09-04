@@ -21,143 +21,18 @@ on:
         required: true
         default: 'latest'
       distribute:
-        description: 'Pre-load the built image onto cluster nodes after push (dMon + robo-dog)'
-        type: boolean
-        default: true
-  schedule:
-    # Weekly check for a new claude-code release; the build job below is a
-    # no-op (skip: true output) when the resolved version hasn't changed
-    # since the last successful run, so this doesn't spam rebuilds.
-    - cron: '17 3 * * 1'
-
-env:
-  # Hardcoded lowercase, NOT ${{ github.repository_owner }}: that expands to
-  # "CarriedWorldUniverse", and an image reference must be lowercase, so
-  # buildx rejected the tag ("repository name must be lowercase") on every
-  # run since the workflow was added — it never once pushed an image, and the
-  # scheduled skip check (docker manifest inspect on the same name) could
-  # never match either. Same convention as cairn's release-image.yml.
-  IMAGE: ghcr.io/carriedworlduniverse/nexus-runner
-
-permissions:
-  contents: read
-  packages: write
-
-jobs:
-  resolve-version:
-    name: resolve claude-code version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.resolve.outputs.version }}
-      skip: ${{ steps.resolve.outputs.skip }}
-    steps:
-      - name: resolve npm dist-tag to an exact version
-        id: resolve
-        run: |
-          set -euo pipefail
-          WANT="${{ github.event.inputs.claude_code_version || 'latest' }}"
-          VER="$(npm view @anthropic-ai/claude-code@"${WANT}" version)"
-          echo "resolved @anthropic-ai/claude-code -> ${VER}"
-          echo "version=${VER}" >> "$GITHUB_OUTPUT"
-          # On the scheduled trigger only, skip the rebuild if this version's
-          # tag already exists in GHCR (avoids a weekly no-op rebuild+push).
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            if docker manifest inspect "${IMAGE}:cli-${VER}" >/dev/null 2>&1; then
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "skip=false" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  build-push:
-    name: build + push (multi-arch)
-    needs: resolve-version
-    if: needs.resolve-version.outputs.skip != 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # The Dockerfile COPYs prebuilt nexus binaries + cw rather than
-      # compiling in-image (deploy/worker/build.sh's host-build pattern —
-      # cw is a private module, easier to auth once on the CI runner than
-      # inside a container build). Cross-compiled per target arch so the
-      # multi-arch manifest below carries native binaries, not qemu-emulated
-      # Go toolchain output.
-      - name: build nexus binaries (amd64 + arm64)
-        run: |
-          set -euo pipefail
-          mkdir -p deploy/worker/ctx/amd64 deploy/worker/ctx/arm64
-          for arch in amd64 arm64; do
-            for b in agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp nexus-vision-mcp; do
-              GOOS=linux GOARCH="${arch}" go build -o "deploy/worker/ctx/${arch}/${b}" "./runtime/cmd/${b}"
-            done
-          done
-
-      # The Dockerfile COPYs the cairn CLI too (deploy/worker/build.sh stages
-      # it the same way): the latest cairn release, per arch, checksum-verified.
-      - name: stage cairn CLI (latest release, per arch)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG="$(gh release view --repo CarriedWorldUniverse/cairn --json tagName --jq .tagName)"
-          VER="${TAG#v}"
-          echo "staging cairn ${VER}"
-          for arch in amd64 arm64; do
-            tmp="$(mktemp -d)"
-            gh release download "${TAG}" --repo CarriedWorldUniverse/cairn --dir "${tmp}" \
-              --pattern "cairn_${VER}_linux_${arch}.tar.gz" --pattern checksums.txt
-            ( cd "${tmp}" && sha256sum -c checksums.txt --ignore-missing )
-            tar -C "deploy/worker/ctx/${arch}" -xzf "${tmp}/cairn_${VER}_linux_${arch}.tar.gz" cairn
-            rm -rf "${tmp}"
-          done
-          ls -l deploy/worker/ctx/amd64 deploy/worker/ctx/arm64
-
-      - name: build cw (private module)
-        env:
-          GH_TOKEN: ${{ secrets.NEXUS_CW_PAT }}
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/CarriedWorldUniverse/cw /tmp/cw-src
-          for arch in amd64 arm64; do
-            ( cd /tmp/cw-src && GOOS=linux GOARCH="${arch}" go build -o "${GITHUB_WORKSPACE}/deploy/worker/ctx/${arch}/cw" ./cmd/cw )
-          done
-
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: build + push runner:cli-<ver> (linux/amd64, linux/arm64)
-        uses: docker/build-push-action@v6
-        with:
-          context: deploy/worker
-          file: deploy/worker/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            CLAUDE_CODE_VERSION=${{ needs.resolve-version.outputs.version }}
-          push: true
-          tags: |
-            ${{ env.IMAGE }}:cli-${{ needs.resolve-version.outputs.version }}
-            ${{ env.IMAGE }}:latest
-
-  distribute:
     name: pre-load onto cluster nodes (PullNever)
     needs: [resolve-version, build-push]
     if: ${{ github.event.inputs.distribute != 'false' }}
     runs-on: ubuntu-latest
+    # Secrets are mapped to env so the steps below can be gated on their
+    # presence: with none of them set this leg prints a notice and skips, so a
+    # scheduled rebuild never fails on distribution config.
+    env:
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - node: dmon
@@ -167,26 +42,40 @@ jobs:
             arch: arm64
             host_secret: ROBODOG_SSH_HOST
     steps:
-      # PullNever means the pod spec never asks containerd to reach a
-      # registry at dispatch time (sovereignty: no runtime dependency on
-      # GHCR) — so distribution here means pre-loading the image straight
-      # into each node's k3s containerd namespace, once, from CI. This job
-      # documents that step; it is NOT wired to live SSH secrets in this
-      # repo state (see README "Required secrets" + "Enabling this for
-      # real").
-      - name: ctr image pull (native arch, direct from GHCR) + verify tag
+      # PullNever means the pod spec never asks containerd to reach a registry
+      # at dispatch time (sovereignty: no runtime dependency on GHCR) — so
+      # distribution means pre-loading the image into each node's k3s
+      # containerd, once, from CI. The nodes are reachable only inside the
+      # tailnet, so the runner joins it ephemerally first.
+      - name: join the tailnet (ephemeral)
+        if: ${{ env.TS_OAUTH_CLIENT_ID != '' }}
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: latest
+
+      # The deploy key is restricted on each node to ONE forced command,
+      # /usr/local/bin/nexus-image-distribute (source: deploy/node/), which
+      # validates the version, reads the GHCR token from stdin (never argv),
+      # pulls the tag for the node's own arch and re-tags it
+      # localhost/nexus-runner:cli-<ver> and :latest. Host keys are pinned.
+      - name: distribute ${{ matrix.node }} (${{ matrix.arch }})
         env:
           SSH_HOST: ${{ secrets[matrix.host_secret] }}
           SSH_KEY: ${{ secrets.NODE_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.NODE_SSH_KNOWN_HOSTS }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ needs.resolve-version.outputs.version }}
         run: |
           set -euo pipefail
-          if [ -z "${SSH_HOST}" ]; then
-            echo "::notice::${{ matrix.node }} SSH secret unset — skipping live distribution (documented deliverable only)."
+          if [ -z "${TS_OAUTH_CLIENT_ID}" ] || [ -z "${SSH_HOST}" ] || [ -z "${SSH_KEY}" ]; then
+            echo "::notice::${{ matrix.node }}: tailnet/SSH secrets unset — skipping live distribution (README-runner-images.md, Enabling this for real)."
             exit 0
           fi
-          install -m 600 /dev/stdin ~/.ssh/id_ed25519 <<< "${SSH_KEY}"
-          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/id_ed25519 "jacinta@${SSH_HOST}" \
-            "sudo k3s ctr images pull --platform linux/${{ matrix.arch }} ${{ env.IMAGE }}:cli-${{ needs.resolve-version.outputs.version }} && \
-             sudo k3s ctr images tag ${{ env.IMAGE }}:cli-${{ needs.resolve-version.outputs.version }} localhost/nexus-runner:cli-${{ needs.resolve-version.outputs.version }} --force && \
-             sudo k3s ctr images tag ${{ env.IMAGE }}:cli-${{ needs.resolve-version.outputs.version }} localhost/nexus-runner:latest --force && \
-             sudo k3s ctr images ls | grep nexus-runner"
+          umask 077; mkdir -p ~/.ssh
+          printf '%s\n' "${SSH_KEY}" > ~/.ssh/id_ed25519
+          printf '%s\n' "${KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          printf '%s' "${GHCR_TOKEN}" | ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts \
+            -i ~/.ssh/id_ed25519 "jacinta@${SSH_HOST}" "${VER}"
