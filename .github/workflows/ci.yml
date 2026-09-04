@@ -19,7 +19,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.4'
+          go-version-file: go.mod
           cache: true
 
       - name: go vet
@@ -43,7 +43,7 @@ jobs:
       # (GOPRIVATE) are skipped; pre-worm deps pass without a ledger entry.
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.4'
+          go-version-file: go.mod
       # Self-contained: the guard is a vendored stdlib-only tool in this repo
       # (.github/wormguard, isolated go.mod), so CI needs no cross-repo clone or
       # credential. nexus's deps are all pre-cutoff; when a fresh dep is
@@ -69,7 +69,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.4'
+          go-version-file: go.mod
           cache: true
 
       - name: install security scanners
