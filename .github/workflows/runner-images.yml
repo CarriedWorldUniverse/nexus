@@ -95,10 +95,30 @@ jobs:
           set -euo pipefail
           mkdir -p deploy/worker/ctx/amd64 deploy/worker/ctx/arm64
           for arch in amd64 arm64; do
-            for b in agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp; do
+            for b in agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp nexus-vision-mcp; do
               GOOS=linux GOARCH="${arch}" go build -o "deploy/worker/ctx/${arch}/${b}" "./runtime/cmd/${b}"
             done
           done
+
+      # The Dockerfile COPYs the cairn CLI too (deploy/worker/build.sh stages
+      # it the same way): the latest cairn release, per arch, checksum-verified.
+      - name: stage cairn CLI (latest release, per arch)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="$(gh release view --repo CarriedWorldUniverse/cairn --json tagName --jq .tagName)"
+          VER="${TAG#v}"
+          echo "staging cairn ${VER}"
+          for arch in amd64 arm64; do
+            tmp="$(mktemp -d)"
+            gh release download "${TAG}" --repo CarriedWorldUniverse/cairn --dir "${tmp}" \
+              --pattern "cairn_${VER}_linux_${arch}.tar.gz" --pattern checksums.txt
+            ( cd "${tmp}" && sha256sum -c checksums.txt --ignore-missing )
+            tar -C "deploy/worker/ctx/${arch}" -xzf "${tmp}/cairn_${VER}_linux_${arch}.tar.gz" cairn
+            rm -rf "${tmp}"
+          done
+          ls -l deploy/worker/ctx/amd64 deploy/worker/ctx/arm64
 
       - name: build cw (private module)
         env:

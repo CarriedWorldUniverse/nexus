@@ -7,13 +7,18 @@
 # expected alongside this Dockerfile (see build.sh, which builds them on the
 # host first — the host has the git auth for cw's private modules).
 FROM debian:bookworm-slim
+# Set by buildx per --platform (amd64 / arm64); defaults to amd64 for a plain
+# single-arch `podman build` (deploy/worker/build.sh). Every download below
+# selects its artifact by it — the arm64 image must carry arm64 binaries, not
+# amd64 ones that cannot execute on robo-dog.
+ARG TARGETARCH=amd64
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl gnupg xz-utils \
       ripgrep jq fd-find tree make ffmpeg \
    && rm -rf /var/lib/apt/lists/*
 
 # Go toolchain — builders compile Go work.
-RUN curl -fsSL https://go.dev/dl/go1.26.3.linux-amd64.tar.gz -o /tmp/go.tgz \
+RUN curl -fsSL https://go.dev/dl/go1.26.6.linux-${TARGETARCH}.tar.gz -o /tmp/go.tgz \
  && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
 ENV PATH=/usr/local/go/bin:/usr/local/bin:/root/go/bin:/root/.npm-global/bin:$PATH
 
@@ -24,15 +29,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # gh (PR creation in github mode — cw setup-git github authenticates it) and
 # helm (render/lint charts — hosting-platform work).
 RUN GH_VERSION=2.62.0 \
- && curl -fsSL https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz -o /tmp/gh.tgz \
+ && curl -fsSL https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${TARGETARCH}.tar.gz -o /tmp/gh.tgz \
  && tar -C /tmp -xzf /tmp/gh.tgz \
- && install /tmp/gh_${GH_VERSION}_linux_amd64/bin/gh /usr/local/bin/gh \
+ && install /tmp/gh_${GH_VERSION}_linux_${TARGETARCH}/bin/gh /usr/local/bin/gh \
  && rm -rf /tmp/gh* \
  && HELM_VERSION=3.16.3 \
- && curl -fsSL https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz -o /tmp/helm.tgz \
+ && curl -fsSL https://get.helm.sh/helm-v${HELM_VERSION}-linux-${TARGETARCH}.tar.gz -o /tmp/helm.tgz \
  && tar -C /tmp -xzf /tmp/helm.tgz \
- && install /tmp/linux-amd64/helm /usr/local/bin/helm \
- && rm -rf /tmp/helm* /tmp/linux-amd64 \
+ && install /tmp/linux-${TARGETARCH}/helm /usr/local/bin/helm \
+ && rm -rf /tmp/helm* /tmp/linux-${TARGETARCH} \
  && gh --version && helm version --short
 
 # kubectl — cluster introspection for always-on infra aspects (e.g. keel as the
@@ -40,7 +45,7 @@ RUN GH_VERSION=2.62.0 \
 # so it is inert for dispatch builders (default SA, no perms). Matches the k3s
 # server minor (v1.35).
 RUN KUBECTL_VERSION=v1.35.5 \
- && curl -fsSL https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl -o /usr/local/bin/kubectl \
+ && curl -fsSL https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl -o /usr/local/bin/kubectl \
  && chmod +x /usr/local/bin/kubectl && kubectl version --client
 
 # nano - lightweight editor for hand-editing config inside the pod (e.g. croft).
@@ -49,15 +54,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends nano && rm -rf 
 # Chrome — the browser head (NEX tier-1 head for croft; usable by any worker).
 # Playwright MCP expects the stable channel at /opt/google/chrome/chrome; the
 # deb pulls the full headless-capable dependency set. No GPU needed (swiftshader).
-RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
- && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
- && apt-get update && apt-get install -y --no-install-recommends google-chrome-stable fonts-liberation \
- && rm -rf /var/lib/apt/lists/* && google-chrome --version
+# Chrome is amd64-only: Google publishes no Linux arm64 build. The arm64 image
+# has no browser head; the vision/browser lanes must schedule on amd64.
+RUN if [ "${TARGETARCH}" = "amd64" ]; then \
+      curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+   && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+   && apt-get update && apt-get install -y --no-install-recommends google-chrome-stable fonts-liberation \
+   && rm -rf /var/lib/apt/lists/* && google-chrome --version ; \
+    else echo "TARGETARCH=${TARGETARCH}: google-chrome skipped (no arm64 build)"; fi
 
 # kasmVNC + minimal desktop — tier-2 head for croft: web-delivered X desktop
 # over the tailnet (croft startup.sh starts the server only where ~/.vnc is
 # provisioned on the PVC; inert for pool workers). Deb pinned, bookworm build.
-RUN curl -fsSL -o /tmp/kasmvnc.deb https://github.com/kasmtech/KasmVNC/releases/download/v1.4.0/kasmvncserver_bookworm_1.4.0_amd64.deb \
+RUN curl -fsSL -o /tmp/kasmvnc.deb https://github.com/kasmtech/KasmVNC/releases/download/v1.4.0/kasmvncserver_bookworm_1.4.0_${TARGETARCH}.deb \
  && apt-get update && apt-get install -y --no-install-recommends /tmp/kasmvnc.deb openbox xterm \
  && rm -rf /var/lib/apt/lists/* /tmp/kasmvnc.deb \
  && dpkg -s kasmvncserver | grep ^Version
@@ -68,7 +77,8 @@ RUN curl -fsSL -o /tmp/kasmvnc.deb https://github.com/kasmtech/KasmVNC/releases/
 # VCS (inert when CW_VCS!=cairn). cairn is COPY'd like the other binaries rather
 # than fetched in a RUN step: one staging path (build.sh/CI) owns all binary
 # versions, and the image build needs no network fetch for it.
-COPY agentfunnel nexus-issue-mcp nexus-jira-mcp nexus-comms-mcp nexus-vision-mcp cw cairn /usr/local/bin/
+# Prebuilt on the host/CI per arch (see build.sh and runner-images.yml).
+COPY ctx/${TARGETARCH}/ /usr/local/bin/
 
 # Provider CLI: codex (standalone, installed via npm — fetches the linux
 # binary into the standalone layout).
