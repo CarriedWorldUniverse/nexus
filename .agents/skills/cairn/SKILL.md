@@ -14,7 +14,7 @@ Carried World is cairn-managed on dMon at **`~/Projects/carried-world-cairn/main
 
 ## The mental model (the cool part — it's Jujutsu-like, not git-like)
 - **The working change is always open.** Every line has a live, unsealed change at its tip — your on-disk edits ARE that change (no staging area; `log`/`blame` show it as `(working)`). `cairn commit <branch> -m "msg"` **seals** the open change (stamps the message) and **opens a fresh one**. So you never "create" a commit from nothing — you name the one you're already in.
-- **Lines, not branches.** A repo is a TREE of lines (`cairn tree`); `main` is the structural root. `cairn status [branch]` reports a line's working change vs its parent (`branch / lineage / ahead / conflicts / expressed / changes`). `cairn ls` lists expressed lines with their `ChangeID`.
+- **Lines, not branches.** A repo is a TREE of lines (`cairn tree`); `main` is the structural root. Since v0.1.38 a clone infers each imported branch's real parent from topology (a feature forked from develop sits under develop, `ahead` counts only its own commits); clones made earlier keep every branch flat under the root — re-clone, or `cairn reparent <branch> <parent>`. `cairn status [branch]` reports a line's working change vs its parent (`branch / lineage / ahead / conflicts / expressed / changes`). `cairn ls` lists expressed lines with their `ChangeID`.
 - **express = a line as a folder on disk.** `cairn express <branch> [--from <parent>]` materializes `<repo>/<branch>/` to edit. **Run any command from inside a branch folder and it acts on that line** (like git's current branch) — `commit`/`push`/`status` with no branch arg use it. `unexpress <branch>` removes the folder (`--force` to discard unsealed work).
 - **commit reconciles against the parent.** Because it's git-backed, sealing reconciles the line against the latest parent — **you are always writing against the latest committed code**, branch or not. No stale-branch drift; conflicts surface early (`cairn resolve <branch> <path>`) instead of as a big-bang merge. Commit returns **exit 2** (not 1) when it recorded conflicts, so `cairn commit && cairn push` is script-safe.
 - **fold = merge a line into its parent.** `cairn fold <branch>` (must be conflict-free; the server permits only ff on the default branch). Clean because the line never diverged.
@@ -26,7 +26,7 @@ Your training pulls toward git spellings. Where semantics match, cairn is alread
 | Git reflex | cairn reality |
 |---|---|
 | `git add` / staging | **Does not exist.** On-disk edits ARE the open working change; go straight to `cairn commit <branch> -m`. |
-| `git branch <n>` / `checkout -b <n>` / `switch -c <n>` | `cairn express <n>` (materializes the line as a folder). **Aliased.** |
+| `git branch <n>` / `checkout -b <n>` / `switch -c <n>` | `cairn express <n>` (materializes the line as a folder). **Aliased.** Since v0.1.38 it forks from the line whose folder you are standing in — git's current-branch semantics — and from the root only at the repo root; `--from <parent>` overrides. |
 | `git branch` (bare, to LIST) | `cairn tree` (the line tree) / `cairn ls` (expressed folders). |
 | `git checkout <branch>` / `switch <branch>` | `cd <repo>/<branch>/` — lines are folders; being inside one selects it. |
 | `git merge <branch>` | `cairn fold <branch>` (from the parent; must be conflict-free). **Aliased.** |
