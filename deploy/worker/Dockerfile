@@ -85,7 +85,14 @@ COPY ctx/${TARGETARCH}/ /usr/local/bin/
 
 # Provider CLI: codex (standalone, installed via npm — fetches the linux
 # binary into the standalone layout).
-RUN npm config set prefix /root/.npm-global && npm i -g @openai/codex && codex --version
+# codex ships its binary as a per-platform OPTIONAL dependency, and npm
+# has started skipping it under buildx ("Missing optional dependency
+# @openai/codex-linux-x64"), which fails the build. Name the platform
+# package explicitly, keyed on TARGETARCH, so it cannot be skipped.
+RUN npm config set prefix /root/.npm-global \
+ && case "${TARGETARCH}" in amd64) NPMARCH=x64;; arm64) NPMARCH=arm64;; *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1;; esac \
+ && npm i -g @openai/codex@latest "@openai/codex-linux-${NPMARCH}@latest" \
+ && codex --version
 
 # Provider CLI: claude-code (M1 Unit 7, PHASE2-DESIGN §6/§7 — frontier auth +
 # CLI version knob). CLAUDE_CODE_VERSION pins the exact release this image
