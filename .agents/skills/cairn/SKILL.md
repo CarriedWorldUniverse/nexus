@@ -44,18 +44,37 @@ Two edges worth knowing:
 - **`checkout -b <name> <start-point>` is deliberately NOT aliased.** The start point names a parent, which express spells `--from`; cairn refuses and prints `cairn express <name> --from <start-point>` rather than silently forking off the wrong line.
 - **Aliases need v0.1.24+.** On an older binary every git spelling is still a bare `unknown subcommand` + usage dump. `cairn --version` to check, `sudo cairn update` to fix (gotcha 8).
 
-## Two workflows
-**Daily (small change):**
+## Workflows — one line per task, then fold or PR
+The best practice: **express a line per task, work and commit there, keep it on the parent's latest with `pull`, then either fold it back (parent is yours) or push it for a PR (parent is protected).** Which ending depends on who owns the parent.
+
+**Daily (small change, straight on main):**
 ```
 edit → cairn commit main -m "what + why" → cairn push
 ```
-**Feature arc (multi-commit) — the intended pattern (dogfoods branch/merge + survives a protected main):**
+**Local flow — parent is yours (Carried World's `main`, unprotected):**
 ```
-cairn express village-life                      # working line off main (a folder)
-… edit → cairn commit village-life -m "…"  (repeat; reconciles vs main each time)
-cairn fold village-life                         # merge the line into main (clean ff)
-cairn push                                      # back up to GitHub origin
+cairn express feat              # from main's folder (or --from <parent>)
+… edit ./feat → cairn commit -m "…"   (repeat; local only)
+cairn pull                      # rebases feat onto the latest main (v0.1.46)
+cairn fold feat                 # from the parent; must be conflict-free
+cairn push                      # publish the parent
 ```
+**PR flow — parent is protected (cairn's own `main`):**
+```
+cairn express feat
+… edit → cairn commit -m "…"
+cairn pull                      # rebases feat while it is still unpushed
+cairn push origin feat          # publish the line
+gh pr create …                  # review + merge happen on GitHub
+cairn pull                      # brings the merged main in; feat's branch is gone on origin
+cairn unexpress feat            # or: cairn abandon feat --force
+```
+Do NOT fold in the PR flow: a fold into a protected `main` is rejected at push (then `cairn undo` it). A squash-merge leaves harmless empty duplicates on local `main` (gotcha 9).
+
+**Rules that make both flows work:**
+- **Short-lived, one line per task.** Lines nest (`express sub --from feat`); a nested line folds into `feat`, not `main`.
+- **`pull` before you push or fold.** Pull rebases only UNPUSHED lines onto their moved parent; once a line is pushed it stops (that would need a force-push), and its next commit merges the parent in instead. A conflicting commit stops the rebase: resolve, then `cairn commit` with no `-m`.
+- **`cairn commit && cairn push`** — commit exits **2** on conflicts, so a conflicted line is never pushed.
 
 ## Pool builder use (`CW_VCS=cairn`) — clone-per-run
 When a dispatched builder runs with `CW_VCS=cairn`, the harness has **already** provisioned an isolated cairn working copy for the ticket before your turn: it `cairn clone`d a per-run copy, set the `nexus-cw` identity, pointed `origin` at the GitHub repo, and `cairn express`ed your line — and dropped you **inside that line's folder**. So you do NOT clone, express, or configure anything. You just:
