@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
    && rm -rf /var/lib/apt/lists/*
 
 # Go toolchain — builders compile Go work.
-RUN curl -fsSL https://go.dev/dl/go1.26.6.linux-${TARGETARCH}.tar.gz -o /tmp/go.tgz \
+RUN curl -fsSL https://go.dev/dl/go1.26.9.linux-${TARGETARCH}.tar.gz -o /tmp/go.tgz \
  && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
 ENV PATH=/usr/local/go/bin:/usr/local/bin:/root/go/bin:/root/.npm-global/bin:$PATH
 
